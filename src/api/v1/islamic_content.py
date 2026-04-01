@@ -10,6 +10,7 @@ Route mapping:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -31,16 +32,20 @@ _UPSTREAM_URL = os.getenv(
 )
 
 _client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
 
 
-def _get_client() -> httpx.AsyncClient:
+async def _get_client() -> httpx.AsyncClient:
     global _client
-    if _client is None:
-        _client = httpx.AsyncClient(
-            base_url=_UPSTREAM_URL,
-            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0),
-            limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
-        )
+    if _client is not None:
+        return _client
+    async with _client_lock:
+        if _client is None:
+            _client = httpx.AsyncClient(
+                base_url=_UPSTREAM_URL,
+                timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0),
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
+            )
     return _client
 
 
@@ -73,7 +78,7 @@ async def proxy_islamic_content(
             )
 
     # --- Proxy ---
-    client = _get_client()
+    client = await _get_client()
     upstream_path = f"/api/v1/{path}"
     if request.url.query:
         upstream_path += f"?{request.url.query}"
@@ -87,7 +92,14 @@ async def proxy_islamic_content(
     headers["X-Tenant-Id"] = user.tenant_id
     headers["X-User-Tier"] = user.tier
 
-    body = await request.body()
+    # Stream large request bodies; buffer small ones for simplicity
+    content_length = int(request.headers.get("content-length", 0))
+    if content_length > 1_000_000:  # >1MB: stream
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+    else:
+        body = await request.body()
 
     upstream_resp = await client.request(
         method=request.method,

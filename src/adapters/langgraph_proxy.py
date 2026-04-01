@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import random
 import time
 from collections.abc import AsyncIterator
@@ -278,12 +279,9 @@ class LangGraphProxy:
             "X-User-Tier": user.tier,
         }
 
-        # 如果配置了内部认证 token，添加到 Authorization header
-        # 优先使用配置的 Token，其次是备选 Key
-        token = self.auth_token or "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
-
-        # DEBUG: Log authentication flow
-        logger.info(f"[LangGraphProxy] Building headers. Using token: {token[:10]}...")
+        token = self.auth_token or os.environ.get("LANGGRAPH_AUTH_TOKEN", "")
+        if not token:
+            logger.warning("[LangGraphProxy] No auth token configured")
 
         # 修正：LangGraph Server/SDK 标准认证使用 X-Api-Key Header
         # 用户指出的 "langgraph-auth" 鉴权通常依赖此 Header

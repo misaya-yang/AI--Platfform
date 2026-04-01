@@ -479,11 +479,10 @@ class Container:
         redis = self._providers["redis"].get_sync()
         auth_token = self.settings.langgraph.auth_token
 
-        # Fallback: 如果未配置 auth_token，尝试使用硬编码的备选 Key
-        # 这是为了解决本地开发环境中 LangGraph 认证失败的问题
         if not auth_token:
-            auth_token = "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
-            logger.info("LangGraph auth_token 未配置，使用备选 API Key")
+            auth_token = os.environ.get("LANGGRAPH_AUTH_TOKEN", "")
+        if not auth_token:
+            logger.warning("LANGGRAPH_AUTH_TOKEN not configured — LangGraph proxy may fail authentication")
 
         proxy = LangGraphProxy(
             load_balancer=load_balancer,

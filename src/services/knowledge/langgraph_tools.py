@@ -882,24 +882,25 @@ class KnowledgeBaseTool:
         top_k: int | None = None,
         **kwargs,
     ) -> str:
-        """Sync execution (runs async in new event loop)."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If there's already a running loop, create a new one in a thread
-                import concurrent.futures
+        """Sync execution — safely bridges async from sync context."""
+        import concurrent.futures
 
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(
-                        asyncio.run, self._arun(query, intent=intent, top_k=top_k, **kwargs)
-                    )
-                    return future.result()
-            else:
+        def _run_in_new_loop():
+            loop = asyncio.new_event_loop()
+            try:
                 return loop.run_until_complete(
                     self._arun(query, intent=intent, top_k=top_k, **kwargs)
                 )
+            finally:
+                loop.close()
+
+        try:
+            asyncio.get_running_loop()
+            # Inside an async context — run in a thread with a fresh event loop
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_run_in_new_loop).result()
         except RuntimeError:
-            # No event loop, create one
+            # No running loop — safe to use asyncio.run()
             return asyncio.run(self._arun(query, intent=intent, top_k=top_k, **kwargs))
 
     async def ainvoke(self, input: str | dict[str, Any], **kwargs) -> str:
@@ -1068,17 +1069,20 @@ class MultiKnowledgeBaseTool:
         )
 
     def _run(self, query: str, **kwargs) -> str:
-        """Sync execution."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
+        """Sync execution — safely bridges async from sync context."""
+        import concurrent.futures
 
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, self._arun(query, **kwargs))
-                    return future.result()
-            else:
+        def _run_in_new_loop():
+            loop = asyncio.new_event_loop()
+            try:
                 return loop.run_until_complete(self._arun(query, **kwargs))
+            finally:
+                loop.close()
+
+        try:
+            asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_run_in_new_loop).result()
         except RuntimeError:
             return asyncio.run(self._arun(query, **kwargs))
 

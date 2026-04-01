@@ -77,8 +77,12 @@ services:
       - qdrant-data:/qdrant/storage
     networks:
       - ai-gateway-net
-    # Note: Qdrant uses distroless image, healthcheck via depends_on condition not reliable
-    # Container health is verified by gateway's startup dependency
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:6333/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   # ===========================================================================

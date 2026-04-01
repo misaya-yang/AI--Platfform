@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import date, datetime
@@ -75,8 +76,8 @@ class DatabaseStorage:
         auto_init: bool = True,
         schema_path: str | None = None,
         permission_cache_ttl_seconds: int = 60,
-        pool_min_size: int = 2,
-        pool_max_size: int = 10,
+        pool_min_size: int = int(os.environ.get("DB_POOL_MIN_SIZE", "2")),
+        pool_max_size: int = int(os.environ.get("DB_POOL_MAX_SIZE", "20")),
         api_key_usage_flush_interval_seconds: int = 2,
         api_key_usage_flush_batch_size: int = 100,
     ):

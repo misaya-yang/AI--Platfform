@@ -262,7 +262,7 @@ export type DashboardWebSocketCallback = (data: WebSocketMessage) => void;
 export class DashboardWebSocket {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = 20;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private callbacks: Set<DashboardWebSocketCallback> = new Set();
   private url: string;
@@ -354,7 +354,9 @@ export class DashboardWebSocket {
       return;
     }
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    // Exponential backoff with jitter to prevent thundering herd
+    const base = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    const delay = base + Math.random() * 1000;
     this.reconnectAttempts++;
 
     console.log(`[Dashboard WS] Reconnecting in ${delay}ms...`);

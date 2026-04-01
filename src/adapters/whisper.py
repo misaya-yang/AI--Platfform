@@ -49,8 +49,14 @@ class WhisperAdapter(ProtocolAdapter):
             except Exception:
                 return item.data.encode("utf-8")
         if item.url:
-            async with httpx.AsyncClient() as client:
+            # Reuse the adapter's connector client if available, otherwise create temp client
+            client = getattr(getattr(self, 'connector', None), '_client', None)
+            if client:
                 resp = await client.get(item.url)
+                resp.raise_for_status()
+                return resp.content
+            async with httpx.AsyncClient(timeout=30.0) as tmp:
+                resp = await tmp.get(item.url)
                 resp.raise_for_status()
                 return resp.content
         raise ValidationFailedError("audio data or url is required")

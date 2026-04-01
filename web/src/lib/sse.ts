@@ -3,6 +3,35 @@ export type SSEEvent<T = unknown> = { event: string; data: T };
 
 export interface SSEFetchOptions extends RequestInit {
   signal?: AbortSignal;
+  /** SSE stream timeout in ms. Default: 5 minutes. Set 0 to disable. */
+  timeoutMs?: number;
+}
+
+const DEFAULT_SSE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Create a combined AbortSignal that fires on either the caller's signal or a timeout.
+ */
+function createTimeoutSignal(
+  existingSignal?: AbortSignal | null,
+  timeoutMs?: number,
+): { signal: AbortSignal; cleanup: () => void } {
+  const ms = timeoutMs ?? DEFAULT_SSE_TIMEOUT_MS;
+  if (ms <= 0 && !existingSignal) {
+    return { signal: new AbortController().signal, cleanup: () => {} };
+  }
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  if (ms > 0) {
+    timer = setTimeout(() => controller.abort(new Error("SSE stream timeout")), ms);
+  }
+  if (existingSignal) {
+    existingSignal.addEventListener("abort", () => controller.abort(existingSignal.reason), { once: true });
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => { if (timer) clearTimeout(timer); },
+  };
 }
 
 async function readResponseErrorDetail(resp: Response): Promise<string> {
@@ -152,12 +181,13 @@ export async function* sseFetch<T>(
   if (debug) {
     console.log(`[SSE] Starting fetch to ${url}`);
   }
-  
+
+  const { signal: timeoutSignal, cleanup: cleanupTimeout } = createTimeoutSignal(init.signal, init.timeoutMs);
   const resp = await fetch(url, {
     ...init,
-    signal: init.signal,
+    signal: timeoutSignal,
   });
-  
+
   if (debug) {
     console.log(
       `[SSE] Response received in ${(performance.now() - startTime).toFixed(0)}ms, status=${resp.status}`
@@ -256,6 +286,7 @@ export async function* sseFetch<T>(
   } finally {
     init.signal?.removeEventListener("abort", abortReader);
     reader.releaseLock();
+    cleanupTimeout();
   }
 }
 

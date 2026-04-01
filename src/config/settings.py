@@ -52,6 +52,8 @@ _INSECURE_JWT_SECRETS = frozenset({
     "",
     "default-secret-change-me",
     "your-jwt-secret-key",
+    "your-jwt-secret-key-change-in-production",
+    "change-me-in-production-use-strong-secret",
     "secret",
     "changeme",
 })
@@ -69,10 +71,17 @@ class AuthJWTSettings(BaseModel):
     def _reject_insecure_secret_in_production(cls, v: str) -> str:
         """Reject known-insecure secrets when running in production."""
         env = os.environ.get("GATEWAY_ENV", "development").lower()
-        if env == "production" and v in _INSECURE_JWT_SECRETS:
-            raise ValueError(
-                "JWT secret is empty or insecure. "
-                "Set GATEWAY_AUTHENTICATION__JWT__SECRET to a strong random value."
+        if v in _INSECURE_JWT_SECRETS:
+            if env == "production":
+                raise ValueError(
+                    "JWT secret is empty or insecure. "
+                    "Set GATEWAY_AUTHENTICATION__JWT__SECRET to a strong random value."
+                )
+            import warnings
+            warnings.warn(
+                "JWT secret is insecure. Set GATEWAY_AUTHENTICATION__JWT__SECRET "
+                "before deploying to production.",
+                stacklevel=2,
             )
         return v
 

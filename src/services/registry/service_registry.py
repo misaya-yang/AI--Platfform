@@ -56,6 +56,7 @@ class ServiceRegistry:
         self.storage = storage
         self._cache: dict[str, ServiceDefinition] = {}
         self._adapters: dict[str, type[ProtocolAdapter]] = {}
+        self._adapter_cache: dict[str, ProtocolAdapter] = {}
 
     async def register(self, service: ServiceDefinition) -> None:
         self._validate_service(service)
@@ -121,11 +122,18 @@ class ServiceRegistry:
         self._adapters[adapter_type] = adapter_class
 
     def get_adapter(self, service: ServiceDefinition) -> ProtocolAdapter:
+        # Cache adapters by service_id to avoid creating new instances per request
+        cache_key = service.service_id
+        if cache_key in self._adapter_cache:
+            return self._adapter_cache[cache_key]
+
         adapter_type = (service.metadata or {}).get("adapter_type", "generic_rest")
         adapter_class = self._adapters.get(adapter_type)
         if not adapter_class:
             raise AdapterNotFoundError(adapter_type)
-        return adapter_class(service)
+        adapter = adapter_class(service)
+        self._adapter_cache[cache_key] = adapter
+        return adapter
 
     def _validate_service(self, service: ServiceDefinition) -> None:
         if not service.service_id:
