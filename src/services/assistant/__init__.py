@@ -145,6 +145,12 @@ from .tool_invoker import (
     ToolInvoker,
     create_tool_invoker,
 )
+from .client import (
+    AssistantClientProtocol,
+    InProcessAssistantClient,
+    RemoteAssistantClient,
+    create_assistant_client,
+)
 from .gateway import (
     AssistantExecutionGateway,
     AssistantPolicyEngine,

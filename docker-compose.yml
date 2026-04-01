@@ -273,6 +273,36 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # ===========================================================================
+  # Assistant Service (Phase 3 — extracted microservice, disabled by default)
+  # To activate: uncomment below + set ASSISTANT_MODE=remote on gateway service.
+  # ===========================================================================
+  # assistant-service:
+  #   build:
+  #     context: .
+  #     dockerfile: assistant-service/Dockerfile
+  #   container_name: assistant-service
+  #   image: assistant-service:${TAG:-latest}
+  #   ports:
+  #     - "8093:8093"
+  #   environment:
+  #     DATABASE_URL: postgresql://postgres:${PG_PASSWORD:-111111}@postgres:5432/gateway
+  #     REDIS_URL: redis://:${REDIS_PASSWORD:-111111}@redis:6379/0
+  #   networks:
+  #     - ai-gateway-net
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+  #     start_period: 20s
+  #   restart: unless-stopped
+
 # =============================================================================
 # Networks
 # =============================================================================

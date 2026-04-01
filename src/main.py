@@ -1230,6 +1230,16 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     app.state.assistant_gateway = assistant_service.execution_gateway
     app.state.tool_registry = tool_registry
 
+    # Create assistant client (Protocol-based abstraction for future microservice extraction)
+    from .services.assistant.client import create_assistant_client
+    assistant_mode = os.environ.get("ASSISTANT_MODE", "in_process")
+    assistant_remote_url = os.environ.get("ASSISTANT_SERVICE_URL", "http://assistant-service:8093")
+    app.state.assistant_client = create_assistant_client(
+        mode=assistant_mode,
+        service=assistant_service if assistant_mode == "in_process" else None,
+        remote_url=assistant_remote_url,
+    )
+
     # Load models from database (if available)
     model_service = getattr(app.state, "model_service", None)
     if model_service:
