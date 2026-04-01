@@ -214,7 +214,8 @@ async def startup():
         logger.warning(f"Quiz tool registration failed: {e}")
 
     # --- Load models from database (bypass DatabaseStorage, use raw asyncpg) ---
-    if database and hasattr(database, '_pool') and database._pool:
+    logger.info(f"DB pool check: database={database is not None}, has_pool={hasattr(database, '_pool') if database else 'N/A'}, pool={getattr(database, '_pool', None) is not None if database else 'N/A'}")
+    if database and getattr(database, '_pool', None):
         try:
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
