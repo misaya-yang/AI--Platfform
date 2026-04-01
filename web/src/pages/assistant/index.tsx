@@ -188,7 +188,7 @@ export function AssistantPage() {
           listModels().catch(() => []),
           listDatasets().catch(() => []),
           getConfig().catch(() => ({
-            default_model_id: "gpt-4o",
+            default_model_id: "qwen3.5-plus",
             available_providers: [],
             kb_enabled: false,
             web_search_enabled: false,
@@ -202,7 +202,11 @@ export function AssistantPage() {
           const defaultId = configData.default_model_id || modelsData[0].id;
           const exists = modelsData.some((m) => m.id === defaultId);
           const fallbackModelId = exists ? defaultId : modelsData[0].id;
-          setSelectedModel((current) => current || fallbackModelId);
+          setSelectedModel((current) => {
+            // Validate current model exists in available list; fallback if not
+            if (current && modelsData.some((m) => m.id === current)) return current;
+            return fallbackModelId;
+          });
         }
       } catch (error) {
         console.error("Failed to load assistant data:", error);
