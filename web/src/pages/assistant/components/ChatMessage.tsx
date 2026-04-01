@@ -792,171 +792,170 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 12 }}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: "easeOut" }}
+      transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
       className={cn(
-        "flex w-full gap-3 sm:gap-4",
-        isUser ? "flex-row-reverse" : "flex-row"
+        "group w-full",
+        isUser ? "flex justify-end" : ""
       )}
     >
-      {/* Avatar */}
-      <motion.div
-        initial={{ scale: 0.9 }}
-        animate={{ scale: 1 }}
-        transition={{ delay: 0.05, type: "spring", stiffness: 300, damping: 20 }}
-        className={cn(
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-transform hover:scale-105 sm:h-9 sm:w-9",
-          isUser
-            ? "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/20"
-            : "bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm shadow-emerald-500/20"
-        )}
-      >
-        {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
-      </motion.div>
-
-      {/* Content - GPT style: no wrapper for assistant */}
-      <div
-        className={cn(
-          "flex flex-col min-w-0 flex-1",
-          isUser ? "items-end" : "items-start"
-        )}
-      >
-        {/* User message with bubble */}
-        {isUser ? (
+      {/* User message — warm pill, right-aligned */}
+      {isUser ? (
+        <div className="max-w-[75%]">
+          <AttachmentsDisplay attachments={message.attachments} useV2={ASSISTANT_UI_V2} />
           <div
-            className={
+            className={cn(
+              "rounded-3xl px-5 py-3",
               ASSISTANT_UI_V2
-                ? "max-w-[85%] bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-primary))] rounded-2xl rounded-tr-sm px-4 py-3 border border-[hsl(var(--assistant-border-soft))]"
-                : "max-w-[85%] bg-gradient-to-br from-violet-500 to-purple-600 text-white rounded-2xl rounded-tr-sm px-4 py-3 shadow-sm shadow-violet-500/15"
-            }
+                ? "bg-[hsl(var(--assistant-user-bubble))] text-[hsl(var(--assistant-text-primary))]"
+                : "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/15"
+            )}
           >
-            <AttachmentsDisplay attachments={message.attachments} useV2={ASSISTANT_UI_V2} />
-            <div className="whitespace-pre-wrap leading-relaxed text-sm">
+            <div className="whitespace-pre-wrap leading-relaxed text-[15px]">
               {message.content}
             </div>
           </div>
-        ) : (
-          /* Assistant message - GPT style without wrapper */
-          <div className="w-full space-y-3 assistant-copy">
-            {hasProcessSummary && message.processSummary ? (
-              <ProcessSummaryBar summary={message.processSummary} />
-            ) : hasToolCalls ? (
-              <ToolCallsDisplay toolCalls={message.toolCalls} isStreaming={!!message.isStreaming} />
-            ) : isThinking ? (
-              ASSISTANT_UI_V2 ? (
-                <div className="text-xs text-[hsl(var(--assistant-text-secondary))]">
-                  {t("assistant.processSummary.preparing", "Preparing response")}
-                </div>
-              ) : (
-                <motion.div
-                  initial={{ opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
-                >
-                  <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
-                    <div className="flex gap-1">
-                      {[0, 1, 2].map((i) => (
-                        <motion.div
-                          key={i}
-                          className="w-2 h-2 rounded-full bg-violet-500"
-                          animate={{
-                            scale: [1, 1.4, 1],
-                            opacity: [0.5, 1, 0.5]
-                          }}
-                          transition={{
-                            duration: 1.2,
-                            repeat: Infinity,
-                            delay: i * 0.15,
-                            ease: "easeInOut"
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                  <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
-                    {t("assistant.thinking")}
-                  </span>
-                </motion.div>
-              )
-            ) : null}
-
-            {/* Search status display */}
-            {shouldShowSearchStatus && message.searchStatus && (
-              <SearchStatusDisplay searchStatus={message.searchStatus} />
-            )}
-
-            {/* Web search results */}
-            {message.webSearchResults && message.webSearchResults.length > 0 && (
-              <WebSearchDisplay results={message.webSearchResults} />
-            )}
-
-            {/* Context display */}
-            {message.contexts && message.contexts.length > 0 && (
-              <ContextDisplay contexts={message.contexts} />
-            )}
-
-            {/* Message content - directly rendered without wrapper */}
-            {message.isGeneratingImage ? (
-              <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
-            ) : message.content ? (
-              <div className="text-[hsl(var(--assistant-text-primary))] text-[15px] sm:text-[16px] leading-7">
-                <StreamOutput
-                  text={message.content}
-                  isStreaming={!!message.isStreaming}
-                  id={`msg-${message.id}`}
-                />
-              </div>
-            ) : !isThinking && !hasToolCalls && !message.isStreaming && (
-              <span className="text-slate-400 italic text-sm">
-                {t("assistant.emptyResponse", "(No response)")}
-              </span>
-            )}
-
-            {/* Agent phase display */}
-            {message.isStreaming && message.agentPhase && (
-              <AgentPhaseDisplay phase={message.agentPhase} />
-            )}
-
-            {/* Citation display */}
-            {!message.isStreaming && message.ragCitations && message.ragCitations.length > 0 && (
-              <CitationDisplay
-                citations={message.ragCitations}
-                evaluation={message.ragEvaluation}
-              />
-            )}
-
-            {/* Generated artifacts */}
-            {!message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
-              ASSISTANT_UI_V2 ? (
-                <div className="mt-4 space-y-2">
-                  {message.generatedArtifacts.map((artifact) => (
-                    <InlineArtifactCard key={artifact.id} artifact={artifact} />
-                  ))}
-                </div>
-              ) : (
-                <div className="mt-4 space-y-3">
-                  {message.generatedArtifacts.map((artifact) => (
-                    <DocumentPreview
-                      key={artifact.id}
-                      title={artifact.title || artifact.filename || "Document"}
-                      content={artifact.content || ""}
-                      format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
-                      downloadUrl={artifact.url}
-                      defaultExpanded={false}
-                      maxHeight={300}
+        </div>
+      ) : (
+        /* Assistant message — clean, no bubble, full width */
+        <div className="w-full space-y-3 assistant-copy pl-1">
+          {hasProcessSummary && message.processSummary ? (
+            <ProcessSummaryBar summary={message.processSummary} />
+          ) : hasToolCalls ? (
+            <ToolCallsDisplay toolCalls={message.toolCalls} isStreaming={!!message.isStreaming} />
+          ) : isThinking ? (
+            ASSISTANT_UI_V2 ? (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-center gap-2.5 py-2"
+              >
+                <div className="flex gap-1">
+                  {[0, 1, 2].map((i) => (
+                    <motion.div
+                      key={i}
+                      className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--assistant-accent))]"
+                      animate={{ opacity: [0.3, 1, 0.3] }}
+                      transition={{
+                        duration: 1.4,
+                        repeat: Infinity,
+                        delay: i * 0.2,
+                        ease: "easeInOut",
+                      }}
                     />
                   ))}
                 </div>
-              )
-            )}
+              </motion.div>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
+              >
+                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
+                  <div className="flex gap-1">
+                    {[0, 1, 2].map((i) => (
+                      <motion.div
+                        key={i}
+                        className="w-2 h-2 rounded-full bg-violet-500"
+                        animate={{
+                          scale: [1, 1.4, 1],
+                          opacity: [0.5, 1, 0.5]
+                        }}
+                        transition={{
+                          duration: 1.2,
+                          repeat: Infinity,
+                          delay: i * 0.15,
+                          ease: "easeInOut"
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
+                  {t("assistant.thinking")}
+                </span>
+              </motion.div>
+            )
+          ) : null}
 
-            {/* Quiz card */}
-            {message.quizData && (
-              <div className="mt-4">
-                <QuizCard
-                  quizData={message.quizData}
-                  existingResult={message.quizResult}
+          {/* Search status display */}
+          {shouldShowSearchStatus && message.searchStatus && (
+            <SearchStatusDisplay searchStatus={message.searchStatus} />
+          )}
+
+          {/* Web search results */}
+          {message.webSearchResults && message.webSearchResults.length > 0 && (
+            <WebSearchDisplay results={message.webSearchResults} />
+          )}
+
+          {/* Context display */}
+          {message.contexts && message.contexts.length > 0 && (
+            <ContextDisplay contexts={message.contexts} />
+          )}
+
+          {/* Message content */}
+          {message.isGeneratingImage ? (
+            <ImageGeneratingPlaceholder prompt={message.imageGenerationPrompt} />
+          ) : message.content ? (
+            <div className="text-[hsl(var(--assistant-text-primary))] text-[15px] leading-[1.75]">
+              <StreamOutput
+                text={message.content}
+                isStreaming={!!message.isStreaming}
+                id={`msg-${message.id}`}
+              />
+            </div>
+          ) : !isThinking && !hasToolCalls && !message.isStreaming && (
+            <span className="text-[hsl(var(--assistant-text-secondary))] italic text-sm">
+              {t("assistant.emptyResponse", "(No response)")}
+            </span>
+          )}
+
+          {/* Agent phase display */}
+          {message.isStreaming && message.agentPhase && (
+            <AgentPhaseDisplay phase={message.agentPhase} />
+          )}
+
+          {/* Citation display */}
+          {!message.isStreaming && message.ragCitations && message.ragCitations.length > 0 && (
+            <CitationDisplay
+              citations={message.ragCitations}
+              evaluation={message.ragEvaluation}
+            />
+          )}
+
+          {/* Generated artifacts */}
+          {!message.isStreaming && message.generatedArtifacts && message.generatedArtifacts.length > 0 && (
+            ASSISTANT_UI_V2 ? (
+              <div className="mt-4 space-y-2">
+                {message.generatedArtifacts.map((artifact) => (
+                  <InlineArtifactCard key={artifact.id} artifact={artifact} />
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 space-y-3">
+                {message.generatedArtifacts.map((artifact) => (
+                  <DocumentPreview
+                    key={artifact.id}
+                    title={artifact.title || artifact.filename || "Document"}
+                    content={artifact.content || ""}
+                    format={artifact.format === "md" || artifact.format === "markdown" ? "markdown" : "text"}
+                    downloadUrl={artifact.url}
+                    defaultExpanded={false}
+                    maxHeight={300}
+                  />
+                ))}
+              </div>
+            )
+          )}
+
+          {/* Quiz card */}
+          {message.quizData && (
+            <div className="mt-4">
+              <QuizCard
+                quizData={message.quizData}
+                existingResult={message.quizResult}
                 />
               </div>
             )}
@@ -965,7 +964,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
             {!message.isStreaming && <StatsBadge message={message} />}
           </div>
         )}
-      </div>
     </motion.div>
   );
 }

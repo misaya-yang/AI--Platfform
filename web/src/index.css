@@ -42,13 +42,14 @@
     --transition-fast: 150ms;
     --transition-normal: 200ms;
 
-    /* Assistant UI V2 scoped tokens */
-    --assistant-canvas-bg: 214 36% 96%;
-    --assistant-text-primary: 219 26% 16%;
-    --assistant-text-secondary: 215 16% 42%;
-    --assistant-border-soft: 214 28% 85%;
-    --assistant-accent: 215 78% 46%;
-    --assistant-chip-bg: 0 0% 100%;
+    /* Assistant UI V2 scoped tokens — Claude-inspired warm palette */
+    --assistant-canvas-bg: 40 20% 97%;
+    --assistant-text-primary: 24 10% 14%;
+    --assistant-text-secondary: 24 6% 46%;
+    --assistant-border-soft: 30 14% 88%;
+    --assistant-accent: 24 70% 45%;
+    --assistant-chip-bg: 30 25% 95%;
+    --assistant-user-bubble: 30 20% 93%;
   }
 
   .dark {
@@ -80,12 +81,13 @@
     --input: 0 0% 100% / 0.08;
     --ring: 217 91% 60%;
 
-    --assistant-canvas-bg: 240 6% 4%;
-    --assistant-text-primary: 240 5% 93%;
-    --assistant-text-secondary: 240 3% 55%;
-    --assistant-border-soft: 0 0% 100% / 0.06;
-    --assistant-accent: 217 91% 60%;
-    --assistant-chip-bg: 240 4% 11%;
+    --assistant-canvas-bg: 24 6% 7%;
+    --assistant-text-primary: 30 10% 90%;
+    --assistant-text-secondary: 24 5% 52%;
+    --assistant-border-soft: 0 0% 100% / 0.08;
+    --assistant-accent: 24 65% 55%;
+    --assistant-chip-bg: 24 5% 12%;
+    --assistant-user-bubble: 24 6% 15%;
   }
 
   * {
@@ -114,6 +116,12 @@
   kbd,
   samp {
     font-family: var(--font-mono);
+  }
+
+  .font-assistant {
+    font-family: "Söhne", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   .assistant-v2 {

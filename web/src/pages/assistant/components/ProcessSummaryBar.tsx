@@ -112,9 +112,9 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   return (
     <div
       className={cn(
-        "w-full rounded-lg",
+        "w-full rounded-xl transition-colors",
         hasError
-          ? "bg-red-500/5"
+          ? "bg-red-500/5 border border-red-500/10"
           : "bg-transparent"
       )}
     >
@@ -122,32 +122,34 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
         <button
           type="button"
           onClick={() => setUserExpanded((current) => !(current ?? defaultExpanded))}
-          className="w-full py-1.5 pr-1 flex items-center gap-2 text-left"
+          className="w-full py-2 px-1 flex items-center gap-2.5 text-left group/summary"
           aria-expanded={expanded}
         >
           {headerIcon}
-          <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
+          <span className="text-[13px] text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
             {headerText}
           </span>
           {durationMs != null && durationMs > 0 && (
-            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
-              <Clock3 className="h-3 w-3" />
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] tabular-nums">
               {(durationMs / 1000).toFixed(1)}s
             </span>
           )}
-          <motion.span animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.15 }}>
-            <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
+          <motion.span
+            animate={{ rotate: expanded ? 90 : 0 }}
+            transition={{ duration: 0.15 }}
+            className="opacity-40 group-hover/summary:opacity-70 transition-opacity"
+          >
+            <ChevronDown className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))] -rotate-90" />
           </motion.span>
         </button>
       ) : (
-        <div className="w-full py-1.5 pr-1 flex items-center gap-2 text-left">
+        <div className="w-full py-2 px-1 flex items-center gap-2.5 text-left">
           {headerIcon}
-          <span className="text-xs sm:text-sm text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
+          <span className="text-[13px] text-[hsl(var(--assistant-text-secondary))] flex-1 truncate">
             {headerText}
           </span>
           {durationMs != null && durationMs > 0 && (
-            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))]">
-              <Clock3 className="h-3 w-3" />
+            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] tabular-nums">
               {(durationMs / 1000).toFixed(1)}s
             </span>
           )}
@@ -160,10 +162,10 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.18 }}
+            transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
             className="overflow-hidden"
           >
-            <div className="ml-5 pl-3 pb-2 border-l border-[hsl(var(--assistant-border-soft))]/80 space-y-2">
+            <div className="ml-6 pl-3 pb-2.5 border-l-2 border-[hsl(var(--assistant-border-soft))] space-y-2">
               {stepTotal > 0 && (
                 <div>
                   <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-[hsl(var(--assistant-text-secondary))] mb-1.5">

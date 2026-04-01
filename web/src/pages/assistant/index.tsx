@@ -526,7 +526,7 @@ export function AssistantPage() {
                   </div>
                 ) : (
                   <div
-                    className="space-y-6"
+                    className={ASSISTANT_UI_V2 ? "space-y-8" : "space-y-6"}
                     role="log"
                     aria-live="polite"
                     aria-relevant="additions text"
