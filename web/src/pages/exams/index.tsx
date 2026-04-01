@@ -244,29 +244,34 @@ function ExamsContent({
   loadExams: () => void;
   showHeader: boolean;
 }) {
+  const { t } = useTranslation();
+  const statusLabels: Record<string, string> = {
+    all: t("exams.filterAll"),
+    draft: t("exams.filterDraft"),
+    published: t("exams.filterPublished"),
+    closed: t("exams.filterClosed"),
+  };
+
   return (
     <div className={showHeader ? "space-y-6 p-6 max-w-6xl mx-auto" : "space-y-4"}>
       {showHeader && (
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Exam Management</h1>
-            <p className="text-muted-foreground text-sm mt-1">
-              Create, publish, and track exam results
-            </p>
+            <h1 className="text-2xl font-semibold tracking-tight">{t("exams.title")}</h1>
+            <p className="text-muted-foreground text-sm mt-1">{t("exams.subtitle")}</p>
           </div>
           <Button onClick={() => setShowCreate(true)} className="gap-2">
             <Plus className="h-4 w-4" />
-            Create Exam
+            {t("exams.createExam")}
           </Button>
         </div>
       )}
 
-      {/* Create button for tab mode */}
       {!showHeader && (
         <div className="flex justify-end">
           <Button onClick={() => setShowCreate(true)} className="gap-2" size="sm">
             <Plus className="h-4 w-4" />
-            Create Exam
+            {t("exams.createExam")}
           </Button>
         </div>
       )}
@@ -276,7 +281,7 @@ function ExamsContent({
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Search exams..."
+            placeholder={t("exams.searchPlaceholder")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9"
@@ -289,9 +294,8 @@ function ExamsContent({
               variant={statusFilter === s ? "default" : "ghost"}
               size="sm"
               onClick={() => setStatusFilter(s)}
-              className="capitalize"
             >
-              {s === "all" ? "All" : STATUS_CONFIG[s]?.label || s}
+              {statusLabels[s] || s}
             </Button>
           ))}
         </div>
@@ -300,10 +304,10 @@ function ExamsContent({
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: "Total", value: total, icon: ClipboardList },
-          { label: "Published", value: exams.filter((e) => e.status === "published").length, icon: ExternalLink },
-          { label: "Participants", value: exams.reduce((s, e) => s + (e.attempt_count || 0), 0), icon: Users },
-          { label: "Avg Score", value: (() => {
+          { label: t("exams.statsTotal"), value: total, icon: ClipboardList },
+          { label: t("exams.statsPublished"), value: exams.filter((e) => e.status === "published").length, icon: ExternalLink },
+          { label: t("exams.statsParticipants"), value: exams.reduce((s, e) => s + (e.attempt_count || 0), 0), icon: Users },
+          { label: t("exams.statsAvgScore"), value: (() => {
             const scored = exams.filter((e) => e.avg_score != null);
             if (!scored.length) return "—";
             return `${Math.round((scored.reduce((s, e) => s + (e.avg_score || 0), 0) / scored.length) * 100)}%`;
@@ -324,83 +328,75 @@ function ExamsContent({
       {/* Exam list */}
       {loading ? (
         <div className="flex items-center justify-center py-12 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading...
+          <Loader2 className="h-5 w-5 animate-spin mr-2" /> {t("common.loading", "加载中...")}
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground">
           <ClipboardList className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p>No exams found</p>
+          <p>{t("exams.noExams")}</p>
           <Button variant="outline" className="mt-4" onClick={() => setShowCreate(true)}>
-            Create your first exam
+            {t("exams.createFirst")}
           </Button>
         </div>
       ) : (
         <div className="space-y-3">
-          {filtered.map((exam) => {
-            const cfg = STATUS_CONFIG[exam.status] || STATUS_CONFIG.draft;
-            return (
-              <div
-                key={exam.exam_id}
-                className="rounded-xl border bg-card hover:bg-accent/30 transition-colors cursor-pointer p-4"
-                onClick={() => navigate(`/exams/${exam.exam_id}`)}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-medium truncate">{exam.title}</h3>
-                      <Badge variant={cfg.variant}>{cfg.label}</Badge>
-                    </div>
-                    {exam.description && (
-                      <p className="text-sm text-muted-foreground mt-1 line-clamp-1">{exam.description}</p>
-                    )}
-                    <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <ClipboardList className="h-3 w-3" /> {exam.question_count} questions
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Users className="h-3 w-3" /> {exam.attempt_count} participants
-                      </span>
-                      {exam.avg_score != null && (
-                        <span className="flex items-center gap-1">
-                          <BarChart3 className="h-3 w-3" /> {Math.round(exam.avg_score * 100)}% avg
-                        </span>
-                      )}
-                      {exam.deadline && (
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3 w-3" /> Due {new Date(exam.deadline).toLocaleDateString()}
-                        </span>
-                      )}
-                    </div>
+          {filtered.map((exam) => (
+            <div
+              key={exam.exam_id}
+              className="rounded-xl border bg-card hover:bg-accent/30 transition-colors cursor-pointer p-4"
+              onClick={() => navigate(`/exams/${exam.exam_id}`)}
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-medium truncate">{exam.title}</h3>
+                    <Badge variant={(STATUS_CONFIG[exam.status] || STATUS_CONFIG.draft).variant}>
+                      {statusLabels[exam.status] || exam.status}
+                    </Badge>
                   </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 ml-4" onClick={(e) => e.stopPropagation()}>
-                    {exam.status === "draft" && (
-                      <Button size="sm" onClick={() => handlePublish(exam)}>Publish</Button>
+                  {exam.description && (
+                    <p className="text-sm text-muted-foreground mt-1 line-clamp-1">{exam.description}</p>
+                  )}
+                  <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <ClipboardList className="h-3 w-3" /> {t("exams.questions", { count: exam.question_count })}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <Users className="h-3 w-3" /> {t("exams.participants", { count: exam.attempt_count })}
+                    </span>
+                    {exam.avg_score != null && (
+                      <span className="flex items-center gap-1">
+                        <BarChart3 className="h-3 w-3" /> {t("exams.avg", { score: `${Math.round(exam.avg_score * 100)}%` })}
+                      </span>
                     )}
-                    {exam.status === "published" && exam.share_code && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="gap-1"
-                        onClick={() => copyShareLink(exam)}
-                      >
-                        {copiedId === exam.exam_id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                        {copiedId === exam.exam_id ? "Copied" : "Link"}
-                      </Button>
-                    )}
-                    {exam.status === "published" && (
-                      <Button size="sm" variant="outline" onClick={() => handleClose(exam)}>Close</Button>
+                    {exam.deadline && (
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" /> {t("exams.due", { date: new Date(exam.deadline).toLocaleDateString() })}
+                      </span>
                     )}
                   </div>
                 </div>
+
+                <div className="flex items-center gap-2 ml-4" onClick={(e) => e.stopPropagation()}>
+                  {exam.status === "draft" && (
+                    <Button size="sm" onClick={() => handlePublish(exam)}>{t("exams.publish")}</Button>
+                  )}
+                  {exam.status === "published" && exam.share_code && (
+                    <Button size="sm" variant="outline" className="gap-1" onClick={() => copyShareLink(exam)}>
+                      {copiedId === exam.exam_id ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                      {copiedId === exam.exam_id ? t("exams.copied") : t("exams.link")}
+                    </Button>
+                  )}
+                  {exam.status === "published" && (
+                    <Button size="sm" variant="outline" onClick={() => handleClose(exam)}>{t("exams.close")}</Button>
+                  )}
+                </div>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Create Exam Dialog */}
       <CreateExamDialog
         open={showCreate}
         onClose={() => setShowCreate(false)}
@@ -470,19 +466,21 @@ function CreateExamDialog({
     }
   };
 
+  const { t } = useTranslation();
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Create Exam</DialogTitle>
+          <DialogTitle>{t("exams.create.title")}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
           <div>
-            <Label>Source Quiz</Label>
+            <Label>{t("exams.create.sourceQuiz")}</Label>
             <Select value={selectedQuiz} onValueChange={setSelectedQuiz}>
               <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Select a quiz..." />
+                <SelectValue placeholder={t("exams.create.selectQuiz")} />
               </SelectTrigger>
               <SelectContent>
                 {quizzes.map((q) => (
@@ -495,28 +493,28 @@ function CreateExamDialog({
           </div>
 
           <div>
-            <Label>Exam Title</Label>
+            <Label>{t("exams.create.examTitle")}</Label>
             <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Enter exam title"
+              placeholder={t("exams.create.titlePlaceholder")}
               className="mt-1"
             />
           </div>
 
           <div>
-            <Label>Description (optional)</Label>
+            <Label>{t("exams.create.description")}</Label>
             <Input
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Exam description"
+              placeholder={t("exams.create.descPlaceholder")}
               className="mt-1"
             />
           </div>
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <Label>Passing Score %</Label>
+              <Label>{t("exams.create.passingScore")}</Label>
               <Input
                 type="number"
                 min={0}
@@ -527,7 +525,7 @@ function CreateExamDialog({
               />
             </div>
             <div>
-              <Label>Max Retakes</Label>
+              <Label>{t("exams.create.maxRetakes")}</Label>
               <Input
                 type="number"
                 min={1}
@@ -538,13 +536,13 @@ function CreateExamDialog({
               />
             </div>
             <div>
-              <Label>Time Limit (min)</Label>
+              <Label>{t("exams.create.timeLimit")}</Label>
               <Input
                 type="number"
                 min={0}
                 value={timeLimit}
                 onChange={(e) => setTimeLimit(e.target.value)}
-                placeholder="No limit"
+                placeholder={t("exams.create.noLimit")}
                 className="mt-1"
               />
             </div>
@@ -552,10 +550,10 @@ function CreateExamDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button variant="outline" onClick={onClose}>{t("exams.create.cancel")}</Button>
           <Button onClick={handleCreate} disabled={!selectedQuiz || !title || creating}>
             {creating && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
-            Create as Draft
+            {t("exams.create.createDraft")}
           </Button>
         </DialogFooter>
       </DialogContent>

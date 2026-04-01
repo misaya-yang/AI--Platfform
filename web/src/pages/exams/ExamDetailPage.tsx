@@ -4,6 +4,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import {
   ArrowLeft,
   Users,
@@ -47,6 +48,7 @@ import { StreamOutput } from "@/components/StreamOutput";
 type Tab = "participants" | "questions" | "analysis";
 
 export function ExamDetailPage() {
+  const { t } = useTranslation();
   const { examId } = useParams<{ examId: string }>();
   const navigate = useNavigate();
 
@@ -170,7 +172,7 @@ export function ExamDetailPage() {
       {/* Back + Header */}
       <div>
         <Button variant="ghost" size="sm" onClick={() => navigate("/exams")} className="gap-1 mb-2 -ml-2">
-          <ArrowLeft className="h-4 w-4" /> Back
+          <ArrowLeft className="h-4 w-4" /> {t("exams.back")}
         </Button>
         <div className="flex items-start justify-between">
           <div>
@@ -180,23 +182,23 @@ export function ExamDetailPage() {
             </div>
             {exam.description && <p className="text-muted-foreground mt-1">{exam.description}</p>}
             <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
-              <span>{exam.question_count} questions</span>
-              <span>Pass: {Math.round((exam.passing_score || 0.6) * 100)}%</span>
-              {exam.time_limit_minutes && <span>{exam.time_limit_minutes} min limit</span>}
+              <span>{t("exams.questions", { count: exam.question_count })}</span>
+              <span>{t("exams.pass", { score: Math.round((exam.passing_score || 0.6) * 100) })}</span>
+              {exam.time_limit_minutes && <span>{t("exams.timeLimit", { min: exam.time_limit_minutes })}</span>}
               {exam.deadline && <span>Due: {new Date(exam.deadline).toLocaleString()}</span>}
             </div>
           </div>
           <div className="flex items-center gap-2">
             {exam.status === "draft" && (
-              <Button onClick={handlePublish}>Publish</Button>
+              <Button onClick={handlePublish}>{t("exams.publish")}</Button>
             )}
             {exam.status === "published" && (
               <>
                 <Button variant="outline" className="gap-1" onClick={copyLink}>
                   {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  {copied ? "Copied" : "Copy Link"}
+                  {copied ? t("exams.copied") : t("exams.link")}
                 </Button>
-                <Button variant="outline" onClick={handleClose}>Close</Button>
+                <Button variant="outline" onClick={handleClose}>{t("exams.close")}</Button>
               </>
             )}
           </div>
@@ -206,16 +208,16 @@ export function ExamDetailPage() {
       {/* Stats cards */}
       {stats && (
         <div className="grid grid-cols-4 gap-4">
-          <StatCard icon={Users} label="Participants" value={stats.total_participants} />
+          <StatCard icon={Users} label={t("exams.statsParticipants")} value={stats.total_participants} />
           <StatCard
             icon={BarChart3}
-            label="Avg Score"
+            label={t("exams.statsAvgScore")}
             value={stats.avg_score != null ? `${Math.round(stats.avg_score * 100)}%` : "—"}
           />
-          <StatCard icon={Trophy} label="Pass Rate" value={`${Math.round(stats.pass_rate * 100)}%`} />
+          <StatCard icon={Trophy} label={t("exams.detail.passRate")} value={`${Math.round(stats.pass_rate * 100)}%`} />
           <StatCard
             icon={AlertCircle}
-            label="Score Range"
+            label={t("exams.detail.scoreRange")}
             value={stats.min_score != null ? `${Math.round(stats.min_score * 100)}–${Math.round((stats.max_score || 0) * 100)}%` : "—"}
           />
         </div>
@@ -224,9 +226,9 @@ export function ExamDetailPage() {
       {/* Tabs */}
       <div className="flex gap-1 border-b">
         {([
-          { key: "participants", label: "Participants", icon: Users },
-          { key: "questions", label: "Question Analysis", icon: ClipboardList },
-          { key: "analysis", label: "AI Analysis", icon: Brain },
+          { key: "participants", label: t("exams.detail.participants"), icon: Users },
+          { key: "questions", label: t("exams.detail.questionAnalysis"), icon: ClipboardList },
+          { key: "analysis", label: t("exams.detail.aiAnalysis"), icon: Brain },
         ] as const).map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -298,30 +300,31 @@ function ParticipantsTab({
   passingScore: number;
   onExport: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{total} participants</p>
+        <p className="text-sm text-muted-foreground">{t("exams.detail.participantCount", { count: total })}</p>
         <Button variant="outline" size="sm" className="gap-1" onClick={onExport}>
-          <Download className="h-3.5 w-3.5" /> Export CSV
+          <Download className="h-3.5 w-3.5" /> {t("exams.detail.exportCsv")}
         </Button>
       </div>
       <div className="rounded-xl border overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Score</TableHead>
-              <TableHead>Correct</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Completed</TableHead>
+              <TableHead>{t("exams.detail.name")}</TableHead>
+              <TableHead>{t("exams.detail.score")}</TableHead>
+              <TableHead>{t("exams.detail.correct")}</TableHead>
+              <TableHead>{t("exams.detail.status")}</TableHead>
+              <TableHead>{t("exams.detail.completed")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {attempts.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                  No participants yet
+                  {t("exams.detail.noParticipants")}
                 </TableCell>
               </TableRow>
             ) : (
@@ -339,7 +342,7 @@ function ParticipantsTab({
                     <TableCell>{a.correct_count}/{a.total_count}</TableCell>
                     <TableCell>
                       <Badge variant={passed ? "default" : "destructive"}>
-                        {passed ? "Passed" : "Failed"}
+                        {passed ? t("exams.detail.passed") : t("exams.detail.failed")}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
@@ -357,6 +360,7 @@ function ParticipantsTab({
 }
 
 function QuestionsTab({ stats }: { stats: ExamStats }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-3">
       {stats.per_question.map((q) => {
@@ -371,16 +375,16 @@ function QuestionsTab({ stats }: { stats: ExamStats }) {
                   <span className="text-sm truncate">{q.question_text}</span>
                 </div>
                 <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
-                  <span>Answer: <strong>{q.correct_answer}</strong></span>
-                  <span>{q.total_answered} answered</span>
-                  {q.most_common_wrong && <span>Most common wrong: <strong>{q.most_common_wrong}</strong></span>}
+                  <span>{t("exams.detail.answer", { answer: q.correct_answer })}</span>
+                  <span>{t("exams.detail.answered", { count: q.total_answered })}</span>
+                  {q.most_common_wrong && <span>{t("exams.detail.mostCommonWrong", { answer: q.most_common_wrong })}</span>}
                 </div>
               </div>
               <div className="ml-4 text-right">
                 <span className={`text-lg font-semibold ${isWeak ? "text-red-500" : pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
                   {pct}%
                 </span>
-                <p className="text-xs text-muted-foreground">correct</p>
+                <p className="text-xs text-muted-foreground">{t("exams.detail.correctRate")}</p>
               </div>
             </div>
             {/* Bar */}
@@ -410,26 +414,27 @@ function AnalysisTab({
   onAnalyze: () => void;
   onSelectReport: (id: string) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Brain className="h-5 w-5 text-primary" />
-          <span className="font-medium">AI Analysis Report</span>
+          <span className="font-medium">{t("exams.analysis.title")}</span>
           {reports.length > 0 && (
-            <span className="text-xs text-muted-foreground">({reports.length} reports)</span>
+            <span className="text-xs text-muted-foreground">({t("exams.analysis.reportCount", { count: reports.length })})</span>
           )}
         </div>
         <Button onClick={onAnalyze} disabled={analyzing} className="gap-2">
           {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Brain className="h-4 w-4" />}
-          {analyzing ? "Analyzing..." : report ? "Regenerate" : "Generate Report"}
+          {analyzing ? t("exams.analysis.analyzing") : report ? t("exams.analysis.regenerate") : t("exams.analysis.generate")}
         </Button>
       </div>
 
       {report ? (
         <div className="rounded-xl border bg-card p-6">
           <div className="text-xs text-muted-foreground mb-4">
-            Generated: {new Date(report.generated_at).toLocaleString()} · Model: {report.model_id}
+            {t("exams.analysis.generated", { time: new Date(report.generated_at).toLocaleString() })} · {t("exams.analysis.model", { model: report.model_id })}
           </div>
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <StreamOutput text={report.content} isStreaming={false} />
@@ -438,8 +443,8 @@ function AnalysisTab({
       ) : (
         <div className="text-center py-12 text-muted-foreground rounded-xl border border-dashed">
           <Brain className="h-10 w-10 mx-auto mb-3 opacity-30" />
-          <p>No analysis yet. Click "Generate Report" to create one.</p>
-          <p className="text-xs mt-1">AI will analyze scores, question difficulty, and provide recommendations.</p>
+          <p>{t("exams.analysis.noReport")}</p>
+          <p className="text-xs mt-1">{t("exams.analysis.noReportHint")}</p>
         </div>
       )}
     </div>
