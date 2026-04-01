@@ -169,21 +169,21 @@ export function SegmentList({
   return (
     <div className="space-y-4">
       {/* Statistics Header */}
-      <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800">
+      <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-950/50 border border-border">
         <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm font-medium">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-border text-sm font-medium">
             <Hash className="w-3.5 h-3.5 text-slate-500" />
             {segments.length} {t("knowledge.segment.totalSegments")}
           </span>
           
           {stats.isHierarchical && (
-            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 text-sm font-medium text-blue-700 dark:text-blue-300">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 text-sm font-medium text-blue-700 dark:text-blue-300">
               <Layers className="w-3.5 h-3.5" />
               {stats.totalParents} {t("knowledge.segment.parentSegments")} · {stats.totalChildren} {t("knowledge.segment.childSegments")}
             </span>
           )}
           
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-sm text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-border text-sm text-muted-foreground">
             {stats.totalChars.toLocaleString()} {t("knowledge.segment.chars")}
             <span className="text-xs text-muted-foreground/60">
               (~{Math.ceil(stats.totalChars / 4)} tokens)
@@ -192,7 +192,7 @@ export function SegmentList({
         </div>
         
         {stats.isHierarchical && (
-          <div className="ml-auto flex items-center gap-1 bg-white dark:bg-slate-900 rounded-lg p-0.5 border border-slate-200 dark:border-slate-800">
+          <div className="ml-auto flex items-center gap-1 bg-white dark:bg-slate-900 rounded-lg p-0.5 border border-border">
             <button
               onClick={() => setViewMode("hierarchical")}
               className={cn(

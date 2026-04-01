@@ -86,7 +86,7 @@ function ChildChunkCard({
         <div className={cn(
           "rounded-lg border transition-all duration-200",
           "bg-blue-50/30 dark:bg-blue-950/20",
-          "border-blue-200/60 dark:border-blue-800/40",
+          "border-blue-200/60 dark:border-blue-900/40",
           "hover:border-blue-300 dark:hover:border-blue-700"
         )}>
           {/* Header */}
@@ -269,12 +269,12 @@ export function ChunkCard({
   return (
     <div className={cn(
       "rounded-xl border-2 transition-all duration-200",
-      "bg-card border-slate-200 dark:border-slate-800",
-      "hover:border-slate-300 dark:hover:border-slate-700"
+      "bg-card border-border",
+      "hover:border-slate-300 dark:hover:border-slate-800"
     )}>
       {/* Parent Header */}
       <div 
-        className="flex items-center gap-4 px-4 py-3 bg-slate-50/80 dark:bg-slate-950/50 border-b border-slate-200 dark:border-slate-800 cursor-pointer"
+        className="flex items-center gap-4 px-4 py-3 bg-slate-50/80 dark:bg-slate-950/50 border-b border-border cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
         <span className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-slate-600 to-slate-800 text-white font-bold text-sm shadow-sm">

@@ -232,7 +232,7 @@ export function ConversationSidebar({
   return (
     <div className="flex flex-col h-full">
       {/* New Chat Button */}
-      <div className="p-3 border-b">
+      <div className="p-3 border-b border-border/40">
         <Button
           onClick={onNewChat}
           className="w-full gap-2"

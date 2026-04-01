@@ -119,7 +119,7 @@ function ChildChunk({
         <div className={cn(
           "relative rounded-lg border transition-all duration-200",
           "bg-gradient-to-r from-blue-50/80 to-blue-50/40 dark:from-blue-950/30 dark:to-blue-950/20",
-          "border-blue-200 dark:border-blue-800",
+          "border-blue-200 dark:border-blue-900/60",
           "hover:border-blue-300 dark:hover:border-blue-700",
           "hover:shadow-sm"
         )}>
@@ -132,7 +132,7 @@ function ChildChunk({
               </span>
               
               {/* Character count - prominent */}
-              <Badge variant="outline" className="text-[10px] font-mono bg-white/70 dark:bg-gray-900/50 border-blue-200 dark:border-blue-800">
+              <Badge variant="outline" className="text-[10px] font-mono bg-white/70 dark:bg-gray-900/50 border-blue-200 dark:border-blue-900/60">
                 <Type className="w-3 h-3 mr-1 text-blue-500" />
                 {charCount.toLocaleString()} {t("knowledge.segment.chars")}
               </Badge>
@@ -236,8 +236,8 @@ export function HierarchicalSegmentCard({
       <div className={cn(
         "relative rounded-xl border-2 transition-all duration-300",
         "bg-card",
-        "border-slate-200 dark:border-slate-800",
-        "hover:border-slate-300 dark:hover:border-slate-700",
+        "border-border",
+        "hover:border-slate-300 dark:hover:border-slate-800",
         "hover:shadow-lg hover:shadow-slate-200/50 dark:hover:shadow-black/20",
         "overflow-hidden"
       )}>
@@ -246,7 +246,7 @@ export function HierarchicalSegmentCard({
           "flex items-center justify-between px-4 py-3",
           "bg-gradient-to-r from-slate-50 via-slate-50/80 to-card",
           "dark:from-slate-950 dark:via-slate-950/80 dark:to-card",
-          "border-b border-slate-200 dark:border-slate-800"
+          "border-b border-border"
         )}>
           <div className="flex items-center gap-3">
             {/* Parent index - large badge */}
@@ -297,7 +297,7 @@ export function HierarchicalSegmentCard({
                 {children.length > 0 && (
                   <Badge 
                     variant="outline" 
-                    className="text-[10px] bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800"
+                    className="text-[10px] bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-900/60"
                   >
                     <Layers className="w-3 h-3 mr-1 text-blue-500" />
                     {children.length} {t("knowledge.segment.childChunks")}

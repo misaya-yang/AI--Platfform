@@ -375,10 +375,10 @@ export function AssistantPage() {
     <TooltipProvider>
       <div
         className={cn(
-          "flex flex-col -m-6",
+          "flex flex-col",
           ASSISTANT_UI_V2 ? "assistant-v2 font-assistant" : "bg-slate-50 dark:bg-slate-900"
         )}
-        style={{ height: "calc(100vh - 64px)", width: "calc(100% + 48px)" }}
+        style={{ height: "calc(100vh - 40px)", margin: "0 -16px -16px -16px", width: "calc(100% + 32px)" }}
       >
         <div className="flex flex-1 overflow-hidden">
           
@@ -389,7 +389,7 @@ export function AssistantPage() {
                 initial={{ width: 0, opacity: 0 }}
                 animate={{ width: 280, opacity: 1 }}
                 exit={{ width: 0, opacity: 0 }}
-                className="border-r border-slate-200/80 dark:border-slate-700/50 bg-white/50 dark:bg-slate-800/30 overflow-hidden flex-shrink-0"
+                className="border-r border-border/60 bg-white/50 dark:bg-slate-800/30 overflow-hidden flex-shrink-0"
               >
                 <div className="h-full w-[280px]">
                   <ConversationSidebar

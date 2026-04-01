@@ -1865,7 +1865,7 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="flex items-center gap-3">
                     <h3 className="font-bold text-foreground">{t("knowledge.detail.retrievalResults")}</h3>
                     {hitResults.length > 0 && (
-                      <Badge className="bg-emerald-100 text-emerald-700 border-emerald-200">
+                      <Badge className="bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/60">
                         {t("knowledge.detail.resultCount", { count: hitResults.length })}
                       </Badge>
                     )}
@@ -3407,7 +3407,7 @@ for chunk in results.get("chunks", []):
                   </div>
                 </div>
 
-                <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 rounded-lg">
+                <div className="p-4 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/60 rounded-lg">
                   <p className="text-sm text-blue-700 dark:text-blue-300">
                     <span className="font-medium">{t("knowledge.detail.hint")}</span>
                     {dsQuery.data?.visibility === "private" && t("knowledge.detail.permPrivateHint")}
