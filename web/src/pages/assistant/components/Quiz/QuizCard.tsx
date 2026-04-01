@@ -12,6 +12,7 @@ import {
   BookOpen,
   ChevronLeft,
   ChevronRight,
+  Link2,
   Loader2,
   Send,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { submitQuiz } from "@/api/quiz";
 import type { QuizData, QuizAttemptResult } from "../../types";
 import { QuizQuestion } from "./QuizQuestion";
 import { QuizResult } from "./QuizResult";
+import { QuizShareDialog } from "./QuizShareDialog";
 
 interface QuizCardProps {
   quizData: QuizData;
@@ -40,6 +42,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
   const [result, setResult] = useState<QuizAttemptResult | undefined>(existingResult);
   const [viewMode, setViewMode] = useState<ViewMode>(existingResult ? "result" : "quiz");
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [showShareDialog, setShowShareDialog] = useState(false);
 
   const questions = quizData.questions;
   const totalQuestions = questions.length;
@@ -176,6 +179,17 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
           {viewMode === "result" && result && (
             <motion.div key="result">
               <QuizResult result={result} onReview={handleReview} />
+              <div className="mt-3 flex justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowShareDialog(true)}
+                  className="gap-1.5"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  {t("assistant.quiz.shareQuiz", "Share Quiz")}
+                </Button>
+              </div>
             </motion.div>
           )}
 
@@ -229,6 +243,13 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
           )}
         </AnimatePresence>
       </div>
+
+      {/* Share dialog */}
+      <QuizShareDialog
+        quizId={quizData.quiz_id}
+        open={showShareDialog}
+        onClose={() => setShowShareDialog(false)}
+      />
     </div>
   );
 }

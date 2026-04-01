@@ -21,6 +21,7 @@ from ...core.auth.user_resolver import UserContext
 from ...services.assistant.quiz_generator import QuizGenerator
 from ...services.assistant.quiz_grader import QuizGrader
 from ...services.assistant.quiz_service import QuizService
+from ...services.assistant.quiz_share_manager import QuizShareManager
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
@@ -43,6 +44,17 @@ class QuizGenerateRequest(BaseModel):
 
 class QuizSubmitRequest(BaseModel):
     answers: dict[str, str] = Field(..., description="question_id → selected option label")
+
+
+class QuizShareRequest(BaseModel):
+    expires_hours: int | None = Field(None, description="Hours until expiry (None = never)")
+    max_attempts: int | None = Field(None, description="Max attempts (None = unlimited)")
+    require_name: bool = Field(True, description="Require name before taking")
+
+
+class PublicQuizSubmitRequest(BaseModel):
+    answers: dict[str, str] = Field(..., description="question_id → selected option label")
+    display_name: str | None = Field(None, description="Anonymous user's name")
 
 
 class QuizGenerateResponse(BaseModel):
@@ -221,3 +233,90 @@ async def delete_quiz(
     if not deleted:
         raise HTTPException(404, "Quiz not found or not authorized to delete")
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Share endpoints (authenticated)
+# ---------------------------------------------------------------------------
+
+
+def _get_share_manager(request: Request) -> QuizShareManager:
+    db = getattr(request.app.state, "database", None)
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    return QuizShareManager(db=db)
+
+
+@router.post("/{quiz_id}/share")
+async def create_share_link(
+    quiz_id: str,
+    body: QuizShareRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Generate a shareable link for a quiz."""
+    mgr = _get_share_manager(request)
+    try:
+        share = await mgr.create_share(
+            quiz_id=quiz_id,
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            expires_hours=body.expires_hours,
+            max_attempts=body.max_attempts,
+            require_name=body.require_name,
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+    return share
+
+
+@router.delete("/{quiz_id}/share/{share_id}")
+async def revoke_share_link(
+    quiz_id: str,
+    share_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Revoke a share link."""
+    mgr = _get_share_manager(request)
+    revoked = await mgr.revoke_share(share_id, user.user_id)
+    if not revoked:
+        raise HTTPException(404, "Share link not found or not authorized")
+    return {"revoked": True}
+
+
+# ---------------------------------------------------------------------------
+# Public endpoints (no auth required)
+# ---------------------------------------------------------------------------
+
+public_router = APIRouter(prefix="/quiz/shared", tags=["quiz-public"])
+
+
+@public_router.get("/{share_code}")
+async def get_shared_quiz(share_code: str, request: Request):
+    """Get a quiz for public taking (no auth required). Returns questions without answers."""
+    mgr = _get_share_manager(request)
+    quiz = await mgr.get_public_quiz(share_code)
+    if not quiz:
+        raise HTTPException(404, "Quiz not found, expired, or max attempts reached")
+    return quiz
+
+
+@public_router.post("/{share_code}/submit")
+async def submit_shared_quiz(
+    share_code: str,
+    body: PublicQuizSubmitRequest,
+    request: Request,
+):
+    """Submit answers for a shared quiz (no auth required)."""
+    mgr = _get_share_manager(request)
+    try:
+        result = await mgr.submit_public_attempt(
+            share_code=share_code,
+            answers=body.answers,
+            display_name=body.display_name,
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return result

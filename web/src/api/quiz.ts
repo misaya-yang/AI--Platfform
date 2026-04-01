@@ -49,3 +49,39 @@ export async function listQuizzes(params?: {
 export async function deleteQuiz(quizId: string): Promise<void> {
   await api.delete(`/api/v1/assistant/quiz/${quizId}`);
 }
+
+// --- Share ---
+
+export interface ShareQuizRequest {
+  expires_hours?: number;
+  max_attempts?: number;
+  require_name?: boolean;
+}
+
+export interface ShareQuizResponse {
+  share_id: string;
+  share_code: string;
+  quiz_id: string;
+  quiz_title: string;
+  expires_at: string | null;
+  require_name: boolean;
+  max_attempts: number | null;
+}
+
+export async function createQuizShare(
+  quizId: string,
+  data?: ShareQuizRequest,
+): Promise<ShareQuizResponse> {
+  const { data: result } = await api.post<ShareQuizResponse>(
+    `/api/v1/assistant/quiz/${quizId}/share`,
+    data ?? {},
+  );
+  return result;
+}
+
+export async function revokeQuizShare(
+  quizId: string,
+  shareId: string,
+): Promise<void> {
+  await api.delete(`/api/v1/assistant/quiz/${quizId}/share/${shareId}`);
+}

@@ -14,6 +14,7 @@ import DatasetCreatePage from "@/pages/knowledge/DatasetCreate";
 import { AssistantPage } from "@/pages/assistant";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 import { SharePage } from "@/pages/SharePage";
+import { QuizPage } from "@/pages/QuizPage";
 
 export function AppRouter() {
   return (
@@ -22,6 +23,7 @@ export function AppRouter() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/403" element={<ForbiddenPage />} />
       <Route path="/share/:shareId" element={<SharePage />} />
+      <Route path="/quiz/:shareCode" element={<QuizPage />} />
 
       {/* Protected routes - wrapped with single ProtectedRoute at layout level */}
       <Route

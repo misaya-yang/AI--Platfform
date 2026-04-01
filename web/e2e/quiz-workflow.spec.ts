@@ -32,7 +32,7 @@ test.describe("Quiz workflow", () => {
     }
   });
 
-  test("generate, submit, list, delete quiz", async ({ request }) => {
+  test("generate, submit, share, public access, delete quiz", async ({ page, request }) => {
     const apiUrl = getApiUrl();
 
     // --- Step 1: List KB datasets to find one with content ---
@@ -134,7 +134,55 @@ test.describe("Quiz workflow", () => {
     expect(pq).toHaveProperty("correct_answer");
     expect(pq).toHaveProperty("explanation");
 
-    // --- Step 5: List quizzes ---
+    // --- Step 5: Create share link ---
+    const shareRes = await request.post(
+      `${apiUrl}/api/v1/assistant/quiz/${quizId}/share`,
+      {
+        headers,
+        data: { require_name: true },
+      },
+    );
+    expect(shareRes.ok(), `Create share failed: ${shareRes.status()}`).toBeTruthy();
+    const share = await shareRes.json();
+    expect(share.share_code).toBeTruthy();
+    expect(share.quiz_id).toBe(quizId);
+
+    // --- Step 6: Access shared quiz (no auth) ---
+    const publicRes = await request.get(
+      `${apiUrl}/api/v1/quiz/shared/${share.share_code}`,
+    );
+    expect(publicRes.ok(), `Public quiz access failed: ${publicRes.status()}`).toBeTruthy();
+    const publicQuiz = await publicRes.json();
+    expect(publicQuiz.title).toBeTruthy();
+    expect(publicQuiz.questions.length).toBeGreaterThanOrEqual(1);
+    // Verify no correct answers exposed
+    expect(publicQuiz.questions[0].correct_answer).toBeUndefined();
+
+    // --- Step 7: Submit anonymous attempt ---
+    const publicAnswers: Record<string, string> = {};
+    for (const q of publicQuiz.questions) {
+      publicAnswers[q.id] = "B";
+    }
+    const publicSubmitRes = await request.post(
+      `${apiUrl}/api/v1/quiz/shared/${share.share_code}/submit`,
+      {
+        data: {
+          answers: publicAnswers,
+          display_name: "E2E Test User",
+        },
+      },
+    );
+    expect(publicSubmitRes.ok(), `Public submit failed: ${publicSubmitRes.status()}`).toBeTruthy();
+    const publicResult = await publicSubmitRes.json();
+    expect(publicResult.attempt_id).toBeTruthy();
+    expect(publicResult.total_count).toBe(publicQuiz.questions.length);
+
+    // --- Step 8: Navigate to /quiz/:shareCode page ---
+    // Just verify the public page loads (renders intro screen)
+    await page.goto(`/quiz/${share.share_code}`, { waitUntil: "domcontentloaded" });
+    await expect(page.getByText(publicQuiz.title)).toBeVisible({ timeout: 10_000 });
+
+    // --- Step 9: List quizzes ---
     const listRes = await request.get(
       `${apiUrl}/api/v1/assistant/quiz/list`,
       { headers },
@@ -147,7 +195,7 @@ test.describe("Quiz workflow", () => {
     );
     expect(found).toBeTruthy();
 
-    // --- Step 6: Delete quiz ---
+    // --- Step 10: Delete quiz ---
     const delRes = await request.delete(
       `${apiUrl}/api/v1/assistant/quiz/${quizId}`,
       { headers },
