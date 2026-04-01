@@ -106,7 +106,7 @@ test.describe("Quiz history persistence", () => {
     await ensureAuthenticatedPage(page, "/assistant");
 
     // Find and click the seeded session in sidebar
-    const sessionBtn = page.getByRole("button", { name: new RegExp(seed.title) });
+    const sessionBtn = page.getByRole("button", { name: new RegExp(seed.title + "\\s·") });
     await expect(sessionBtn).toBeVisible({ timeout: 15_000 });
     await sessionBtn.click();
 
