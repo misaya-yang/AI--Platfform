@@ -126,11 +126,19 @@ class QuizGeneratorExecutor(ToolExecutor):
 
         retriever = self.kb_service or self.kb_proxy
         if not retriever or not self.model_registry or not self.database:
+            missing = []
+            if not retriever:
+                missing.append("kb_service/kb_proxy")
+            if not self.model_registry:
+                missing.append("model_registry")
+            if not self.database:
+                missing.append("database")
+            logger.error(f"Quiz tool missing services: {missing}")
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error="Quiz generation services not available",
+                error=f"Quiz generation services not available (missing: {', '.join(missing)})",
             )
 
         if not user:
