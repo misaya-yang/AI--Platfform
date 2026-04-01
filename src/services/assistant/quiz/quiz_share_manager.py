@@ -13,7 +13,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from ...persistence.database import DatabaseStorage
+from ....persistence.database import DatabaseStorage
 
 logger = logging.getLogger(__name__)
 

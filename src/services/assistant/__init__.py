@@ -85,7 +85,7 @@ from .guardrails import (
     ToolConstraintValidator,
     ValidationResult,
 )
-from .model_registry import ModelInfo, ModelProvider, ModelRegistry
+from .models.model_registry import ModelInfo, ModelProvider, ModelRegistry
 
 # Query Intent Analyzer (Self-RAG style adaptive retrieval)
 from .query_intent_analyzer import (

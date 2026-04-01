@@ -24,10 +24,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
-from ...services.assistant.quiz_generator import QuizGenerator
-from ...services.assistant.quiz_grader import QuizGrader
-from ...services.assistant.quiz_service import QuizService
-from ...services.assistant.quiz_share_manager import QuizShareManager
+from ...services.assistant.quiz.quiz_generator import QuizGenerator
+from ...services.assistant.quiz.quiz_grader import QuizGrader
+from ...services.assistant.quiz.quiz_service import QuizService
+from ...services.assistant.quiz.quiz_share_manager import QuizShareManager
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])

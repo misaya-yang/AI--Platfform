@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ...core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from .model_registry import ModelRegistry
+    from .models.model_registry import ModelRegistry
 
 logger = get_logger(__name__)
 

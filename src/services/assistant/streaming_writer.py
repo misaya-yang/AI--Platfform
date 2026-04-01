@@ -611,7 +611,7 @@ class StreamingWriter:
         Yields:
             String chunks of generated text
         """
-        from .model_registry import ChatMessage
+        from .models.model_registry import ChatMessage
 
         messages = [ChatMessage(role="user", content=prompt)]
 

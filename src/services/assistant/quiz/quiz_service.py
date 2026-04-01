@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from ...persistence.database import DatabaseStorage
+from ....persistence.database import DatabaseStorage
 from .quiz_generator import QuizGenerator
 from .quiz_grader import QuizGrader
 

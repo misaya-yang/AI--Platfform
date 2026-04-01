@@ -163,7 +163,7 @@ class QuizGrader:
         user_answer: str,
     ) -> dict:
         """Use LLM to grade a short answer question."""
-        from .model_registry import ChatMessage
+        from ..models.model_registry import ChatMessage
 
         prompt = SHORT_ANSWER_GRADING_PROMPT.format(
             question_text=question_text,

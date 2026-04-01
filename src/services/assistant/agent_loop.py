@@ -99,7 +99,7 @@ from .working_memory import TaskStatus, WorkingMemory
 if TYPE_CHECKING:
     from ...core.auth.user_resolver import UserContext
     from ..knowledge.knowledge_service import KnowledgeService
-    from ..model.model_registry import ModelRegistry
+    from .models.model_registry import ModelRegistry
     from .memory_service import MemoryService
 
 logger = get_logger(__name__)

@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from ...persistence.database import DatabaseStorage
+from ....persistence.database import DatabaseStorage
 from .quiz_share_manager import QuizShareManager
 
 logger = logging.getLogger(__name__)
@@ -443,7 +443,7 @@ Provide your analysis with these sections:
 Use the exam language (Chinese if title is Chinese, otherwise English).
 """
 
-        from .model_registry import ChatMessage as ModelChatMessage
+        from ..models.model_registry import ChatMessage as ModelChatMessage
 
         content, _usage = await model_registry.chat(
             model_id="qwen3.5-plus",

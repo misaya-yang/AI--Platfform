@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from .model_registry import ChatMessage, ModelRegistry
+from ..models.model_registry import ChatMessage, ModelRegistry
 
 logger = logging.getLogger(__name__)
 

@@ -62,7 +62,7 @@ from .guardrails import (
     ValidationResult,
 )
 from .memory import MemoryManager
-from .model_registry import ChatMessage, ModelProvider, ModelRegistry
+from .models.model_registry import ChatMessage, ModelProvider, ModelRegistry
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
     get_ttft_optimized_prompt,
