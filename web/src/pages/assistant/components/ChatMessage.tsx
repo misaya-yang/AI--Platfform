@@ -46,6 +46,7 @@ import { CitationDisplay } from "./CitationDisplay";
 import { DocumentPreview } from "./DocumentPreview";
 import type { ChatMessage as ChatMessageType, SearchStatusItem, AgentPhaseStatus } from "../types";
 import { ProcessSummaryBar } from "./ProcessSummaryBar";
+import { QuizCard } from "./Quiz";
 
 interface ChatMessageProps {
   message: ChatMessageType;
@@ -948,6 +949,16 @@ export function ChatMessage({ message }: ChatMessageProps) {
                   ))}
                 </div>
               )
+            )}
+
+            {/* Quiz card */}
+            {message.quizData && (
+              <div className="mt-4">
+                <QuizCard
+                  quizData={message.quizData}
+                  existingResult={message.quizResult}
+                />
+              </div>
             )}
 
             {/* Stats */}

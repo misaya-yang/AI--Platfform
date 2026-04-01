@@ -1,0 +1,165 @@
+/**
+ * Quiz Workflow E2E Test
+ *
+ * Covers the Phase 1 quiz lifecycle:
+ * 1. Generate quiz via API
+ * 2. Verify quiz structure (questions, options)
+ * 3. Submit answers and verify grading
+ * 4. List quizzes and verify the created quiz appears
+ * 5. Delete quiz and verify removal
+ */
+
+import { expect, test } from "@playwright/test";
+import { buildAuthHeaders, getApiUrl } from "./support/helpers";
+
+test.describe("Quiz workflow", () => {
+  test.setTimeout(3 * 60_000);
+
+  let headers: Record<string, string>;
+  let quizId: string | undefined;
+
+  test.beforeAll(async ({ request }) => {
+    headers = await buildAuthHeaders(request);
+  });
+
+  test.afterAll(async ({ request }) => {
+    // Cleanup: delete quiz if it was created and not already deleted
+    if (quizId) {
+      const apiUrl = getApiUrl();
+      await request
+        .delete(`${apiUrl}/api/v1/assistant/quiz/${quizId}`, { headers })
+        .catch(() => {});
+    }
+  });
+
+  test("generate, submit, list, delete quiz", async ({ request }) => {
+    const apiUrl = getApiUrl();
+
+    // --- Step 1: List KB datasets to find one with content ---
+    const dsRes = await request.get(`${apiUrl}/api/v1/assistant/datasets`, {
+      headers,
+    });
+    expect(dsRes.ok(), `List datasets failed: ${dsRes.status()}`).toBeTruthy();
+    const dsData = await dsRes.json();
+    const datasets = dsData.datasets ?? dsData.data ?? dsData;
+    expect(Array.isArray(datasets)).toBeTruthy();
+
+    // Skip test if no datasets available
+    if (datasets.length === 0) {
+      test.skip(true, "No KB datasets available for quiz generation");
+      return;
+    }
+
+    const datasetId = datasets[0].id ?? datasets[0].dataset_id;
+    expect(datasetId).toBeTruthy();
+
+    // --- Step 2: Generate quiz ---
+    const genRes = await request.post(
+      `${apiUrl}/api/v1/assistant/quiz/generate`,
+      {
+        headers,
+        data: {
+          dataset_ids: [datasetId],
+          topic: "general knowledge",
+          question_count: 3,
+          difficulty: "easy",
+        },
+      },
+    );
+    expect(
+      genRes.ok(),
+      `Generate quiz failed: ${genRes.status()} ${await genRes.text()}`,
+    ).toBeTruthy();
+
+    const quiz = await genRes.json();
+    quizId = quiz.quiz_id;
+    expect(quizId).toBeTruthy();
+    expect(quiz.title).toBeTruthy();
+    expect(quiz.questions).toBeDefined();
+    expect(quiz.questions.length).toBeGreaterThanOrEqual(1);
+
+    // Verify question structure
+    const firstQ = quiz.questions[0];
+    expect(firstQ.id).toBeTruthy();
+    expect(firstQ.question_text).toBeTruthy();
+    expect(firstQ.options).toBeDefined();
+    expect(firstQ.options.length).toBe(4);
+    expect(firstQ.options[0]).toHaveProperty("label");
+    expect(firstQ.options[0]).toHaveProperty("text");
+
+    // Correct answers should NOT be included
+    expect(firstQ.correct_answer).toBeUndefined();
+
+    // --- Step 3: Get quiz by ID ---
+    const getRes = await request.get(
+      `${apiUrl}/api/v1/assistant/quiz/${quizId}`,
+      { headers },
+    );
+    expect(getRes.ok()).toBeTruthy();
+    const fetched = await getRes.json();
+    expect(fetched.quiz_id).toBe(quizId);
+    expect(fetched.questions.length).toBe(quiz.questions.length);
+
+    // --- Step 4: Submit answers ---
+    const answers: Record<string, string> = {};
+    for (const q of quiz.questions) {
+      // Pick "A" for all (deterministic for test — we just verify grading works)
+      answers[q.id] = "A";
+    }
+
+    const submitRes = await request.post(
+      `${apiUrl}/api/v1/assistant/quiz/${quizId}/submit`,
+      {
+        headers,
+        data: { answers },
+      },
+    );
+    expect(
+      submitRes.ok(),
+      `Submit failed: ${submitRes.status()}`,
+    ).toBeTruthy();
+
+    const result = await submitRes.json();
+    expect(result.attempt_id).toBeTruthy();
+    expect(typeof result.total_score).toBe("number");
+    expect(result.correct_count).toBeGreaterThanOrEqual(0);
+    expect(result.total_count).toBe(quiz.questions.length);
+    expect(result.per_question).toBeDefined();
+    expect(result.per_question.length).toBe(quiz.questions.length);
+
+    // Verify per-question structure
+    const pq = result.per_question[0];
+    expect(pq).toHaveProperty("correct");
+    expect(pq).toHaveProperty("user_answer");
+    expect(pq).toHaveProperty("correct_answer");
+    expect(pq).toHaveProperty("explanation");
+
+    // --- Step 5: List quizzes ---
+    const listRes = await request.get(
+      `${apiUrl}/api/v1/assistant/quiz/list`,
+      { headers },
+    );
+    expect(listRes.ok()).toBeTruthy();
+    const listData = await listRes.json();
+    expect(listData.quizzes).toBeDefined();
+    const found = listData.quizzes.find(
+      (q: Record<string, unknown>) => q.quiz_id === quizId,
+    );
+    expect(found).toBeTruthy();
+
+    // --- Step 6: Delete quiz ---
+    const delRes = await request.delete(
+      `${apiUrl}/api/v1/assistant/quiz/${quizId}`,
+      { headers },
+    );
+    expect(delRes.ok(), `Delete failed: ${delRes.status()}`).toBeTruthy();
+    quizId = undefined; // prevent afterAll cleanup
+
+    // Verify deletion
+    const getAfterDel = await request.get(
+      `${apiUrl}/api/v1/assistant/quiz/${quizId ?? "nonexistent"}`,
+      { headers },
+    );
+    expect(getAfterDel.status()).toBe(404);
+  });
+});

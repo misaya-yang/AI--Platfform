@@ -287,6 +287,10 @@ export interface ChatMessage {
   // Multimodal
   attachments?: MessageAttachment[];
 
+  // Quiz data (rendered as interactive card in chat)
+  quizData?: QuizData;
+  quizResult?: QuizAttemptResult;
+
   // Generated artifacts (documents, images, etc.)
   generatedArtifacts?: GeneratedArtifact[];
 
@@ -300,6 +304,48 @@ export interface ChatMessage {
   firstTokenMs?: number;
   modelId?: string;
   timestamp?: string;
+}
+
+// =============================================================================
+// Quiz Types
+// =============================================================================
+
+export interface QuizOption {
+  label: string;
+  text: string;
+}
+
+export interface QuizQuestionData {
+  id: string;
+  question_num: number;
+  question_type: string;
+  question_text: string;
+  options: QuizOption[];
+}
+
+export interface QuizData {
+  quiz_id: string;
+  title: string;
+  description?: string;
+  topic?: string;
+  difficulty?: string;
+  question_count: number;
+  questions: QuizQuestionData[];
+}
+
+export interface QuizAttemptResult {
+  attempt_id: string;
+  total_score: number;
+  correct_count: number;
+  total_count: number;
+  per_question: Array<{
+    question_num: number;
+    question_id: string;
+    correct: boolean;
+    user_answer: string;
+    correct_answer: string;
+    explanation?: string;
+  }>;
 }
 
 // =============================================================================

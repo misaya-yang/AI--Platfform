@@ -19,6 +19,7 @@ from .v1.models import router as models_router
 from .v1.presign import router as presign_router
 from .v1.providers import router as providers_router
 from .v1.proxy import router as proxy_router
+from .v1.quiz import router as quiz_router
 from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
@@ -60,5 +61,6 @@ api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪�
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API
+api_router.include_router(quiz_router)  # Quiz generation & grading
 api_router.include_router(providers_router)  # LLM Provider 管理
 api_router.include_router(models_router)  # LLM Model 管理

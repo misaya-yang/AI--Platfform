@@ -1732,6 +1732,19 @@ export function useChatSession() {
             }
             break;
 
+          case SSEEventType.QUIZ_READY:
+            if (event.data && typeof event.data === "object") {
+              const quizPayload = event.data as Record<string, unknown>;
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMessage.id
+                    ? { ...m, quizData: quizPayload as any }
+                    : m
+                )
+              );
+            }
+            break;
+
           // Note: TASK_PLANNING and WORKING_MEMORY_UPDATE are handled above (lines 552-571)
           // Do not duplicate handlers here
 
