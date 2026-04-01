@@ -1278,6 +1278,7 @@ class AgentLoop:
             messages: list[dict[str, Any]] = []
             contexts_for_persistence: list[dict[str, Any]] = []
             web_search_results_for_persistence: dict[str, Any] | None = None
+            quiz_id_for_persistence: str | None = None
             created_artifact_ids: list[str] = []
 
             def _sanitize_output_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2486,6 +2487,7 @@ class AgentLoop:
                                 else None
                             )
                             if quiz_data:
+                                quiz_id_for_persistence = quiz_data.get("quiz_id")
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="quiz:ready",
@@ -2822,6 +2824,7 @@ class AgentLoop:
                             "usage": usage_payload,
                             "contexts": contexts_for_persistence or None,
                             "web_search_results": web_search_results_for_persistence,
+                            "quiz_id": quiz_id_for_persistence,
                             "artifact_ids": created_artifact_ids or None,
                             "engine": "agent_loop",
                             "mode": "streaming_first",

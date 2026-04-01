@@ -55,6 +55,7 @@ import type {
   WorkingMemory,
   CodeExecutionState,
 } from "../types";
+import { getQuiz } from "@/api/quiz";
 import { getStyleSystemPrompt } from "../styles";
 import type { Artifact } from "@/components/artifacts";
 import {
@@ -187,9 +188,52 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
         output_tokens: msg.metadata.usage.completion_tokens,
       };
     }
+
+    // Mark quiz_id for async loading
+    if (msg.metadata.quiz_id) {
+      (baseMessage as any)._quizId = msg.metadata.quiz_id;
+    }
   }
   return baseMessage;
 };
+
+/** Async: load quiz data for messages that have _quizId, then update state */
+async function hydrateQuizData(
+  messages: ChatMessageType[],
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessageType[]>>,
+) {
+  const quizMessages = messages.filter((m) => (m as any)._quizId);
+  if (quizMessages.length === 0) return;
+
+  const results = await Promise.allSettled(
+    quizMessages.map(async (m) => {
+      const quizId = (m as any)._quizId as string;
+      const quiz = await getQuiz(quizId);
+      return { messageId: m.id, quiz };
+    }),
+  );
+
+  const quizMap = new Map<string, any>();
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      quizMap.set(r.value.messageId, r.value.quiz);
+    }
+  }
+
+  if (quizMap.size > 0) {
+    setMessages((prev) =>
+      prev.map((m) => {
+        const quiz = quizMap.get(m.id);
+        if (quiz) {
+          const updated = { ...m, quizData: quiz };
+          delete (updated as any)._quizId;
+          return updated;
+        }
+        return m;
+      }),
+    );
+  }
+}
 
 function initProcessSummary(runId?: string, startedAt?: number): ProcessSummaryState {
   return {
@@ -386,10 +430,11 @@ export function useChatSession() {
                 getSessionArtifacts(savedSessionId).catch(() => []),
               ]);
               
-              const chatMessages = history.map((msg, index) => 
+              const chatMessages = history.map((msg, index) =>
                 restoreMessageMetadata(msg, index, savedSessionId)
               );
               setMessages(chatMessages);
+              hydrateQuizData(chatMessages, setMessages);
               setHistoryRestoreState("ready");
               trackChatHistoryRestored("assistant", {
                 sessionId: savedSessionId,
@@ -495,10 +540,11 @@ export function useChatSession() {
       ]);
 
       // Restore messages
-      const chatMessages = history.map((msg, index) => 
+      const chatMessages = history.map((msg, index) =>
         restoreMessageMetadata(msg, index, sessionId)
       );
       setMessages(chatMessages);
+      hydrateQuizData(chatMessages, setMessages);
       setActiveSessionId(sessionId);
       setHistoryRestoreState("ready");
       trackChatHistoryRestored("assistant", {
