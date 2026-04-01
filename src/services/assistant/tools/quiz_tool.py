@@ -207,9 +207,11 @@ class QuizGeneratorExecutor(ToolExecutor):
                 if normalized_opts and q.get("correct_answer"):
                     text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
                     normalized_answers = []
-                    # Map numeric indices (1,2,3,4) to labels (A,B,C,D)
-                    idx_to_label = {str(i + 1): opt["label"] for i, opt in enumerate(normalized_opts)}
+                    # Map numeric indices to labels — LLMs may return 0-indexed or 1-indexed
+                    idx0_to_label = {str(i): opt["label"] for i, opt in enumerate(normalized_opts)}      # 0→A, 1→B, 2→C
+                    idx1_to_label = {str(i + 1): opt["label"] for i, opt in enumerate(normalized_opts)}  # 1→A, 2→B, 3→C
                     label_set = {o["label"].upper() for o in normalized_opts}
+                    explanation = q.get("explanation", "").lower()
 
                     for ans in q["correct_answer"]:
                         ans_str = str(ans).strip()
@@ -217,9 +219,25 @@ class QuizGeneratorExecutor(ToolExecutor):
                         # Already a label (A/B/C/D/true/false)?
                         if ans_str.upper() in label_set or ans_lower in ("true", "false"):
                             normalized_answers.append(ans_str.upper() if len(ans_str) == 1 else ans_str.lower())
-                        # Numeric index (1→A, 2→B, etc.) — common LLM mistake
-                        elif ans_str in idx_to_label:
-                            normalized_answers.append(idx_to_label[ans_str])
+                        # Numeric index — try 0-indexed first (more common for LLMs)
+                        elif ans_str in idx0_to_label:
+                            # Validate against explanation if available
+                            label_0 = idx0_to_label[ans_str]
+                            opt_0_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_0), "")
+                            if ans_str in idx1_to_label:
+                                label_1 = idx1_to_label[ans_str]
+                                opt_1_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_1), "")
+                                # Pick whichever option text appears in the explanation
+                                if explanation and opt_0_text and any(w in explanation for w in opt_0_text.split()[:3]):
+                                    normalized_answers.append(label_0)
+                                elif explanation and opt_1_text and any(w in explanation for w in opt_1_text.split()[:3]):
+                                    normalized_answers.append(label_1)
+                                else:
+                                    normalized_answers.append(label_0)  # default 0-indexed
+                            else:
+                                normalized_answers.append(label_0)
+                        elif ans_str in idx1_to_label:
+                            normalized_answers.append(idx1_to_label[ans_str])
                         # Text content — find matching label
                         elif ans_lower in text_to_label:
                             normalized_answers.append(text_to_label[ans_lower])
