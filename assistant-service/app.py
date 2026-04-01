@@ -110,7 +110,7 @@ async def startup():
     if db_url:
         try:
             from src.persistence.database import DatabaseStorage
-            database = DatabaseStorage(db_url)
+            database = DatabaseStorage(db_url, enabled=True, auto_init=False)
             await database.connect()
             logger.info("Database connected")
 
