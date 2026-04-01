@@ -218,10 +218,13 @@ async def startup():
         try:
             from src.services.llm.model_service import ModelService
             model_service = ModelService(database)
+            # Debug: check what list_models returns
+            all_models = await model_service.list_models(tenant_id="default", include_disabled=False)
+            logger.info(f"DB has {len(all_models)} models: {[m.get('model_id') for m in all_models[:5]]}")
             loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
-            logger.info(f"Loaded {loaded} models from database")
+            logger.info(f"Loaded {loaded} models into registry. Registry now has: {list(model_registry._models.keys())[:10]}")
         except Exception as e:
-            logger.warning(f"Failed to load models from DB: {e}")
+            logger.warning(f"Failed to load models from DB: {e}", exc_info=True)
 
     # Store on app state
     app.state.assistant_service = assistant_service
