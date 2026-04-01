@@ -145,6 +145,7 @@ class QuizShareManager:
             "require_name": row["require_name"],
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
             "time_limit_minutes": row.get("time_limit_minutes"),
+            "is_exam": bool(row.get("is_exam")),
         }
 
     async def get_public_quiz(self, share_code: str) -> dict | None:
@@ -235,16 +236,25 @@ class QuizShareManager:
         grader = QuizGrader()
         result = grader.grade(questions, answers)
 
-        # Persist attempt
+        # Persist attempt — link to exam if this is an exam share
         attempt_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
+
+        exam_id_val = None
+        if share.get("is_exam"):
+            exam_row = await self.db.fetchrow(
+                "SELECT id FROM exams WHERE share_id = $1 LIMIT 1",
+                uuid.UUID(share["share_id"]),
+            )
+            if exam_row:
+                exam_id_val = exam_row["id"]
 
         await self.db.execute(
             """
             INSERT INTO quiz_attempts (id, quiz_id, user_id, share_id, display_name,
                                        answers, total_score, correct_count, total_count,
-                                       started_at, completed_at, status, client_ip)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                                       started_at, completed_at, status, client_ip, exam_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             """,
             uuid.UUID(attempt_id),
             uuid.UUID(quiz_id),
@@ -259,6 +269,7 @@ class QuizShareManager:
             now,
             "completed",
             client_ip,
+            exam_id_val,
         )
 
         logger.info(
