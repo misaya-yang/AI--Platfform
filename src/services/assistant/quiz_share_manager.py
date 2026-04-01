@@ -56,6 +56,7 @@ class QuizShareManager:
         expires_hours: int | None = None,
         max_attempts: int | None = None,
         require_name: bool = True,
+        time_limit_minutes: int | None = None,
     ) -> dict:
         """Create a shareable link for a quiz."""
         # Verify quiz exists and belongs to user
@@ -77,8 +78,8 @@ class QuizShareManager:
             """
             INSERT INTO quiz_shares (id, quiz_id, share_code, created_by,
                                      is_active, max_attempts, expires_at,
-                                     require_name, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                     require_name, time_limit_minutes, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             uuid.UUID(share_id),
             uuid.UUID(quiz_id),
@@ -88,6 +89,7 @@ class QuizShareManager:
             max_attempts,
             expires_at,
             require_name,
+            time_limit_minutes,
             now,
         )
 
@@ -101,6 +103,7 @@ class QuizShareManager:
             "expires_at": expires_at.isoformat() if expires_at else None,
             "require_name": require_name,
             "max_attempts": max_attempts,
+            "time_limit_minutes": time_limit_minutes,
         }
 
     async def get_share_by_code(self, share_code: str) -> dict | None:
@@ -141,6 +144,7 @@ class QuizShareManager:
             "difficulty": row["difficulty"],
             "require_name": row["require_name"],
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+            "time_limit_minutes": row.get("time_limit_minutes"),
         }
 
     async def get_public_quiz(self, share_code: str) -> dict | None:
@@ -178,6 +182,7 @@ class QuizShareManager:
             "question_count": share["question_count"],
             "difficulty": share["difficulty"],
             "require_name": share["require_name"],
+            "time_limit_minutes": share.get("time_limit_minutes"),
             "questions": shuffled_questions,
         }
 
@@ -186,6 +191,7 @@ class QuizShareManager:
         share_code: str,
         answers: dict[str, str],
         display_name: str | None = None,
+        client_ip: str | None = None,
     ) -> dict:
         """Grade an anonymous attempt via shared link."""
         display_name = _sanitize_display_name(display_name)
@@ -237,8 +243,8 @@ class QuizShareManager:
             """
             INSERT INTO quiz_attempts (id, quiz_id, user_id, share_id, display_name,
                                        answers, total_score, correct_count, total_count,
-                                       started_at, completed_at, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                       started_at, completed_at, status, client_ip)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
             uuid.UUID(attempt_id),
             uuid.UUID(quiz_id),
@@ -252,6 +258,7 @@ class QuizShareManager:
             now,
             now,
             "completed",
+            client_ip,
         )
 
         logger.info(

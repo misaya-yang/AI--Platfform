@@ -57,6 +57,7 @@ class QuizShareRequest(BaseModel):
     expires_hours: int | None = Field(None, description="Hours until expiry (None = never)")
     max_attempts: int | None = Field(None, description="Max attempts (None = unlimited)")
     require_name: bool = Field(True, description="Require name before taking")
+    time_limit_minutes: int | None = Field(None, description="Time limit per attempt in minutes (None = unlimited)")
 
 
 class PublicQuizSubmitRequest(BaseModel):
@@ -170,7 +171,7 @@ async def generate_quiz(
         raise HTTPException(422, str(e))
     except Exception as e:
         logger.error(f"Quiz generation failed: {e}", exc_info=True)
-        raise HTTPException(500, f"Quiz generation failed: {e}")
+        raise HTTPException(500, "Quiz generation failed. Please try again.")
 
     return quiz
 
@@ -312,6 +313,44 @@ async def list_attempts(
     )
 
 
+@router.get("/{quiz_id}/attempts/export")
+async def export_attempts_csv(
+    quiz_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Export attempts as CSV (creator only)."""
+    import csv
+    import io
+
+    svc = _get_quiz_service(request)
+    data = await svc.list_attempts(quiz_id, user.tenant_id, user.user_id, limit=10000, offset=0)
+    attempts = data.get("attempts", [])
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Name", "Score", "Correct", "Total", "Percentage", "Completed At", "Status"])
+    for a in attempts:
+        pct = f"{a['total_score'] * 100:.0f}%" if a.get("total_score") is not None else ""
+        writer.writerow([
+            a.get("display_name") or a.get("user_id") or "Anonymous",
+            a.get("total_score", ""),
+            a.get("correct_count", ""),
+            a.get("total_count", ""),
+            pct,
+            a.get("completed_at", ""),
+            a.get("status", ""),
+        ])
+
+    from fastapi.responses import Response
+
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="quiz-{quiz_id[:8]}-results.csv"'},
+    )
+
+
 @router.delete("/{quiz_id}")
 async def delete_quiz(
     quiz_id: str,
@@ -355,6 +394,7 @@ async def create_share_link(
             expires_hours=body.expires_hours,
             max_attempts=body.max_attempts,
             require_name=body.require_name,
+            time_limit_minutes=body.time_limit_minutes,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -402,11 +442,14 @@ async def submit_shared_quiz(
 ):
     """Submit answers for a shared quiz (no auth required)."""
     mgr = _get_share_manager(request)
+    # P2: Track client IP
+    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or request.client.host if request.client else None
     try:
         result = await mgr.submit_public_attempt(
             share_code=share_code,
             answers=body.answers,
             display_name=body.display_name,
+            client_ip=client_ip,
         )
     except ValueError as e:
         msg = str(e)
