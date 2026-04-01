@@ -719,7 +719,7 @@ def create_app() -> FastAPI:
         await _init_assistant_service(app, settings)
 
         # Initialize Assistant TaskManager lifecycle explicitly
-        from .services.assistant.task_manager import init_task_manager
+        from .services.assistant.tasks.task_manager import init_task_manager
 
         app.state.assistant_task_manager = await init_task_manager()
 
@@ -772,7 +772,7 @@ def create_app() -> FastAPI:
         # Islamic Content: now handled by microservice at :8091, no cleanup needed
 
         # Stop Assistant TaskManager lifecycle
-        from .services.assistant.task_manager import shutdown_task_manager
+        from .services.assistant.tasks.task_manager import shutdown_task_manager
 
         await shutdown_task_manager()
 

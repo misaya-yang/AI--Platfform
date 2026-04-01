@@ -134,7 +134,7 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     - premium: Users with tier=premium/enterprise/admin or role=admin
     - admin: Only users with tier=admin or role=admin
     """
-    from ...services.assistant.model_registry import ModelAccessLevel
+    from ...services.assistant.models.model_registry import ModelAccessLevel
 
     # Admin users can access everything
     if user.tier == "admin" or "admin" in user.roles:
@@ -950,7 +950,7 @@ async def cancel_task(
     Returns:
         TaskCancelResponse with cancellation status
     """
-    from ...services.assistant.task_manager import get_task_manager
+    from ...services.assistant.tasks.task_manager import get_task_manager
 
     task_manager = get_task_manager()
 

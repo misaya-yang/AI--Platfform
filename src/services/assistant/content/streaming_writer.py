@@ -13,7 +13,7 @@ Key Features:
 - Buffer-based streaming for efficient output
 
 Usage:
-    from src.services.assistant.streaming_writer import StreamingWriter, StreamChunk
+    from src.services.assistant.content.streaming_writer import StreamingWriter, StreamChunk
 
     writer = StreamingWriter(kb_service=kb_service, assistant_service=assistant_service)
 

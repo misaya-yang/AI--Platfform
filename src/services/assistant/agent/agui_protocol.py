@@ -14,7 +14,7 @@ AG-UI Protocol defines a standardized set of events for:
 Reference: https://docs.ag-ui.com/concepts/architecture
 
 Usage:
-    from src.services.assistant.agui_protocol import AGUIEventEmitter
+    from src.services.assistant.agent.agui_protocol import AGUIEventEmitter
 
     emitter = AGUIEventEmitter(request_id="req-123")
 

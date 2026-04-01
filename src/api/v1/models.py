@@ -9,7 +9,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from ...services.assistant.model_registry import ModelRegistry
+from ...services.assistant.models.model_registry import ModelRegistry
 from ...services.llm.model_service import ModelService
 from ..deps import get_user_context
 from ..schemas.providers import (
