@@ -64,13 +64,14 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
             name="questions",
             type="array",
             description=(
-                'Array of question objects. Example: '
-                '[{"question_num":1,"question_type":"mc_single","question_text":"What is X?",'
-                '"options":[{"label":"A","text":"Option 1"},{"label":"B","text":"Option 2"},'
-                '{"label":"C","text":"Option 3"},{"label":"D","text":"Option 4"}],'
-                '"correct_answer":["C"],"explanation":"C is correct because..."}]. '
-                'IMPORTANT: correct_answer must be the LABEL (A/B/C/D), NOT the text content. '
-                'options must use {"label":"A","text":"..."} format.'
+                "Array of question objects. Each object needs these fields: "
+                "question_num (integer starting from 1), "
+                "question_type (always use mc_single), "
+                "question_text (the question string), "
+                "options (array of 4 objects, each with two keys: the first key is the letter A/B/C/D, the second key is the option text — "
+                'for example: [{"A":"Earth"},{"B":"Mars"},{"C":"Venus"},{"D":"Jupiter"}]), '
+                "correct_answer (array with one letter, e.g. [\"C\"]), "
+                "explanation (one sentence why the answer is correct)"
             ),
             required=True,
             items={"type": "object"},
