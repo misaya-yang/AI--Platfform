@@ -513,9 +513,10 @@ Please use this web search context to inform your response when relevant."""
         tool_constraint_validator: ToolConstraintValidator | None = None,
         execution_gateway: Any | None = None,
         request_router: Any | None = None,
+        kb_proxy: Any | None = None,
     ):
         self.model_registry = model_registry
-        self.kb_service = kb_service
+        self.kb_service = kb_service or kb_proxy  # Use proxy when local KB unavailable
         self.tavily_tool = TavilySearchTool(api_key=tavily_api_key)
         self.session_manager = session_manager
         self.context_manager = get_context_manager()

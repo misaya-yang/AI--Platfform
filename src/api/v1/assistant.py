@@ -202,12 +202,17 @@ async def list_datasets(
     Returns datasets the user has access to for RAG integration.
     """
     kb_service = getattr(request.app.state, "knowledge_service", None)
-    if not kb_service:
+    kb_proxy = getattr(request.app.state, "kb_proxy", None)
+
+    if not kb_service and not kb_proxy:
         return DatasetsListResponse(datasets=[])
 
     try:
-        # list_datasets expects UserContext, returns List[Dict[str, Any]]
-        datasets_raw = await kb_service.list_datasets(user=user)
+        # Use local service or HTTP proxy
+        if kb_service:
+            datasets_raw = await kb_service.list_datasets(user=user)
+        else:
+            datasets_raw = await kb_proxy.list_datasets(user=user)
 
         datasets = []
         for ds in datasets_raw:
@@ -216,13 +221,18 @@ async def list_datasets(
             chunk_count = 0
             embedding_model = ds.get("embedding_model", "")
 
-            # Fetch statistics for each dataset
-            try:
-                stats = await kb_service.get_dataset_statistics(user, dataset_id)
-                document_count = stats.get("document_count", 0)
-                chunk_count = stats.get("segment_count", 0)  # segments = chunks
-            except Exception:
-                pass  # Keep defaults if stats fetch fails
+            # Fetch statistics for each dataset (local service only — skip for proxy to avoid N+1 HTTP calls)
+            if kb_service:
+                try:
+                    stats = await kb_service.get_dataset_statistics(user, dataset_id)
+                    document_count = stats.get("document_count", 0)
+                    chunk_count = stats.get("segment_count", 0)
+                except Exception:
+                    pass
+            else:
+                # Proxy mode: use counts from list response if available
+                document_count = ds.get("document_count", 0)
+                chunk_count = ds.get("segment_count", ds.get("chunk_count", 0))
 
             # Determine if multimodal based on embedding model
             # Uses centralized model registry from services/knowledge/embedding.py
@@ -263,6 +273,7 @@ async def get_config(
     ]
 
     kb_service = getattr(request.app.state, "knowledge_service", None)
+    kb_proxy = getattr(request.app.state, "kb_proxy", None)
     tavily_api_key = os.getenv("TAVILY_API_KEY")
 
     # Get available tools
@@ -274,7 +285,7 @@ async def get_config(
     return AssistantConfigResponse(
         default_model_id="gemini-3-flash-preview",
         available_providers=available_providers,
-        kb_enabled=kb_service is not None,
+        kb_enabled=kb_service is not None or kb_proxy is not None,
         web_search_enabled=bool(tavily_api_key),
         tools_available=tools_available,
     )

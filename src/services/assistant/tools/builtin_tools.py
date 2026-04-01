@@ -168,7 +168,7 @@ class KBSearchExecutor(ToolExecutor):
 
             knowledge_settings = getattr(
                 getattr(self.kb_service, "settings", None), "knowledge", None
-            )
+            ) if hasattr(self.kb_service, "settings") else None
             dataset_fanout_concurrency = max(
                 int(getattr(knowledge_settings, "dataset_fanout_max_concurrency", 3) or 3),
                 1,
@@ -184,16 +184,26 @@ class KBSearchExecutor(ToolExecutor):
                         include_images = intent != "find_document"
                         # Enable VLM reranking for image-focused queries
                         vlm_rerank = intent in ("general", "find_image")
-                        results, meta = await self.kb_service.retrieve_with_images_v2(
-                            user=request.user,
-                            dataset_id=dataset_id,
-                            query=query,
-                            top_k=top_k,
-                            intent=intent,
-                            vlm_rerank=vlm_rerank,
-                            include_images=include_images,
-                            score_threshold=score_threshold,  # Pass threshold to retrieval
-                        )
+                        if hasattr(self.kb_service, "retrieve_with_images_v2"):
+                            results, meta = await self.kb_service.retrieve_with_images_v2(
+                                user=request.user,
+                                dataset_id=dataset_id,
+                                query=query,
+                                top_k=top_k,
+                                intent=intent,
+                                vlm_rerank=vlm_rerank,
+                                include_images=include_images,
+                                score_threshold=score_threshold,
+                            )
+                        else:
+                            # Fallback for proxy client (no multimodal support)
+                            results, meta = await self.kb_service.retrieve(
+                                user=request.user,
+                                dataset_id=dataset_id,
+                                query=query,
+                                top_k=top_k,
+                                score_threshold=score_threshold,
+                            )
                     return {
                         "dataset_id": dataset_id,
                         "results": results,

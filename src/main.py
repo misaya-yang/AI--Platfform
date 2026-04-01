@@ -855,9 +855,13 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.billing_interceptor = container.billing_interceptor
     app.state.context_injector = container.context_injector
 
-    # Knowledge Base (KBMS)
+    # Knowledge Base (KBMS) — microservice mode: use HTTP proxy client
     app.state.knowledge_service = None
     app.state.knowledge_worker = None
+
+    from .services.knowledge.kb_proxy_client import KBProxyClient
+    app.state.kb_proxy = KBProxyClient()
+    logger.info(f"KB proxy client initialized → {KBProxyClient.KB_SERVICE_URL if hasattr(KBProxyClient, 'KB_SERVICE_URL') else 'knowledge-service:8092'}")
 
     # Confluence 集成
     app.state.confluence_sync_service = None
@@ -1171,6 +1175,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=kb_service,
+        kb_proxy=getattr(app.state, "kb_proxy", None),
         tavily_api_key=tavily_api_key or None,
         session_manager=session_manager,
         code_executor=code_executor,
@@ -1191,8 +1196,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     from .services.assistant.tools.image_generator_tool import register_image_generation_tool
 
     tool_registry = get_tool_registry()
+    effective_kb_service = kb_service or getattr(app.state, "kb_proxy", None)
     register_builtin_tools(
-        kb_service=kb_service, tavily_tool=tavily_tool, memory_service=memory_service
+        kb_service=effective_kb_service, tavily_tool=tavily_tool, memory_service=memory_service
     )
 
     # Register code executor tool if available
@@ -1214,6 +1220,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         kb_service=kb_service,
         model_registry=model_registry,
         database=getattr(app.state, "database", None),
+        kb_proxy=getattr(app.state, "kb_proxy", None),
     )
 
     # Store in app.state

@@ -98,11 +98,13 @@ class QuizGeneratorExecutor(ToolExecutor):
 
     def __init__(
         self,
-        kb_service: KnowledgeService | None = None,
+        kb_service: Any | None = None,
         model_registry: ModelRegistry | None = None,
         database: DatabaseStorage | None = None,
+        kb_proxy: Any | None = None,
     ) -> None:
         self.kb_service = kb_service
+        self.kb_proxy = kb_proxy
         self.model_registry = model_registry
         self.database = database
 
@@ -115,7 +117,8 @@ class QuizGeneratorExecutor(ToolExecutor):
         difficulty = args.get("difficulty", "medium")
         language = args.get("language", "auto")
 
-        if not self.kb_service or not self.model_registry or not self.database:
+        retriever = self.kb_service or self.kb_proxy
+        if not retriever or not self.model_registry or not self.database:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
@@ -146,7 +149,7 @@ class QuizGeneratorExecutor(ToolExecutor):
             all_chunks: list[dict[str, Any]] = []
             for ds_id in kb_dataset_ids:
                 try:
-                    results, _ = await self.kb_service.retrieve(
+                    results, _ = await retriever.retrieve(
                         user=user, dataset_id=ds_id, query=topic,
                         top_k=20, mode="hybrid",
                     )
@@ -211,11 +214,13 @@ def register_quiz_tool(
     kb_service: Any | None = None,
     model_registry: Any | None = None,
     database: Any | None = None,
+    kb_proxy: Any | None = None,
 ) -> None:
     """Register the quiz generation tool in the global registry."""
     executor = QuizGeneratorExecutor(
         kb_service=kb_service,
         model_registry=model_registry,
         database=database,
+        kb_proxy=kb_proxy,
     )
     register_tool(QUIZ_GENERATION_DEFINITION, executor)
