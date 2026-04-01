@@ -213,6 +213,32 @@ class QuizGeneratorExecutor(ToolExecutor):
                             normalized_opts.append({"label": chr(65 + len(normalized_opts)), "text": opt})
                 q["options"] = normalized_opts
 
+                # Normalize correct_answer: convert text values to labels
+                # LLM may return ["2.5%"] instead of ["C"] — map text back to label
+                if normalized_opts and q.get("correct_answer"):
+                    text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
+                    normalized_answers = []
+                    for ans in q["correct_answer"]:
+                        ans_str = str(ans).strip()
+                        ans_lower = ans_str.lower()
+                        # Already a label (A/B/C/D/true/false)?
+                        if ans_str.upper() in {o["label"].upper() for o in normalized_opts} or ans_lower in ("true", "false"):
+                            normalized_answers.append(ans_str.upper() if len(ans_str) == 1 else ans_str.lower())
+                        # Text content — find matching label
+                        elif ans_lower in text_to_label:
+                            normalized_answers.append(text_to_label[ans_lower])
+                        else:
+                            # Partial match
+                            matched = False
+                            for text, label in text_to_label.items():
+                                if ans_lower in text or text in ans_lower:
+                                    normalized_answers.append(label)
+                                    matched = True
+                                    break
+                            if not matched:
+                                normalized_answers.append(ans_str)
+                    q["correct_answer"] = normalized_answers
+
             # Persist to DB
             quiz_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
