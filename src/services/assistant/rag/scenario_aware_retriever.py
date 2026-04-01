@@ -24,12 +24,12 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
-    from ...core.auth.user_resolver import UserContext
-    from ..knowledge.knowledge_service import KnowledgeService
+    from ....core.auth.user_resolver import UserContext
+    from ...knowledge.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
 

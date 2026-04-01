@@ -44,8 +44,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...core.observability.logging import get_logger
-from ...models.enums import StreamEventType
+from ....core.observability.logging import get_logger
+from ....models.enums import StreamEventType
 
 logger = get_logger(__name__)
 

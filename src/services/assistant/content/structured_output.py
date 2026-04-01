@@ -28,7 +28,7 @@ from typing import (
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 

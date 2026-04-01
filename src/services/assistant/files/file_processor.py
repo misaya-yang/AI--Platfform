@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
+from ....core.auth.user_resolver import UserContext
+from ....core.observability.logging import get_logger
 from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (
     FileProcessingStrategyFactory,
@@ -39,8 +39,8 @@ from .file_strategy import (
 from .pdf_converter import PDFConversionError, create_pdf_converter
 
 if TYPE_CHECKING:
-    from ..knowledge.knowledge_service import KnowledgeService
-    from ..knowledge.vlm_service import DashScopeVLMService
+    from ...knowledge.knowledge_service import KnowledgeService
+    from ...knowledge.vlm_service import DashScopeVLMService
     from ..storage.file_storage import FileStorageService
 
 # Type alias for progress callback

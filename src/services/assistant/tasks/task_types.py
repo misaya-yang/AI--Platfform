@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ...core.auth.user_resolver import UserContext
-from .file_processor import FileProcessor
+from ....core.auth.user_resolver import UserContext
+from ..files.file_processor import FileProcessor
 
 logger = logging.getLogger(__name__)
 

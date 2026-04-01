@@ -25,9 +25,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ...core.observability.logging import get_logger
-from .agui_protocol import create_agui_emitter
-from .guardrails import (
+from ....core.observability.logging import get_logger
+from ..agent.agui_protocol import create_agui_emitter
+from ..quality.guardrails import (
     DocumentType,
     QualityGuardrails,
     QualityIssue,

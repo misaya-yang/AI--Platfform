@@ -10,7 +10,7 @@ Provides a GPT-like assistant experience with:
 - Write-while-search capability (Phase 2.3)
 """
 
-from .agent_loop import (
+from .agent.agent_loop import (
     PHASE_DISPLAY_NAMES,
     PHASE_INDEX,
     TOTAL_PHASES,
@@ -23,7 +23,7 @@ from .agent_loop import (
     StructuredError,
     create_agent_loop,
 )
-from .agui_protocol import (
+from .agent.agui_protocol import (
     AGUIEventEmitter,
     ArtifactEvent,
     BaseEvent,
@@ -36,13 +36,13 @@ from .agui_protocol import (
     create_agui_emitter,
 )
 from .assistant_service import AssistantConfig, AssistantService, RAGEvaluation
-from .cache_optimizer import (
+from .quality.cache_optimizer import (
     CacheBreakpoint,
     CacheConfig,
     CacheMetrics,
     ContextCacheOptimizer,
 )
-from .content_generator import (
+from .content.content_generator import (
     ContentOutline,
     ContentSection,
     DeepContentGenerator,
@@ -51,10 +51,10 @@ from .content_generator import (
     StreamEvent,
     create_content_generator,
 )
-from .context_metrics import (
+from .rag.context_metrics import (
     CacheMetrics as KVCacheMetrics,  # Renamed to avoid conflict with cache_optimizer.CacheMetrics
 )
-from .context_metrics import (
+from .rag.context_metrics import (
     CompressionMetrics,
     ContextMetrics,
     ContextMetricsBuilder,
@@ -65,15 +65,15 @@ from .context_metrics import (
     get_context_metrics_collector,
     init_context_metrics_collector,
 )
-from .document_parser import DocumentParseError, DocumentParser, parse_document
-from .file_processor import (
+from .files.document_parser import DocumentParseError, DocumentParser, parse_document
+from .files.file_processor import (
     FileProcessError,
     FileProcessor,
     ImageContent,
     ProcessedFiles,
     create_file_processor,
 )
-from .guardrails import (
+from .quality.guardrails import (
     BANNED_PHRASES,
     QUALITY_THRESHOLDS,
     TOOL_CONSTRAINTS,
@@ -88,14 +88,14 @@ from .guardrails import (
 from .models.model_registry import ModelInfo, ModelProvider, ModelRegistry
 
 # Query Intent Analyzer (Self-RAG style adaptive retrieval)
-from .query_intent_analyzer import (
+from .rag.query_intent_analyzer import (
     QueryIntent,
     QueryIntentAnalyzer,
     QueryType,
     RetrievalDecision,
     create_query_intent_analyzer,
 )
-from .rag_metrics import (
+from .rag.rag_metrics import (
     Citation,
     CitationStatus,
     ContextChunkMetrics,
@@ -108,13 +108,13 @@ from .rag_metrics import (
     get_rag_evaluator,
     get_rag_metrics_collector,
 )
-from .streaming_writer import (
+from .content.streaming_writer import (
     DEFAULT_VERIFICATION_TRIGGERS,
     StreamChunk,
     StreamingWriter,
     create_streaming_writer,
 )
-from .structured_output import (
+from .content.structured_output import (
     AnswerWithCitations,
     ClassificationResult,
     ExtractedEntities,
@@ -128,7 +128,7 @@ from .structured_output import (
     parse_structured_output,
     validate_output,
 )
-from .task_manager import (
+from .tasks.task_manager import (
     SessionResources,
     TaskContext,
     TaskManager,
@@ -136,7 +136,7 @@ from .task_manager import (
     init_task_manager,
     shutdown_task_manager,
 )
-from .task_planner import IntentType, TaskStrategy
+from .tasks.task_planner import IntentType, TaskStrategy
 
 # Enterprise Agent Loop Components
 from .tool_invoker import (

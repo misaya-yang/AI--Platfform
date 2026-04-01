@@ -57,9 +57,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
-from ...models.enums import StreamEventType
-from .context_engine import (
+from ....core.observability.logging import get_logger
+from ....models.enums import StreamEventType
+from ..rag.context_engine import (
     ContextAssemblyPlan,
     ContextBudgetManager,
     ContextEngine,
@@ -67,7 +67,7 @@ from .context_engine import (
     estimate_history_tokens,
     format_long_term_memory,
 )
-from .context_metrics import (
+from ..rag.context_metrics import (
     ContextMetricsBuilder,
     get_context_metrics_collector,
 )
@@ -76,11 +76,11 @@ from .error_recovery import (
     ErrorType,
     RecoveryResult,
 )
-from .gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
-from .memory.compressor import CompressedContext, ContextCompressor
-from .openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
-from .query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
-from .rag_metrics import (
+from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
+from ..memory.compressor import CompressedContext, ContextCompressor
+from ..openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
+from ..rag.query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
+from ..rag.rag_metrics import (
     RAGMetrics,
     RAGMetricsCollector,
     RetrievalMetrics,
@@ -88,19 +88,19 @@ from .rag_metrics import (
     get_rag_metrics_collector,
 )
 from .react_executor import ReActEvent, ReActExecutor
-from .scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
-from .scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
-from .task_manager import SessionResources, TaskManager, get_task_manager
-from .task_planner import ExecutionPlan, TaskPlanner
-from .tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
-from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
-from .working_memory import TaskStatus, WorkingMemory
+from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
+from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
+from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
+from ..tasks.task_planner import ExecutionPlan, TaskPlanner
+from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
+from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
+from ..working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
-    from ...core.auth.user_resolver import UserContext
-    from ..knowledge.knowledge_service import KnowledgeService
-    from .models.model_registry import ModelRegistry
-    from .memory_service import MemoryService
+    from ....core.auth.user_resolver import UserContext
+    from ...knowledge.knowledge_service import KnowledgeService
+    from ..models.model_registry import ModelRegistry
+    from ..memory_service import MemoryService
 
 logger = get_logger(__name__)
 
@@ -507,7 +507,7 @@ class AgentLoop:
     def _create_scenario_analyzer(self) -> ScenarioAnalyzer:
         """Create a ScenarioAnalyzer instance."""
         try:
-            from .scenario_analyzer import create_scenario_analyzer
+            from ..rag.scenario_analyzer import create_scenario_analyzer
 
             return create_scenario_analyzer()
         except (ImportError, AttributeError):
@@ -1137,7 +1137,7 @@ class AgentLoop:
 
         # Use a fast model for summarization
         try:
-            from .prompts import build_summary_prompt
+            from ..prompts import build_summary_prompt
 
             prompt = build_summary_prompt(
                 content=conversation_text,
@@ -1250,7 +1250,7 @@ class AgentLoop:
 
         This achieves TTFT similar to Manus (~1-2s) vs legacy mode (~10s).
         """
-        from .prompts.system_prompt_v2 import get_streaming_first_prompt
+        from ..prompts.system_prompt_v2 import get_streaming_first_prompt
 
         phase = AgentLoopPhase.GENERATION_STORAGE  # Use generation phase for streaming
         start_time = time.time()
@@ -2531,7 +2531,7 @@ class AgentLoop:
                         # Persist output files into ArtifactStorage (if available)
                         persisted_output_files: list[dict[str, Any]] = tool_output_files
                         if tool_output_files and self.artifact_storage:
-                            from .artifacts import persist_output_files
+                            from ..artifacts import persist_output_files
 
                             source_map = {
                                 "execute_python_code": "code_execution",
@@ -2835,7 +2835,7 @@ class AgentLoop:
 
             if self.memory_service and ctx.message:
                 try:
-                    from .memory.preference_extractor import (
+                    from ..memory.preference_extractor import (
                         extract_preferences,
                         merge_preferences,
                         split_memory_updates,
@@ -3214,7 +3214,7 @@ class AgentLoop:
         # Create task planner if needed (with LLM support for intelligent planning)
         if self.task_planner is None:
             try:
-                from .task_planner import create_task_planner
+                from ..tasks.task_planner import create_task_planner
 
                 # Create LLM adapter for TaskPlanner
                 llm_adapter = None
@@ -3364,7 +3364,7 @@ class AgentLoop:
         try:
             # Create ScenarioAwareRetriever if needed
             if self.scenario_retriever is None:
-                from .scenario_aware_retriever import ScenarioAwareRetriever
+                from ..rag.scenario_aware_retriever import ScenarioAwareRetriever
 
                 self.scenario_retriever = ScenarioAwareRetriever(
                     knowledge_service=self.kb_service,

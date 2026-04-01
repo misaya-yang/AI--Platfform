@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...context_engine import ContextBudgetManager, ContextEngine, ContextStructure
+from ...rag.context_engine import ContextBudgetManager, ContextEngine, ContextStructure
 from .cost_breakdown import ContextCostBreakdown
 
 

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
     pass

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 

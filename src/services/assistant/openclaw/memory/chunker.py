@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ...context_engine import estimate_tokens
+from ...rag.context_engine import estimate_tokens
 
 
 @dataclass(frozen=True)

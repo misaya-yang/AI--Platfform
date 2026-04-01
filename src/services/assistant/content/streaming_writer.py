@@ -35,11 +35,11 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ...core.auth.user_resolver import UserContext
-    from ..knowledge.knowledge_service import KnowledgeService
+    from ....core.auth.user_resolver import UserContext
+    from ...knowledge.knowledge_service import KnowledgeService
     from .assistant_service import AssistantService
 
 logger = get_logger(__name__)
@@ -611,7 +611,7 @@ class StreamingWriter:
         Yields:
             String chunks of generated text
         """
-        from .models.model_registry import ChatMessage
+        from ..models.model_registry import ChatMessage
 
         messages = [ChatMessage(role="user", content=prompt)]
 

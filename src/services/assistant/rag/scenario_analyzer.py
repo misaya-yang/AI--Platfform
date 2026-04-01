@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
-from .prompts.scenario_analysis_prompts import (
+from ....core.observability.logging import get_logger
+from ..prompts.scenario_analysis_prompts import (
     SCENARIO_TYPES,
     build_analysis_prompt,
     build_document_analysis_prompt,

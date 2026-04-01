@@ -18,7 +18,7 @@ from typing import Any
 
 import tiktoken
 
-from ...core.observability.logging import get_logger
+from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -28,7 +28,7 @@ References:
 
 from typing import Any
 
-from ..guardrails import BANNED_PHRASES, QUALITY_THRESHOLDS, DocumentType
+from ..quality.guardrails import BANNED_PHRASES, QUALITY_THRESHOLDS, DocumentType
 
 # =============================================================================
 # Document Generation System Prompt

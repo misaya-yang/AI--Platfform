@@ -47,14 +47,14 @@ from ..knowledge.knowledge_service import KnowledgeService
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, get_file_storage
-from .agent_loop import AgentLoopEvent
-from .cache_optimizer import CacheConfig, ContextCacheOptimizer
+from .agent.agent_loop import AgentLoopEvent
+from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
-from .context_engine import ContextEngine, ContextStructure
-from .context_manager import ContextConfig, get_context_manager
-from .domain_policies import DomainPolicyResolver, ImamPolicy
-from .file_processor import ProcessedFiles, create_file_processor
-from .guardrails import (
+from .rag.context_engine import ContextEngine, ContextStructure
+from .rag.context_manager import ContextConfig, get_context_manager
+from .quality.domain_policies import DomainPolicyResolver, ImamPolicy
+from .files.file_processor import ProcessedFiles, create_file_processor
+from .quality.guardrails import (
     DocumentType,
     QualityGuardrails,
     ToolCallValidation,
@@ -71,21 +71,21 @@ from .prompts.system_prompt_v2 import (
     inject_user_preferences,
     inject_web_context,
 )
-from .rag_metrics import (
+from .rag.rag_metrics import (
     Citation,
     RAGMetrics,
     get_rag_evaluator,
 )
-from .react_executor import ReActPhase
-from .scenario_analyzer import (
+from .agent.react_executor import ReActPhase
+from .rag.scenario_analyzer import (
     ScenarioDetectionResult,
     create_scenario_analyzer,
 )
-from .structured_output import (
+from .content.structured_output import (
     OutputFormat,
     OutputGuardrail,
 )
-from .task_planner import TaskPlanner, create_task_planner
+from .tasks.task_planner import TaskPlanner, create_task_planner
 from .tool_invoker import ToolInvocationContext
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator, create_tool_orchestrator
 from .tools import TavilySearchTool
@@ -2963,7 +2963,7 @@ Please use this web search context to inform your response when relevant."""
         Yields:
             AssistantStreamEvent objects
         """
-        from .agent_loop import AgentLoop, AgentLoopConfig
+        from .agent.agent_loop import AgentLoop, AgentLoopConfig
 
         # Create AgentLoop configuration with Streaming-First mode enabled
         loop_config = AgentLoopConfig(

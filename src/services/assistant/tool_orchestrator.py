@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ...core.observability.logging import get_logger
-from .task_planner import ExecutionPlan, PlannedTask
+from .tasks.task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:

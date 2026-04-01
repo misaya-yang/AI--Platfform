@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from ..knowledge.constants import ISLAMIC_SYNONYMS
+from ...knowledge.constants import ISLAMIC_SYNONYMS
 
 _ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 
