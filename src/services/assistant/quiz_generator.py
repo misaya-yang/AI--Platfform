@@ -20,7 +20,7 @@ DEFAULT_QUIZ_MODEL = "gemini-2.0-flash"
 
 QUIZ_GENERATION_PROMPT = """\
 You are a quiz generator. Based on the following knowledge base content,
-generate exactly {question_count} multiple-choice quiz questions.
+generate exactly {question_count} quiz questions.
 
 ## Knowledge Base Content:
 {kb_content}
@@ -29,15 +29,35 @@ generate exactly {question_count} multiple-choice quiz questions.
 - Topic focus: {topic}
 - Difficulty: {difficulty}
 - Language: {language}
+- Question types to use: {question_types}
 
-## Rules:
+## Question Type Rules:
+
+**mc_single** (multiple choice, single answer):
+- Provide exactly 4 options (A, B, C, D) with exactly one correct answer.
+- correct_answer: ["B"] (single label in array)
+
+**mc_multi** (multiple choice, multiple correct):
+- Provide 4-5 options. 2-3 should be correct.
+- correct_answer: ["A", "C"] (multiple labels)
+- Question text should say "Select all that apply"
+
+**true_false**:
+- Statement that is clearly true or false based on KB content.
+- options: [{{"label": "true", "text": "True"}}, {{"label": "false", "text": "False"}}]
+- correct_answer: ["true"] or ["false"]
+
+**short_answer**:
+- Question requiring a 1-3 sentence answer.
+- options: [] (empty array)
+- correct_answer: ["The expected answer text"] (reference answer for AI grading)
+
+## General Rules:
 1. All questions MUST be answerable from the provided KB content only.
-2. Each question must have a clear, unambiguous correct answer.
-3. Provide exactly 4 options (A, B, C, D) with exactly one correct answer.
-4. Include an explanation for each correct answer, citing relevant KB content.
-5. Questions should cover different aspects of the content (avoid repetition).
-6. Order questions from easier to harder.
-7. Keep questions concise but clear.
+2. Include an explanation for each correct answer, citing relevant KB content.
+3. Questions should cover different aspects (avoid repetition).
+4. Order questions from easier to harder.
+5. Mix the question types as specified.
 
 ## Output JSON format (strict — no extra keys, no markdown fences):
 {{
@@ -48,14 +68,17 @@ generate exactly {question_count} multiple-choice quiz questions.
       "question_num": 1,
       "question_type": "mc_single",
       "question_text": "What is ...?",
-      "options": [
-        {{"label": "A", "text": "Option text"}},
-        {{"label": "B", "text": "Option text"}},
-        {{"label": "C", "text": "Option text"}},
-        {{"label": "D", "text": "Option text"}}
-      ],
+      "options": [{{"label": "A", "text": "Option text"}}, ...],
       "correct_answer": ["B"],
       "explanation": "The correct answer is B because ..."
+    }},
+    {{
+      "question_num": 2,
+      "question_type": "true_false",
+      "question_text": "Statement to evaluate.",
+      "options": [{{"label": "true", "text": "True"}}, {{"label": "false", "text": "False"}}],
+      "correct_answer": ["true"],
+      "explanation": "This is true because ..."
     }}
   ]
 }}
@@ -75,6 +98,7 @@ class QuizGenerator:
         kb_chunks: list[dict[str, Any]],
         topic: str | None = None,
         question_count: int = 5,
+        question_types: list[str] | None = None,
         difficulty: str = "medium",
         language: str = "auto",
         model_id: str | None = None,
@@ -83,17 +107,20 @@ class QuizGenerator:
         Generate quiz questions from KB chunks.
 
         Args:
-            kb_chunks: Retrieved KB content (list of dicts with 'content', 'score', etc.)
+            kb_chunks: Retrieved KB content
             topic: Optional topic focus
             question_count: Number of questions (1-10)
+            question_types: List of types: mc_single, mc_multi, true_false, short_answer
             difficulty: easy / medium / hard
             language: Language code or "auto"
             model_id: Override LLM model
 
         Returns:
-            {title, description, questions: [{question_num, question_type, question_text, options, correct_answer, explanation}]}
+            {title, description, questions: [...]}
         """
         question_count = max(1, min(10, question_count))
+        if not question_types:
+            question_types = ["mc_single"]
 
         # Build KB content string from chunks
         kb_content = self._format_kb_chunks(kb_chunks)
@@ -103,12 +130,15 @@ class QuizGenerator:
         topic_str = topic or "key concepts and important information from the content"
         language_str = language if language != "auto" else "same language as the KB content"
 
+        types_str = ", ".join(question_types)
+
         prompt = QUIZ_GENERATION_PROMPT.format(
             question_count=question_count,
             kb_content=kb_content,
             topic=topic_str,
             difficulty=difficulty,
             language=language_str,
+            question_types=types_str,
         )
 
         messages = [ChatMessage(role="user", content=prompt)]

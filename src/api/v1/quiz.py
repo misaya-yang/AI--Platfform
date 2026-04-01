@@ -37,6 +37,7 @@ class QuizGenerateRequest(BaseModel):
     dataset_ids: list[str] = Field(..., min_length=1, description="KB dataset IDs to source questions from")
     topic: str | None = Field(None, description="Optional topic focus")
     question_count: int = Field(5, ge=1, le=10, description="Number of questions")
+    question_types: list[str] = Field(default=["mc_single"], description="mc_single, mc_multi, true_false, short_answer")
     difficulty: str = Field("medium", description="easy / medium / hard")
     language: str = Field("auto", description="Language code or 'auto'")
     model_id: str | None = Field(None, description="Override LLM model for generation")
@@ -96,7 +97,7 @@ def _get_quiz_service(request: Request) -> QuizService:
         raise HTTPException(503, "Model registry not available")
 
     generator = QuizGenerator(registry)
-    grader = QuizGrader()
+    grader = QuizGrader(model_registry=registry)
     return QuizService(db=db, generator=generator, grader=grader)
 
 
@@ -154,6 +155,7 @@ async def generate_quiz(
             kb_chunks=all_chunks,
             topic=body.topic,
             question_count=body.question_count,
+            question_types=body.question_types,
             difficulty=body.difficulty,
             language=body.language,
             model_id=body.model_id,

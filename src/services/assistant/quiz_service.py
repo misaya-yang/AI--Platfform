@@ -42,6 +42,7 @@ class QuizService:
         kb_chunks: list[dict[str, Any]],
         topic: str | None = None,
         question_count: int = 5,
+        question_types: list[str] | None = None,
         difficulty: str = "medium",
         language: str = "auto",
         model_id: str | None = None,
@@ -52,6 +53,7 @@ class QuizService:
             kb_chunks=kb_chunks,
             topic=topic,
             question_count=question_count,
+            question_types=question_types,
             difficulty=difficulty,
             language=language,
             model_id=model_id,
@@ -248,8 +250,12 @@ class QuizService:
         if not quiz:
             raise ValueError(f"Quiz {quiz_id} not found")
 
-        # Grade
-        result = self.grader.grade(quiz["questions"], answers)
+        # Grade (async for short_answer AI grading)
+        has_short_answer = any(q.get("question_type") == "short_answer" for q in quiz["questions"])
+        if has_short_answer and hasattr(self.grader, "grade_async"):
+            result = await self.grader.grade_async(quiz["questions"], answers)
+        else:
+            result = self.grader.grade(quiz["questions"], answers)
 
         # Persist attempt
         attempt_id = str(uuid.uuid4())

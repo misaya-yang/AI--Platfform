@@ -99,7 +99,12 @@ export function QuizPage() {
     }
   }, [quiz, shareCode, selectedAnswers, displayName, submitting]);
 
-  const allAnswered = quiz ? quiz.questions.every((q) => selectedAnswers[q.id]) : false;
+  const allAnswered = quiz
+    ? quiz.questions.every((q) => {
+        const a = selectedAnswers[q.id];
+        return a != null && a.trim() !== "";
+      })
+    : false;
 
   // --- Loading ---
   if (pageState === "loading") {

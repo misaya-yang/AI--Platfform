@@ -47,7 +47,10 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
   const questions = quizData.questions;
   const totalQuestions = questions.length;
   const currentQuestion = questions[viewMode === "review" ? reviewIndex : currentIndex];
-  const allAnswered = questions.every((q) => selectedAnswers[q.id]);
+  const allAnswered = questions.every((q) => {
+    const a = selectedAnswers[q.id];
+    return a != null && a.trim() !== "";
+  });
 
   const handleSelect = useCallback(
     (label: string) => {

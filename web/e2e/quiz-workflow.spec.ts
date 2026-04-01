@@ -61,7 +61,8 @@ test.describe("Quiz workflow", () => {
         data: {
           dataset_ids: [datasetId],
           topic: "general knowledge",
-          question_count: 3,
+          question_count: 4,
+          question_types: ["mc_single", "true_false"],
           difficulty: "easy",
         },
       },
