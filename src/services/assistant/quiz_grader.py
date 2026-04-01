@@ -173,7 +173,7 @@ class QuizGrader:
 
         try:
             content, _usage = await self.model_registry.chat(
-                model_id="qwen-plus",
+                model_id="qwen3.5-plus",
                 messages=[ChatMessage(role="user", content=prompt)],
                 temperature=0.1,
                 max_tokens=256,
