@@ -64,13 +64,13 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const hasContextBudget = Boolean(summary.contextBudget);
   const hasContextCompacted = Boolean(summary.contextCompacted?.compacted);
   const canExpand = stepTotal > 0 || toolTotal > 0 || hasContextBudget || hasContextCompacted;
-  // Only show error if the LAST step/tool failed (not if an early one failed but later ones succeeded)
-  const lastStep = summary.steps.length > 0 ? summary.steps[summary.steps.length - 1] : null;
-  const lastTool = summary.tools.length > 0 ? summary.tools[summary.tools.length - 1] : null;
+  // Only show error if the overall run has finished AND no step/tool succeeded.
+  // During streaming, don't flash "执行失败" for intermediate tool failures — the model may retry.
+  const isRunFinished = summary.status === "succeeded" || summary.status === "failed";
+  const anyStepCompleted = summary.steps.some((s) => s.status === "completed");
+  const anyToolCompleted = summary.tools.some((s) => s.status === "completed");
   const hasError =
-    summary.status === "failed" ||
-    (lastStep?.status === "failed" && !summary.steps.some((s) => s.status === "completed")) ||
-    (lastTool?.status === "error" && !summary.tools.some((s) => s.status === "completed"));
+    summary.status === "failed" && !anyStepCompleted && !anyToolCompleted;
   const durationMs = summary.totalDurationMs;
 
   const headerText = useMemo(() => {
