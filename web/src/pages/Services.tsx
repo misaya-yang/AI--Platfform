@@ -19,7 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Plus, Server, Cloud, Cpu, Search } from "lucide-react";
+import { Plus, Server, Cloud, Cpu, Search, ClipboardList } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useTranslation } from "react-i18next";
 import { getErrorMessage } from "@/lib/utils";
@@ -35,6 +35,7 @@ import * as providersApi from "@/api/providers";
 import * as modelsApi from "@/api/models";
 import type { Provider, ProviderCreate, ProviderUpdate } from "@/api/providers";
 import type { LLMModel, ModelCreate, ModelUpdate } from "@/api/models";
+import { ExamsTabContent } from "@/pages/exams";
 
 export function ServicesPage() {
   const { toast } = useToast();
@@ -329,6 +330,13 @@ export function ServicesPage() {
               <Cpu className="h-4 w-4" />
               {t("services.page.tabs.models")}
             </TabsTrigger>
+            <TabsTrigger
+              value="exams"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+            >
+              <ClipboardList className="h-4 w-4" />
+              {t("services.page.tabs.exams", "考试管理")}
+            </TabsTrigger>
           </TabsList>
 
           <div className="flex items-center gap-2">
@@ -476,6 +484,11 @@ export function ServicesPage() {
                 />
               </div>
             )}
+          </TabsContent>
+
+          {/* Exams Tab */}
+          <TabsContent value="exams" className="mt-0 focus-visible:outline-none focus-visible:ring-0">
+            <ExamsTabContent />
           </TabsContent>
         </div>
       </Tabs>

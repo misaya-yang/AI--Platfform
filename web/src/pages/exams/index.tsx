@@ -115,20 +115,161 @@ export function ExamsPage() {
   };
 
   return (
-    <div className="space-y-6 p-6 max-w-6xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Exam Management</h1>
-          <p className="text-muted-foreground text-sm mt-1">
-            Create, publish, and track exam results
-          </p>
+    <ExamsContent
+      exams={exams}
+      total={total}
+      loading={loading}
+      filtered={filtered}
+      statusFilter={statusFilter}
+      setStatusFilter={setStatusFilter}
+      search={search}
+      setSearch={setSearch}
+      showCreate={showCreate}
+      setShowCreate={setShowCreate}
+      copiedId={copiedId}
+      navigate={navigate}
+      handlePublish={handlePublish}
+      handleClose={handleClose}
+      copyShareLink={copyShareLink}
+      loadExams={loadExams}
+      showHeader
+    />
+  );
+}
+
+/**
+ * Embeddable version for Services page tab (no outer wrapper/header).
+ */
+export function ExamsTabContent() {
+  const navigate = useNavigate();
+  const [exams, setExams] = useState<Exam[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const loadExams = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params: Record<string, unknown> = { limit: 50 };
+      if (statusFilter !== "all") params.status = statusFilter;
+      const data = await listExams(params as any);
+      setExams(data.exams);
+      setTotal(data.total);
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
+
+  useEffect(() => { loadExams(); }, [loadExams]);
+
+  const filtered = search
+    ? exams.filter((e) => e.title.toLowerCase().includes(search.toLowerCase()))
+    : exams;
+
+  const handlePublish = async (exam: Exam) => {
+    try {
+      await publishExam(exam.exam_id);
+      loadExams();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Failed to publish");
+    }
+  };
+
+  const handleClose = async (exam: Exam) => {
+    if (!confirm("Close this exam? No more submissions will be accepted.")) return;
+    try {
+      await closeExam(exam.exam_id);
+      loadExams();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || "Failed to close");
+    }
+  };
+
+  const copyShareLink = (exam: Exam) => {
+    if (!exam.share_code) return;
+    const url = `${window.location.origin}/quiz/${exam.share_code}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopiedId(exam.exam_id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  };
+
+  return (
+    <ExamsContent
+      exams={exams}
+      total={total}
+      loading={loading}
+      filtered={filtered}
+      statusFilter={statusFilter}
+      setStatusFilter={setStatusFilter}
+      search={search}
+      setSearch={setSearch}
+      showCreate={showCreate}
+      setShowCreate={setShowCreate}
+      copiedId={copiedId}
+      navigate={navigate}
+      handlePublish={handlePublish}
+      handleClose={handleClose}
+      copyShareLink={copyShareLink}
+      loadExams={loadExams}
+      showHeader={false}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared Content Component
+// ---------------------------------------------------------------------------
+
+function ExamsContent({
+  exams, total, loading, filtered, statusFilter, setStatusFilter,
+  search, setSearch, showCreate, setShowCreate, copiedId,
+  navigate, handlePublish, handleClose, copyShareLink, loadExams,
+  showHeader,
+}: {
+  exams: Exam[]; total: number; loading: boolean; filtered: Exam[];
+  statusFilter: string; setStatusFilter: (v: string) => void;
+  search: string; setSearch: (v: string) => void;
+  showCreate: boolean; setShowCreate: (v: boolean) => void;
+  copiedId: string | null;
+  navigate: (path: string) => void;
+  handlePublish: (e: Exam) => void;
+  handleClose: (e: Exam) => void;
+  copyShareLink: (e: Exam) => void;
+  loadExams: () => void;
+  showHeader: boolean;
+}) {
+  return (
+    <div className={showHeader ? "space-y-6 p-6 max-w-6xl mx-auto" : "space-y-4"}>
+      {showHeader && (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Exam Management</h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Create, publish, and track exam results
+            </p>
+          </div>
+          <Button onClick={() => setShowCreate(true)} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Create Exam
+          </Button>
         </div>
-        <Button onClick={() => setShowCreate(true)} className="gap-2">
-          <Plus className="h-4 w-4" />
-          Create Exam
-        </Button>
-      </div>
+      )}
+
+      {/* Create button for tab mode */}
+      {!showHeader && (
+        <div className="flex justify-end">
+          <Button onClick={() => setShowCreate(true)} className="gap-2" size="sm">
+            <Plus className="h-4 w-4" />
+            Create Exam
+          </Button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex items-center gap-3">

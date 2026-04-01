@@ -67,12 +67,6 @@ const navItems = [
     permission: "conversation:playground:access",
   },
   {
-    key: "/exams",
-    labelKey: "nav.exams",
-    icon: <UnorderedListOutlined />,
-    permission: "console:dashboard:view",
-  },
-  {
     key: "/tasks",
     labelKey: "nav.tasks",
     icon: <UnorderedListOutlined />,
