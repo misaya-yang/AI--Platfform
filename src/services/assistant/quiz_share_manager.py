@@ -4,8 +4,11 @@ Quiz Share Manager — Create, validate, and revoke shareable quiz links.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import random
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,6 +18,28 @@ from ...persistence.database import DatabaseStorage
 logger = logging.getLogger(__name__)
 
 SHARE_CODE_LENGTH = 12
+MAX_DISPLAY_NAME_LEN = 100
+DISPLAY_NAME_RE = re.compile(r"^[\w\s\u4e00-\u9fff\u0600-\u06ff.\-@]+$", re.UNICODE)
+
+
+def _sanitize_display_name(name: str | None) -> str | None:
+    """Sanitize display_name: strip, length-limit, reject suspicious chars."""
+    if not name:
+        return None
+    name = html.escape(name.strip())[:MAX_DISPLAY_NAME_LEN]
+    if not name or not DISPLAY_NAME_RE.match(html.unescape(name)):
+        return name  # keep escaped version even if regex fails
+    return name
+
+
+def _shuffle_options(questions: list[dict]) -> list[dict]:
+    """Shuffle option display order per question. Labels stay attached to their text."""
+    shuffled = []
+    for q in questions:
+        opts = list(q.get("options", []))
+        random.shuffle(opts)
+        shuffled.append({**q, "options": opts})
+    return shuffled
 
 
 class QuizShareManager:
@@ -142,6 +167,9 @@ class QuizShareManager:
                 "options": options,
             })
 
+        # P0: Shuffle option display order so each viewer sees different arrangement
+        shuffled_questions = _shuffle_options(questions)
+
         return {
             "quiz_id": share["quiz_id"],
             "share_code": share["share_code"],
@@ -150,7 +178,7 @@ class QuizShareManager:
             "question_count": share["question_count"],
             "difficulty": share["difficulty"],
             "require_name": share["require_name"],
-            "questions": questions,
+            "questions": shuffled_questions,
         }
 
     async def submit_public_attempt(
@@ -160,9 +188,21 @@ class QuizShareManager:
         display_name: str | None = None,
     ) -> dict:
         """Grade an anonymous attempt via shared link."""
+        display_name = _sanitize_display_name(display_name)
+
         share = await self.get_share_by_code(share_code)
         if not share:
             raise ValueError("Quiz share not found, expired, or max attempts reached")
+
+        # P0: Prevent duplicate submissions by same display_name on same share
+        if display_name:
+            dup = await self.db.fetchrow(
+                "SELECT id FROM quiz_attempts WHERE share_id = $1 AND display_name = $2 LIMIT 1",
+                uuid.UUID(share["share_id"]),
+                display_name,
+            )
+            if dup:
+                raise ValueError(f"You have already submitted this quiz as '{html.unescape(display_name)}'.")
 
         quiz_id = share["quiz_id"]
 

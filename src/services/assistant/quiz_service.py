@@ -242,8 +242,10 @@ class QuizService:
         quiz_id: str,
         tenant_id: str,
         user_id: str,
-    ) -> list[dict]:
-        """List attempts for a quiz. Creator sees all, others see own."""
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """List attempts for a quiz. Creator sees all, others see own. Returns {attempts, total}."""
         # Check quiz ownership
         quiz_row = await self.db.fetchrow(
             "SELECT created_by FROM quizzes WHERE id = $1 AND tenant_id = $2",
@@ -251,33 +253,44 @@ class QuizService:
             tenant_id,
         )
         if not quiz_row:
-            return []
+            return {"attempts": [], "total": 0}
 
         is_creator = quiz_row["created_by"] == user_id
+        qid = uuid.UUID(quiz_id)
 
         if is_creator:
+            count_row = await self.db.fetchrow(
+                "SELECT count(*) AS cnt FROM quiz_attempts WHERE quiz_id = $1", qid,
+            )
             rows = await self.db.fetch(
                 """
                 SELECT id, user_id, display_name, total_score, correct_count,
                        total_count, started_at, completed_at, status
                 FROM quiz_attempts WHERE quiz_id = $1
                 ORDER BY started_at DESC
+                LIMIT $2 OFFSET $3
                 """,
-                uuid.UUID(quiz_id),
+                qid, limit, offset,
             )
         else:
+            count_row = await self.db.fetchrow(
+                "SELECT count(*) AS cnt FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2",
+                qid, user_id,
+            )
             rows = await self.db.fetch(
                 """
                 SELECT id, user_id, display_name, total_score, correct_count,
                        total_count, started_at, completed_at, status
                 FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2
                 ORDER BY started_at DESC
+                LIMIT $3 OFFSET $4
                 """,
-                uuid.UUID(quiz_id),
-                user_id,
+                qid, user_id, limit, offset,
             )
 
-        return [
+        total = count_row["cnt"] if count_row else 0
+
+        attempts = [
             {
                 "attempt_id": str(r["id"]),
                 "user_id": r["user_id"],
@@ -291,6 +304,7 @@ class QuizService:
             }
             for r in rows
         ]
+        return {"attempts": attempts, "total": total}
 
     async def submit_attempt(
         self,

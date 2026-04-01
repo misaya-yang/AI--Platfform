@@ -301,12 +301,15 @@ async def submit_quiz(
 async def list_attempts(
     quiz_id: str,
     request: Request,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: UserContext = Depends(get_user_context),
 ):
-    """List all attempts for a quiz (creator sees all, others see own)."""
+    """List all attempts for a quiz (creator sees all, others see own). Paginated."""
     svc = _get_quiz_service(request)
-    attempts = await svc.list_attempts(quiz_id, user.tenant_id, user.user_id)
-    return {"attempts": attempts}
+    return await svc.list_attempts(
+        quiz_id, user.tenant_id, user.user_id, limit=limit, offset=offset,
+    )
 
 
 @router.delete("/{quiz_id}")
@@ -406,5 +409,7 @@ async def submit_shared_quiz(
             display_name=body.display_name,
         )
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        msg = str(e)
+        status = 409 if "already submitted" in msg else 404
+        raise HTTPException(status, msg)
     return result
