@@ -1213,7 +1213,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     register_quiz_tool(
         kb_service=kb_service,
         model_registry=model_registry,
-        database=container.database,
+        database=getattr(app.state, "database", None),
     )
 
     # Store in app.state
