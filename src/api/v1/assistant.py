@@ -283,7 +283,7 @@ async def get_config(
         tools_available = [t.name for t in tool_registry.list_tools()]
 
     return AssistantConfigResponse(
-        default_model_id="gemini-3-flash-preview",
+        default_model_id="qwen3.5-plus",
         available_providers=available_providers,
         kb_enabled=kb_service is not None or kb_proxy is not None,
         web_search_enabled=bool(tavily_api_key),
