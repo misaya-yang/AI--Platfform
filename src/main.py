@@ -862,8 +862,7 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     # Knowledge Base (KBMS) — microservice mode
     app.state.knowledge_service = None
     app.state.knowledge_worker = None
-    # kb_proxy already initialized before assistant service (line ~714)
-    logger.info(f"KB proxy client initialized → {KBProxyClient.KB_SERVICE_URL if hasattr(KBProxyClient, 'KB_SERVICE_URL') else 'knowledge-service:8092'}")
+    # kb_proxy already initialized before assistant service
 
     # Confluence 集成
     app.state.confluence_sync_service = None
