@@ -32,64 +32,71 @@ logger = logging.getLogger(__name__)
 QUIZ_GENERATION_DEFINITION = ToolDefinition(
     name="generate_quiz",
     description=(
-        "Generate an interactive quiz from the knowledge base content. "
-        "Creates multiple-choice, true/false, multi-select, or short-answer questions "
-        "based on KB documents. The quiz is displayed as an interactive card in the chat."
+        "MUST USE this tool when user asks for quiz, test, or practice questions. "
+        "Generates an interactive quiz card from knowledge base content. "
+        "Do NOT generate quiz questions as plain text — always call this tool instead. "
+        "The tool creates a graded, interactive quiz UI with score tracking."
     ),
     parameters=[
         ToolParameter(
             name="topic",
             type="string",
-            description="The topic or subject to generate questions about.",
+            description="The topic to generate questions about. Extract from user's message.",
             required=True,
         ),
         ToolParameter(
             name="question_count",
             type="number",
-            description="Number of questions to generate (1-10). Default is 5.",
+            description="Number of questions (1-10). Default 5. Extract from user's message if specified.",
             required=False,
             default=5,
         ),
         ToolParameter(
             name="question_types",
             type="array",
-            description="Types of questions: mc_single, mc_multi, true_false, short_answer. Default is mc_single.",
+            description="Question types: mc_single, mc_multi, true_false, short_answer. Default mc_single.",
             required=False,
             items={"type": "string", "enum": ["mc_single", "mc_multi", "true_false", "short_answer"]},
         ),
         ToolParameter(
             name="difficulty",
             type="string",
-            description="Difficulty level: easy, medium, or hard. Default is medium.",
+            description="easy, medium, or hard. Default medium.",
             required=False,
             default="medium",
             enum=["easy", "medium", "hard"],
-        ),
-        ToolParameter(
-            name="language",
-            type="string",
-            description="Language for the quiz. 'auto' matches KB content language. Default is auto.",
-            required=False,
-            default="auto",
         ),
     ],
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
     when_to_use=(
-        "Use when the user wants to be quizzed, tested, or practice their knowledge. "
-        "Examples: '出5道题测试我', 'quiz me', 'test my knowledge', 'practice questions'."
+        "ALWAYS use this tool when the user's message contains ANY of these intents: "
+        "quiz, test, 测验, 测试, 出题, 考考, 练习, flashcard, practice questions, "
+        "test my knowledge, check my understanding, 考我, 题目. "
+        "This tool is MANDATORY for quiz requests — never answer quiz requests with plain text."
     ),
     when_not_to_use=(
-        "Do not use when the user is simply asking a question expecting a direct answer."
+        "Only skip if the user is asking a factual question that expects a direct answer, "
+        "NOT a quiz or test format."
     ),
     examples=[
         ToolExample(
-            description="User wants a quiz",
-            input={"topic": "key concepts", "question_count": 5, "difficulty": "medium"},
-            expected_output="Interactive quiz card with 5 questions",
+            description="Chinese: 出5道题测试我",
+            input={"topic": "Zakat", "question_count": 5, "difficulty": "medium"},
+            expected_output="Interactive quiz card with 5 MC questions",
+        ),
+        ToolExample(
+            description="English: quiz me on 3 questions about prayer",
+            input={"topic": "prayer", "question_count": 3, "difficulty": "medium"},
+            expected_output="Interactive quiz card with 3 questions",
+        ),
+        ToolExample(
+            description="出3道关于Zakat的选择题",
+            input={"topic": "Zakat", "question_count": 3, "question_types": ["mc_single"]},
+            expected_output="3 multiple choice questions about Zakat",
         ),
     ],
-    timeout_seconds=60,
+    timeout_seconds=120,
 )
 
 

@@ -387,10 +387,17 @@ class RegistryToolInvoker(ToolInvoker):
             },
         )
 
+        # Use tool-specific timeout if defined (e.g. quiz generation needs 120s)
+        from .tools.tool_registry import get_tool_registry
+        effective_timeout = context.timeout_ms
+        tool_def = get_tool_registry().get_tool(tool_name)
+        if tool_def and tool_def.timeout_seconds * 1000 > effective_timeout:
+            effective_timeout = tool_def.timeout_seconds * 1000
+
         # Execute with timeout, retry, and cancellation support
         result = await self._execute_with_retry(
             request=request,
-            timeout_ms=context.timeout_ms,
+            timeout_ms=effective_timeout,
             max_retries=context.max_retries,
             cancel_event=cancel_event,
         )
