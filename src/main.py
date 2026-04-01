@@ -1208,6 +1208,10 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Register PowerPoint generation tool (requires python-pptx)
     register_pptx_generation_tool()
 
+    # Register quiz generation tool (KB → LLM → interactive quiz)
+    from .services.assistant.tools.quiz_tool import register_quiz_tool
+    register_quiz_tool()
+
     # Store in app.state
     app.state.model_registry = model_registry
     app.state.assistant_service = assistant_service

@@ -32,6 +32,11 @@ from .pptx_generator_tool import (
     PPTXGeneratorExecutor,
     register_pptx_generation_tool,
 )
+from .quiz_tool import (
+    QUIZ_GENERATION_DEFINITION,
+    QuizGeneratorExecutor,
+    register_quiz_tool,
+)
 from .tavily_search import TavilySearchTool
 from .tool_registry import (
     ToolCallRequest,
@@ -80,4 +85,8 @@ __all__ = [
     "PPTX_GENERATION_DEFINITION",
     "PPTXGeneratorExecutor",
     "register_pptx_generation_tool",
+    # Quiz generator tool
+    "QUIZ_GENERATION_DEFINITION",
+    "QuizGeneratorExecutor",
+    "register_quiz_tool",
 ]
