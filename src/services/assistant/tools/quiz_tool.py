@@ -158,7 +158,7 @@ class QuizGeneratorExecutor(ToolExecutor):
                 try:
                     results, _ = await retriever.retrieve(
                         user=user, dataset_id=ds_id, query=topic,
-                        top_k=20, mode="hybrid",
+                        top_k=12, mode="hybrid",
                     )
                     for r in results:
                         all_chunks.append({

@@ -1,7 +1,10 @@
 """
 Quiz Generator — LLM-powered question generation from KB content.
 
-Phase 1: MC single-answer questions only.
+Performance-optimized:
+- Dynamic prompt: only includes rules for requested question types
+- Compact output format: short explanations, no redundant fields
+- top_k=12 for KB retrieval (sufficient diversity without token bloat)
 """
 
 from __future__ import annotations
@@ -15,75 +18,39 @@ from .model_registry import ChatMessage, ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-# Default model for quiz generation (fast + good at structured JSON)
 DEFAULT_QUIZ_MODEL = "qwen3.5-plus"
 
-QUIZ_GENERATION_PROMPT = """\
-You are a quiz generator. Based on the following knowledge base content,
-generate exactly {question_count} quiz questions.
+# Base prompt — question type rules are injected dynamically
+_PROMPT_HEADER = """\
+Generate exactly {question_count} quiz questions from the knowledge base content below.
 
-## Knowledge Base Content:
+Topic: {topic}
+Difficulty: {difficulty}
+Language: {language}
+"""
+
+_PROMPT_KB = """
+## Source Content:
 {kb_content}
+"""
 
-## Requirements:
-- Topic focus: {topic}
-- Difficulty: {difficulty}
-- Language: {language}
-- Question types to use: {question_types}
+# Per-type rules (only injected when that type is requested)
+_TYPE_RULES = {
+    "mc_single": """- mc_single: 4 options (A-D), one correct. correct_answer: ["B"]""",
+    "mc_multi": """- mc_multi: 4-5 options, 2-3 correct. correct_answer: ["A","C"]. Add "Select all that apply" to question.""",
+    "true_false": """- true_false: options: [{"label":"true","text":"True"},{"label":"false","text":"False"}]. correct_answer: ["true"] or ["false"]""",
+    "short_answer": """- short_answer: options: []. correct_answer: ["expected answer in 1-2 sentences"]""",
+}
 
-## Question Type Rules:
+_PROMPT_RULES = """
+## Rules:
+1. Questions MUST be answerable from the source content only.
+2. Each explanation: 1-2 sentences max, cite the key fact.
+3. Cover different aspects, order easy→hard.
+{type_rules}
 
-**mc_single** (multiple choice, single answer):
-- Provide exactly 4 options (A, B, C, D) with exactly one correct answer.
-- correct_answer: ["B"] (single label in array)
-
-**mc_multi** (multiple choice, multiple correct):
-- Provide 4-5 options. 2-3 should be correct.
-- correct_answer: ["A", "C"] (multiple labels)
-- Question text should say "Select all that apply"
-
-**true_false**:
-- Statement that is clearly true or false based on KB content.
-- options: [{{"label": "true", "text": "True"}}, {{"label": "false", "text": "False"}}]
-- correct_answer: ["true"] or ["false"]
-
-**short_answer**:
-- Question requiring a 1-3 sentence answer.
-- options: [] (empty array)
-- correct_answer: ["The expected answer text"] (reference answer for AI grading)
-
-## General Rules:
-1. All questions MUST be answerable from the provided KB content only.
-2. Include an explanation for each correct answer, citing relevant KB content.
-3. Questions should cover different aspects (avoid repetition).
-4. Order questions from easier to harder.
-5. Mix the question types as specified.
-
-## Output JSON format (strict — no extra keys, no markdown fences):
-{{
-  "title": "Quiz: [auto-generated title based on topic]",
-  "description": "[1-2 sentence description]",
-  "questions": [
-    {{
-      "question_num": 1,
-      "question_type": "mc_single",
-      "question_text": "What is ...?",
-      "options": [{{"label": "A", "text": "Option text"}}, ...],
-      "correct_answer": ["B"],
-      "explanation": "The correct answer is B because ..."
-    }},
-    {{
-      "question_num": 2,
-      "question_type": "true_false",
-      "question_text": "Statement to evaluate.",
-      "options": [{{"label": "true", "text": "True"}}, {{"label": "false", "text": "False"}}],
-      "correct_answer": ["true"],
-      "explanation": "This is true because ..."
-    }}
-  ]
-}}
-
-Output ONLY valid JSON. No markdown code fences. No extra text.
+## Output: valid JSON only, no markdown fences.
+{{"title":"Quiz: [topic]","description":"[1 sentence]","questions":[{{"question_num":1,"question_type":"mc_single","question_text":"...","options":[{{"label":"A","text":"..."}},{{"label":"B","text":"..."}},{{"label":"C","text":"..."}},{{"label":"D","text":"..."}}],"correct_answer":["B"],"explanation":"..."}}]}}
 """
 
 
@@ -103,42 +70,32 @@ class QuizGenerator:
         language: str = "auto",
         model_id: str | None = None,
     ) -> dict:
-        """
-        Generate quiz questions from KB chunks.
-
-        Args:
-            kb_chunks: Retrieved KB content
-            topic: Optional topic focus
-            question_count: Number of questions (1-10)
-            question_types: List of types: mc_single, mc_multi, true_false, short_answer
-            difficulty: easy / medium / hard
-            language: Language code or "auto"
-            model_id: Override LLM model
-
-        Returns:
-            {title, description, questions: [...]}
-        """
+        """Generate quiz questions from KB chunks."""
         question_count = max(1, min(10, question_count))
         if not question_types:
             question_types = ["mc_single"]
 
-        # Build KB content string from chunks
         kb_content = self._format_kb_chunks(kb_chunks)
         if not kb_content.strip():
             raise ValueError("No KB content available to generate quiz from.")
 
-        topic_str = topic or "key concepts and important information from the content"
-        language_str = language if language != "auto" else "same language as the KB content"
+        topic_str = topic or "key concepts from the content"
+        language_str = language if language != "auto" else "same language as the source content"
 
-        types_str = ", ".join(question_types)
+        # Build dynamic type rules (only include requested types)
+        type_rules = "\n".join(
+            _TYPE_RULES[t] for t in question_types if t in _TYPE_RULES
+        )
 
-        prompt = QUIZ_GENERATION_PROMPT.format(
-            question_count=question_count,
-            kb_content=kb_content,
-            topic=topic_str,
-            difficulty=difficulty,
-            language=language_str,
-            question_types=types_str,
+        prompt = (
+            _PROMPT_HEADER.format(
+                question_count=question_count,
+                topic=topic_str,
+                difficulty=difficulty,
+                language=language_str,
+            )
+            + _PROMPT_KB.format(kb_content=kb_content)
+            + _PROMPT_RULES.format(type_rules=type_rules)
         )
 
         messages = [ChatMessage(role="user", content=prompt)]
@@ -146,7 +103,8 @@ class QuizGenerator:
 
         logger.info(
             f"Generating quiz: model={target_model}, questions={question_count}, "
-            f"difficulty={difficulty}, kb_chunks={len(kb_chunks)}"
+            f"difficulty={difficulty}, kb_chunks={len(kb_chunks)}, "
+            f"prompt_len={len(prompt)}"
         )
 
         content, usage = await self.model_registry.chat(
@@ -164,12 +122,12 @@ class QuizGenerator:
         return quiz_data
 
     def _format_kb_chunks(self, chunks: list[dict[str, Any]]) -> str:
-        """Format KB chunks into a readable string for the prompt."""
+        """Format KB chunks concisely — no redundant headers."""
         parts: list[str] = []
         for i, chunk in enumerate(chunks, 1):
-            text = chunk.get("content") or chunk.get("text") or ""
-            if text.strip():
-                parts.append(f"[Passage {i}]\n{text.strip()}")
+            text = (chunk.get("content") or chunk.get("text") or "").strip()
+            if text:
+                parts.append(f"[{i}] {text}")
         return "\n\n".join(parts)
 
     def _parse_response(self, content: str) -> dict:
@@ -180,6 +138,13 @@ class QuizGenerator:
         match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if match:
             text = match.group(1).strip()
+
+        # Strip leading/trailing non-JSON text
+        # Find first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
 
         try:
             data = json.loads(text)
@@ -206,14 +171,12 @@ class QuizGenerator:
             if "correct_answer" not in q:
                 raise ValueError(f"Question {i + 1} missing 'correct_answer'")
 
-            # Ensure correct_answer is a list
+            # Normalize correct_answer to list
             if not isinstance(q["correct_answer"], list):
                 q["correct_answer"] = [q["correct_answer"]]
 
-            # Ensure question_num is set
             q.setdefault("question_num", i + 1)
             q.setdefault("question_type", "mc_single")
 
-        # Set title/description defaults
         data.setdefault("title", "Knowledge Quiz")
         data.setdefault("description", "")

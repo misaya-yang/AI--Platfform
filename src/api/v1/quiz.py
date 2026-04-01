@@ -136,7 +136,7 @@ async def generate_quiz(
                 user=user,
                 dataset_id=dataset_id,
                 query=query,
-                top_k=20,
+                top_k=12,
                 mode="hybrid",
             )
             for r in results:
@@ -201,7 +201,7 @@ async def generate_quiz_stream(
             for dataset_id in body.dataset_ids:
                 try:
                     results, _meta = await kb_service.retrieve(
-                        user=user, dataset_id=dataset_id, query=query, top_k=20, mode="hybrid",
+                        user=user, dataset_id=dataset_id, query=query, top_k=12, mode="hybrid",
                     )
                     for r in results:
                         all_chunks.append({
