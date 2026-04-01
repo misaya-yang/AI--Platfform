@@ -108,7 +108,7 @@ def extract_preferences(text: str) -> dict[str, Any]:
         [
             r"(?:我的名字是|你可以叫我|叫我)\s*([^\s，。！？,.!?:：；;]{1,24})",
             r"我叫(?!什么)\s*([^\s，。！？,.!?:：；;]{1,24})",
-            r"(?:my name is|call me|you can call me)\s+([A-Za-z][A-Za-z0-9_\\- ]{0,31})",
+            r"(?:my name is|call me|you can call me)\s+([A-Za-z][A-Za-z0-9_ -]{0,31})",
         ],
     )
     if preferred_name:
