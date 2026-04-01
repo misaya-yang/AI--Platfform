@@ -28,7 +28,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ...core.auth.jwt import get_user_context, UserContext
+from ...core.auth.user_resolver import UserContext
+from ..deps import get_user_context
 from ...services.assistant.exam_service import ExamService
 
 logger = logging.getLogger(__name__)
