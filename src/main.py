@@ -1210,7 +1210,11 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     # Register quiz generation tool (KB → LLM → interactive quiz)
     from .services.assistant.tools.quiz_tool import register_quiz_tool
-    register_quiz_tool()
+    register_quiz_tool(
+        kb_service=kb_service,
+        model_registry=model_registry,
+        database=container.database,
+    )
 
     # Store in app.state
     app.state.model_registry = model_registry

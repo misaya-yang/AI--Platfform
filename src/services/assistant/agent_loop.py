@@ -2479,6 +2479,19 @@ class AgentLoop:
                                             event_type=StreamEventType.CONTEXT_RETRIEVED.value,
                                             data=compact_ctx,
                                         )
+                        elif tool_name == "generate_quiz":
+                            quiz_data = (
+                                tool_metadata.get("quiz_data")
+                                if isinstance(tool_metadata, dict)
+                                else None
+                            )
+                            if quiz_data:
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="quiz:ready",
+                                    data=quiz_data,
+                                )
+
                         elif tool_name in ("search_web", "web_search"):
                             display = (
                                 tool_metadata.get("display")

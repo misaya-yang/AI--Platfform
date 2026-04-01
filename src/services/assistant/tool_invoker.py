@@ -383,6 +383,7 @@ class RegistryToolInvoker(ToolInvoker):
                 "run_id": context.run_id,
                 "scope_id": context.scope_id,
                 "policy_profile": context.policy_profile,
+                "kb_dataset_ids": context.kb_dataset_ids,
             },
         )
 
