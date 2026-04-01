@@ -86,7 +86,9 @@ export const SSEEventType = {
   GATEWAY_DECISION: "gateway_decision",
 
   // Quiz events
-  QUIZ_READY: "quiz_ready",
+  QUIZ_STATUS: "quiz:status",
+  QUIZ_READY: "quiz:ready",
+  QUIZ_ERROR: "quiz:error",
 
   // AG-UI snapshots
   TEXT_MESSAGE_START: "text_message_start",

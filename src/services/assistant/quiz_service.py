@@ -237,6 +237,61 @@ class QuizService:
     # Submit / Grade
     # -------------------------------------------------------------------------
 
+    async def list_attempts(
+        self,
+        quiz_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[dict]:
+        """List attempts for a quiz. Creator sees all, others see own."""
+        # Check quiz ownership
+        quiz_row = await self.db.fetchrow(
+            "SELECT created_by FROM quizzes WHERE id = $1 AND tenant_id = $2",
+            uuid.UUID(quiz_id),
+            tenant_id,
+        )
+        if not quiz_row:
+            return []
+
+        is_creator = quiz_row["created_by"] == user_id
+
+        if is_creator:
+            rows = await self.db.fetch(
+                """
+                SELECT id, user_id, display_name, total_score, correct_count,
+                       total_count, started_at, completed_at, status
+                FROM quiz_attempts WHERE quiz_id = $1
+                ORDER BY started_at DESC
+                """,
+                uuid.UUID(quiz_id),
+            )
+        else:
+            rows = await self.db.fetch(
+                """
+                SELECT id, user_id, display_name, total_score, correct_count,
+                       total_count, started_at, completed_at, status
+                FROM quiz_attempts WHERE quiz_id = $1 AND user_id = $2
+                ORDER BY started_at DESC
+                """,
+                uuid.UUID(quiz_id),
+                user_id,
+            )
+
+        return [
+            {
+                "attempt_id": str(r["id"]),
+                "user_id": r["user_id"],
+                "display_name": r["display_name"],
+                "total_score": float(r["total_score"]) if r["total_score"] is not None else None,
+                "correct_count": r["correct_count"],
+                "total_count": r["total_count"],
+                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+                "status": r["status"],
+            }
+            for r in rows
+        ]
+
     async def submit_attempt(
         self,
         quiz_id: str,

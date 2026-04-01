@@ -2,19 +2,25 @@
 Quiz API — Generate, take, and grade quizzes from KB content.
 
 Endpoints:
-- POST /assistant/quiz/generate  — Generate a new quiz
-- GET  /assistant/quiz/list      — List user's quizzes
-- GET  /assistant/quiz/{quiz_id} — Get quiz details (no answers)
-- POST /assistant/quiz/{quiz_id}/submit — Submit answers for grading
-- DELETE /assistant/quiz/{quiz_id} — Delete a quiz
+- POST /assistant/quiz/generate         — Generate a new quiz
+- POST /assistant/quiz/generate/stream   — Generate with SSE progress
+- GET  /assistant/quiz/list              — List user's quizzes
+- GET  /assistant/quiz/{quiz_id}         — Get quiz details (no answers)
+- POST /assistant/quiz/{quiz_id}/submit  — Submit answers for grading
+- GET  /assistant/quiz/{quiz_id}/attempts — List attempts for a quiz
+- DELETE /assistant/quiz/{quiz_id}       — Delete a quiz
+- POST /assistant/quiz/{quiz_id}/share   — Generate share link
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
@@ -169,6 +175,74 @@ async def generate_quiz(
     return quiz
 
 
+@router.post("/generate/stream")
+async def generate_quiz_stream(
+    body: QuizGenerateRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Generate a quiz with SSE progress events."""
+    svc = _get_quiz_service(request)
+    kb_service = getattr(request.app.state, "knowledge_service", None)
+    if kb_service is None:
+        raise HTTPException(503, "Knowledge service not available")
+
+    def _sse(event_type: str, data: Any) -> str:
+        payload = {"event_type": event_type, "data": data, "timestamp": time.time()}
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    async def event_generator():
+        try:
+            yield _sse("quiz:status", {"message": "Retrieving knowledge base content..."})
+
+            all_chunks: list[dict[str, Any]] = []
+            query = body.topic or "key concepts and important information"
+
+            for dataset_id in body.dataset_ids:
+                try:
+                    results, _meta = await kb_service.retrieve(
+                        user=user, dataset_id=dataset_id, query=query, top_k=20, mode="hybrid",
+                    )
+                    for r in results:
+                        all_chunks.append({
+                            "content": r.text, "score": r.score,
+                            "metadata": r.metadata or {},
+                            "segment_id": getattr(r, "segment_id", None),
+                            "document_id": getattr(r, "document_id", None),
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve from dataset {dataset_id}: {e}")
+
+            yield _sse("quiz:status", {"message": f"Retrieved {len(all_chunks)} relevant passages"})
+
+            if not all_chunks:
+                yield _sse("quiz:error", {"message": "No content retrieved from datasets"})
+                return
+
+            yield _sse("quiz:status", {"message": "Generating questions..."})
+
+            quiz = await svc.create_quiz(
+                tenant_id=user.tenant_id, user_id=user.user_id,
+                dataset_ids=body.dataset_ids, kb_chunks=all_chunks,
+                topic=body.topic, question_count=body.question_count,
+                question_types=body.question_types, difficulty=body.difficulty,
+                language=body.language, model_id=body.model_id,
+            )
+
+            yield _sse("quiz:status", {"message": "Quiz ready!"})
+            yield _sse("quiz:ready", quiz)
+
+        except Exception as e:
+            logger.error(f"Quiz stream error: {e}", exc_info=True)
+            yield _sse("quiz:error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/list", response_model=QuizListResponse)
 async def list_quizzes(
     request: Request,
@@ -221,6 +295,18 @@ async def submit_quiz(
         raise HTTPException(404, str(e))
 
     return result
+
+
+@router.get("/{quiz_id}/attempts")
+async def list_attempts(
+    quiz_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """List all attempts for a quiz (creator sees all, others see own)."""
+    svc = _get_quiz_service(request)
+    attempts = await svc.list_attempts(quiz_id, user.tenant_id, user.user_id)
+    return {"attempts": attempts}
 
 
 @router.delete("/{quiz_id}")

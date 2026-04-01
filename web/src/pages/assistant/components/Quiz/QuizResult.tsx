@@ -1,20 +1,43 @@
 /**
- * QuizResult — Score summary and per-question review after quiz submission.
+ * QuizResult — Score summary, per-question review, retake, and attempts history.
  */
 
+import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { CheckCircle2, XCircle, Trophy } from "lucide-react";
+import { CheckCircle2, Clock, RefreshCw, Trophy, Users, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { listAttempts, type QuizAttemptSummary } from "@/api/quiz";
 import type { QuizAttemptResult } from "../../types";
 
 interface QuizResultProps {
   result: QuizAttemptResult;
+  quizId?: string;
   onReview?: () => void;
+  onRetake?: () => void;
 }
 
-export function QuizResult({ result, onReview }: QuizResultProps) {
+export function QuizResult({ result, quizId, onReview, onRetake }: QuizResultProps) {
+  const { t } = useTranslation();
   const pct = Math.round(result.total_score * 100);
   const isGood = pct >= 70;
+  const [showHistory, setShowHistory] = useState(false);
+  const [attempts, setAttempts] = useState<QuizAttemptSummary[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const fetchHistory = useCallback(async () => {
+    if (!quizId || loadingHistory) return;
+    setLoadingHistory(true);
+    try {
+      const data = await listAttempts(quizId);
+      setAttempts(data.attempts);
+      setShowHistory(true);
+    } catch {
+      // Silently fail — history is optional
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [quizId, loadingHistory]);
 
   return (
     <motion.div
@@ -90,15 +113,83 @@ export function QuizResult({ result, onReview }: QuizResultProps) {
         ))}
       </div>
 
-      {/* Review button */}
-      {onReview && (
-        <button
-          type="button"
-          onClick={onReview}
-          className="w-full text-center text-sm text-primary hover:underline py-1"
+      {/* Action buttons */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {onReview && (
+          <button
+            type="button"
+            onClick={onReview}
+            className="text-sm text-primary hover:underline"
+          >
+            {t("assistant.quiz.reviewAnswers", "Review Answers")}
+          </button>
+        )}
+        {onRetake && (
+          <button
+            type="button"
+            onClick={onRetake}
+            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            {t("assistant.quiz.retake", "Retake Quiz")}
+          </button>
+        )}
+        {quizId && (
+          <button
+            type="button"
+            onClick={fetchHistory}
+            disabled={loadingHistory}
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground ml-auto"
+          >
+            <Users className="w-3.5 h-3.5" />
+            {t("assistant.quiz.viewHistory", "History")}
+          </button>
+        )}
+      </div>
+
+      {/* Attempts history */}
+      {showHistory && attempts.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          className="rounded-xl border border-border overflow-hidden"
         >
-          Review Answers
-        </button>
+          <div className="px-4 py-2 bg-muted/30 border-b border-border">
+            <span className="text-xs font-medium text-muted-foreground">
+              {t("assistant.quiz.attemptHistory", "Attempt History")} ({attempts.length})
+            </span>
+          </div>
+          <div className="divide-y divide-border">
+            {attempts.map((a) => (
+              <div key={a.attempt_id} className="flex items-center gap-3 px-4 py-2 text-xs">
+                <span className="font-medium text-foreground">
+                  {a.display_name || a.user_id || "Anonymous"}
+                </span>
+                <span
+                  className={cn(
+                    "font-bold",
+                    (a.total_score ?? 0) >= 0.7
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : "text-amber-600 dark:text-amber-400",
+                  )}
+                >
+                  {a.correct_count}/{a.total_count} ({Math.round((a.total_score ?? 0) * 100)}%)
+                </span>
+                <span className="text-muted-foreground ml-auto flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  {a.completed_at
+                    ? new Date(a.completed_at).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "In progress"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </motion.div>
       )}
     </motion.div>
   );

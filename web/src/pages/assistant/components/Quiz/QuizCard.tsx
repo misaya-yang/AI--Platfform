@@ -87,6 +87,13 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
     setViewMode("result");
   }, []);
 
+  const handleRetake = useCallback(() => {
+    setSelectedAnswers({});
+    setCurrentIndex(0);
+    setResult(undefined);
+    setViewMode("quiz");
+  }, []);
+
   // Find per-question result for review mode
   const getQuestionResult = (questionId: string) => {
     if (!result) return undefined;
@@ -181,7 +188,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
           {/* Result mode */}
           {viewMode === "result" && result && (
             <motion.div key="result">
-              <QuizResult result={result} onReview={handleReview} />
+              <QuizResult result={result} quizId={quizData.quiz_id} onReview={handleReview} onRetake={handleRetake} />
               <div className="mt-3 flex justify-center">
                 <Button
                   variant="outline"
