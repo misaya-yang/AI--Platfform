@@ -898,6 +898,21 @@ Please use this web search context to inform your response when relevant."""
             )
             return
 
+        # ========== Quiz Intent Detection ==========
+        # If the user asks for a quiz and KB datasets are configured, generate inline
+        quiz_intent = self._detect_quiz_intent(message)
+        if quiz_intent and config.kb_dataset_ids and self.kb_service:
+            async for event in self._handle_quiz_generation(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                quiz_intent=quiz_intent,
+                persist_messages=persist_messages,
+            ):
+                yield event
+            return
+
         # ========== Agent Loop Mode (Experimental) ==========
         # If use_agent_loop is enabled, delegate to the unified 8-step AgentLoop
         if config.use_agent_loop:
@@ -4566,3 +4581,218 @@ Please use this web search context to inform your response when relevant."""
                 kb_documents = None
 
         return input_files, kb_documents
+
+    # =========================================================================
+    # Quiz Intent Detection & Handling
+    # =========================================================================
+
+    _QUIZ_PATTERNS = [
+        # Chinese
+        r"出\s*(\d+)\s*道",
+        r"(\d+)\s*道.*(?:题|测验|测试|quiz)",
+        r"测验|测试|出题|考考|练习题|quiz me|闪卡",
+        # English
+        r"quiz\s+me",
+        r"test\s+my\s+knowledge",
+        r"generate\s+(\d+)?\s*(?:quiz|questions?)",
+        r"practice\s+(?:quiz|questions?|test)",
+        r"create\s+(?:a\s+)?quiz",
+        r"(\d+)\s+questions?\s+(?:about|on|from)",
+    ]
+
+    def _detect_quiz_intent(self, message: str) -> dict | None:
+        """
+        Detect if the user is asking for a quiz.
+
+        Returns dict with parsed intent info, or None if not a quiz request.
+        """
+        import re
+
+        msg_lower = message.lower().strip()
+
+        for pattern in self._QUIZ_PATTERNS:
+            match = re.search(pattern, msg_lower)
+            if match:
+                # Try to extract question count from the message
+                count = 5  # default
+                count_match = re.search(r"(\d+)\s*(?:道|道题|questions?|个)", msg_lower)
+                if count_match:
+                    count = min(10, max(1, int(count_match.group(1))))
+
+                # Detect desired difficulty
+                difficulty = "medium"
+                if any(w in msg_lower for w in ["简单", "easy", "basic", "beginner"]):
+                    difficulty = "easy"
+                elif any(w in msg_lower for w in ["难", "hard", "difficult", "advanced"]):
+                    difficulty = "hard"
+
+                # Detect question types
+                question_types = ["mc_single"]  # default
+                if any(w in msg_lower for w in ["判断", "true_false", "true or false", "是非"]):
+                    question_types = ["true_false"]
+                elif any(w in msg_lower for w in ["多选", "mc_multi", "multi", "multiple select"]):
+                    question_types = ["mc_multi"]
+                elif any(w in msg_lower for w in ["简答", "short_answer", "open ended"]):
+                    question_types = ["short_answer"]
+                elif any(w in msg_lower for w in ["混合", "mix", "各种", "all types"]):
+                    question_types = ["mc_single", "true_false", "mc_multi"]
+
+                # Extract topic (the rest of the message after removing quiz keywords)
+                topic = None
+                topic_match = re.search(
+                    r"(?:关于|about|on|from|regarding|有关)\s*(.+?)(?:\s*的?\s*(?:题|测验|测试|quiz|questions?)|$)",
+                    msg_lower,
+                )
+                if topic_match:
+                    topic = topic_match.group(1).strip()
+
+                logger.info(
+                    f"[QUIZ INTENT] Detected: count={count}, difficulty={difficulty}, "
+                    f"types={question_types}, topic={topic}"
+                )
+
+                return {
+                    "question_count": count,
+                    "difficulty": difficulty,
+                    "question_types": question_types,
+                    "topic": topic,
+                }
+
+        return None
+
+    async def _handle_quiz_generation(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        quiz_intent: dict,
+        persist_messages: bool = True,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        """Handle quiz generation within the chat stream."""
+        from .quiz_generator import QuizGenerator
+        from .quiz_grader import QuizGrader
+        from .quiz_service import QuizService
+
+        # Persist user message
+        if persist_messages and self.session_manager:
+            try:
+                await self.session_manager.add_message(
+                    session_id=session_id,
+                    role="user",
+                    content=message,
+                    metadata={"timestamp": datetime.utcnow().isoformat()},
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to persist user message (quiz): {exc}")
+
+        yield AssistantStreamEvent(
+            event_type="quiz:status",
+            data={"message": "Retrieving knowledge base content..."},
+        )
+
+        # Retrieve KB chunks
+        all_chunks: list[dict] = []
+        query = quiz_intent.get("topic") or "key concepts and important information"
+
+        for dataset_id in config.kb_dataset_ids:
+            try:
+                results, _meta = await self.kb_service.retrieve(
+                    user=user,
+                    dataset_id=dataset_id,
+                    query=query,
+                    top_k=20,
+                    mode="hybrid",
+                )
+                for r in results:
+                    all_chunks.append({
+                        "content": r.text,
+                        "score": r.score,
+                        "metadata": r.metadata or {},
+                    })
+            except Exception as e:
+                logger.warning(f"Quiz KB retrieval failed for {dataset_id}: {e}")
+
+        if not all_chunks:
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data="Sorry, I couldn't retrieve any content from the knowledge base to generate a quiz. Please ensure the selected datasets have indexed documents.",
+            )
+            yield AssistantStreamEvent(event_type="done", data={"session_id": session_id})
+            return
+
+        yield AssistantStreamEvent(
+            event_type="quiz:status",
+            data={"message": f"Retrieved {len(all_chunks)} passages. Generating questions..."},
+        )
+
+        # Generate quiz
+        try:
+            if not self.db:
+                logger.error("Cannot access database for quiz generation")
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.TEXT_DELTA.value,
+                    data="Quiz generation requires database access. Please use the quiz API endpoint directly.",
+                )
+                yield AssistantStreamEvent(event_type="done", data={"session_id": session_id})
+                return
+
+            generator = QuizGenerator(self.model_registry)
+            grader = QuizGrader(model_registry=self.model_registry)
+            svc = QuizService(db=self.db, generator=generator, grader=grader)
+
+            quiz = await svc.create_quiz(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                dataset_ids=config.kb_dataset_ids,
+                kb_chunks=all_chunks,
+                topic=quiz_intent.get("topic"),
+                question_count=quiz_intent["question_count"],
+                question_types=quiz_intent.get("question_types"),
+                difficulty=quiz_intent["difficulty"],
+            )
+
+            yield AssistantStreamEvent(
+                event_type="quiz:status",
+                data={"message": "Quiz ready!"},
+            )
+
+            # Emit the quiz data for frontend rendering
+            yield AssistantStreamEvent(
+                event_type="quiz:ready",
+                data=quiz,
+            )
+
+            # Also emit a brief text message for context
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data=f"I've created a quiz: **{quiz['title']}** ({quiz['question_count']} questions, {quiz_intent['difficulty']}). Good luck! 📝",
+            )
+
+            yield AssistantStreamEvent(
+                event_type="done",
+                data={"session_id": session_id},
+            )
+
+            # Persist assistant message
+            if persist_messages and self.session_manager:
+                try:
+                    await self.session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=f"[Quiz generated: {quiz['title']} - {quiz['question_count']} questions]",
+                        metadata={
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "quiz_id": quiz["quiz_id"],
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to persist quiz message: {exc}")
+
+        except Exception as e:
+            logger.error(f"Quiz generation failed in chat: {e}", exc_info=True)
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data=f"Sorry, quiz generation failed: {e}",
+            )
+            yield AssistantStreamEvent(event_type="done", data={"session_id": session_id})

@@ -1732,6 +1732,21 @@ export function useChatSession() {
             }
             break;
 
+          case SSEEventType.QUIZ_STATUS:
+            // Show quiz generation progress as search status
+            if (event.data && typeof event.data === "object") {
+              const statusMsg = (event.data as Record<string, unknown>).message as string || "";
+              updateSearchStatus("kb", { state: "searching", resultCount: undefined });
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMessage.id
+                    ? { ...m, content: statusMsg, isStreaming: true }
+                    : m
+                )
+              );
+            }
+            break;
+
           case SSEEventType.QUIZ_READY:
             if (event.data && typeof event.data === "object") {
               const quizPayload = event.data as Record<string, unknown>;
@@ -1739,6 +1754,19 @@ export function useChatSession() {
                 prev.map((m) =>
                   m.id === assistantMessage.id
                     ? { ...m, quizData: quizPayload as any }
+                    : m
+                )
+              );
+            }
+            break;
+
+          case SSEEventType.QUIZ_ERROR:
+            if (event.data && typeof event.data === "object") {
+              const errMsg = (event.data as Record<string, unknown>).message as string || "Quiz generation failed";
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMessage.id
+                    ? { ...m, content: errMsg, isStreaming: false }
                     : m
                 )
               );
