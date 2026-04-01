@@ -121,8 +121,8 @@ async def generate_quiz(
     """Generate a quiz from KB datasets."""
     svc = _get_quiz_service(request)
 
-    # Retrieve KB chunks for quiz generation
-    kb_service = getattr(request.app.state, "knowledge_service", None)
+    # Retrieve KB chunks for quiz generation (local service or HTTP proxy)
+    kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
     if kb_service is None:
         raise HTTPException(503, "Knowledge service not available")
 
@@ -183,7 +183,7 @@ async def generate_quiz_stream(
 ):
     """Generate a quiz with SSE progress events."""
     svc = _get_quiz_service(request)
-    kb_service = getattr(request.app.state, "knowledge_service", None)
+    kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
     if kb_service is None:
         raise HTTPException(503, "Knowledge service not available")
 

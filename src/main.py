@@ -711,6 +711,10 @@ def create_app() -> FastAPI:
                 app.state.usage_recorder = usage_recorder
                 logger.info("使用量记录器已启动")
 
+        # Initialize KB proxy client BEFORE assistant service (microservice mode)
+        from .services.knowledge.kb_proxy_client import KBProxyClient
+        app.state.kb_proxy = KBProxyClient()
+
         # 初始化 Assistant Service (GPT-like 体验)
         await _init_assistant_service(app, settings)
 
@@ -855,12 +859,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.billing_interceptor = container.billing_interceptor
     app.state.context_injector = container.context_injector
 
-    # Knowledge Base (KBMS) — microservice mode: use HTTP proxy client
+    # Knowledge Base (KBMS) — microservice mode
     app.state.knowledge_service = None
     app.state.knowledge_worker = None
-
-    from .services.knowledge.kb_proxy_client import KBProxyClient
-    app.state.kb_proxy = KBProxyClient()
+    # kb_proxy already initialized before assistant service (line ~714)
     logger.info(f"KB proxy client initialized → {KBProxyClient.KB_SERVICE_URL if hasattr(KBProxyClient, 'KB_SERVICE_URL') else 'knowledge-service:8092'}")
 
     # Confluence 集成
