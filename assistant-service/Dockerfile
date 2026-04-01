@@ -1,24 +1,39 @@
-# Assistant Service — extracted AI assistant microservice
-# Shares code with Gateway but runs independently on port 8093
+# Assistant Service — shares the gateway's Python packages
+# Build: reuse gateway's pyproject.toml for dependencies
 
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install deps from gateway's pyproject.toml
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir hatchling && \
+    pip install --no-cache-dir ".[all]" || pip install --no-cache-dir "." && \
+    find /opt/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
+
+# --- Runtime ---
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps (same as gateway)
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy gateway source (shared code) and assistant-service entry point
-COPY src/ /app/src/
-COPY assistant-service/app.py /app/assistant_app.py
+COPY src/ ./src/
+COPY assistant-service/app.py ./assistant_app.py
 
-# Non-root
 RUN useradd -m appuser && mkdir -p /app/logs && chown -R appuser:appuser /app
 USER appuser
 
