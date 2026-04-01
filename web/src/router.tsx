@@ -15,6 +15,8 @@ import { AssistantPage } from "@/pages/assistant";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 import { SharePage } from "@/pages/SharePage";
 import { QuizPage } from "@/pages/QuizPage";
+import { ExamsPage } from "@/pages/exams";
+import { ExamDetailPage } from "@/pages/exams/ExamDetailPage";
 
 export function AppRouter() {
   return (
@@ -103,6 +105,22 @@ export function AppRouter() {
           element={
             <ProtectedRoute requiredPermission="console:settings:view">
               <SettingsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/exams"
+          element={
+            <ProtectedRoute requiredPermission="console:dashboard:view">
+              <ExamsPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/exams/:examId"
+          element={
+            <ProtectedRoute requiredPermission="console:dashboard:view">
+              <ExamDetailPage />
             </ProtectedRoute>
           }
         />
