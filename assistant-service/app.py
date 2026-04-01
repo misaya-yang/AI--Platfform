@@ -213,6 +213,16 @@ async def startup():
     except Exception as e:
         logger.warning(f"Quiz tool registration failed: {e}")
 
+    # --- Load models from database ---
+    if database:
+        try:
+            from src.services.models.model_service import ModelService
+            model_service = ModelService(database)
+            loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
+            logger.info(f"Loaded {loaded} models from database")
+        except Exception as e:
+            logger.warning(f"Failed to load models from DB: {e}")
+
     # Store on app state
     app.state.assistant_service = assistant_service
     app.state.model_registry = model_registry
