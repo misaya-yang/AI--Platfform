@@ -232,10 +232,9 @@ async def startup():
                             model_registry._models[r["model_id"]] = ModelInfo(
                                 id=r["model_id"],
                                 provider=provider,
-                                display_name=r["display_name"] or r["model_id"],
+                                name=r["display_name"] or r["model_id"],
                                 context_window=r["context_window"] or 32000,
                                 max_output_tokens=r["max_output_tokens"] or 4096,
-                                access_level=r["access_level"] or "public",
                             )
                         except ValueError:
                             pass  # Unknown provider
