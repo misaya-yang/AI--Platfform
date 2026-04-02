@@ -58,6 +58,9 @@ class CodeExecutionConfig:
     network_disabled: bool = True
     read_only_root: bool = False
 
+    # Sandbox runtime — "runsc" for gVisor isolation, None for default runc
+    sandbox_runtime: str | None = "runsc"
+
     # Docker image
     image: str = "python:3.11-slim"
 
@@ -226,6 +229,11 @@ class CodeExecutorService:
             config: Execution configuration. Uses defaults if not provided.
         """
         self.config = config or CodeExecutionConfig()
+        # Allow env var override: SANDBOX_RUNTIME=runsc|runc|""
+        import os
+        env_runtime = os.environ.get("SANDBOX_RUNTIME")
+        if env_runtime is not None:
+            self.config.sandbox_runtime = env_runtime or None
         self._docker_client = None
         self._docker_available: bool | None = None
 
@@ -265,7 +273,21 @@ class CodeExecutorService:
             if client is not None:
                 client.ping()
                 self._docker_available = True
-                logger.info("Docker is available")
+                # Check if configured sandbox runtime is available
+                rt = self.config.sandbox_runtime
+                if rt:
+                    info = client.info()
+                    runtimes = info.get("Runtimes", {})
+                    if rt in runtimes:
+                        logger.info(f"Docker available with sandbox runtime '{rt}' (gVisor)")
+                    else:
+                        logger.warning(
+                            f"Sandbox runtime '{rt}' not found — falling back to default runc. "
+                            f"Available: {list(runtimes.keys())}"
+                        )
+                        self.config.sandbox_runtime = None
+                else:
+                    logger.info("Docker available (sandbox runtime: runc default)")
             else:
                 self._docker_available = False
         except Exception as e:
@@ -468,6 +490,11 @@ class CodeExecutorService:
             "detach": True,
             "remove": False,  # We'll remove manually after getting logs
         }
+
+        # ADR-002 Phase 2: gVisor sandbox runtime for kernel-level isolation
+        if config.sandbox_runtime:
+            container_config["runtime"] = config.sandbox_runtime
+            logger.debug(f"Using sandbox runtime: {config.sandbox_runtime}")
 
         if config.read_only_root:
             container_config["read_only"] = True
