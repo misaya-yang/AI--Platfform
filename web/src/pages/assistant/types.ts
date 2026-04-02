@@ -265,6 +265,9 @@ export interface ChatMessage {
   // Agent phase status (for ReAct thinking display)
   agentPhase?: AgentPhaseStatus;
 
+  // Pre-tool thinking content (displayed as collapsible "Thought Process")
+  thinkingContent?: string;
+
   // Agentic extensions
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];

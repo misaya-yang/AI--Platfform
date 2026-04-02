@@ -2102,6 +2102,14 @@ class AgentLoop:
                 # Step 4: Execute tool calls
                 logger.info(f"[STREAMING-FIRST] Executing {len(tool_calls_batch)} tool calls")
 
+                # Emit thinking_end to signal pre-tool text is complete
+                if accumulated_content.strip():
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="thinking_end",
+                        data={"content": accumulated_content.strip(), "tool_count": len(tool_calls_batch)},
+                    )
+
                 # Add assistant message with tool calls to history
                 assistant_msg = {
                     "role": "assistant",

@@ -9,6 +9,7 @@ export const SSEEventType = {
   STATUS: "status",
   TEXT_DELTA: "text_delta",
   THINKING_DELTA: "thinking_delta",
+  THINKING_END: "thinking_end",
   USAGE: "usage",
   FINISH: "finish",
   DONE: "done",

@@ -893,6 +893,24 @@ export function useChatSession() {
           case "text_delta":
             break;
 
+          case SSEEventType.THINKING_END:
+          case "thinking_end": {
+            // Move accumulated text (pre-tool thinking) to thinkingContent,
+            // clear main content for the post-tool response.
+            const thinkingData = event.data as { content?: string; tool_count?: number } | undefined;
+            const thinkingText = thinkingData?.content || streamTurnState.content || "";
+            if (thinkingText.trim()) {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantMessage.id
+                  ? { ...m, thinkingContent: thinkingText.trim() }
+                  : m
+              ));
+              // Reset accumulated content in stream state for the next LLM iteration
+              streamTurnState = { ...streamTurnState, content: "" };
+            }
+            break;
+          }
+
           case SSEEventType.STATUS:
             // 状态事件不计入 TTFT - TTFT 只测量真正的文本内容出现时间
             // STATUS 事件是预处理阶段（如 "分析任务需求..."），不是最终内容
