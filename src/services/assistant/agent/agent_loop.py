@@ -2391,8 +2391,9 @@ class AgentLoop:
                             ):
                                 # Check if already executed in parallel batch
                                 if tool_id in _subagent_results:
-                                    tool_result = _subagent_results[tool_id]
-                                    tool_result_for_model = _subagent_results[tool_id]
+                                    _sr = _subagent_results[tool_id]
+                                    tool_result = _sr
+                                    tool_result_for_model = f"[Sub-agent result]\n{_sr}\n\n[IMPORTANT: Use this sub-agent's findings to build your comprehensive response. Do NOT just repeat the raw output — synthesize and organize it.]"
                                     tool_success = True
                                 else:
                                     # Single subagent call — run inline
@@ -2417,7 +2418,7 @@ class AgentLoop:
                                         if sub_event["event_type"] == "subagent_finished":
                                             subagent_result = sub_event["data"].get("result_summary", "")
                                     tool_result = subagent_result
-                                    tool_result_for_model = subagent_result
+                                    tool_result_for_model = f"[Sub-agent result]\n{subagent_result}\n\n[IMPORTANT: Use this sub-agent's findings to build your comprehensive response. Do NOT just repeat the raw output — synthesize and organize it.]"
                                     tool_success = True
 
                             queue_state = tool_metadata.get("queue_state")
