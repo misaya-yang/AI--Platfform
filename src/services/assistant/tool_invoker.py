@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json as _json
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -334,6 +336,40 @@ class RegistryToolInvoker(ToolInvoker):
         self.tenant_mcp_config = tenant_mcp_config
         self.tool_audit = tool_audit
 
+        # ADR-003 Phase 3: Per-session tool result cache
+        # Key: (session_id, cache_key) → (ToolCallResult, expires_at)
+        self._result_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+        self._cache_ttl = 300  # 5 minutes
+        self._cache_max_size = 200
+        # Only idempotent tools are cacheable
+        self._cacheable_prefixes = (
+            "search_knowledge_base", "search_web",
+            "mcp_halalmoney__get_", "mcp_halalmoney__check_",
+            "mcp_wahda__search_",
+        )
+
+    @staticmethod
+    def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
+        raw = tool_name + ":" + _json.dumps(arguments, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def _is_cacheable(self, tool_name: str) -> bool:
+        return any(tool_name.startswith(p) or tool_name == p for p in self._cacheable_prefixes)
+
+    def _cache_get(self, session_id: str, key: str) -> Any | None:
+        entry = self._result_cache.get((session_id, key))
+        if entry and entry[1] > time.monotonic():
+            return entry[0]
+        if entry:
+            del self._result_cache[(session_id, key)]
+        return None
+
+    def _cache_put(self, session_id: str, key: str, result: Any) -> None:
+        if len(self._result_cache) >= self._cache_max_size:
+            oldest = min(self._result_cache, key=lambda k: self._result_cache[k][1])
+            del self._result_cache[oldest]
+        self._result_cache[(session_id, key)] = (result, time.monotonic() + self._cache_ttl)
+
     async def invoke(
         self,
         tool_name: str,
@@ -366,6 +402,44 @@ class RegistryToolInvoker(ToolInvoker):
                 success=False,
                 error="Cancelled before execution",
             )
+
+        # ADR-003 Phase 3: Check result cache for idempotent tools
+        cache_key = None
+        if self._is_cacheable(tool_name):
+            cache_key = self._cache_key(tool_name, arguments)
+            cached = self._cache_get(context.session_id, cache_key)
+            if cached is not None:
+                logger.info(f"Cache hit: tool={tool_name} session={context.session_id[:12]}")
+                # Return a copy with fresh call_id
+                cached_copy = ToolCallResult(
+                    call_id=call_id,
+                    tool_name=cached.tool_name,
+                    success=cached.success,
+                    result=cached.result,
+                    error=cached.error,
+                    duration_ms=0,
+                    metadata={**cached.metadata, "cache_hit": True},
+                    output_files=cached.output_files,
+                )
+                # Audit cache hit
+                if self.tool_audit:
+                    try:
+                        from .audit.tool_audit import ToolAuditEntry
+                        entry = ToolAuditEntry(
+                            tenant_id=context.tenant_id,
+                            user_id=context.user_id,
+                            session_id=context.session_id,
+                            request_id=context.request_id,
+                            tool_type=self.tool_audit.classify_tool_type(tool_name),
+                            tool_name=tool_name,
+                            input_summary=self.tool_audit.summarize_input(arguments),
+                            output_status="cache_hit",
+                            latency_ms=0,
+                        )
+                        asyncio.create_task(self.tool_audit.log(entry))
+                    except Exception:
+                        pass
+                return cached_copy
 
         # Enforce tenant tool policy (blocked tools / MCP access)
         if self.tenant_tool_policy and context.tenant_id:
@@ -503,6 +577,10 @@ class RegistryToolInvoker(ToolInvoker):
                 )
             except Exception as e:
                 logger.debug(f"Audit log failed: {e}")
+
+        # ADR-003 Phase 3: Cache successful results for idempotent tools
+        if cache_key and result.success:
+            self._cache_put(context.session_id, cache_key, result)
 
         return result
 
