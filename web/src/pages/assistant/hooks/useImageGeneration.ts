@@ -120,7 +120,8 @@ export function useImageGeneration(
                   source: "image_generation",
                   metadata: { prompt, provider: result.provider, duration_ms: result.duration_ms },
                 });
-                const url = artifact.download_url || getArtifactDownloadUrl(artifact.artifact_id);
+                // Always use proxy URL (never expires) instead of presigned S3 URL
+                const url = getArtifactDownloadUrl(artifact.artifact_id);
                 artifactUrls.push(url);
                 artifactIds.push(artifact.artifact_id);
                 generatedArtifacts.push({ id: artifact.artifact_id, type: "image", format, title: imgTitle, url });

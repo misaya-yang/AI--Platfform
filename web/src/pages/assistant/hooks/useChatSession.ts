@@ -224,7 +224,7 @@ function hydrateMessageArtifacts(
           type: (a.type || "file") as GeneratedArtifact["type"],
           format: a.format || "",
           title: a.title || a.filename || "Artifact",
-          url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
+          url: getArtifactDownloadUrl(a.artifact_id),  // Proxy URL — never expires
           filename: a.filename,
           mimeType: a.mime_type,
           sizeBytes: a.size_bytes,
