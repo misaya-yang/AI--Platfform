@@ -2116,6 +2116,53 @@ class AgentLoop:
                 messages.append(assistant_msg)
                 accumulated_content = ""  # Reset for next iteration
 
+                # ADR-003: Parallel sub-agent execution
+                # Collect all spawn_subagent calls and run them in parallel BEFORE
+                # the serial tool loop. Results are pre-cached by tool_id.
+                _subagent_results: dict[str, str] = {}  # tool_id → result_summary
+                _subagent_calls = [
+                    tc for tc in tool_calls_batch
+                    if tc.get("function", {}).get("name") == "spawn_subagent"
+                ]
+                if len(_subagent_calls) > 1 and self.model_registry:
+                    from .subagent_manager import SubAgentManager
+                    from ..tools.tool_registry import get_tool_registry
+                    sub_mgr = SubAgentManager(
+                        model_registry=self.model_registry,
+                        tool_registry=get_tool_registry(),
+                    )
+                    from .subagent_types import SubAgentConfig, SubAgentType
+                    sub_configs = []
+                    sub_ids = []
+                    for tc in _subagent_calls:
+                        fn = tc.get("function", {})
+                        try:
+                            args = json.loads(fn.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            args = {}
+                        tc_id = str(tc.get("id", ""))
+                        sub_ids.append(tc_id)
+                        sub_configs.append(SubAgentConfig(
+                            agent_type=SubAgentType(args.get("agent_type", "explore")),
+                            prompt=args.get("prompt", ""),
+                            description=args.get("description", ""),
+                            parent_context=args.get("context"),
+                        ))
+                    # Run all sub-agents in parallel
+                    _current_results: dict[str, str] = {}
+                    async for sub_event in sub_mgr.spawn_parallel(
+                        sub_configs, parent_user=user, parent_tenant_id=ctx.tenant_id,
+                    ):
+                        yield AgentLoopEvent(phase=phase, event_type=sub_event["event_type"], data=sub_event["data"])
+                        if sub_event["event_type"] == "subagent_finished":
+                            aid = sub_event["data"].get("agent_id", "")
+                            _current_results[aid] = sub_event["data"].get("result_summary", "")
+                    # Map agent_id results back to tool_call ids (order preserved)
+                    result_values = list(_current_results.values())
+                    for i, tc_id in enumerate(sub_ids):
+                        _subagent_results[tc_id] = result_values[i] if i < len(result_values) else ""
+                    logger.info(f"[STREAMING-FIRST] Parallel sub-agents completed: {len(_subagent_results)} results")
+
                 # Execute each tool call
                 for tool_index, tool_call in enumerate(tool_calls_batch, start=1):
                     tool_id = str(tool_call.get("id") or "").strip() or f"call_{iteration}_{tool_index}"
@@ -2336,37 +2383,42 @@ class AgentLoop:
                             tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
                             tool_output_files = result.output_files or []
 
-                            # ADR-003: Sub-agent execution — intercept __subagent__ marker
+                            # ADR-003: Sub-agent execution
                             if (
                                 isinstance(result.result, dict)
                                 and result.result.get("__subagent__")
                                 and self.model_registry
                             ):
-                                from .subagent_manager import SubAgentManager
-                                from ..tools.tool_registry import get_tool_registry
-                                sub_mgr = SubAgentManager(
-                                    model_registry=self.model_registry,
-                                    tool_registry=get_tool_registry(),
-                                )
-                                sub_config = result.result["config"]
-                                subagent_result = ""
-                                async for sub_event in sub_mgr.spawn(
-                                    sub_config,
-                                    parent_user=user,
-                                    parent_tenant_id=ctx.tenant_id,
-                                ):
-                                    yield AgentLoopEvent(
-                                        phase=phase,
-                                        event_type=sub_event["event_type"],
-                                        data=sub_event["data"],
+                                # Check if already executed in parallel batch
+                                if tool_id in _subagent_results:
+                                    tool_result = _subagent_results[tool_id]
+                                    tool_result_for_model = _subagent_results[tool_id]
+                                    tool_success = True
+                                else:
+                                    # Single subagent call — run inline
+                                    from .subagent_manager import SubAgentManager
+                                    from ..tools.tool_registry import get_tool_registry
+                                    sub_mgr = SubAgentManager(
+                                        model_registry=self.model_registry,
+                                        tool_registry=get_tool_registry(),
                                     )
-                                    if sub_event["event_type"] == "subagent_finished":
-                                        subagent_result = sub_event["data"].get("result_summary", "")
-                                # Override tool result with sub-agent summary
-                                tool_result = subagent_result
-                                tool_result_for_model = subagent_result
-                                tool_success = True
-                                tool_duration_ms = sub_event["data"].get("duration_ms", 0) if sub_event else 0
+                                    sub_config = result.result["config"]
+                                    subagent_result = ""
+                                    async for sub_event in sub_mgr.spawn(
+                                        sub_config,
+                                        parent_user=user,
+                                        parent_tenant_id=ctx.tenant_id,
+                                    ):
+                                        yield AgentLoopEvent(
+                                            phase=phase,
+                                            event_type=sub_event["event_type"],
+                                            data=sub_event["data"],
+                                        )
+                                        if sub_event["event_type"] == "subagent_finished":
+                                            subagent_result = sub_event["data"].get("result_summary", "")
+                                    tool_result = subagent_result
+                                    tool_result_for_model = subagent_result
+                                    tool_success = True
 
                             queue_state = tool_metadata.get("queue_state")
                             if queue_state:

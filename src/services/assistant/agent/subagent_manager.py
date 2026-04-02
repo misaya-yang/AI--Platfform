@@ -342,7 +342,7 @@ Rules:
                 })
 
     @staticmethod
-    def _summarize(text: str, max_length: int = 500) -> str:
+    def _summarize(text: str, max_length: int = 2000) -> str:
         if len(text) <= max_length:
             return text
         return text[:max_length] + "..."

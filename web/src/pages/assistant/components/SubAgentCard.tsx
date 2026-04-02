@@ -4,6 +4,8 @@
  */
 import React, { useState } from "react";
 import { useTranslation } from "react-i18next";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { SubAgentState } from "../types";
 
 const AGENT_TYPE_CONFIG: Record<string, { icon: string; label: string; color: string }> = {
@@ -73,11 +75,12 @@ export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
             </div>
           )}
 
-          {/* Result summary */}
+          {/* Result summary — render as Markdown */}
           {subAgent.resultSummary && subAgent.status === "completed" && (
-            <div className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-foreground leading-relaxed">
-              {subAgent.resultSummary.slice(0, 300)}
-              {subAgent.resultSummary.length > 300 && "..."}
+            <div className="p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-sm text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none max-h-[300px] overflow-y-auto">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {subAgent.resultSummary.slice(0, 500)}
+              </ReactMarkdown>
             </div>
           )}
 
