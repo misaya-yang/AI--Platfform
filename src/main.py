@@ -1267,8 +1267,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         app.state.tool_audit = ToolAuditService(database=database)
 
         mcp_server_names = []
-        if app.state.mcp_manager:
-            mcp_server_names = [c.name for c in (mcp_configs or [])]
+        mcp_mgr = getattr(app.state, "mcp_manager", None)
+        if mcp_mgr and mcp_mgr._configs:
+            mcp_server_names = [c.name for c in mcp_mgr._configs]
         app.state.tenant_mcp_config = TenantMCPConfigService(
             database=database,
             all_server_names=mcp_server_names,
@@ -1277,6 +1278,14 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         assistant_service.tenant_tool_policy = app.state.tenant_tool_policy
         assistant_service.tenant_mcp_config = app.state.tenant_mcp_config
         assistant_service.tool_audit = app.state.tool_audit
+        # Rebuild execution_gateway tool_invoker with tenant services
+        if hasattr(assistant_service, "execution_gateway") and assistant_service.execution_gateway:
+            from .services.assistant.tool_invoker import create_tool_invoker
+            assistant_service.execution_gateway.tool_invoker = create_tool_invoker(
+                tenant_tool_policy=app.state.tenant_tool_policy,
+                tenant_mcp_config=app.state.tenant_mcp_config,
+                tool_audit=app.state.tool_audit,
+            )
         logger.info("ADR-002: Tenant isolation services initialized")
     except Exception as e:
         logger.warning(f"Tenant isolation init failed (non-fatal): {e}")

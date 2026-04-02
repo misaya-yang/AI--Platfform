@@ -7,6 +7,7 @@ and enforces per-tenant rate limits.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Cache settings
+_CACHE_TTL = 300  # 5 minutes
+_CACHE_MAX_SIZE = 500
+
 
 @dataclass
 class TenantToolPolicy:
@@ -26,7 +31,6 @@ class TenantToolPolicy:
     allowed_tools: set[str] = field(default_factory=set)       # whitelist (empty = allow all)
     blocked_tools: set[str] = field(default_factory=set)       # blacklist (precedence over whitelist)
     allowed_categories: set[str] = field(default_factory=set)  # e.g. {"retrieval", "generation"}
-    max_calls_per_session: int = 100
     max_calls_per_minute: int = 20
 
 
@@ -35,19 +39,24 @@ class TenantToolPolicyService:
 
     def __init__(self, database: Any) -> None:
         self._database = database
-        self._cache: dict[str, TenantToolPolicy] = {}
+        self._cache: dict[str, tuple[TenantToolPolicy, float]] = {}  # tenant_id → (policy, expires_at)
 
     # ------------------------------------------------------------------
     # Policy Loading
     # ------------------------------------------------------------------
 
     async def get_policy(self, tenant_id: str) -> TenantToolPolicy:
-        """Get policy for a tenant, from cache or DB."""
-        if tenant_id in self._cache:
-            return self._cache[tenant_id]
+        """Get policy for a tenant, from cache (with TTL) or DB."""
+        entry = self._cache.get(tenant_id)
+        if entry and entry[1] > time.monotonic():
+            return entry[0]
 
         policy = await self._load_from_db(tenant_id)
-        self._cache[tenant_id] = policy
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= _CACHE_MAX_SIZE:
+            oldest = min(self._cache, key=lambda k: self._cache[k][1])
+            del self._cache[oldest]
+        self._cache[tenant_id] = (policy, time.monotonic() + _CACHE_TTL)
         return policy
 
     async def _load_from_db(self, tenant_id: str) -> TenantToolPolicy:
@@ -71,7 +80,6 @@ class TenantToolPolicyService:
             allowed_tools=set(row["allowed_tools"] or []),
             blocked_tools=set(row["blocked_tools"] or []),
             allowed_categories=set(row["allowed_categories"] or []),
-            max_calls_per_session=row.get("max_calls_per_session", 100),
             max_calls_per_minute=row.get("max_calls_per_minute", 20),
         )
 

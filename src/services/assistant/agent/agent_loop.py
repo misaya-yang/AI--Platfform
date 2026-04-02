@@ -1742,13 +1742,10 @@ class AgentLoop:
             available_tool_names: list[str] = []
             invocation_context = self._build_invocation_context(ctx, user=user)
             if self.tool_invoker:
-                # ADR-002: Use tenant-filtered tool list if available
-                if hasattr(self.tool_invoker, "get_tool_definitions_filtered"):
-                    tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
-                        context=invocation_context,
-                    )
-                else:
-                    tool_defs = self.tool_invoker.get_tool_definitions(context=invocation_context)
+                # ADR-002: tenant-filtered tool definitions
+                tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
+                    context=invocation_context,
+                )
                 tool_defs = _select_tools_for_request(tool_defs, ctx.message)
                 tools = []
                 for t in tool_defs:
@@ -3803,12 +3800,9 @@ class AgentLoop:
             available_tools = []
             if self.tool_invoker:
                 invocation_context = self._build_invocation_context(ctx, user=None)
-                if hasattr(self.tool_invoker, "get_tool_definitions_filtered"):
-                    available_tools = await self.tool_invoker.get_tool_definitions_filtered(
-                        context=invocation_context,
-                    )
-                else:
-                    available_tools = self.tool_invoker.get_tool_definitions(context=invocation_context)
+                available_tools = await self.tool_invoker.get_tool_definitions_filtered(
+                    context=invocation_context,
+                )
 
             # Execute ReAct loop
             async for event in react_executor.execute(

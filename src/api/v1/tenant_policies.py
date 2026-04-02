@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
@@ -19,19 +20,32 @@ router = APIRouter(prefix="/admin/tenant-policies", tags=["tenant-policies"])
 
 
 class ToolPolicyPayload(BaseModel):
-    tenant_id: str
+    tenant_id: str = Field(..., min_length=1, max_length=64)
     allowed_tools: list[str] | None = None
     blocked_tools: list[str] | None = None
     allowed_categories: list[str] | None = None
-    max_calls_per_session: int = 100
-    max_calls_per_minute: int = 20
+    max_calls_per_minute: int = Field(20, ge=1, le=10000)
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _validate_tenant_id(cls, v: str) -> str:
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("tenant_id must be alphanumeric (hyphens/underscores allowed)")
+        return v
 
 
 class MCPConfigPayload(BaseModel):
-    tenant_id: str
+    tenant_id: str = Field(..., min_length=1, max_length=64)
     allowed_servers: list[str]
     server_overrides: dict[str, Any] | None = None
-    max_connections: int = 5
+    max_connections: int = Field(5, ge=1, le=100)
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _validate_tenant_id(cls, v: str) -> str:
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError("tenant_id must be alphanumeric (hyphens/underscores allowed)")
+        return v
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -96,13 +110,12 @@ async def upsert_tool_policy(
         """
         INSERT INTO tenant_tool_policies
             (tenant_id, allowed_tools, blocked_tools, allowed_categories,
-             max_calls_per_session, max_calls_per_minute, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+             max_calls_per_minute, updated_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
         ON CONFLICT (tenant_id) DO UPDATE SET
             allowed_tools = EXCLUDED.allowed_tools,
             blocked_tools = EXCLUDED.blocked_tools,
             allowed_categories = EXCLUDED.allowed_categories,
-            max_calls_per_session = EXCLUDED.max_calls_per_session,
             max_calls_per_minute = EXCLUDED.max_calls_per_minute,
             updated_at = NOW()
         """,
@@ -110,7 +123,6 @@ async def upsert_tool_policy(
         payload.allowed_tools,
         payload.blocked_tools,
         payload.allowed_categories,
-        payload.max_calls_per_session,
         payload.max_calls_per_minute,
     )
     # Invalidate cache
@@ -179,7 +191,6 @@ async def upsert_mcp_config(
     """Create or update a tenant MCP config."""
     _require_admin(user)
     db = _get_db(request)
-    import json
     await db.execute(
         """
         INSERT INTO tenant_mcp_configs
@@ -249,8 +260,10 @@ async def query_audit_log(
         params.append(user_id)
         idx += 1
     if tool_name:
-        conditions.append(f"tool_name LIKE ${idx}")
-        params.append(f"%{tool_name}%")
+        # Escape LIKE metacharacters to prevent wildcard abuse
+        safe_name = tool_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conditions.append(f"tool_name LIKE ${idx} ESCAPE '\\'")
+        params.append(f"%{safe_name}%")
         idx += 1
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""

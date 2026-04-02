@@ -261,6 +261,18 @@ class ToolInvoker(ABC):
         """
         pass
 
+    async def get_tool_definitions_filtered(
+        self,
+        context: ToolInvocationContext,
+        tool_names: list[str] | None = None,
+    ) -> list[ToolDefinition]:
+        """Get tool definitions with optional per-tenant filtering.
+
+        Default implementation delegates to synchronous `get_tool_definitions()`.
+        Subclasses may override to add tenant policy / MCP filtering.
+        """
+        return self.get_tool_definitions(context, tool_names)
+
 
 # =============================================================================
 # Concrete Implementation
@@ -355,6 +367,44 @@ class RegistryToolInvoker(ToolInvoker):
                 error="Cancelled before execution",
             )
 
+        # Enforce tenant tool policy (blocked tools / MCP access)
+        if self.tenant_tool_policy and context.tenant_id:
+            try:
+                policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
+                if tool_name in policy.blocked_tools:
+                    logger.warning(f"Tenant policy denied: tool={tool_name} tenant={context.tenant_id}")
+                    return ToolCallResult(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"Tool '{tool_name}' is not available for this tenant.",
+                    )
+                if policy.allowed_tools and tool_name not in policy.allowed_tools:
+                    logger.warning(f"Tenant policy denied (not in whitelist): tool={tool_name} tenant={context.tenant_id}")
+                    return ToolCallResult(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"Tool '{tool_name}' is not available for this tenant.",
+                    )
+            except Exception as e:
+                logger.warning(f"Tenant policy check failed (allowing): {e}")
+
+        if self.tenant_mcp_config and context.tenant_id and tool_name.startswith("mcp_"):
+            try:
+                mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
+                allowed_prefixes = tuple(f"mcp_{s}__" for s in mcp_config.allowed_servers)
+                if not tool_name.startswith(allowed_prefixes):
+                    logger.warning(f"MCP policy denied: tool={tool_name} tenant={context.tenant_id}")
+                    return ToolCallResult(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"MCP tool '{tool_name}' is not available for this tenant.",
+                    )
+            except Exception as e:
+                logger.warning(f"MCP policy check failed (allowing): {e}")
+
         # Check rate limit
         if self.rate_limiter and self.rate_limiter(context.tenant_id, tool_name):
             logger.warning(f"Rate limited: tool={tool_name} tenant={context.tenant_id}")
@@ -419,7 +469,7 @@ class RegistryToolInvoker(ToolInvoker):
             except Exception as e:
                 logger.error(f"Failed to record metrics: {e}")
 
-        # Audit log (fire-and-forget)
+        # Audit log (fire-and-forget with error suppression)
         if self.tool_audit:
             try:
                 from .audit.tool_audit import ToolAuditEntry
@@ -435,7 +485,12 @@ class RegistryToolInvoker(ToolInvoker):
                     error_message=result.error if not result.success else None,
                     latency_ms=duration_ms,
                 )
-                asyncio.create_task(self.tool_audit.log(entry))
+                task = asyncio.create_task(self.tool_audit.log(entry))
+                task.add_done_callback(
+                    lambda t: logger.debug(f"Audit write error: {t.exception()}")
+                    if not t.cancelled() and t.exception()
+                    else None
+                )
             except Exception as e:
                 logger.debug(f"Audit log failed: {e}")
 

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tenant_mcp_configs (
 CREATE INDEX IF NOT EXISTS idx_tmc_tenant ON tenant_mcp_configs(tenant_id);
 
 -- 3. Tool Audit Log — all tool/skill/mcp invocations
+-- TODO(P1): Partition by month + 90-day retention cron when volume exceeds ~100K rows/day
 CREATE TABLE IF NOT EXISTS tool_audit_log (
     id                   BIGSERIAL PRIMARY KEY,
     tenant_id            VARCHAR(64) NOT NULL,
