@@ -536,3 +536,53 @@ class ImageGenerationResponse(BaseModel):
     provider: str = Field(..., description="Provider used for generation (dashscope/google)")
     duration_ms: float = Field(..., description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
+
+
+# =============================================================================
+# Async Image Generation (background task with polling)
+# =============================================================================
+
+
+class AsyncImageGenerationRequest(BaseModel):
+    """Request to submit an async image generation task."""
+
+    prompt: str = Field(..., description="Text description of the image to generate", min_length=1)
+    model_id: str = Field(..., description="Model ID to determine provider routing")
+    style: str | None = Field(default="default", description="Image style")
+    size: str | None = Field(default="1024*1024", description="Image size")
+    n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
+    session_id: str | None = Field(default=None, description="Session ID for artifact storage")
+
+
+class AsyncImageTaskSubmitResponse(BaseModel):
+    """Response after submitting an async image task."""
+
+    task_id: str = Field(..., description="Unique task ID for polling")
+    status: str = Field(default="pending", description="Initial task status")
+    message: str = Field(default="Image generation task submitted")
+
+
+class AsyncImageArtifact(BaseModel):
+    """An image artifact from completed generation."""
+
+    artifact_id: str | None = Field(default=None, description="Artifact ID if saved")
+    download_url: str | None = Field(default=None, description="Presigned download URL")
+    url: str = Field(..., description="Image data URL (data:image/png;base64,...)")
+    width: int | None = None
+    height: int | None = None
+
+
+class AsyncImageTaskStatusResponse(BaseModel):
+    """Response for polling async image task status."""
+
+    task_id: str = Field(..., description="Task ID")
+    status: str = Field(..., description="pending | running | completed | failed")
+    progress: int = Field(default=0, description="Progress percentage 0-100")
+    prompt: str = Field(..., description="Original prompt")
+    model_id: str = Field(..., description="Model used")
+    provider: str | None = Field(default=None, description="Provider used")
+    images: list[AsyncImageArtifact] = Field(default_factory=list, description="Generated images (when completed)")
+    duration_ms: float | None = Field(default=None, description="Total duration when completed")
+    error: str | None = Field(default=None, description="Error message if failed")
+    created_at: str = Field(..., description="Task creation time ISO8601")
+    completed_at: str | None = Field(default=None, description="Completion time ISO8601")

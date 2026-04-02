@@ -44,6 +44,10 @@ from ..schemas.assistant import (
     AssistantConfigResponse,
     DatasetInfoResponse,
     DatasetsListResponse,
+    AsyncImageArtifact,
+    AsyncImageGenerationRequest,
+    AsyncImageTaskStatusResponse,
+    AsyncImageTaskSubmitResponse,
     GeneratedImage,
     ImageGenerationRequest,
     ImageGenerationResponse,
@@ -1447,6 +1451,257 @@ async def generate_image(
             duration_ms=(time.time() - start_time) * 1000,
             error=str(e),
         )
+
+
+# =========================================================================
+# Async Image Generation (background task with polling)
+# =========================================================================
+
+import asyncio
+import uuid
+from datetime import datetime, timezone
+
+# In-memory task store for async image generation
+# Key: task_id, Value: dict with task state
+_image_tasks: dict[str, dict] = {}
+# Max tasks to keep (LRU eviction of completed tasks older than 1 hour)
+_MAX_TASKS = 500
+
+
+def _cleanup_old_tasks() -> None:
+    """Remove completed/failed tasks older than 1 hour."""
+    if len(_image_tasks) < _MAX_TASKS:
+        return
+    now = datetime.now(timezone.utc)
+    to_remove = []
+    for tid, task in _image_tasks.items():
+        if task["status"] in ("completed", "failed"):
+            created = datetime.fromisoformat(task["created_at"])
+            if (now - created).total_seconds() > 3600:
+                to_remove.append(tid)
+    for tid in to_remove:
+        _image_tasks.pop(tid, None)
+
+
+async def _run_image_generation_task(
+    task_id: str,
+    body: AsyncImageGenerationRequest,
+    model_registry: ModelRegistry,
+    user: UserContext,
+) -> None:
+    """Background coroutine that runs image generation and saves artifacts."""
+    import time
+
+    from ...services.assistant.models.model_registry import ModelProvider
+    from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
+
+    task = _image_tasks[task_id]
+    task["status"] = "running"
+    task["progress"] = 10
+
+    start_time = time.time()
+
+    try:
+        # Determine provider preference
+        model_info = model_registry.get_model(body.model_id)
+        selected_provider = model_info.provider.value if model_info else None
+        prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
+
+        router = get_smart_image_generator()
+
+        # Map style
+        style_map = {
+            "default": "<auto>", "auto": "<auto>",
+            "photography": "<photography>", "portrait": "<portrait>",
+            "3d": "<3d cartoon>", "anime": "<anime>",
+            "oil": "<oil painting>", "watercolor": "<watercolor>",
+            "sketch": "<sketch>", "flat": "<flat illustration>",
+        }
+        style = style_map.get(body.style or "default", "<auto>")
+
+        # Parse size
+        width, height = 1024, 1024
+        if body.size:
+            try:
+                parts = body.size.split("*")
+                if len(parts) == 2:
+                    width, height = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+
+        # Aspect ratio
+        try:
+            ratio = float(width) / float(height) if height else 1.0
+        except Exception:
+            ratio = 1.0
+        candidates = {"1:1": 1.0, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4}
+        aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
+
+        task["progress"] = 30
+        task["provider"] = "google" if prefer_gemini else "dashscope"
+
+        res = await router.generate(
+            prompt=body.prompt,
+            n=body.n,
+            size=body.size or "1024*1024",
+            style=style,
+            aspect_ratio=aspect_ratio,
+            prefer_gemini=prefer_gemini,
+        )
+
+        duration_ms = (time.time() - start_time) * 1000
+        task["duration_ms"] = duration_ms
+        task["provider"] = res.provider
+
+        if not res.success:
+            err = res.error or "Image generation failed"
+            if res.blocked and res.block_reason:
+                err = f"{err} (blocked: {res.block_reason})"
+            task["status"] = "failed"
+            task["error"] = err
+            task["progress"] = 100
+            task["completed_at"] = datetime.now(timezone.utc).isoformat()
+            return
+
+        task["progress"] = 70
+
+        # Build image results and save to artifacts
+        images: list[dict] = []
+        artifact_storage = get_artifact_storage()
+        session_id = body.session_id
+
+        for i, img in enumerate(res.images):
+            mime_type = img.get("mime_type", "image/png")
+            content_base64 = img.get("content_base64", "")
+            data_url = f"data:{mime_type};base64,{content_base64}"
+
+            image_entry: dict = {"url": data_url, "width": width, "height": height}
+
+            # Save to artifact storage if session_id provided
+            if artifact_storage and session_id and content_base64:
+                try:
+                    import base64 as b64
+
+                    content = b64.b64decode(content_base64)
+                    ext = mime_type.split("/")[-1] or "png"
+                    filename = f"generated_image_{task_id[:8]}_{i + 1}.{ext}"
+
+                    artifact = await artifact_storage.create_artifact(
+                        session_id=session_id,
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        type="image",
+                        format=ext,
+                        title=f"Generated: {body.prompt[:40]}...",
+                        filename=filename,
+                        content=content,
+                        source="image_generation",
+                    )
+                    download_url = await artifact_storage.get_presigned_download_url(artifact)
+                    image_entry["artifact_id"] = artifact.artifact_id
+                    image_entry["download_url"] = download_url
+                except Exception as e:
+                    logger.warning("Failed to save async image artifact: %s", e)
+
+            images.append(image_entry)
+
+        task["images"] = images
+        task["status"] = "completed"
+        task["progress"] = 100
+        task["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    except Exception as e:
+        logger.error("Async image generation task %s failed: %s", task_id, e)
+        task["status"] = "failed"
+        task["error"] = str(e)
+        task["progress"] = 100
+        task["duration_ms"] = (time.time() - start_time) * 1000
+        task["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+
+@router.post("/generate-image-async", response_model=AsyncImageTaskSubmitResponse)
+async def submit_image_generation(
+    body: AsyncImageGenerationRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    model_registry: ModelRegistry = Depends(get_model_registry),
+) -> AsyncImageTaskSubmitResponse:
+    """
+    Submit an async image generation task.
+
+    Returns a task_id immediately. Poll GET /image-task/{task_id} for status.
+    When completed, images are auto-saved to artifacts (if session_id provided).
+    """
+    _cleanup_old_tasks()
+
+    task_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+
+    _image_tasks[task_id] = {
+        "task_id": task_id,
+        "status": "pending",
+        "progress": 0,
+        "prompt": body.prompt,
+        "model_id": body.model_id,
+        "provider": None,
+        "images": [],
+        "duration_ms": None,
+        "error": None,
+        "created_at": now,
+        "completed_at": None,
+    }
+
+    # Launch background task
+    asyncio.create_task(
+        _run_image_generation_task(task_id, body, model_registry, user)
+    )
+
+    return AsyncImageTaskSubmitResponse(
+        task_id=task_id,
+        status="pending",
+        message="Image generation task submitted",
+    )
+
+
+@router.get("/image-task/{task_id}", response_model=AsyncImageTaskStatusResponse)
+async def get_image_task_status(
+    task_id: str,
+    user: UserContext = Depends(get_user_context),
+) -> AsyncImageTaskStatusResponse:
+    """
+    Poll the status of an async image generation task.
+
+    Status flow: pending → running → completed / failed
+    When status is 'completed', images array contains the results with artifact info.
+    """
+    task = _image_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    images = [
+        AsyncImageArtifact(
+            artifact_id=img.get("artifact_id"),
+            download_url=img.get("download_url"),
+            url=img["url"],
+            width=img.get("width"),
+            height=img.get("height"),
+        )
+        for img in task.get("images", [])
+    ]
+
+    return AsyncImageTaskStatusResponse(
+        task_id=task["task_id"],
+        status=task["status"],
+        progress=task.get("progress", 0),
+        prompt=task["prompt"],
+        model_id=task["model_id"],
+        provider=task.get("provider"),
+        images=images,
+        duration_ms=task.get("duration_ms"),
+        error=task.get("error"),
+        created_at=task["created_at"],
+        completed_at=task.get("completed_at"),
+    )
 
 
 # =========================================================================
