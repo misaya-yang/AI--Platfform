@@ -2339,6 +2339,38 @@ class AgentLoop:
                             tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
                             tool_output_files = result.output_files or []
 
+                            # ADR-003: Sub-agent execution — intercept __subagent__ marker
+                            if (
+                                isinstance(result.result, dict)
+                                and result.result.get("__subagent__")
+                                and self.model_registry
+                            ):
+                                from .subagent_manager import SubAgentManager
+                                from ..tools.tool_registry import get_tool_registry
+                                sub_mgr = SubAgentManager(
+                                    model_registry=self.model_registry,
+                                    tool_registry=get_tool_registry(),
+                                )
+                                sub_config = result.result["config"]
+                                subagent_result = ""
+                                async for sub_event in sub_mgr.spawn(
+                                    sub_config,
+                                    parent_user=user,
+                                    parent_tenant_id=ctx.tenant_id,
+                                ):
+                                    yield AgentLoopEvent(
+                                        phase=phase,
+                                        event_type=sub_event["event_type"],
+                                        data=sub_event["data"],
+                                    )
+                                    if sub_event["event_type"] == "subagent_finished":
+                                        subagent_result = sub_event["data"].get("result_summary", "")
+                                # Override tool result with sub-agent summary
+                                tool_result = subagent_result
+                                tool_result_for_model = subagent_result
+                                tool_success = True
+                                tool_duration_ms = sub_event["data"].get("duration_ms", 0) if sub_event else 0
+
                             queue_state = tool_metadata.get("queue_state")
                             if queue_state:
                                 queue_mode = (

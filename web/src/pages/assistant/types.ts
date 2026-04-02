@@ -271,6 +271,9 @@ export interface ChatMessage {
   // Internal: artifact IDs from session metadata (used by hydrateMessageArtifacts)
   _artifactIds?: string[];
 
+  // Sub-agents spawned during this message's execution
+  activeSubAgents?: SubAgentState[];
+
   // Agentic extensions
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
@@ -613,6 +616,34 @@ export interface ArtifactData {
   url?: string;
   content?: string;
   createdAt: Date;
+}
+
+// =============================================================================
+// Sub-Agent Types (ADR-003)
+// =============================================================================
+
+export interface SubAgentStep {
+  toolName: string;
+  callId: string;
+  status: "running" | "completed" | "failed";
+  summary?: string;
+  durationMs?: number;
+}
+
+export interface SubAgentState {
+  agentId: string;
+  agentType: "explore" | "task" | "plan";
+  description: string;
+  status: "running" | "completed" | "failed";
+  prompt?: string;
+  currentStep?: string;
+  turnsCompleted?: number;
+  toolCallsMade?: number;
+  steps: SubAgentStep[];
+  streamingText?: string;
+  resultSummary?: string;
+  error?: string;
+  durationMs?: number;
 }
 
 // =============================================================================

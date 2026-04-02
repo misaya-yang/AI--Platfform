@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
+import { SubAgentCard } from "./SubAgentCard";
 import { WebSearchDisplay } from "./WebSearchDisplay";
 import { ContextDisplay } from "./ContextDisplay";
 import { CitationDisplay } from "./CitationDisplay";
@@ -893,6 +894,15 @@ export function ChatMessage({ message }: ChatMessageProps) {
           {/* Context display */}
           {message.contexts && message.contexts.length > 0 && (
             <ContextDisplay contexts={message.contexts} />
+          )}
+
+          {/* Sub-Agent Cards (ADR-003) */}
+          {message.activeSubAgents && message.activeSubAgents.length > 0 && (
+            <div className="mb-3 space-y-1">
+              {message.activeSubAgents.map((sa) => (
+                <SubAgentCard key={sa.agentId} subAgent={sa} />
+              ))}
+            </div>
           )}
 
           {/* Thought Process (pre-tool thinking from iteration 1) */}

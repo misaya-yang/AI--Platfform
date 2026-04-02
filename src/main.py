@@ -1224,6 +1224,11 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         kb_proxy=getattr(app.state, "kb_proxy", None),
     )
 
+    # Register sub-agent tool (ADR-003)
+    from .services.assistant.tools.subagent_tool import register_subagent_tool
+    register_subagent_tool()
+    logger.info("Registered spawn_subagent tool")
+
     # Store in app.state
     app.state.model_registry = model_registry
     app.state.assistant_service = assistant_service

@@ -91,6 +91,14 @@ export const SSEEventType = {
   QUIZ_READY: "quiz:ready",
   QUIZ_ERROR: "quiz:error",
 
+  // Sub-Agent lifecycle (ADR-003)
+  SUBAGENT_STARTED: "subagent_started",
+  SUBAGENT_STEP: "subagent_step",
+  SUBAGENT_TEXT_DELTA: "subagent_text_delta",
+  SUBAGENT_TOOL_START: "subagent_tool_start",
+  SUBAGENT_TOOL_RESULT: "subagent_tool_result",
+  SUBAGENT_FINISHED: "subagent_finished",
+
   // AG-UI snapshots
   TEXT_MESSAGE_START: "text_message_start",
   TEXT_MESSAGE_CONTENT: "text_message_content",

@@ -913,6 +913,92 @@ export function useChatSession() {
             break;
           }
 
+          // ADR-003: Sub-Agent events
+          case SSEEventType.SUBAGENT_STARTED:
+          case "subagent_started": {
+            const sa = event.data as { agent_id: string; agent_type: string; description: string; prompt?: string };
+            setMessages(prev => prev.map(m =>
+              m.id === assistantMessage.id
+                ? {
+                    ...m,
+                    activeSubAgents: [...(m.activeSubAgents || []), {
+                      agentId: sa.agent_id,
+                      agentType: sa.agent_type as "explore" | "task" | "plan",
+                      description: sa.description,
+                      prompt: sa.prompt,
+                      status: "running",
+                      steps: [],
+                    }],
+                  }
+                : m
+            ));
+            break;
+          }
+          case SSEEventType.SUBAGENT_TEXT_DELTA:
+          case "subagent_text_delta": {
+            const { agent_id, text } = event.data as { agent_id: string; text: string };
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
+              return {
+                ...m,
+                activeSubAgents: m.activeSubAgents.map(sa =>
+                  sa.agentId === agent_id
+                    ? { ...sa, streamingText: (sa.streamingText || "") + text }
+                    : sa
+                ),
+              };
+            }));
+            break;
+          }
+          case SSEEventType.SUBAGENT_TOOL_START:
+          case "subagent_tool_start": {
+            const { agent_id, tool_name, call_id } = event.data as { agent_id: string; tool_name: string; call_id: string };
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
+              return {
+                ...m,
+                activeSubAgents: m.activeSubAgents.map(sa =>
+                  sa.agentId === agent_id
+                    ? { ...sa, steps: [...sa.steps, { toolName: tool_name, callId: call_id, status: "running" as const }], toolCallsMade: (sa.toolCallsMade || 0) + 1 }
+                    : sa
+                ),
+              };
+            }));
+            break;
+          }
+          case SSEEventType.SUBAGENT_TOOL_RESULT:
+          case "subagent_tool_result": {
+            const { agent_id, call_id, success, duration_ms, summary } = event.data as { agent_id: string; call_id: string; success: boolean; duration_ms?: number; summary?: string };
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
+              return {
+                ...m,
+                activeSubAgents: m.activeSubAgents.map(sa =>
+                  sa.agentId === agent_id
+                    ? { ...sa, steps: sa.steps.map(s => s.callId === call_id ? { ...s, status: success ? "completed" as const : "failed" as const, summary, durationMs: duration_ms } : s) }
+                    : sa
+                ),
+              };
+            }));
+            break;
+          }
+          case SSEEventType.SUBAGENT_FINISHED:
+          case "subagent_finished": {
+            const { agent_id, status, result_summary, duration_ms, error } = event.data as { agent_id: string; status: string; result_summary?: string; duration_ms?: number; error?: string };
+            setMessages(prev => prev.map(m => {
+              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
+              return {
+                ...m,
+                activeSubAgents: m.activeSubAgents.map(sa =>
+                  sa.agentId === agent_id
+                    ? { ...sa, status: status as "completed" | "failed", resultSummary: result_summary, durationMs: duration_ms, error }
+                    : sa
+                ),
+              };
+            }));
+            break;
+          }
+
           case SSEEventType.STATUS:
             // 状态事件不计入 TTFT - TTFT 只测量真正的文本内容出现时间
             // STATUS 事件是预处理阶段（如 "分析任务需求..."），不是最终内容
