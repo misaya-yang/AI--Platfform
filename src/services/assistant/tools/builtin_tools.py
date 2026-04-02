@@ -39,8 +39,7 @@ logger = get_logger(__name__)
 
 KB_SEARCH_DEFINITION = ToolDefinition(
     name="search_knowledge_base",
-    description="Search the internal knowledge base for relevant documents and information. "
-    "Supports text and image retrieval. Returns the most relevant chunks from the specified datasets.",
+    description="Search the knowledge base for relevant documents. Returns ranked text/image chunks from specified datasets.",
     parameters=[
         ToolParameter(
             name="query",
@@ -409,8 +408,7 @@ class KBSearchExecutor(ToolExecutor):
 
 WEB_SEARCH_DEFINITION = ToolDefinition(
     name="search_web",
-    description="Search the web for current information using Tavily. "
-    "Returns relevant web pages with summaries.",
+    description="Search the web for current events, public knowledge, or external information not in the knowledge base.",
     parameters=[
         ToolParameter(
             name="query",
@@ -455,19 +453,8 @@ WEB_SEARCH_DEFINITION = ToolDefinition(
     timeout_seconds=30,
 )
 
-# Backward-compatible alias for models that call `web_search` instead of `search_web`.
-# IMPORTANT: Keep parameters identical to avoid confusing the LLM.
-WEB_SEARCH_ALIAS_DEFINITION = ToolDefinition(
-    name="web_search",
-    description=WEB_SEARCH_DEFINITION.description,
-    parameters=WEB_SEARCH_DEFINITION.parameters,
-    category=WEB_SEARCH_DEFINITION.category,
-    risk_level=WEB_SEARCH_DEFINITION.risk_level,
-    when_to_use=WEB_SEARCH_DEFINITION.when_to_use,
-    when_not_to_use=WEB_SEARCH_DEFINITION.when_not_to_use,
-    examples=WEB_SEARCH_DEFINITION.examples,
-    timeout_seconds=WEB_SEARCH_DEFINITION.timeout_seconds,
-)
+
+# Note: web_search alias removed in ADR-003 Phase 1 — consolidated to search_web only.
 
 
 class WebSearchExecutor(ToolExecutor):
@@ -563,7 +550,6 @@ def register_builtin_tools(
     if tavily_tool and tavily_tool.is_configured:
         web_exec = WebSearchExecutor(tavily_tool)
         register_tool(WEB_SEARCH_DEFINITION, web_exec)
-        register_tool(WEB_SEARCH_ALIAS_DEFINITION, web_exec)
         logger.info("Registered web search tool")
     else:
         logger.warning("Tavily not configured, web search tool not registered")

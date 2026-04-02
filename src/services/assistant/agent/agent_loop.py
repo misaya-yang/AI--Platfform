@@ -93,6 +93,7 @@ from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetri
 from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
 from ..tasks.task_planner import ExecutionPlan, TaskPlanner
 from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
+from ..tools.constants import ToolName, QA_TOOLS
 from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from ..working_memory import TaskStatus, WorkingMemory
 
@@ -1297,7 +1298,7 @@ class AgentLoop:
                 if name == "search_knowledge_base":
                     q = str(args.get("query") or "")[:120]
                     return {"title": "检索知识库", "description": q, "icon": "kb"}
-                if name in ("search_web", "web_search"):
+                if name == "search_web":
                     q = str(args.get("query") or "")[:120]
                     return {"title": "网页搜索", "description": q, "icon": "web"}
                 if name == "execute_python_code":
@@ -1429,7 +1430,7 @@ class AgentLoop:
                             lines.append(_truncate_text(text_result, 1200))
                         return "\n".join(lines)
 
-                if tool_name in ("search_web", "web_search"):
+                if tool_name == "search_web":
                     display = (
                         tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
                     )
@@ -1593,13 +1594,7 @@ class AgentLoop:
 
                 # For non-creation Q&A turns, keep only retrieval + memory tools.
                 if question_like and not asks_to_create:
-                    keep_names = {
-                        "search_knowledge_base",
-                        "search_web",
-                        "web_search",
-                        "update_user_memory",
-                    }
-                    selected = [d for d in all_defs if getattr(d, "name", "") in keep_names]
+                    selected = [d for d in all_defs if getattr(d, "name", "") in QA_TOOLS]
                     if selected:
                         return selected
 
@@ -2529,7 +2524,7 @@ class AgentLoop:
                                     data=quiz_data,
                                 )
 
-                        elif tool_name in ("search_web", "web_search"):
+                        elif tool_name == "search_web":
                             display = (
                                 tool_metadata.get("display")
                                 if isinstance(tool_metadata, dict)
@@ -2549,7 +2544,7 @@ class AgentLoop:
                         if (
                             not first_token_emitted
                             and tool_success
-                            and tool_name in ("search_knowledge_base", "search_web", "web_search")
+                            and tool_name in ("search_knowledge_base", "search_web")
                         ):
                             results_count = None
                             if isinstance(tool_metadata, dict):
