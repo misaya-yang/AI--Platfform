@@ -21,6 +21,7 @@ from .v1.providers import router as providers_router
 from .v1.proxy import router as proxy_router
 from .v1.quiz import router as quiz_router, public_router as quiz_public_router
 from .v1.exams import router as exams_router
+from .v1.skills import router as skills_router
 from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
@@ -65,5 +66,6 @@ api_router.include_router(assistant_router)  # GPT-like Assistant API
 api_router.include_router(quiz_router)  # Quiz generation & grading
 api_router.include_router(quiz_public_router)  # Public quiz sharing (no auth)
 api_router.include_router(exams_router)  # Exam management (admin only)
+api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(providers_router)  # LLM Provider 管理
 api_router.include_router(models_router)  # LLM Model 管理

@@ -77,6 +77,9 @@ class QueryIntent:
     retrieval_strategy: str  # semantic, keyword, hybrid, none
     suggested_queries: list[str] = field(default_factory=list)
 
+    # Skill detection
+    skill_name: str | None = None  # Detected /slash-command or "use skill X"
+
     # Metadata
     confidence: float = 0.0
     analysis_time_ms: float = 0.0
@@ -212,6 +215,37 @@ class QueryIntentAnalyzer:
         """
         query_lower = query.lower().strip()
         query_len = len(query)
+
+        # 0. Skill slash-command detection: /skill-name or "use skill X"
+        import re as _re
+        slash_match = _re.match(r"^/([a-z][a-z0-9\-_]{1,48})\b", query_lower)
+        if slash_match:
+            return QueryIntent(
+                requires_kb_search=False,
+                decision=RetrievalDecision.SKIP,
+                decision_reason=f"Slash command: /{slash_match.group(1)}",
+                query_type=QueryType.FACTUAL,
+                domain="skill",
+                complexity=0.2,
+                retrieval_strategy="none",
+                confidence=0.95,
+                tier_used="fast_rule",
+                skill_name=slash_match.group(1),
+            )
+        use_skill_match = _re.search(r"(?:use|用|调用|启用)\s*(?:skill|技能)\s*[:\s]*([a-z][a-z0-9\-_]+)", query_lower)
+        if use_skill_match:
+            return QueryIntent(
+                requires_kb_search=False,
+                decision=RetrievalDecision.SKIP,
+                decision_reason=f"Explicit skill invocation: {use_skill_match.group(1)}",
+                query_type=QueryType.FACTUAL,
+                domain="skill",
+                complexity=0.2,
+                retrieval_strategy="none",
+                confidence=0.9,
+                tier_used="fast_rule",
+                skill_name=use_skill_match.group(1),
+            )
 
         # 1. Greetings - no KB needed
         greetings = ["你好", "早上好", "晚上好", "嗨", "hi", "hello", "hey", "哈喽"]
