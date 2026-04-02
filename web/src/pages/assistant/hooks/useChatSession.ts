@@ -193,9 +193,50 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
     if (msg.metadata.quiz_id) {
       (baseMessage as any)._quizId = msg.metadata.quiz_id;
     }
+
+    // Mark artifact_ids for post-hydration
+    if (msg.metadata.artifact_ids && Array.isArray(msg.metadata.artifact_ids)) {
+      (baseMessage as any)._artifactIds = msg.metadata.artifact_ids;
+    }
   }
   return baseMessage;
 };
+
+/** Hydrate generatedArtifacts on messages from the session artifact list */
+function hydrateMessageArtifacts(
+  messages: ChatMessageType[],
+  artifacts: ArtifactInfo[],
+): ChatMessageType[] {
+  if (!artifacts.length) return messages;
+  const artifactMap = new Map<string, ArtifactInfo>();
+  for (const a of artifacts) {
+    artifactMap.set(a.artifact_id, a);
+  }
+  return messages.map((m) => {
+    const ids: string[] | undefined = (m as any)._artifactIds;
+    if (!ids || ids.length === 0) return m;
+    const generatedArtifacts: GeneratedArtifact[] = [];
+    for (const id of ids) {
+      const a = artifactMap.get(id);
+      if (a) {
+        generatedArtifacts.push({
+          id: a.artifact_id,
+          type: (a.type || "file") as GeneratedArtifact["type"],
+          format: a.format || "",
+          title: a.title || a.filename || "Artifact",
+          url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
+          filename: a.filename,
+          mimeType: a.mime_type,
+          sizeBytes: a.size_bytes,
+        });
+      }
+    }
+    if (generatedArtifacts.length > 0) {
+      return { ...m, generatedArtifacts };
+    }
+    return m;
+  });
+}
 
 /** Async: load quiz data for messages that have _quizId, then update state */
 async function hydrateQuizData(
@@ -430,19 +471,7 @@ export function useChatSession() {
                 getSessionArtifacts(savedSessionId).catch(() => []),
               ]);
               
-              const chatMessages = history.map((msg, index) =>
-                restoreMessageMetadata(msg, index, savedSessionId)
-              );
-              setMessages(chatMessages);
-              hydrateQuizData(chatMessages, setMessages);
-              setHistoryRestoreState("ready");
-              trackChatHistoryRestored("assistant", {
-                sessionId: savedSessionId,
-                messageCount: chatMessages.length,
-                restored: true,
-              });
-              
-              // Restore artifacts
+              // Restore artifacts first (needed for message hydration)
               const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
                 id: a.artifact_id,
                 type: a.type as any,
@@ -457,6 +486,20 @@ export function useChatSession() {
               }));
               setArtifacts(loadedArtifacts);
               setShowArtifacts(loadedArtifacts.length > 0);
+
+              // Restore messages with artifact hydration
+              let chatMessages = history.map((msg, index) =>
+                restoreMessageMetadata(msg, index, savedSessionId)
+              );
+              chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+              setMessages(chatMessages);
+              hydrateQuizData(chatMessages, setMessages);
+              setHistoryRestoreState("ready");
+              trackChatHistoryRestored("assistant", {
+                sessionId: savedSessionId,
+                messageCount: chatMessages.length,
+                restored: true,
+              });
             } catch (err) {
               console.error("Failed to restore active session:", err);
               const reason =
@@ -539,21 +582,7 @@ export function useChatSession() {
         getSessionArtifacts(sessionId).catch(() => []),
       ]);
 
-      // Restore messages
-      const chatMessages = history.map((msg, index) =>
-        restoreMessageMetadata(msg, index, sessionId)
-      );
-      setMessages(chatMessages);
-      hydrateQuizData(chatMessages, setMessages);
-      setActiveSessionId(sessionId);
-      setHistoryRestoreState("ready");
-      trackChatHistoryRestored("assistant", {
-        sessionId,
-        messageCount: chatMessages.length,
-        restored: true,
-      });
-
-      // Restore artifacts
+      // Restore artifacts first (needed for message hydration)
       const loadedArtifacts: Artifact[] = sessionArtifacts.map((a: ArtifactInfo) => ({
         id: a.artifact_id,
         type: a.type as any,
@@ -568,6 +597,21 @@ export function useChatSession() {
       }));
       setArtifacts(loadedArtifacts);
       setShowArtifacts(loadedArtifacts.length > 0);
+
+      // Restore messages with artifact hydration
+      let chatMessages = history.map((msg, index) =>
+        restoreMessageMetadata(msg, index, sessionId)
+      );
+      chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+      setMessages(chatMessages);
+      hydrateQuizData(chatMessages, setMessages);
+      setActiveSessionId(sessionId);
+      setHistoryRestoreState("ready");
+      trackChatHistoryRestored("assistant", {
+        sessionId,
+        messageCount: chatMessages.length,
+        restored: true,
+      });
 
       // Reset agent state
       setWorkingMemory(null);
