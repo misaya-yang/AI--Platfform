@@ -237,9 +237,10 @@ function ArtifactCard({
   const title = isOutputFile
     ? (artifact as OutputFile).filename
     : (artifact as Artifact).title || (artifact as Artifact).filename;
-  const format = isOutputFile
-    ? (artifact as OutputFile).mime_type?.split("/")[1] || "file"
+  const rawFormat = isOutputFile
+    ? undefined  // Let getFormatLabel derive from mimeType
     : (artifact as Artifact).format;
+  const format = getFormatLabel(rawFormat, isOutputFile ? (artifact as OutputFile).mime_type || undefined : (artifact as Artifact).mimeType || undefined);
   const size = isOutputFile
     ? (artifact as OutputFile).size_bytes
     : (artifact as Artifact).sizeBytes;
