@@ -91,7 +91,7 @@ class MCPManager:
         # Create executor closure
         async def executor(request: Any) -> Any:
             from ..tools.tool_registry import ToolCallResult
-            args = getattr(request, "tool_args", {}) or {}
+            args = getattr(request, "arguments", None) or getattr(request, "tool_args", {}) or {}
             result = await client.call_tool(mcp_tool.name, args)
             text_parts = []
             for c in result.content:

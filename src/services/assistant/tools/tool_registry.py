@@ -445,8 +445,8 @@ class ToolRegistry:
                 error=f"Permission denied for tool: {request.tool_name}",
             )
 
-        # Validate arguments
-        errors = executor.validate_arguments(definition, request.arguments)
+        # Validate arguments (skip for non-ToolExecutor callables like MCP closures)
+        errors = executor.validate_arguments(definition, request.arguments) if hasattr(executor, "validate_arguments") else []
         if errors:
             return ToolCallResult(
                 call_id=request.call_id,
@@ -470,8 +470,10 @@ class ToolRegistry:
 
             # Enforce timeout from tool definition
             try:
+                # Support both ToolExecutor instances (.execute) and plain callables (MCP closures)
+                coro = executor.execute(request) if hasattr(executor, "execute") else executor(request)
                 result = await asyncio.wait_for(
-                    executor.execute(request), timeout=definition.timeout_seconds
+                    coro, timeout=definition.timeout_seconds
                 )
             except asyncio.TimeoutError:
                 duration_ms = definition.timeout_seconds * 1000
