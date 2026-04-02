@@ -219,14 +219,21 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
     if artifact_id not in artifact_ids:
         raise HTTPException(404, "Artifact not in this share")
 
-    # Proxy to artifact storage
+    # Proxy to artifact storage — load full artifact, then generate presigned URL
     artifact_storage = _get_artifact_storage(request)
     if not artifact_storage:
         raise HTTPException(503, "Artifact storage not available")
 
     try:
-        url = await artifact_storage.get_download_url(artifact_id)
+        artifact = await artifact_storage.get_artifact(artifact_id)
+        if not artifact:
+            raise HTTPException(404, "Artifact not found in storage")
+        url = await artifact_storage.get_presigned_download_url(artifact)
+        if not url:
+            raise HTTPException(500, "Failed to generate download URL")
         return RedirectResponse(url=url, status_code=302)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get artifact URL: {e}")
         raise HTTPException(404, "Artifact not found")
