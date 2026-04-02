@@ -260,8 +260,9 @@ async def query_audit_log(
         f"SELECT * FROM tool_audit_log {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
         *params,
     )
-    count = await db.fetchval(
-        f"SELECT COUNT(*) FROM tool_audit_log {where}",
+    count_row = await db.fetchrow(
+        f"SELECT COUNT(*) AS cnt FROM tool_audit_log {where}",
         *params[:-2],
     )
-    return {"total": count, "items": [dict(r) for r in rows]}
+    total = count_row["cnt"] if count_row else 0
+    return {"total": total, "items": [dict(r) for r in rows]}

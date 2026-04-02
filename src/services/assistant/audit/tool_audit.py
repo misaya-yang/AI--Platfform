@@ -91,16 +91,17 @@ class ToolAuditService:
             return True
 
         try:
-            count = await self._database.fetchval(
+            row = await self._database.fetchrow(
                 """
-                SELECT COUNT(*) FROM tool_audit_log
+                SELECT COUNT(*) AS cnt FROM tool_audit_log
                 WHERE tenant_id = $1 AND user_id = $2
                   AND created_at > NOW() - INTERVAL '1 minute'
                 """,
                 tenant_id,
                 user_id,
             )
-            return (count or 0) < limit_per_minute
+            count = row["cnt"] if row else 0
+            return count < limit_per_minute
         except Exception as e:
             logger.warning(f"Rate limit check failed: {e}")
             return True  # Fail open
