@@ -40,7 +40,7 @@ async def list_mcp_tools(
     registry = get_tool_registry()
     mcp_tools = [
         {"name": t.name, "description": t.description, "category": t.category.value}
-        for t in registry.list()
+        for t in registry.list_tools()
         if t.category == ToolCategory.MCP
     ]
     return {"tools": mcp_tools, "total": len(mcp_tools)}
