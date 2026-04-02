@@ -2102,8 +2102,9 @@ class AgentLoop:
                 # Step 4: Execute tool calls
                 logger.info(f"[STREAMING-FIRST] Executing {len(tool_calls_batch)} tool calls")
 
-                # Emit thinking_end to signal pre-tool text is complete
-                if accumulated_content.strip():
+                # Emit thinking_end ONLY on the first iteration to signal
+                # pre-tool thinking text. Later iterations' text is the actual response.
+                if iteration == 1 and accumulated_content.strip():
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="thinking_end",
