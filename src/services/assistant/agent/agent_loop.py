@@ -94,6 +94,7 @@ from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
 from ..tasks.task_planner import ExecutionPlan, TaskPlanner
 from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
 from ..tools.constants import ToolName, QA_TOOLS
+from ..tools.tool_selector import select_tools
 from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from ..working_memory import TaskStatus, WorkingMemory
 
@@ -1538,67 +1539,8 @@ class AgentLoop:
                 all_defs: list[Any],
                 user_message: str,
             ) -> list[Any]:
-                """
-                Select a lean tool set for question-style turns to reduce prompt overhead.
-
-                Keep full toolset for creation/execution intents so Agent capabilities are preserved.
-                """
-                message_lower = (user_message or "").lower()
-                create_markers = (
-                    "generate",
-                    "create",
-                    "build",
-                    "draft",
-                    "write",
-                    "code",
-                    "python",
-                    "ppt",
-                    "slide",
-                    "document",
-                    "docx",
-                    "image",
-                    "poster",
-                    "生成",
-                    "创建",
-                    "制作",
-                    "写",
-                    "代码",
-                    "脚本",
-                    "图片",
-                    "海报",
-                    "文档",
-                    "报告",
-                    "ppt",
-                )
-                question_markers = (
-                    "?",
-                    "？",
-                    "what",
-                    "why",
-                    "when",
-                    "where",
-                    "who",
-                    "how",
-                    "什么",
-                    "为什么",
-                    "如何",
-                    "怎么",
-                    "是否",
-                    "能否",
-                    "请问",
-                    "介绍",
-                    "解释",
-                )
-                asks_to_create = any(token in message_lower for token in create_markers)
-                question_like = any(token in message_lower for token in question_markers)
-
-                # For non-creation Q&A turns, keep only retrieval + memory tools.
-                if question_like and not asks_to_create:
-                    selected = [d for d in all_defs if getattr(d, "name", "") in QA_TOOLS]
-                    if selected:
-                        return selected
-
-                return all_defs
+                """ADR-003 Phase 2: Token-aware, relevance-scored tool selection."""
+                return select_tools(all_defs, user_message)
 
             def _trim_history_for_streaming(
                 messages_history: list[dict[str, Any]],
