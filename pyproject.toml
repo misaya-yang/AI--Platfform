@@ -115,9 +115,14 @@ storage = [
     "aiofiles>=24.0.0",   # Async file I/O for streaming downloads
 ]
 
+# Code Execution Sandbox (Docker SDK for gVisor/runsc)
+sandbox = [
+    "docker>=7.0.0",
+]
+
 # All optional dependencies
 all = [
-    "ai-gateway[database,knowledge,documents,grpc,aiohttp,storage]",
+    "ai-gateway[database,knowledge,documents,grpc,aiohttp,storage,sandbox]",
 ]
 
 # Development dependencies
