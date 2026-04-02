@@ -32,7 +32,7 @@ TIER_SKILL = 2    # User-defined skills
 TIER_MCP = 3      # MCP tools (lowest priority by default)
 
 # Tools that are always included regardless of relevance
-ALWAYS_INCLUDE = {ToolName.SEARCH_KB, ToolName.UPDATE_MEMORY}
+ALWAYS_INCLUDE = {ToolName.SEARCH_KB, ToolName.UPDATE_MEMORY, ToolName.SPAWN_SUBAGENT}
 
 # Keyword → tool relevance mappings
 _TOOL_KEYWORDS: dict[str, list[str]] = {

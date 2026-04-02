@@ -26,6 +26,7 @@ class ToolName(str, Enum):
 
     # Utility
     UPDATE_MEMORY = "update_user_memory"
+    SPAWN_SUBAGENT = "spawn_subagent"
 
 
 # Sets for quick membership checks
