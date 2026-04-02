@@ -98,6 +98,8 @@ export function useImageGeneration(
       if (result.success && result.images.length > 0) {
         const providerName = result.provider === "google" ? "Gemini" : "DashScope Wanx";
         const artifactUrls: string[] = [];
+        const artifactIds: string[] = [];
+        const generatedArtifacts: Array<{ id: string; type: "image"; format: string; title: string; url: string }> = [];
 
         for (let i = 0; i < result.images.length; i++) {
           const img = result.images[i];
@@ -107,11 +109,12 @@ export function useImageGeneration(
               if (match) {
                 const format = match[1];
                 const base64Data = match[2];
+                const imgTitle = `${t("assistant.generatedImage", "Generated Image")} ${i + 1}: ${prompt.slice(0, 30)}...`;
                 const artifact = await createArtifact({
                   session_id: sessionId,
                   type: "image",
                   format: format,
-                  title: `${t("assistant.generatedImage", "Generated Image")} ${i + 1}: ${prompt.slice(0, 30)}...`,
+                  title: imgTitle,
                   filename: `generated_image_${Date.now()}_${i + 1}.${format}`,
                   content_base64: base64Data,
                   source: "image_generation",
@@ -119,6 +122,8 @@ export function useImageGeneration(
                 });
                 const url = artifact.download_url || getArtifactDownloadUrl(artifact.artifact_id);
                 artifactUrls.push(url);
+                artifactIds.push(artifact.artifact_id);
+                generatedArtifacts.push({ id: artifact.artifact_id, type: "image", format, title: imgTitle, url });
 
                 setArtifacts((prev) => [...prev, {
                   id: artifact.artifact_id,
@@ -142,18 +147,26 @@ export function useImageGeneration(
           }
         }
 
-        const responseContent = artifactUrls.map((url, i) => `![${t("assistant.generatedImage", "Generated Image")} ${i + 1}](${url})`).join("\n\n") + 
+        const responseContent = artifactUrls.map((url, i) => `![${t("assistant.generatedImage", "Generated Image")} ${i + 1}](${url})`).join("\n\n") +
           `\n\n*${t("assistant.generatedWith", "Generated with")} ${providerName} (${(result.duration_ms / 1000).toFixed(1)}s)*`;
 
-        setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { 
-          ...m, content: responseContent, isGeneratingImage: false, imageGenerationPrompt: undefined 
+        setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? {
+          ...m,
+          content: responseContent,
+          isGeneratingImage: false,
+          imageGenerationPrompt: undefined,
+          generatedArtifacts: generatedArtifacts.length > 0 ? generatedArtifacts : undefined,
         } : m));
 
         if (sessionId) {
           addSessionMessage(sessionId, {
             role: "assistant",
             content: responseContent,
-            metadata: { model_id: selectedModel, stats: { duration_ms: result.duration_ms } }
+            metadata: {
+              model_id: selectedModel,
+              stats: { duration_ms: result.duration_ms },
+              artifact_ids: artifactIds.length > 0 ? artifactIds : undefined,
+            }
           }).catch(console.error);
         }
 
