@@ -37,8 +37,16 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 # ---------------------------------------------------------------------------
 
 def _get_skill_registry(request: Request) -> SkillRegistry:
-    db = getattr(request.app.state, "database", None)
-    return SkillRegistry(database=db)
+    # Singleton registry on app.state, auto-registers builtins
+    registry = getattr(request.app.state, "_skill_registry", None)
+    if registry is None:
+        db = getattr(request.app.state, "database", None)
+        registry = SkillRegistry(database=db)
+        # Register builtins
+        from ...services.assistant.skills.builtin.skill_create import SKILL_CREATE_MANIFEST
+        registry.register(SKILL_CREATE_MANIFEST)
+        request.app.state._skill_registry = registry
+    return registry
 
 
 def _get_skill_builder(request: Request) -> SkillBuilder:
@@ -131,11 +139,6 @@ async def list_skills(
             await registry.load_from_database(user.tenant_id, user.user_id)
         except Exception:
             pass
-
-    # Also register builtins
-    from ...services.assistant.skills.builtin.skill_create import SKILL_CREATE_MANIFEST
-    if SKILL_CREATE_MANIFEST.name not in [s.name for s in registry.list(enabled_only=False)]:
-        registry.register(SKILL_CREATE_MANIFEST)
 
     skills = registry.list(enabled_only=enabled_only)
     return {
