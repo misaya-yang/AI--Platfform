@@ -2,7 +2,7 @@ import React, { useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { Share2, Copy, Check, X, ExternalLink } from "lucide-react";
 import { createConversationShare, type ShareInfo } from "@/api/assistant";
-import { toast } from "sonner";
+import { toast } from "@/hooks/use-toast";
 
 interface ShareDialogProps {
   sessionId: string;

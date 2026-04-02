@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Download, FileText, Image as ImageIcon, Eye } from "lucide-react";
+import { Download } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────
 
