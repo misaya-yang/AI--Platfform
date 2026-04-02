@@ -60,6 +60,7 @@ class SubAgentManager:
         config: SubAgentConfig,
         parent_user: Any | None = None,
         parent_tenant_id: str = "",
+        kb_dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Spawn a single sub-agent. Yields SSE-compatible event dicts."""
         agent_id = f"sub_{uuid.uuid4().hex[:12]}"
@@ -93,6 +94,7 @@ class SubAgentManager:
             result_text = ""
             async for event in self._run_loop(
                 agent_id, state, messages, tools, model_id, system_prompt, config, defaults,
+                kb_dataset_ids=kb_dataset_ids,
             ):
                 yield event
                 if event["event_type"] == "subagent_text_delta":
@@ -132,6 +134,7 @@ class SubAgentManager:
         configs: list[SubAgentConfig],
         parent_user: Any | None = None,
         parent_tenant_id: str = "",
+        kb_dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Spawn multiple sub-agents in parallel. Merges event streams."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -139,7 +142,7 @@ class SubAgentManager:
         total = len(configs)
 
         async def _run(cfg: SubAgentConfig) -> None:
-            async for event in self.spawn(cfg, parent_user, parent_tenant_id):
+            async for event in self.spawn(cfg, parent_user, parent_tenant_id, kb_dataset_ids=kb_dataset_ids):
                 await queue.put(event)
 
         tasks = [asyncio.create_task(_run(c)) for c in configs]
@@ -213,6 +216,7 @@ Rules:
         system_prompt: str,
         config: SubAgentConfig,
         defaults: dict,
+        kb_dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Simplified agent loop for sub-agents."""
         from ..tools.tool_registry import ToolCallRequest, ToolCallResult
@@ -275,6 +279,10 @@ Rules:
                     tool_args = json.loads(fn.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     tool_args = {}
+
+                # Auto-inject kb_dataset_ids for KB search (inherited from parent)
+                if tool_name == "search_knowledge_base" and kb_dataset_ids and not tool_args.get("dataset_ids"):
+                    tool_args["dataset_ids"] = kb_dataset_ids
 
                 yield {
                     "event_type": "subagent_tool_start",

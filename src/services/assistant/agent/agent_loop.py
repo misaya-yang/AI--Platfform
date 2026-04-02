@@ -2116,6 +2116,7 @@ class AgentLoop:
                     _current_results: dict[str, str] = {}
                     async for sub_event in sub_mgr.spawn_parallel(
                         sub_configs, parent_user=user, parent_tenant_id=ctx.tenant_id,
+                        kb_dataset_ids=ctx.config.kb_dataset_ids or [],
                     ):
                         yield AgentLoopEvent(phase=phase, event_type=sub_event["event_type"], data=sub_event["data"])
                         if sub_event["event_type"] == "subagent_finished":
@@ -2361,6 +2362,7 @@ class AgentLoop:
                                         result.result["config"],
                                         parent_user=user,
                                         parent_tenant_id=ctx.tenant_id,
+                                        kb_dataset_ids=ctx.config.kb_dataset_ids or [],
                                     ):
                                         yield AgentLoopEvent(phase=phase, event_type=sub_event["event_type"], data=sub_event["data"])
                                         if sub_event["event_type"] == "subagent_finished":
