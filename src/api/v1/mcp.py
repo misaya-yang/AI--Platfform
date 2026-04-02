@@ -52,7 +52,9 @@ async def refresh_mcp_server(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """Re-discover tools from an MCP server (hot-reload)."""
+    """Re-discover tools from an MCP server (hot-reload). Admin only."""
+    if "admin" not in (user.roles or []):
+        raise HTTPException(403, "Admin role required to refresh MCP servers")
     mgr = _get_mcp_manager(request)
     results = await mgr.refresh_tools(server_name)
     count = results.get(server_name, -1)

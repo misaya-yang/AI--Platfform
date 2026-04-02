@@ -37,24 +37,33 @@ class MCPManager:
         results: dict[str, int] = {}
         tool_registry = get_tool_registry()
 
-        for config in self._configs:
+        # Parallel initialization of all servers
+        import asyncio
+
+        async def _init_one(config: MCPServerConfig) -> tuple[str, int]:
             if not config.enabled:
-                results[config.name] = 0
-                continue
+                return config.name, 0
             try:
                 client = MCPClient(config)
                 await client.initialize()
                 tools = await client.list_tools()
                 self._clients[config.name] = client
-
                 for mcp_tool in tools:
                     self._register_mcp_tool(mcp_tool, client, tool_registry)
-
-                results[config.name] = len(tools)
                 logger.info(f"MCP '{config.name}': {len(tools)} tools registered")
+                return config.name, len(tools)
             except Exception as e:
                 logger.warning(f"MCP '{config.name}' failed: {e}")
-                results[config.name] = -1
+                return config.name, -1
+
+        init_results = await asyncio.gather(
+            *[_init_one(c) for c in self._configs],
+            return_exceptions=True,
+        )
+        for r in init_results:
+            if isinstance(r, Exception):
+                continue
+            results[r[0]] = r[1]
 
         return results
 
@@ -84,7 +93,10 @@ class MCPManager:
             from ..tools.tool_registry import ToolCallResult
             args = getattr(request, "tool_args", {}) or {}
             result = await client.call_tool(mcp_tool.name, args)
-            text_parts = [c["text"] for c in result.content if c.get("type") == "text"]
+            text_parts = []
+            for c in result.content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    text_parts.append(str(c.get("text", "")))
             return ToolCallResult(
                 call_id=getattr(request, "call_id", ""),
                 tool_name=registry_name,
@@ -96,7 +108,7 @@ class MCPManager:
         tool_registry.register(definition, executor)
 
     async def refresh_tools(self, server_name: str | None = None) -> dict[str, int]:
-        """Re-discover tools from MCP servers (hot-reload)."""
+        """Re-discover tools from MCP servers. Deregisters stale tools."""
         tool_registry = get_tool_registry()
         targets = [server_name] if server_name else list(self._clients.keys())
         results: dict[str, int] = {}
@@ -106,6 +118,12 @@ class MCPManager:
                 results[name] = -1
                 continue
             try:
+                # Deregister old tools for this server before re-registering
+                prefix = f"mcp_{name}__"
+                for existing in tool_registry.list_tools():
+                    if existing.name.startswith(prefix):
+                        tool_registry.unregister(existing.name)
+
                 tools = await client.list_tools()
                 for t in tools:
                     self._register_mcp_tool(t, client, tool_registry)

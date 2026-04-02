@@ -55,7 +55,7 @@ class SkillExecutor:
                 return await handler(args, skill)
             except Exception as e:
                 logger.error(f"Builtin skill '{handler_name}' failed: {e}", exc_info=True)
-                return {"success": False, "error": str(e)}
+                return {"success": False, "error": f"Skill execution failed: {handler_name}"}
 
         elif entrypoint.startswith("md://") or entrypoint.startswith("db://"):
             # Return instructions — the LLM will follow them in the next turn

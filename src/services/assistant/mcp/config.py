@@ -43,10 +43,16 @@ def load_mcp_config(path: str | None = None) -> list[MCPServerConfig]:
     for srv in servers:
         if not isinstance(srv, dict) or not srv.get("name"):
             continue
+        # Fix: api_key=None must not become "None" string
+        raw_key = srv.get("api_key")
+        api_key = _resolve_env_vars(str(raw_key)) if raw_key else None
+        if api_key == "":
+            api_key = None
+
         configs.append(MCPServerConfig(
             name=srv["name"],
             url=_resolve_env_vars(str(srv.get("url", ""))),
-            api_key=_resolve_env_vars(str(srv.get("api_key", ""))) or None,
+            api_key=api_key,
             transport=srv.get("transport", "http"),
             timeout=float(srv.get("timeout", 30.0)),
             enabled=srv.get("enabled", True),

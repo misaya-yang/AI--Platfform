@@ -34,7 +34,9 @@ class SkillToolBridge:
 
     def register_skill_as_tool(self, skill: SkillManifest) -> None:
         """Convert a SkillManifest into a ToolDefinition and register it."""
-        tool_name = f"skill_{skill.name.replace('-', '_')}"
+        import re
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", skill.name)
+        tool_name = f"skill_{safe_name}"
 
         # Build parameters from tool_schema or use a generic input param
         params = self._build_params(skill)

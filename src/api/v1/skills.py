@@ -36,17 +36,39 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 # Helpers
 # ---------------------------------------------------------------------------
 
+import asyncio as _asyncio
+
+_registry_lock = _asyncio.Lock()
+_db_loaded: set[str] = set()  # Track which tenant+user combos have been loaded
+
+
 def _get_skill_registry(request: Request) -> SkillRegistry:
-    # Singleton registry on app.state, auto-registers builtins
+    """Get or create singleton registry. Thread-safe via lock in async context."""
     registry = getattr(request.app.state, "_skill_registry", None)
     if registry is None:
         db = getattr(request.app.state, "database", None)
         registry = SkillRegistry(database=db)
-        # Register builtins
         from ...services.assistant.skills.builtin.skill_create import SKILL_CREATE_MANIFEST
         registry.register(SKILL_CREATE_MANIFEST)
         request.app.state._skill_registry = registry
     return registry
+
+
+async def _ensure_db_loaded(registry: SkillRegistry, user: UserContext) -> None:
+    """Load skills from DB once per tenant+user combo (not on every request)."""
+    key = f"{user.tenant_id}:{user.user_id}"
+    if key in _db_loaded:
+        return
+    async with _registry_lock:
+        if key in _db_loaded:
+            return
+        db = registry.database
+        if db:
+            try:
+                await registry.load_from_database(user.tenant_id, user.user_id)
+                _db_loaded.add(key)
+            except Exception as e:
+                logger.warning(f"Failed to load skills from DB: {e}")
 
 
 def _get_skill_builder(request: Request) -> SkillBuilder:
@@ -138,13 +160,7 @@ async def list_skills(
     """List all skills for the current user/tenant."""
     registry = _get_skill_registry(request)
 
-    # Load from DB
-    db = getattr(request.app.state, "database", None)
-    if db:
-        try:
-            await registry.load_from_database(user.tenant_id, user.user_id)
-        except Exception:
-            pass
+    await _ensure_db_loaded(registry, user)
 
     skills = registry.list(enabled_only=enabled_only)
     return {
@@ -161,12 +177,7 @@ async def get_skill(
 ):
     """Get skill detail by name."""
     registry = _get_skill_registry(request)
-    db = getattr(request.app.state, "database", None)
-    if db:
-        try:
-            await registry.load_from_database(user.tenant_id, user.user_id)
-        except Exception:
-            pass
+    await _ensure_db_loaded(registry, user)
 
     skill = registry.get(name)
     if not skill:
@@ -183,12 +194,7 @@ async def update_skill(
 ):
     """Update skill fields."""
     registry = _get_skill_registry(request)
-    db = getattr(request.app.state, "database", None)
-    if db:
-        try:
-            await registry.load_from_database(user.tenant_id, user.user_id)
-        except Exception:
-            pass
+    await _ensure_db_loaded(registry, user)
 
     skill = registry.get(name)
     if not skill:
@@ -251,12 +257,7 @@ async def test_skill(
 ):
     """Test execute a skill with sample input."""
     registry = _get_skill_registry(request)
-    db = getattr(request.app.state, "database", None)
-    if db:
-        try:
-            await registry.load_from_database(user.tenant_id, user.user_id)
-        except Exception:
-            pass
+    await _ensure_db_loaded(registry, user)
 
     skill = registry.get(name)
     if not skill:
