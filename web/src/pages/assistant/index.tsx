@@ -14,6 +14,7 @@ import {
   FileText,
   PanelRightOpen,
   AlertCircle,
+  Share2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -43,6 +44,7 @@ import {
   type AgentTask,
 } from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
+import { ShareDialog } from "./components/ShareDialog";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
@@ -117,6 +119,7 @@ export function AssistantPage() {
   // 3. UI State
   const [input, setInput] = useState("");
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [showShareDialog, setShowShareDialog] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
@@ -376,6 +379,7 @@ export function AssistantPage() {
   }, [messages, scrollToBottomDom]);
 
   return (
+    <>
     <TooltipProvider>
       <div
         className={cn(
@@ -432,6 +436,23 @@ export function AssistantPage() {
                 <TooltipContent side="bottom">{showLeftPanel ? t("assistant.hideHistory", "Hide history") : t("assistant.showHistory", "Show history")}</TooltipContent>
               </Tooltip>
               <CompactModelSelector models={models} selectedModel={selectedModel} onSelect={setSelectedModel} disabled={isStreaming} />
+              {/* Share button */}
+              {activeSessionId && messages.length > 0 && !isStreaming && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-9 w-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                      onClick={() => setShowShareDialog(true)}
+                      aria-label={t("assistant.share", "Share")}
+                    >
+                      <Share2 className="h-4 w-4 text-slate-500" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{t("assistant.shareConversation", "Share Conversation")}</TooltipContent>
+                </Tooltip>
+              )}
             </div>
 
             {/* Messages Area */}
@@ -700,6 +721,16 @@ export function AssistantPage() {
         </div>
       </div>
     </TooltipProvider>
+
+    {/* Share Dialog */}
+    <ShareDialog
+      sessionId={activeSessionId || ""}
+      messageCount={messages.length}
+      artifactCount={artifacts.length}
+      isOpen={showShareDialog}
+      onClose={() => setShowShareDialog(false)}
+    />
+    </>
   );
 }
 

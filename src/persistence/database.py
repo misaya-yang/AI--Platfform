@@ -295,6 +295,7 @@ class DatabaseStorage:
             await self._auto_apply_openclaw_scheduler_audit_migration()
             await self._auto_apply_openclaw_context_metrics_migration()
             await self._auto_apply_tenant_isolation_migration()
+            await self._auto_apply_conversation_shares_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -1116,6 +1117,43 @@ class DatabaseStorage:
                 logger.info("Migration 044 already applied")
             else:
                 logger.exception("Failed to apply migration 044")
+
+    # ------------------------------------------------------------------
+    # Migration 045: Conversation Shares
+    # ------------------------------------------------------------------
+
+    async def _conversation_shares_needs_migration(self) -> bool:
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            table = await conn.fetchval("SELECT to_regclass('public.conversation_shares')")
+            return table is None
+
+    async def _auto_apply_conversation_shares_migration(self) -> None:
+        if not self._pool:
+            return
+        try:
+            needs = await self._conversation_shares_needs_migration()
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check conversation shares migration")
+            return
+        if not needs:
+            return
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database" / "migrations" / "045_conversation_shares.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 045 not found: {migration_path}")
+            return
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 045_conversation_shares.sql")
+        except asyncpg.PostgresError as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 045 already applied")
+            else:
+                logger.exception("Failed to apply migration 045")
 
     # =========================================================================
     # 服务定义表 (services)

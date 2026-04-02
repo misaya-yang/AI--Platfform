@@ -24,6 +24,7 @@ from .v1.exams import router as exams_router
 from .v1.skills import router as skills_router
 from .v1.mcp import router as mcp_router
 from .v1.tenant_policies import router as tenant_policies_router
+from .v1.conversation_shares import router as conversation_shares_router
 from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
@@ -71,5 +72,6 @@ api_router.include_router(exams_router)  # Exam management (admin only)
 api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(mcp_router)  # MCP server management
 api_router.include_router(tenant_policies_router)  # ADR-002: Tenant isolation admin
+api_router.include_router(conversation_shares_router)  # Conversation sharing with artifacts
 api_router.include_router(providers_router)  # LLM Provider 管理
 api_router.include_router(models_router)  # LLM Model 管理

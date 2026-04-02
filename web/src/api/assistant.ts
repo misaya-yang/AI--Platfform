@@ -853,6 +853,63 @@ export function getArtifactDownloadUrl(artifactId: string): string {
 
 
 // =========================================================================
+// Conversation Sharing API
+// =========================================================================
+
+export interface ShareInfo {
+  share_code: string;
+  share_url: string;
+  title: string | null;
+  message_count: number;
+  artifact_count: number;
+  created_at: string;
+  expires_at: string | null;
+}
+
+export async function createConversationShare(
+  sessionId: string,
+  options?: { expires_days?: number; include_artifacts?: boolean }
+): Promise<ShareInfo> {
+  const { data } = await api.post<ShareInfo>(
+    `/api/v1/assistant/sessions/${sessionId}/share`,
+    { expires_days: options?.expires_days, include_artifacts: options?.include_artifacts ?? true }
+  );
+  return data;
+}
+
+export async function getConversationShare(shareCode: string): Promise<{
+  share_code: string;
+  title: string;
+  snapshot: {
+    messages: Array<{ role: string; content: string; timestamp?: string; metadata?: Record<string, unknown> }>;
+    artifacts: Array<{ artifact_id: string; type: string; format: string; title: string; filename: string; size_bytes: number; mime_type?: string }>;
+    model_id?: string;
+    shared_at?: string;
+  };
+  message_count: number;
+  artifact_count: number;
+  view_count: number;
+  created_at: string;
+  expires_at: string | null;
+}> {
+  const { data } = await api.get(`/api/v1/assistant/shares/${shareCode}`);
+  return data;
+}
+
+export function getSharedArtifactUrl(shareCode: string, artifactId: string): string {
+  return `/api/v1/assistant/shares/${shareCode}/artifact/${artifactId}`;
+}
+
+export async function listMyShares(limit = 50): Promise<{ shares: Array<Record<string, unknown>> }> {
+  const { data } = await api.get(`/api/v1/assistant/shares?limit=${limit}`);
+  return data;
+}
+
+export async function revokeShare(shareCode: string): Promise<void> {
+  await api.delete(`/api/v1/assistant/shares/${shareCode}`);
+}
+
+// =========================================================================
 // Image Generation API (Smart Routing)
 // =========================================================================
 
