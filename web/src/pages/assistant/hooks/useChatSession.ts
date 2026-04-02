@@ -196,7 +196,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
 
     // Mark artifact_ids for post-hydration
     if (msg.metadata.artifact_ids && Array.isArray(msg.metadata.artifact_ids)) {
-      (baseMessage as any)._artifactIds = msg.metadata.artifact_ids;
+      baseMessage._artifactIds = msg.metadata.artifact_ids;
     }
   }
   return baseMessage;
@@ -213,7 +213,7 @@ function hydrateMessageArtifacts(
     artifactMap.set(a.artifact_id, a);
   }
   return messages.map((m) => {
-    const ids: string[] | undefined = (m as any)._artifactIds;
+    const ids = m._artifactIds;
     if (!ids || ids.length === 0) return m;
     const generatedArtifacts: GeneratedArtifact[] = [];
     for (const id of ids) {
@@ -896,17 +896,19 @@ export function useChatSession() {
           case SSEEventType.THINKING_END:
           case "thinking_end": {
             // Move accumulated text (pre-tool thinking) to thinkingContent,
-            // clear main content for the post-tool response.
+            // then clear main content for the post-tool response.
             const thinkingData = event.data as { content?: string; tool_count?: number } | undefined;
             const thinkingText = thinkingData?.content || streamTurnState.content || "";
             if (thinkingText.trim()) {
+              // First: reset stream state content so syncTurnStateToMessage sees empty
+              streamTurnState = { ...streamTurnState, content: "" };
+              syncTurnStateToMessage();
+              // Then: set thinkingContent on the message
               setMessages(prev => prev.map(m =>
                 m.id === assistantMessage.id
-                  ? { ...m, thinkingContent: thinkingText.trim() }
+                  ? { ...m, thinkingContent: thinkingText.trim(), content: "" }
                   : m
               ));
-              // Reset accumulated content in stream state for the next LLM iteration
-              streamTurnState = { ...streamTurnState, content: "" };
             }
             break;
           }

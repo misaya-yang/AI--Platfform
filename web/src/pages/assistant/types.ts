@@ -268,6 +268,9 @@ export interface ChatMessage {
   // Pre-tool thinking content (displayed as collapsible "Thought Process")
   thinkingContent?: string;
 
+  // Internal: artifact IDs from session metadata (used by hydrateMessageArtifacts)
+  _artifactIds?: string[];
+
   // Agentic extensions
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];

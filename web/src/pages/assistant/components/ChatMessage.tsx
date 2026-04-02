@@ -900,7 +900,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
             <details className="mb-3 group" open={!message.content}>
               <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-1.5 select-none py-1">
                 <svg className="w-3.5 h-3.5 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                Thought process
+                {t("assistant.thoughtProcess", "Thought process")}
               </summary>
               <div className="mt-1.5 pl-5 text-sm text-muted-foreground/80 leading-relaxed border-l-2 border-muted-foreground/20">
                 {message.thinkingContent}

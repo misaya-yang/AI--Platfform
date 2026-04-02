@@ -237,16 +237,14 @@ function ArtifactCard({
   const title = isOutputFile
     ? (artifact as OutputFile).filename
     : (artifact as Artifact).title || (artifact as Artifact).filename;
-  const rawFormat = isOutputFile
-    ? undefined  // Let getFormatLabel derive from mimeType
-    : (artifact as Artifact).format;
-  const format = getFormatLabel(rawFormat, isOutputFile ? (artifact as OutputFile).mime_type || undefined : (artifact as Artifact).mimeType || undefined);
-  const size = isOutputFile
-    ? (artifact as OutputFile).size_bytes
-    : (artifact as Artifact).sizeBytes;
+  const rawFormat = isOutputFile ? undefined : (artifact as Artifact).format;
   const mimeType = isOutputFile
     ? (artifact as OutputFile).mime_type
     : (artifact as Artifact).mimeType;
+  const formatLabel = getFormatLabel(rawFormat, mimeType || undefined);
+  const size = isOutputFile
+    ? (artifact as OutputFile).size_bytes
+    : (artifact as Artifact).sizeBytes;
 
   return (
     <motion.div
@@ -258,10 +256,10 @@ function ArtifactCard({
       <div
         className={cn(
           "flex items-center justify-center w-10 h-10 rounded-lg text-white text-[10px] font-bold tracking-wide",
-          getFormatColor(format, mimeType || undefined)
+          getFormatColor(rawFormat, mimeType || undefined)
         )}
       >
-        {getFormatLabel(format, mimeType || undefined)}
+        {formatLabel}
       </div>
 
       {/* File info */}
@@ -270,7 +268,7 @@ function ArtifactCard({
           {title}
         </p>
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          {format?.toUpperCase()} {size ? `· ${formatFileSize(size)}` : ""}
+          {formatLabel} {size ? `· ${formatFileSize(size)}` : ""}
         </p>
       </div>
 
