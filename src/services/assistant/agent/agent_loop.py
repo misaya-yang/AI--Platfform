@@ -1798,6 +1798,18 @@ class AgentLoop:
                                 event_type="skill_loaded",
                                 data={"loaded_count": loaded},
                             )
+                    # Register skills as function-callable tools
+                    try:
+                        from ..skills.tool_bridge import SkillToolBridge
+                        from ..tools.tool_registry import get_tool_registry
+                        bridge = SkillToolBridge(
+                            self.openclaw_runtime.skill_registry,
+                            get_tool_registry(),
+                        )
+                        bridge.sync_all_skills()
+                    except Exception as e:
+                        logger.debug(f"Skill tool bridge sync failed: {e}")
+
                     selected_skills = self.openclaw_runtime.skill_registry.select_for_query(
                         ctx.message,
                         max_skills=3,
@@ -1859,7 +1871,9 @@ class AgentLoop:
                 )
             else:
                 system_prompt = base_prompt
+            # Progressive disclosure: L1 metadata always, L2 instructions on trigger match
             if ctx.openclaw_skills_metadata:
+                # L1: compact metadata (~200 tokens) — always in system prompt
                 skill_lines = []
                 for skill in ctx.openclaw_skills_metadata[:5]:
                     skill_lines.append(
@@ -1867,7 +1881,25 @@ class AgentLoop:
                         f"{str(skill.get('summary') or skill.get('description') or '')[:180]}"
                     )
                 skills_block = "\n".join(skill_lines)
-                system_prompt = f"{system_prompt}\n\n## Available Skills Metadata\n{skills_block}"
+                system_prompt = f"{system_prompt}\n\n## Available Skills\n{skills_block}\nUse skill tools (skill_*) to invoke them."
+
+                # L2: load instructions for trigger-matched skills (max 2, ~2000 tokens each)
+                import re as _re
+                l2_loaded = 0
+                for skill in ctx.openclaw_skills_metadata[:3]:
+                    trigger = skill.get("trigger")
+                    if not trigger or l2_loaded >= 2:
+                        continue
+                    patterns = trigger.get("patterns", []) if isinstance(trigger, dict) else []
+                    if patterns and any(_re.search(p, ctx.message, _re.IGNORECASE) for p in patterns):
+                        instructions = skill.get("instructions", "")
+                        if instructions:
+                            # Inject as context message (not system prompt) to preserve KV-cache prefix
+                            messages.append({
+                                "role": "system",
+                                "content": f"[Skill: {skill['name']}]\n{instructions[:skill.get('max_context_tokens', 2000)]}",
+                            })
+                            l2_loaded += 1
 
             long_term_memory_prompt = format_long_term_memory(ctx.long_term_memory or {})
             if long_term_memory_prompt:

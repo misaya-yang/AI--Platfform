@@ -4,13 +4,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
+
+
+class SkillSource(str, Enum):
+    """Where the skill came from."""
+    BUILTIN = "builtin"
+    USER = "user"
+    MARKETPLACE = "marketplace"
+
+
+@dataclass
+class TriggerConfig:
+    """Auto-trigger configuration for a skill."""
+    patterns: list[str] = field(default_factory=list)  # Regex patterns
+    auto: bool = False  # Auto-trigger when patterns match (vs explicit /command only)
 
 
 @dataclass
 class SkillManifest:
-    """Minimal skill manifest structure."""
+    """Skill manifest — defines a skill's identity, behavior, and execution config."""
 
+    # === Core (existing) ===
     name: str
     title: str
     description: str
@@ -20,6 +36,15 @@ class SkillManifest:
     tags: list[str] = field(default_factory=list)
     permissions: list[str] = field(default_factory=list)
     enabled: bool = True
+
+    # === Extended (new) ===
+    instructions: str = ""              # Full markdown instructions (L2, loaded on demand)
+    trigger: TriggerConfig | None = None  # Auto-trigger patterns
+    config: dict = field(default_factory=dict)  # Skill-specific configuration
+    source: SkillSource = SkillSource.BUILTIN
+    tool_schema: dict | None = None     # JSON Schema for function calling
+    max_context_tokens: int = 2000      # Token budget for instructions
+    author: str = ""
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -42,6 +67,13 @@ class SkillManifest:
             "tags": self.tags,
             "permissions": self.permissions,
             "enabled": self.enabled,
+            "instructions": self.instructions,
+            "trigger": {"patterns": self.trigger.patterns, "auto": self.trigger.auto} if self.trigger else None,
+            "config": self.config,
+            "source": self.source.value,
+            "tool_schema": self.tool_schema,
+            "max_context_tokens": self.max_context_tokens,
+            "author": self.author,
         }
 
 

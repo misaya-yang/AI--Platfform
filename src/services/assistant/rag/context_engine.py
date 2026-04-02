@@ -123,8 +123,9 @@ class ContextBudgetManager:
     ) -> ContextAssemblyPlan:
         available = max(1024, model_context_window - self.reserved_output_tokens)
         budget_tokens = {
-            "system": int(available * 0.35),
-            "user_memory": int(available * 0.15),
+            "system": int(available * 0.30),
+            "user_memory": int(available * 0.12),
+            "skills": int(available * 0.08),   # Skill L1 metadata + L2 instructions
             "session": int(available * 0.20),
             "request": int(available * 0.30),
         }
