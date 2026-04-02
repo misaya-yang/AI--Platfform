@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import os
 import shutil
 import tempfile
 import time
@@ -62,7 +63,7 @@ class CodeExecutionConfig:
     sandbox_runtime: str | None = "runsc"
 
     # Docker image
-    image: str = "python:3.11-slim"
+    image: str = "python:3.12-slim"
 
     # Workspace paths (inside container)
     workspace_path: str = "/workspace"
@@ -230,7 +231,6 @@ class CodeExecutorService:
         """
         self.config = config or CodeExecutionConfig()
         # Allow env var override: SANDBOX_RUNTIME=runsc|runc|""
-        import os
         env_runtime = os.environ.get("SANDBOX_RUNTIME")
         if env_runtime is not None:
             self.config.sandbox_runtime = env_runtime or None

@@ -1268,8 +1268,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
         mcp_server_names = []
         mcp_mgr = getattr(app.state, "mcp_manager", None)
-        if mcp_mgr and mcp_mgr._configs:
-            mcp_server_names = [c.name for c in mcp_mgr._configs]
+        if mcp_mgr:
+            mcp_server_names = mcp_mgr.server_names
         app.state.tenant_mcp_config = TenantMCPConfigService(
             database=database,
             all_server_names=mcp_server_names,

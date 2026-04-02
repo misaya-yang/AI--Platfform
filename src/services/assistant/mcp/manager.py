@@ -142,6 +142,11 @@ class MCPManager:
                 pass
         self._clients.clear()
 
+    @property
+    def server_names(self) -> list[str]:
+        """Public accessor for configured server names."""
+        return [c.name for c in self._configs]
+
     def get_servers_status(self) -> list[dict]:
         """Return status of all configured MCP servers."""
         status = []

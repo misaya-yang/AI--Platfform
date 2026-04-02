@@ -387,6 +387,16 @@ class RegistryToolInvoker(ToolInvoker):
                         success=False,
                         error=f"Tool '{tool_name}' is not available for this tenant.",
                     )
+                if policy.allowed_categories:
+                    tool_def = self.tool_registry.get_tool(tool_name)
+                    if tool_def and tool_def.category.value not in policy.allowed_categories:
+                        logger.warning(f"Tenant policy denied (category): tool={tool_name} cat={tool_def.category.value} tenant={context.tenant_id}")
+                        return ToolCallResult(
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            success=False,
+                            error=f"Tool '{tool_name}' category is not allowed for this tenant.",
+                        )
             except Exception as e:
                 logger.warning(f"Tenant policy check failed (allowing): {e}")
 

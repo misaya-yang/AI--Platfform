@@ -8,6 +8,7 @@ queries against the audit table.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -124,7 +125,6 @@ class ToolAuditService:
         """Create a safe summary of tool input arguments."""
         if not arguments:
             return ""
-        import json
         try:
             text = json.dumps(arguments, ensure_ascii=False, default=str)
         except Exception:

@@ -25,7 +25,7 @@ class TenantMCPConfig:
     """Per-tenant MCP server access policy."""
 
     tenant_id: str
-    allowed_servers: set[str] = field(default_factory=set)  # empty = deny all MCP
+    allowed_servers: set[str] = field(default_factory=set)  # empty at filter-time = deny all MCP; DB-miss populates with all known servers
     server_overrides: dict[str, Any] | None = None
     max_connections: int = 5
 

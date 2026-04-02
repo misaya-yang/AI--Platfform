@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from ...core.auth.user_resolver import UserContext
+from ...core.observability.logging import get_logger
 from ..deps import get_user_context
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter(prefix="/admin/tenant-policies", tags=["tenant-policies"])
 
 
 # ── Pydantic Models ──────────────────────────────────────────────────
+
+
+def _check_tenant_id(v: str) -> str:
+    if not v.replace("-", "").replace("_", "").isalnum():
+        raise ValueError("tenant_id must be alphanumeric (hyphens/underscores allowed)")
+    return v
 
 
 class ToolPolicyPayload(BaseModel):
@@ -26,12 +32,7 @@ class ToolPolicyPayload(BaseModel):
     allowed_categories: list[str] | None = None
     max_calls_per_minute: int = Field(20, ge=1, le=10000)
 
-    @field_validator("tenant_id")
-    @classmethod
-    def _validate_tenant_id(cls, v: str) -> str:
-        if not v.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("tenant_id must be alphanumeric (hyphens/underscores allowed)")
-        return v
+    _validate_tenant_id = field_validator("tenant_id")(_check_tenant_id)
 
 
 class MCPConfigPayload(BaseModel):
@@ -40,12 +41,7 @@ class MCPConfigPayload(BaseModel):
     server_overrides: dict[str, Any] | None = None
     max_connections: int = Field(5, ge=1, le=100)
 
-    @field_validator("tenant_id")
-    @classmethod
-    def _validate_tenant_id(cls, v: str) -> str:
-        if not v.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("tenant_id must be alphanumeric (hyphens/underscores allowed)")
-        return v
+    _validate_tenant_id = field_validator("tenant_id")(_check_tenant_id)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -240,8 +236,8 @@ async def query_audit_log(
     tenant_id: str | None = None,
     user_id: str | None = None,
     tool_name: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     user: UserContext = Depends(get_user_context),
 ):
     """Query tool audit log with optional filters."""
