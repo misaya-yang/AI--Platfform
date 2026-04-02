@@ -11,6 +11,7 @@ import { useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Download } from "lucide-react";
+import { formatFileSize, getFormatLabel } from "@/lib/format";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -54,25 +55,6 @@ interface LegacyShareData {
   agent_name: string;
   created_at: string;
   expires_at: string | null;
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getFormatLabel(format?: string, mimeType?: string): string {
-  const f = (format || "").toLowerCase();
-  if (f === "docx" || f === "doc" || mimeType?.includes("word")) return "DOCX";
-  if (f === "pdf" || mimeType?.includes("pdf")) return "PDF";
-  if (f === "pptx" || mimeType?.includes("presentation")) return "PPTX";
-  if (f === "png" || f === "jpg" || f === "jpeg" || f === "gif" || mimeType?.startsWith("image/")) return (f || "IMG").toUpperCase();
-  if (f === "md" || f === "markdown") return "MD";
-  if (f) return f.toUpperCase().slice(0, 6);
-  return "FILE";
 }
 
 // ── Component ────────────────────────────────────────────────────────

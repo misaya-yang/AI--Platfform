@@ -292,11 +292,5 @@ export function isDocumentFile(file: File): boolean {
   return documentTypes.includes(file.type);
 }
 
-/**
- * Format file size for display.
- */
-export function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+// Re-export from shared format utilities for backward compatibility.
+export { formatFileSize } from "@/lib/format";

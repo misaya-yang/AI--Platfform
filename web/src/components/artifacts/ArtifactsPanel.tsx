@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
+import { formatFileSize, getFormatLabel } from "@/lib/format";
 import type { ExecutionStatusType } from "./ExecutionStatus";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useTranslation } from "react-i18next";
@@ -83,26 +84,6 @@ const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 // ============================================================================
 // Helpers
 // ============================================================================
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getFormatLabel(format?: string, mimeType?: string): string {
-  // Normalize: prefer short format label over raw MIME type
-  const f = format?.toLowerCase() || "";
-  if (f === "docx" || f === "doc" || mimeType?.includes("word")) return "DOCX";
-  if (f === "pdf" || mimeType?.includes("pdf")) return "PDF";
-  if (f === "pptx" || f === "ppt" || mimeType?.includes("presentation")) return "PPTX";
-  if (f === "xlsx" || f === "xls" || mimeType?.includes("sheet")) return "XLSX";
-  if (f === "md" || f === "markdown") return "MD";
-  if (f === "csv") return "CSV";
-  if (f === "png" || f === "jpg" || f === "jpeg" || f === "gif" || f === "webp" || mimeType?.startsWith("image/")) return f.toUpperCase() || "IMG";
-  if (f) return f.toUpperCase().slice(0, 6);  // Cap at 6 chars
-  return "FILE";
-}
 
 function getFormatColor(format?: string, mimeType?: string): string {
   const f = format?.toLowerCase() || mimeType || "";

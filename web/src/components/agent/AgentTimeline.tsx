@@ -33,6 +33,7 @@ import {
   StopCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatDuration } from "@/lib/format";
 import { useTranslation } from "react-i18next";
 
 // ============================================================================
@@ -157,11 +158,6 @@ const stepTypeColors: Record<StepType, string> = {
   complete: "text-green-500",
 };
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
-}
 
 function getStepDuration(step: TimelineStep): number | undefined {
   if (step.startTime && step.endTime) {

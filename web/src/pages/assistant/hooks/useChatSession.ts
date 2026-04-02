@@ -54,6 +54,7 @@ import type {
   // Working memory and code execution state types
   WorkingMemory,
   CodeExecutionState,
+  SubAgentState,
 } from "../types";
 import { getQuiz } from "@/api/quiz";
 import { getStyleSystemPrompt } from "../styles";
@@ -765,6 +766,13 @@ export function useChatSession() {
       );
     };
 
+    const updateSubAgent = (agentId: string, updater: (sa: SubAgentState) => SubAgentState) => {
+      updateAssistantMessage(m => {
+        if (!m.activeSubAgents) return m;
+        return { ...m, activeSubAgents: m.activeSubAgents.map(sa => sa.agentId === agentId ? updater(sa) : sa) };
+      });
+    };
+
     const syncTurnStateToMessage = () => {
       content = streamTurnState.content;
       firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
@@ -911,87 +919,55 @@ export function useChatSession() {
           }
 
           // ADR-003: Sub-Agent events
-          case SSEEventType.SUBAGENT_STARTED:
-          case "subagent_started": {
+          case SSEEventType.SUBAGENT_STARTED: {
             const sa = event.data as { agent_id: string; agent_type: string; description: string; prompt?: string };
-            setMessages(prev => prev.map(m =>
-              m.id === assistantMessage.id
-                ? {
-                    ...m,
-                    activeSubAgents: [...(m.activeSubAgents || []), {
-                      agentId: sa.agent_id,
-                      agentType: sa.agent_type as "explore" | "task" | "plan",
-                      description: sa.description,
-                      prompt: sa.prompt,
-                      status: "running",
-                      steps: [],
-                    }],
-                  }
-                : m
-            ));
+            updateAssistantMessage(m => ({
+              ...m,
+              activeSubAgents: [...(m.activeSubAgents || []), {
+                agentId: sa.agent_id,
+                agentType: sa.agent_type as "explore" | "task" | "plan",
+                description: sa.description,
+                prompt: sa.prompt,
+                status: "running",
+                steps: [],
+              }],
+            }));
             break;
           }
-          case SSEEventType.SUBAGENT_TEXT_DELTA:
-          case "subagent_text_delta": {
+          case SSEEventType.SUBAGENT_TEXT_DELTA: {
             const { agent_id, text } = event.data as { agent_id: string; text: string };
-            setMessages(prev => prev.map(m => {
-              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
-              return {
-                ...m,
-                activeSubAgents: m.activeSubAgents.map(sa =>
-                  sa.agentId === agent_id
-                    ? { ...sa, streamingText: (sa.streamingText || "") + text }
-                    : sa
-                ),
-              };
-            }));
+            updateSubAgent(agent_id, sa => ({ ...sa, streamingText: (sa.streamingText || "") + text }));
             break;
           }
-          case SSEEventType.SUBAGENT_TOOL_START:
-          case "subagent_tool_start": {
+          case SSEEventType.SUBAGENT_TOOL_START: {
             const { agent_id, tool_name, call_id } = event.data as { agent_id: string; tool_name: string; call_id: string };
-            setMessages(prev => prev.map(m => {
-              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
-              return {
-                ...m,
-                activeSubAgents: m.activeSubAgents.map(sa =>
-                  sa.agentId === agent_id
-                    ? { ...sa, steps: [...sa.steps, { toolName: tool_name, callId: call_id, status: "running" as const }], toolCallsMade: (sa.toolCallsMade || 0) + 1 }
-                    : sa
-                ),
-              };
+            updateSubAgent(agent_id, sa => ({
+              ...sa,
+              steps: [...sa.steps, { toolName: tool_name, callId: call_id, status: "running" as const }],
+              toolCallsMade: (sa.toolCallsMade || 0) + 1,
             }));
             break;
           }
-          case SSEEventType.SUBAGENT_TOOL_RESULT:
-          case "subagent_tool_result": {
+          case SSEEventType.SUBAGENT_TOOL_RESULT: {
             const { agent_id, call_id, success, duration_ms, summary } = event.data as { agent_id: string; call_id: string; success: boolean; duration_ms?: number; summary?: string };
-            setMessages(prev => prev.map(m => {
-              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
-              return {
-                ...m,
-                activeSubAgents: m.activeSubAgents.map(sa =>
-                  sa.agentId === agent_id
-                    ? { ...sa, steps: sa.steps.map(s => s.callId === call_id ? { ...s, status: success ? "completed" as const : "failed" as const, summary, durationMs: duration_ms } : s) }
-                    : sa
-                ),
-              };
+            updateSubAgent(agent_id, sa => ({
+              ...sa,
+              steps: sa.steps.map(s =>
+                s.callId === call_id
+                  ? { ...s, status: (success ? "completed" : "failed") as "completed" | "failed", summary, durationMs: duration_ms }
+                  : s
+              ),
             }));
             break;
           }
-          case SSEEventType.SUBAGENT_FINISHED:
-          case "subagent_finished": {
+          case SSEEventType.SUBAGENT_FINISHED: {
             const { agent_id, status, result_summary, duration_ms, error } = event.data as { agent_id: string; status: string; result_summary?: string; duration_ms?: number; error?: string };
-            setMessages(prev => prev.map(m => {
-              if (m.id !== assistantMessage.id || !m.activeSubAgents) return m;
-              return {
-                ...m,
-                activeSubAgents: m.activeSubAgents.map(sa =>
-                  sa.agentId === agent_id
-                    ? { ...sa, status: status as "completed" | "failed", resultSummary: result_summary, durationMs: duration_ms, error }
-                    : sa
-                ),
-              };
+            updateSubAgent(agent_id, sa => ({
+              ...sa,
+              status: status as "completed" | "failed",
+              resultSummary: result_summary,
+              durationMs: duration_ms,
+              error,
             }));
             break;
           }

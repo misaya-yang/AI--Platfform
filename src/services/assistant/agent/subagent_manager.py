@@ -15,6 +15,7 @@ import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
 from ....core.observability.logging import get_logger
+from .stream_helpers import merge_stream_tool_calls
 from .subagent_types import (
     SUBAGENT_DEFAULTS,
     SubAgentConfig,
@@ -178,14 +179,11 @@ class SubAgentManager:
         return [t for t in all_tools if t.category.value in allowed]
 
     def _pick_model(self, config: SubAgentConfig) -> str:
-        """Select model by agent type. Uses whatever is available."""
-        # Use the first available model from the registry
+        """Select model by agent type — explore prefers fast models, others prefer strongest."""
         models = list(self.model_registry._models.values())
         if not models:
-            return "qwen3.5-plus"  # Fallback
-        # Explore: prefer fastest; Task/Plan: prefer strongest
+            return "qwen3.5-plus"
         if config.agent_type == SubAgentType.EXPLORE:
-            # Prefer flash/turbo models
             for m in models:
                 if "flash" in m.id.lower() or "turbo" in m.id.lower():
                     return m.id
@@ -229,10 +227,10 @@ Rules:
                 "data": {"agent_id": agent_id, "step": f"Turn {turn + 1}/{config.max_turns}", "status": "running"},
             }
 
-            # Call LLM
             full_text = ""
             tool_calls_accumulated: dict[str, dict] = {}
             tool_call_order: list[str] = []
+            anon_counter = 0
 
             try:
                 async for delta in self.model_registry.chat_stream(
@@ -248,23 +246,9 @@ Rules:
                             "data": {"agent_id": agent_id, "text": delta.content},
                         }
                     if delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            idx = str(tc.get("index", 0))
-                            if idx not in tool_calls_accumulated:
-                                tool_calls_accumulated[idx] = {
-                                    "id": tc.get("id", f"call_{turn}_{idx}"),
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                                tool_call_order.append(idx)
-                            entry = tool_calls_accumulated[idx]
-                            fn = tc.get("function", {})
-                            if fn.get("name"):
-                                entry["function"]["name"] = fn["name"]
-                            if fn.get("arguments"):
-                                entry["function"]["arguments"] += fn["arguments"]
-                            if tc.get("id"):
-                                entry["id"] = tc["id"]
+                        anon_counter = merge_stream_tool_calls(
+                            delta.tool_calls, tool_calls_accumulated, tool_call_order, anon_counter,
+                        )
             except Exception as e:
                 logger.error(f"SubAgent {agent_id} LLM call failed: {e}")
                 state.error = str(e)
@@ -272,12 +256,10 @@ Rules:
 
             tool_calls = [tool_calls_accumulated[k] for k in tool_call_order]
 
-            # No tool calls → done
             if not tool_calls:
                 messages.append({"role": "assistant", "content": full_text})
                 break
 
-            # Execute tools
             messages.append({"role": "assistant", "content": full_text, "tool_calls": tool_calls})
 
             for tc in tool_calls:

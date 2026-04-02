@@ -70,23 +70,19 @@ async def create_share(
     """Create a public share link for a conversation with artifacts."""
     db = _get_db(request)
 
-    # Load session
     session = await db.fetchrow(
         "SELECT session_id, history, metadata, user_id, tenant_id FROM sessions WHERE session_id = $1",
         session_id,
     )
     if not session:
         raise HTTPException(404, "Session not found")
-
-    # Verify ownership
     if session["user_id"] and session["user_id"] != user.user_id:
         raise HTTPException(403, "Not your session")
 
-    history = json.loads(session["history"]) if isinstance(session["history"], str) else session["history"]
+    history = session["history"] if isinstance(session["history"], (list, dict)) else json.loads(session["history"])
     if not history:
         raise HTTPException(400, "Session has no messages")
 
-    # Load artifacts for this session
     artifacts_data = []
     if body.include_artifacts:
         rows = await db.fetch(
@@ -95,9 +91,14 @@ async def create_share(
         )
         artifacts_data = [dict(r) for r in rows]
 
-    # Build snapshot
-    meta = json.loads(session["metadata"]) if isinstance(session["metadata"], str) else (session["metadata"] or {})
-    title = meta.get("title", "") if isinstance(meta, dict) else ""
+    raw_meta = session["metadata"]
+    if isinstance(raw_meta, dict):
+        meta = raw_meta
+    elif isinstance(raw_meta, str):
+        meta = json.loads(raw_meta)
+    else:
+        meta = {}
+    title = meta.get("title", "")
     model_id = None
     for msg in reversed(history):
         if isinstance(msg, dict) and msg.get("metadata", {}).get("model_id"):
@@ -111,7 +112,6 @@ async def create_share(
         "shared_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Generate unique share code
     share_code = _generate_share_code()
     for _ in range(5):
         existing = await db.fetchrow(
@@ -169,12 +169,9 @@ async def get_share(share_code: str, request: Request):
     )
     if not row:
         raise HTTPException(404, "Share not found or expired")
-
-    # Check expiry
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    # Increment view count (fire-and-forget)
     try:
         await db.execute(
             "UPDATE conversation_shares SET view_count = view_count + 1 WHERE share_code = $1",
@@ -183,7 +180,7 @@ async def get_share(share_code: str, request: Request):
     except Exception:
         pass
 
-    snapshot = json.loads(row["snapshot"]) if isinstance(row["snapshot"], str) else row["snapshot"]
+    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
 
     return {
         "share_code": share_code,
@@ -213,13 +210,11 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
     if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(410, "Share has expired")
 
-    # Verify artifact is in the share snapshot
-    snapshot = json.loads(row["snapshot"]) if isinstance(row["snapshot"], str) else row["snapshot"]
+    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
     artifact_ids = [a["artifact_id"] for a in snapshot.get("artifacts", [])]
     if artifact_id not in artifact_ids:
         raise HTTPException(404, "Artifact not in this share")
 
-    # Proxy to artifact storage — load full artifact, then generate presigned URL
     artifact_storage = _get_artifact_storage(request)
     if not artifact_storage:
         raise HTTPException(503, "Artifact storage not available")

@@ -4,13 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import type { Segment } from "@/types/knowledge";
 import { Badge } from "@/components/ui/badge";
-
-function formatFileSize(bytes?: number): string {
-  if (!bytes) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+import { formatFileSize } from "@/lib/format";
 
 export function SegmentCard({
   segment,

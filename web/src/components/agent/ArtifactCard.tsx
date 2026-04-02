@@ -31,6 +31,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatFileSize } from "@/lib/format";
 import { useTranslation } from "react-i18next";
 
 // ============================================================================
@@ -163,13 +164,6 @@ function getArtifactType(artifact: ArtifactData): ArtifactType {
   }
 
   return "file";
-}
-
-function formatFileSize(bytes?: number): string {
-  if (!bytes) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function getFormatLabel(artifact: ArtifactData): string {

@@ -88,6 +88,9 @@ from ..rag.rag_metrics import (
     get_rag_metrics_collector,
 )
 from .react_executor import ReActEvent, ReActExecutor
+from .stream_helpers import merge_stream_tool_calls
+from .subagent_manager import SubAgentManager
+from .subagent_types import SubAgentConfig, SubAgentType
 from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
 from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
@@ -492,10 +495,52 @@ class AgentLoop:
 
         self.system_prompt = system_prompt
 
-        # Optional integrations for Streaming-First parity with legacy AssistantService
         self.session_manager = session_manager
         self.artifact_storage = artifact_storage
         self.file_processor = file_processor
+
+        # ADR-003: Lazy-initialized sub-agent manager (reused across tool calls)
+        self._subagent_manager: SubAgentManager | None = None
+
+    def _get_subagent_manager(self) -> SubAgentManager:
+        """Return a reusable SubAgentManager, creating it on first access."""
+        if self._subagent_manager is None:
+            from ..tools.tool_registry import get_tool_registry
+            self._subagent_manager = SubAgentManager(
+                model_registry=self.model_registry,
+                tool_registry=get_tool_registry(),
+            )
+        return self._subagent_manager
+
+    @staticmethod
+    def _format_subagent_model_result(result_summary: str) -> str:
+        """Format sub-agent result for the model's context."""
+        return (
+            f"[Sub-agent result]\n{result_summary}\n\n"
+            "[IMPORTANT: Use this sub-agent's findings to build your comprehensive "
+            "response. Do NOT just repeat the raw output — synthesize and organize it.]"
+        )
+
+    def _parse_subagent_configs(
+        self, tool_calls: list[dict],
+    ) -> tuple[list[SubAgentConfig], list[str]]:
+        """Parse spawn_subagent tool calls into configs and their tool IDs."""
+        configs: list[SubAgentConfig] = []
+        tool_ids: list[str] = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                args = {}
+            tool_ids.append(str(tc.get("id", "")))
+            configs.append(SubAgentConfig(
+                agent_type=SubAgentType(args.get("agent_type", "explore")),
+                prompt=args.get("prompt", ""),
+                description=args.get("description", ""),
+                parent_context=args.get("context"),
+            ))
+        return configs, tool_ids
 
     def _create_query_intent_analyzer(self) -> QueryIntentAnalyzer:
         """Create a QueryIntentAnalyzer instance with LLM support."""
@@ -1478,63 +1523,6 @@ class AgentLoop:
                     normalized_ids = [str(dataset_ids).strip()]
                 return f"q={query}|intent={intent}|datasets={','.join(normalized_ids)}"
 
-            def _merge_stream_tool_calls(
-                chunks: list[dict[str, Any]],
-                accumulator: dict[str, dict[str, Any]],
-                order: list[str],
-                anonymous_counter: int,
-            ) -> int:
-                """Merge provider tool-call delta chunks into complete tool calls."""
-                for chunk in chunks:
-                    if not isinstance(chunk, dict):
-                        continue
-
-                    raw_index = chunk.get("index")
-                    tool_id = str(chunk.get("id") or "").strip()
-                    if raw_index is not None:
-                        try:
-                            key = f"idx:{int(raw_index)}"
-                        except (TypeError, ValueError):
-                            key = f"id:{tool_id}" if tool_id else f"anon:{anonymous_counter}"
-                    elif tool_id:
-                        key = f"id:{tool_id}"
-                    else:
-                        key = f"anon:{anonymous_counter}"
-
-                    if key.startswith("anon:"):
-                        anonymous_counter += 1
-
-                    if key not in accumulator:
-                        accumulator[key] = {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                        order.append(key)
-
-                    merged = accumulator[key]
-                    if tool_id:
-                        merged["id"] = tool_id
-                    chunk_type = chunk.get("type")
-                    if chunk_type:
-                        merged["type"] = str(chunk_type)
-
-                    function_data = (
-                        chunk.get("function") if isinstance(chunk.get("function"), dict) else {}
-                    )
-                    fn_name = function_data.get("name")
-                    if fn_name:
-                        merged["function"]["name"] = str(fn_name)
-                    fn_args = function_data.get("arguments")
-                    if fn_args:
-                        merged["function"]["arguments"] += str(fn_args)
-
-                    # Gemini 3 thoughtSignature passthrough.
-                    if chunk.get("thoughtSignature"):
-                        merged["thoughtSignature"] = chunk["thoughtSignature"]
-
-                return anonymous_counter
-
             def _select_tools_for_request(
                 all_defs: list[Any],
                 user_message: str,
@@ -2069,7 +2057,7 @@ class AgentLoop:
 
                     # Collect tool calls
                     if delta.tool_calls:
-                        anonymous_tool_counter = _merge_stream_tool_calls(
+                        anonymous_tool_counter = merge_stream_tool_calls(
                             delta.tool_calls,
                             tool_calls_accumulated,
                             tool_call_order,
@@ -2116,39 +2104,15 @@ class AgentLoop:
                 messages.append(assistant_msg)
                 accumulated_content = ""  # Reset for next iteration
 
-                # ADR-003: Parallel sub-agent execution
-                # Collect all spawn_subagent calls and run them in parallel BEFORE
-                # the serial tool loop. Results are pre-cached by tool_id.
-                _subagent_results: dict[str, str] = {}  # tool_id → result_summary
+                # ADR-003: Pre-execute parallel sub-agent calls, cache results by tool_id
+                _subagent_results: dict[str, str] = {}
                 _subagent_calls = [
                     tc for tc in tool_calls_batch
                     if tc.get("function", {}).get("name") == "spawn_subagent"
                 ]
                 if len(_subagent_calls) > 1 and self.model_registry:
-                    from .subagent_manager import SubAgentManager
-                    from ..tools.tool_registry import get_tool_registry
-                    sub_mgr = SubAgentManager(
-                        model_registry=self.model_registry,
-                        tool_registry=get_tool_registry(),
-                    )
-                    from .subagent_types import SubAgentConfig, SubAgentType
-                    sub_configs = []
-                    sub_ids = []
-                    for tc in _subagent_calls:
-                        fn = tc.get("function", {})
-                        try:
-                            args = json.loads(fn.get("arguments", "{}"))
-                        except json.JSONDecodeError:
-                            args = {}
-                        tc_id = str(tc.get("id", ""))
-                        sub_ids.append(tc_id)
-                        sub_configs.append(SubAgentConfig(
-                            agent_type=SubAgentType(args.get("agent_type", "explore")),
-                            prompt=args.get("prompt", ""),
-                            description=args.get("description", ""),
-                            parent_context=args.get("context"),
-                        ))
-                    # Run all sub-agents in parallel
+                    sub_mgr = self._get_subagent_manager()
+                    sub_configs, sub_ids = self._parse_subagent_configs(_subagent_calls)
                     _current_results: dict[str, str] = {}
                     async for sub_event in sub_mgr.spawn_parallel(
                         sub_configs, parent_user=user, parent_tenant_id=ctx.tenant_id,
@@ -2157,7 +2121,6 @@ class AgentLoop:
                         if sub_event["event_type"] == "subagent_finished":
                             aid = sub_event["data"].get("agent_id", "")
                             _current_results[aid] = sub_event["data"].get("result_summary", "")
-                    # Map agent_id results back to tool_call ids (order preserved)
                     result_values = list(_current_results.values())
                     for i, tc_id in enumerate(sub_ids):
                         _subagent_results[tc_id] = result_values[i] if i < len(result_values) else ""
@@ -2389,37 +2352,22 @@ class AgentLoop:
                                 and result.result.get("__subagent__")
                                 and self.model_registry
                             ):
-                                # Check if already executed in parallel batch
                                 if tool_id in _subagent_results:
-                                    _sr = _subagent_results[tool_id]
-                                    tool_result = _sr
-                                    tool_result_for_model = f"[Sub-agent result]\n{_sr}\n\n[IMPORTANT: Use this sub-agent's findings to build your comprehensive response. Do NOT just repeat the raw output — synthesize and organize it.]"
-                                    tool_success = True
+                                    subagent_result = _subagent_results[tool_id]
                                 else:
-                                    # Single subagent call — run inline
-                                    from .subagent_manager import SubAgentManager
-                                    from ..tools.tool_registry import get_tool_registry
-                                    sub_mgr = SubAgentManager(
-                                        model_registry=self.model_registry,
-                                        tool_registry=get_tool_registry(),
-                                    )
-                                    sub_config = result.result["config"]
+                                    sub_mgr = self._get_subagent_manager()
                                     subagent_result = ""
                                     async for sub_event in sub_mgr.spawn(
-                                        sub_config,
+                                        result.result["config"],
                                         parent_user=user,
                                         parent_tenant_id=ctx.tenant_id,
                                     ):
-                                        yield AgentLoopEvent(
-                                            phase=phase,
-                                            event_type=sub_event["event_type"],
-                                            data=sub_event["data"],
-                                        )
+                                        yield AgentLoopEvent(phase=phase, event_type=sub_event["event_type"], data=sub_event["data"])
                                         if sub_event["event_type"] == "subagent_finished":
                                             subagent_result = sub_event["data"].get("result_summary", "")
-                                    tool_result = subagent_result
-                                    tool_result_for_model = f"[Sub-agent result]\n{subagent_result}\n\n[IMPORTANT: Use this sub-agent's findings to build your comprehensive response. Do NOT just repeat the raw output — synthesize and organize it.]"
-                                    tool_success = True
+                                tool_result = subagent_result
+                                tool_result_for_model = self._format_subagent_model_result(subagent_result)
+                                tool_success = True
 
                             queue_state = tool_metadata.get("queue_state")
                             if queue_state:

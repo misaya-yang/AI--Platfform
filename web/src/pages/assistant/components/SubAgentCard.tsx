@@ -7,17 +7,13 @@ import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { SubAgentState } from "../types";
+import { formatDuration } from "@/lib/format";
 
 const AGENT_TYPE_CONFIG: Record<string, { icon: string; label: string; color: string }> = {
   explore: { icon: "🔍", label: "Explore", color: "border-blue-300 bg-blue-50/50 dark:bg-blue-950/30" },
   task:    { icon: "⚙️", label: "Task",    color: "border-purple-300 bg-purple-50/50 dark:bg-purple-950/30" },
   plan:    { icon: "📋", label: "Plan",    color: "border-green-300 bg-green-50/50 dark:bg-green-950/30" },
 };
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
 
 export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
   const { t } = useTranslation();
