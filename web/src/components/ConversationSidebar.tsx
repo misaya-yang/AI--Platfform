@@ -12,10 +12,12 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
+import { CustomizeDialog } from "@/pages/assistant/components/CustomizeDialog";
 import {
   MessageSquare,
   Plus,
   Search,
+  Settings,
   Trash2,
   X,
   Loader2,
@@ -202,6 +204,7 @@ export function ConversationSidebar({
 }: ConversationSidebarProps) {
   const { t } = useTranslation();
   const [searchQuery, setSearchQuery] = useState("");
+  const [showCustomize, setShowCustomize] = useState(false);
   const fallbackChatLabel = t("assistant.chatFallback", "Chat");
   const deleteChatLabel = t("assistant.deleteChat", "Delete chat");
 
@@ -323,6 +326,20 @@ export function ConversationSidebar({
           </>
         )}
       </div>
+
+      {/* Customize button */}
+      <div className="p-3 border-t border-border/40 shrink-0">
+        <button
+          type="button"
+          onClick={() => setShowCustomize(true)}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+        >
+          <Settings className="h-4 w-4" />
+          {t("assistant.customize", "自定义")}
+        </button>
+      </div>
+
+      <CustomizeDialog open={showCustomize} onClose={() => setShowCustomize(false)} />
     </div>
   );
 }
