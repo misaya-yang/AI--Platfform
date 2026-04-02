@@ -1240,6 +1240,22 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         remote_url=assistant_remote_url,
     )
 
+    # Initialize MCP (Model Context Protocol) connections
+    try:
+        from .services.assistant.mcp import MCPManager, load_mcp_config
+        mcp_configs = load_mcp_config()
+        if mcp_configs:
+            mcp_manager = MCPManager(configs=mcp_configs)
+            results = await mcp_manager.initialize_all()
+            app.state.mcp_manager = mcp_manager
+            total_tools = sum(v for v in results.values() if v > 0)
+            logger.info(f"MCP: {len(results)} servers, {total_tools} tools registered")
+        else:
+            app.state.mcp_manager = None
+    except Exception as e:
+        logger.warning(f"MCP initialization failed: {e}")
+        app.state.mcp_manager = None
+
     # Load models from database (if available)
     model_service = getattr(app.state, "model_service", None)
     if model_service:

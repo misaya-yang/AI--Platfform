@@ -46,6 +46,7 @@ class ToolCategory(str, Enum):
     INTEGRATION = "integration"  # External system calls
     UTILITY = "utility"  # Helper functions
     SKILL = "skill"  # User-defined or builtin skills
+    MCP = "mcp"  # External system tools via Model Context Protocol
 
 
 @dataclass
