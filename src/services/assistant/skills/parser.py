@@ -27,8 +27,15 @@ from ..openclaw.skills.models import SkillManifest, SkillSource, TriggerConfig
 logger = logging.getLogger(__name__)
 
 
+MAX_SKILL_MD_SIZE = 50_000  # 50KB max
+MAX_INSTRUCTIONS_TOKENS = 5000
+
+
 def parse_skill_md(content: str) -> SkillManifest:
     """Parse a SKILL.md file (YAML frontmatter + markdown body) into a SkillManifest."""
+    if len(content) > MAX_SKILL_MD_SIZE:
+        raise ValueError(f"SKILL.md too large ({len(content)} bytes, max {MAX_SKILL_MD_SIZE})")
+
     frontmatter, body = _split_frontmatter(content)
     if not frontmatter:
         raise ValueError("SKILL.md must start with YAML frontmatter (--- ... ---)")
@@ -46,6 +53,10 @@ def parse_skill_md(content: str) -> SkillManifest:
         raise ValueError("'name' is required in frontmatter")
     if not description:
         raise ValueError("'description' is required in frontmatter")
+
+    # Validate name format (kebab-case, 3-50 chars)
+    if not re.match(r"^[a-z][a-z0-9\-]{2,49}$", name):
+        raise ValueError("name must be kebab-case (a-z, 0-9, hyphens), 3-50 chars")
 
     # Trigger config
     trigger = None

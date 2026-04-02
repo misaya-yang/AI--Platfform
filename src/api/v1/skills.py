@@ -84,7 +84,13 @@ async def upload_skill(
     if not file.filename or not file.filename.endswith(".md"):
         raise HTTPException(400, "File must be a .md file (SKILL.md format)")
 
-    content = (await file.read()).decode("utf-8")
+    raw = await file.read()
+    if len(raw) > 50_000:
+        raise HTTPException(400, f"File too large ({len(raw)} bytes, max 50KB)")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "File must be valid UTF-8")
     try:
         manifest = parse_skill_md(content)
     except (ValueError, Exception) as e:

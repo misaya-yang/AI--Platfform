@@ -3,11 +3,16 @@ MCP Client — JSON-RPC 2.0 client implementing Model Context Protocol.
 
 Transport: HTTP (Streamable HTTP) for server-to-server deployment.
 Spec: https://modelcontextprotocol.io/specification/2025-11-25
+
+Security: Tool descriptions from MCP servers are UNTRUSTED.
+Input validation is required before passing to LLM.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +20,11 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Limits to prevent abuse from malicious MCP servers
+MAX_TOOLS_PER_SERVER = 50
+MAX_DESCRIPTION_LENGTH = 500
+MAX_TOOL_NAME_LENGTH = 64
 
 
 class MCPError(Exception):
@@ -68,6 +78,7 @@ class MCPClient:
         self._tools: list[MCPTool] = []
         self._initialized: bool = False
         self._server_info: dict = {}
+        self._semaphore = asyncio.Semaphore(config.max_concurrent)
 
     async def initialize(self) -> dict:
         """MCP handshake: initialize → notifications/initialized."""
@@ -87,8 +98,6 @@ class MCPClient:
             "clientInfo": {"name": "hejaz-ai-gateway", "version": "1.0.0"},
         })
         self._server_info = result.get("serverInfo", {})
-
-        # Send initialized notification
         await self._notify("notifications/initialized")
         self._initialized = True
         logger.info(f"MCP '{self.config.name}' initialized: {self._server_info.get('name', '?')}")
@@ -97,33 +106,47 @@ class MCPClient:
     async def list_tools(self) -> list[MCPTool]:
         """Discover tools from MCP server (tools/list)."""
         resp = await self._jsonrpc("tools/list", {})
+        raw_tools = resp.get("tools", [])[:MAX_TOOLS_PER_SERVER]
         self._tools = [
             MCPTool(
-                name=t["name"],
-                description=t.get("description", ""),
+                name=self._sanitize_name(t["name"]),
+                description=self._sanitize_description(t.get("description", "")),
                 input_schema=t.get("inputSchema", {}),
                 server_name=self.config.name,
             )
-            for t in resp.get("tools", [])
-            if self._is_tool_allowed(t["name"])
+            for t in raw_tools
+            if self._is_tool_allowed(t.get("name", ""))
         ]
         return self._tools
 
     async def call_tool(self, tool_name: str, arguments: dict) -> MCPToolResult:
-        """Invoke a tool on the MCP server (tools/call)."""
-        resp = await self._jsonrpc("tools/call", {
-            "name": tool_name,
-            "arguments": arguments,
-        })
-        return MCPToolResult(
-            content=resp.get("content", []),
-            is_error=resp.get("isError", False),
-        )
+        """Invoke a tool on the MCP server (tools/call) with concurrency limiting."""
+        async with self._semaphore:
+            start = time.monotonic()
+            try:
+                resp = await self._jsonrpc("tools/call", {
+                    "name": tool_name,
+                    "arguments": arguments,
+                })
+                duration = (time.monotonic() - start) * 1000
+                logger.info(f"MCP tool '{self.config.name}:{tool_name}' completed in {duration:.0f}ms")
+                return MCPToolResult(
+                    content=resp.get("content", []),
+                    is_error=resp.get("isError", False),
+                )
+            except Exception as e:
+                duration = (time.monotonic() - start) * 1000
+                logger.error(f"MCP tool '{self.config.name}:{tool_name}' failed in {duration:.0f}ms: {e}")
+                return MCPToolResult(
+                    content=[{"type": "text", "text": f"Tool call failed: {e}"}],
+                    is_error=True,
+                )
 
     async def close(self) -> None:
         if self._http:
             await self._http.aclose()
             self._http = None
+        self._initialized = False
 
     @property
     def tools(self) -> list[MCPTool]:
@@ -134,7 +157,7 @@ class MCPClient:
         return self._initialized
 
     async def _jsonrpc(self, method: str, params: dict) -> dict:
-        """Send JSON-RPC 2.0 request."""
+        """Send JSON-RPC 2.0 request with error handling."""
         if not self._http:
             raise MCPError(-1, "Client not connected")
         payload = {
@@ -143,8 +166,16 @@ class MCPClient:
             "method": method,
             "params": params,
         }
-        resp = await self._http.post("/mcp", json=payload)
-        resp.raise_for_status()
+        try:
+            resp = await self._http.post("/mcp", json=payload)
+            resp.raise_for_status()
+        except httpx.TimeoutException:
+            raise MCPError(-2, f"Request to {self.config.name} timed out")
+        except httpx.HTTPStatusError as e:
+            raise MCPError(e.response.status_code, f"HTTP {e.response.status_code} from {self.config.name}")
+        except httpx.ConnectError:
+            raise MCPError(-3, f"Cannot connect to {self.config.name} at {self.config.url}")
+
         result = resp.json()
         if "error" in result:
             err = result["error"]
@@ -152,7 +183,7 @@ class MCPClient:
         return result.get("result", {})
 
     async def _notify(self, method: str, params: dict | None = None) -> None:
-        """Send JSON-RPC 2.0 notification (no id, no response expected)."""
+        """Send JSON-RPC 2.0 notification (fire-and-forget)."""
         if not self._http:
             return
         payload = {"jsonrpc": "2.0", "method": method}
@@ -161,11 +192,25 @@ class MCPClient:
         try:
             await self._http.post("/mcp", json=payload)
         except Exception:
-            pass  # Notifications are fire-and-forget
+            pass
 
     def _is_tool_allowed(self, tool_name: str) -> bool:
+        if not tool_name:
+            return False
         if self.config.blocked_tools and tool_name in self.config.blocked_tools:
             return False
         if self.config.allowed_tools is not None:
             return tool_name in self.config.allowed_tools
         return True
+
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        """Sanitize tool name — prevent injection via malicious server."""
+        import re
+        clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", name)[:MAX_TOOL_NAME_LENGTH]
+        return clean or "unnamed"
+
+    @staticmethod
+    def _sanitize_description(desc: str) -> str:
+        """Truncate and sanitize tool description — untrusted content from MCP server."""
+        return desc[:MAX_DESCRIPTION_LENGTH].replace("\n", " ").strip()
