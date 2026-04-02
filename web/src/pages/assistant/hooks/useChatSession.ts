@@ -895,18 +895,15 @@ export function useChatSession() {
 
           case SSEEventType.THINKING_END:
           case "thinking_end": {
-            // Move accumulated text (pre-tool thinking) to thinkingContent,
-            // then clear main content for the post-tool response.
-            const thinkingData = event.data as { content?: string; tool_count?: number } | undefined;
-            const thinkingText = thinkingData?.content || streamTurnState.content || "";
+            // Only for thinking models (Claude extended thinking, Gemini thinking).
+            // Non-thinking models don't emit this event — their pre-tool text
+            // is normal text_delta and stays in message.content as-is.
+            const thinkingData = event.data as { content?: string } | undefined;
+            const thinkingText = thinkingData?.content || "";
             if (thinkingText.trim()) {
-              // First: reset stream state content so syncTurnStateToMessage sees empty
-              streamTurnState = { ...streamTurnState, content: "" };
-              syncTurnStateToMessage();
-              // Then: set thinkingContent on the message
               setMessages(prev => prev.map(m =>
                 m.id === assistantMessage.id
-                  ? { ...m, thinkingContent: thinkingText.trim(), content: "" }
+                  ? { ...m, thinkingContent: thinkingText.trim() }
                   : m
               ));
             }

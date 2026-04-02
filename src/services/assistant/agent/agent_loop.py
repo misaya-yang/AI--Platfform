@@ -2102,14 +2102,10 @@ class AgentLoop:
                 # Step 4: Execute tool calls
                 logger.info(f"[STREAMING-FIRST] Executing {len(tool_calls_batch)} tool calls")
 
-                # Emit thinking_end ONLY on the first iteration to signal
-                # pre-tool thinking text. Later iterations' text is the actual response.
-                if iteration == 1 and accumulated_content.strip():
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="thinking_end",
-                        data={"content": accumulated_content.strip(), "tool_count": len(tool_calls_batch)},
-                    )
+                # Note: thinking_end is NOT emitted for non-thinking models.
+                # For thinking models (Claude extended thinking, Gemini thinking),
+                # thinking tokens will be streamed via the native thinking_delta event.
+                # Normal pre-tool text is just regular text_delta — no special handling.
 
                 # Add assistant message with tool calls to history
                 assistant_msg = {
