@@ -37,12 +37,8 @@ class SmartImageGenerator:
     """
     Provider router for image generation.
 
-    Args:
-        prefer_gemini: If True, try Gemini first when available.
+    Routes to the preferred provider first, falls back to the other on non-safety errors.
     """
-
-    def __init__(self, prefer_gemini: bool = True):
-        self.prefer_gemini = prefer_gemini
 
     async def generate(
         self,
@@ -52,6 +48,7 @@ class SmartImageGenerator:
         style: str = "<auto>",
         negative_prompt: str = "",
         aspect_ratio: str = "1:1",
+        prefer_gemini: bool = True,
     ) -> SmartImageGenerationResult:
         start = time.time()
 
@@ -59,7 +56,7 @@ class SmartImageGenerator:
         dash = get_image_generator()
 
         # Gemini first (if preferred + configured)
-        if self.prefer_gemini and gemini.is_configured:
+        if prefer_gemini and gemini.is_configured:
             gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
             if gemini_res.success:
                 return SmartImageGenerationResult(
@@ -114,7 +111,52 @@ class SmartImageGenerator:
                 duration_ms=gemini_res.duration_ms,
             )
 
-        # DashScope only
+        # DashScope first (when not prefer_gemini)
+        if not prefer_gemini and dash.is_configured:
+            dash_res = await dash.generate(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                size=size,
+                style=style,
+                n=n,
+            )
+            if dash_res.success:
+                return SmartImageGenerationResult(
+                    success=True,
+                    provider="dashscope",
+                    images=dash_res.images,
+                    duration_ms=dash_res.duration_ms,
+                )
+
+            # DashScope failed: fallback to Gemini when possible.
+            if gemini.is_configured:
+                logger.warning(
+                    "DashScope image generation failed, falling back to Gemini. err=%s",
+                    dash_res.error,
+                )
+                gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
+                return SmartImageGenerationResult(
+                    success=gemini_res.success,
+                    provider="google",
+                    images=gemini_res.images if gemini_res.success else [],
+                    error=gemini_res.error,
+                    error_code=gemini_res.error_code,
+                    blocked=gemini_res.blocked,
+                    block_reason=gemini_res.block_reason,
+                    duration_ms=gemini_res.duration_ms,
+                    used_fallback=True,
+                )
+
+            # No fallback configured
+            return SmartImageGenerationResult(
+                success=False,
+                provider="dashscope",
+                images=[],
+                error=dash_res.error,
+                duration_ms=dash_res.duration_ms,
+            )
+
+        # Single provider fallback (only one configured)
         if dash.is_configured:
             dash_res = await dash.generate(
                 prompt=prompt,
@@ -129,6 +171,19 @@ class SmartImageGenerator:
                 images=dash_res.images if dash_res.success else [],
                 error=dash_res.error,
                 duration_ms=dash_res.duration_ms,
+            )
+
+        if gemini.is_configured:
+            gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
+            return SmartImageGenerationResult(
+                success=gemini_res.success,
+                provider="google",
+                images=gemini_res.images if gemini_res.success else [],
+                error=gemini_res.error,
+                error_code=gemini_res.error_code,
+                blocked=gemini_res.blocked,
+                block_reason=gemini_res.block_reason,
+                duration_ms=gemini_res.duration_ms,
             )
 
         # No providers configured
@@ -148,6 +203,6 @@ _smart_image_generator: SmartImageGenerator | None = None
 def get_smart_image_generator(prefer_gemini: bool = True) -> SmartImageGenerator:
     """Get or create a global SmartImageGenerator instance."""
     global _smart_image_generator
-    if _smart_image_generator is None or _smart_image_generator.prefer_gemini != prefer_gemini:
-        _smart_image_generator = SmartImageGenerator(prefer_gemini=prefer_gemini)
+    if _smart_image_generator is None:
+        _smart_image_generator = SmartImageGenerator()
     return _smart_image_generator

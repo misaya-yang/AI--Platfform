@@ -1318,21 +1318,29 @@ async def generate_image(
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
     """
-    Generate images with smart routing.
+    Generate images with smart routing based on model_id provider.
 
-    Routing logic (default):
-    - Prefer Gemini native image generation when configured
-    - If Gemini fails with a non-safety error, fallback to DashScope Wanx when configured
-    - If Gemini is blocked by safety filters, DO NOT fallback across providers
+    Routing logic:
+    - Google models (gemini-*) → Gemini native image generation, fallback DashScope
+    - DashScope models (qwen-*, wanx-*) → DashScope Wanx, fallback Gemini
+    - Other models → DashScope first (cheaper), fallback Gemini
+    - Safety-blocked requests never fallback across providers
     """
     import time
+
+    from ...services.assistant.models.model_registry import ModelProvider
+    from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
 
     start_time = time.time()
 
     try:
-        from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
+        # Determine provider preference from model_id
+        model_info = model_registry.get_model(body.model_id)
+        selected_provider = model_info.provider.value if model_info else None
 
-        router = get_smart_image_generator(prefer_gemini=True)
+        # Route based on model provider: Google → Gemini first, others → DashScope first
+        prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
+        router = get_smart_image_generator(prefer_gemini=prefer_gemini)
 
         # Map style (DashScope only; Gemini ignores style)
         style_map = {
@@ -1373,12 +1381,11 @@ async def generate_image(
         }
         aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
 
-        model_info = model_registry.get_model(body.model_id)
-        selected_provider = model_info.provider.value if model_info else None
         logger.info(
-            "Image generation request - model_id=%s, provider=%s, prompt=%s..., size=%s, n=%s",
+            "Image generation request - model_id=%s, provider=%s, prefer_gemini=%s, prompt=%s..., size=%s, n=%s",
             body.model_id,
             selected_provider,
+            prefer_gemini,
             body.prompt[:50],
             body.size,
             body.n,
@@ -1390,6 +1397,7 @@ async def generate_image(
             size=body.size or "1024*1024",
             style=style,
             aspect_ratio=aspect_ratio,
+            prefer_gemini=prefer_gemini,
         )
 
         if not res.success:

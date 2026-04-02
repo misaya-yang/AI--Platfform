@@ -393,7 +393,29 @@ class ImageGeneratorExecutor(ToolExecutor):
             )
 
         aspect_ratio = self._size_to_aspect_ratio(size)
-        router = get_smart_image_generator(prefer_gemini=True)
+
+        # Determine provider preference from metadata (model_id → provider)
+        prefer_gemini = False  # Default to DashScope (cheaper)
+        model_id = request.metadata.get("model_id", "")
+        if model_id:
+            from ..models.model_registry import ModelProvider
+
+            # Check if model belongs to Google provider
+            try:
+                from ..models.model_registry import ModelRegistry
+
+                registry: ModelRegistry | None = request.metadata.get("model_registry")
+                if registry:
+                    info = registry.get_model(model_id)
+                    if info and info.provider == ModelProvider.GOOGLE:
+                        prefer_gemini = True
+            except Exception:
+                pass
+            # Fallback: infer from model_id prefix
+            if not prefer_gemini and ("gemini" in model_id.lower()):
+                prefer_gemini = True
+
+        router = get_smart_image_generator()
         res = await router.generate(
             prompt=prompt,
             n=n,
@@ -401,6 +423,7 @@ class ImageGeneratorExecutor(ToolExecutor):
             style=style,
             negative_prompt=negative_prompt,
             aspect_ratio=aspect_ratio,
+            prefer_gemini=prefer_gemini,
         )
 
         if not res.success:
