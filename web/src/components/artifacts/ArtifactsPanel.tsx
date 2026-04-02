@@ -91,10 +91,16 @@ function formatFileSize(bytes: number): string {
 }
 
 function getFormatLabel(format?: string, mimeType?: string): string {
-  if (format) return format.toUpperCase();
-  if (mimeType?.includes("word")) return "DOCX";
-  if (mimeType?.includes("pdf")) return "PDF";
-  if (mimeType?.startsWith("image/")) return "IMG";
+  // Normalize: prefer short format label over raw MIME type
+  const f = format?.toLowerCase() || "";
+  if (f === "docx" || f === "doc" || mimeType?.includes("word")) return "DOCX";
+  if (f === "pdf" || mimeType?.includes("pdf")) return "PDF";
+  if (f === "pptx" || f === "ppt" || mimeType?.includes("presentation")) return "PPTX";
+  if (f === "xlsx" || f === "xls" || mimeType?.includes("sheet")) return "XLSX";
+  if (f === "md" || f === "markdown") return "MD";
+  if (f === "csv") return "CSV";
+  if (f === "png" || f === "jpg" || f === "jpeg" || f === "gif" || f === "webp" || mimeType?.startsWith("image/")) return f.toUpperCase() || "IMG";
+  if (f) return f.toUpperCase().slice(0, 6);  // Cap at 6 chars
   return "FILE";
 }
 
@@ -433,9 +439,10 @@ export function ArtifactsPanel({
       : firstDoc.title || firstDoc.filename
     : "Artifacts";
   const displayFormat = firstDoc
-    ? "mime_type" in firstDoc
-      ? firstDoc.mime_type?.split("/")[1]?.toUpperCase()
-      : firstDoc.format?.toUpperCase()
+    ? getFormatLabel(
+        "format" in firstDoc ? (firstDoc as Artifact).format : undefined,
+        "mime_type" in firstDoc ? (firstDoc as OutputFile).mime_type || undefined : (firstDoc as Artifact).mimeType || undefined
+      )
     : "";
 
   const handleCopy = React.useCallback(async () => {
