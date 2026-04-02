@@ -1256,6 +1256,34 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         logger.warning(f"MCP initialization failed: {e}")
         app.state.mcp_manager = None
 
+    # ADR-002 Phase 1: Initialize tenant isolation services
+    database = getattr(app.state, "database", None)
+    try:
+        from .services.assistant.tools.tenant_tool_policy import TenantToolPolicyService
+        from .services.assistant.mcp.tenant_mcp_config import TenantMCPConfigService
+        from .services.assistant.audit import ToolAuditService
+
+        app.state.tenant_tool_policy = TenantToolPolicyService(database=database)
+        app.state.tool_audit = ToolAuditService(database=database)
+
+        mcp_server_names = []
+        if app.state.mcp_manager:
+            mcp_server_names = [c.name for c in (mcp_configs or [])]
+        app.state.tenant_mcp_config = TenantMCPConfigService(
+            database=database,
+            all_server_names=mcp_server_names,
+        )
+        # Inject into AssistantService (created before MCP init)
+        assistant_service.tenant_tool_policy = app.state.tenant_tool_policy
+        assistant_service.tenant_mcp_config = app.state.tenant_mcp_config
+        assistant_service.tool_audit = app.state.tool_audit
+        logger.info("ADR-002: Tenant isolation services initialized")
+    except Exception as e:
+        logger.warning(f"Tenant isolation init failed (non-fatal): {e}")
+        app.state.tenant_tool_policy = None
+        app.state.tenant_mcp_config = None
+        app.state.tool_audit = None
+
     # Load models from database (if available)
     model_service = getattr(app.state, "model_service", None)
     if model_service:

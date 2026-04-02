@@ -514,9 +514,17 @@ Please use this web search context to inform your response when relevant."""
         execution_gateway: Any | None = None,
         request_router: Any | None = None,
         kb_proxy: Any | None = None,
+        # ADR-002: Tenant isolation services
+        tenant_tool_policy: Any | None = None,
+        tenant_mcp_config: Any | None = None,
+        tool_audit: Any | None = None,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service or kb_proxy  # Use proxy when local KB unavailable
+        # ADR-002: Tenant isolation
+        self.tenant_tool_policy = tenant_tool_policy
+        self.tenant_mcp_config = tenant_mcp_config
+        self.tool_audit = tool_audit
         self.tavily_tool = TavilySearchTool(api_key=tavily_api_key)
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
@@ -613,7 +621,11 @@ Please use this web search context to inform your response when relevant."""
 
         self.request_router = request_router or AssistantRequestRouter()
         self.execution_gateway = execution_gateway or AssistantExecutionGateway(
-            tool_invoker=create_tool_invoker(),
+            tool_invoker=create_tool_invoker(
+                tenant_tool_policy=self.tenant_tool_policy,
+                tenant_mcp_config=self.tenant_mcp_config,
+                tool_audit=self.tool_audit,
+            ),
             database=db,
             enabled=gateway_enabled,
         )
@@ -3006,6 +3018,7 @@ Please use this web search context to inform your response when relevant."""
         )
 
         # Create AgentLoop instance (system_prompt passed via loop_config)
+        from .tool_invoker import create_tool_invoker
         agent_loop = AgentLoop(
             model_registry=self.model_registry,
             kb_service=self.kb_service,
@@ -3016,6 +3029,11 @@ Please use this web search context to inform your response when relevant."""
             execution_gateway=self.execution_gateway,
             request_router=self.request_router,
             database=self.db,
+            tool_invoker=create_tool_invoker(
+                tenant_tool_policy=self.tenant_tool_policy,
+                tenant_mcp_config=self.tenant_mcp_config,
+                tool_audit=self.tool_audit,
+            ),
         )
 
         # Load history if not provided

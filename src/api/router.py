@@ -23,6 +23,7 @@ from .v1.quiz import router as quiz_router, public_router as quiz_public_router
 from .v1.exams import router as exams_router
 from .v1.skills import router as skills_router
 from .v1.mcp import router as mcp_router
+from .v1.tenant_policies import router as tenant_policies_router
 from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
@@ -69,5 +70,6 @@ api_router.include_router(quiz_public_router)  # Public quiz sharing (no auth)
 api_router.include_router(exams_router)  # Exam management (admin only)
 api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(mcp_router)  # MCP server management
+api_router.include_router(tenant_policies_router)  # ADR-002: Tenant isolation admin
 api_router.include_router(providers_router)  # LLM Provider 管理
 api_router.include_router(models_router)  # LLM Model 管理

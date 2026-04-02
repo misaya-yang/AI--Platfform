@@ -120,6 +120,7 @@ class FileStorageService:
         user_id: str,
         file_id: str,
         ext: str,
+        tenant_id: str | None = None,
     ) -> tuple[str, str]:
         """
         Generate storage key and safe filename for a file.
@@ -128,15 +129,20 @@ class FileStorageService:
             user_id: User ID
             file_id: Unique file ID
             ext: File extension (including dot)
+            tenant_id: Tenant ID for path isolation (ADR-002)
 
         Returns:
             Tuple of (storage_key, safe_filename)
 
-        Key structure: uploads/{user_id}/{file_id}_{timestamp}{ext}
+        Key structure: uploads/{tenant_id}/{user_id}/{file_id}_{timestamp}{ext}
+        Falls back to: uploads/{user_id}/{file_id}_{timestamp}{ext} when tenant_id is empty.
         """
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_filename = f"{file_id}_{timestamp}{ext}"
-        storage_key = f"{self.KEY_PREFIX}/{user_id}/{safe_filename}"
+        if tenant_id:
+            storage_key = f"{self.KEY_PREFIX}/{tenant_id}/{user_id}/{safe_filename}"
+        else:
+            storage_key = f"{self.KEY_PREFIX}/{user_id}/{safe_filename}"
         return storage_key, safe_filename
 
     async def upload_file(
@@ -147,6 +153,7 @@ class FileStorageService:
         content_type: str,
         metadata: dict[str, str] | None = None,
         file_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> FileInfo:
         """
         Upload a file to storage.
@@ -158,6 +165,7 @@ class FileStorageService:
             content_type: MIME type
             metadata: Optional metadata
             file_id: Optional file ID (generated if not provided)
+            tenant_id: Tenant ID for path isolation (ADR-002)
 
         Returns:
             FileInfo with upload details
@@ -175,7 +183,7 @@ class FileStorageService:
         if not file_id:
             file_id = self.generate_file_id()
 
-        storage_key, safe_filename = self._generate_key(user_id, file_id, ext)
+        storage_key, safe_filename = self._generate_key(user_id, file_id, ext, tenant_id=tenant_id)
 
         # Build metadata
         file_metadata = {

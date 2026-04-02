@@ -294,6 +294,7 @@ class DatabaseStorage:
             await self._auto_apply_openclaw_skills_migration()
             await self._auto_apply_openclaw_scheduler_audit_migration()
             await self._auto_apply_openclaw_context_metrics_migration()
+            await self._auto_apply_tenant_isolation_migration()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -1072,6 +1073,49 @@ class DatabaseStorage:
                 logger.info("Migration 039 already applied")
             else:
                 logger.exception("Failed to apply migration 039")
+
+    # ------------------------------------------------------------------
+    # Migration 044: Tenant Soft Isolation (ADR-002)
+    # ------------------------------------------------------------------
+
+    async def _tenant_isolation_needs_migration(self) -> bool:
+        """Check whether tenant_tool_policies table is missing."""
+        if not self._pool:
+            return False
+        async with self._pool.acquire() as conn:
+            table = await conn.fetchval("SELECT to_regclass('public.tenant_tool_policies')")
+            return table is None
+
+    async def _auto_apply_tenant_isolation_migration(self) -> None:
+        """Apply migration 044 for tenant soft isolation."""
+        if not self._pool:
+            return
+        try:
+            needs = await self._tenant_isolation_needs_migration()
+        except (asyncpg.PostgresError, OSError):
+            logger.exception("Could not check tenant isolation migration")
+            return
+        if not needs:
+            return
+
+        migration_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "database"
+            / "migrations"
+            / "044_tenant_soft_isolation.sql"
+        )
+        if not migration_path.exists():
+            logger.warning(f"Migration 044 not found: {migration_path}")
+            return
+
+        try:
+            await self.execute_schema(str(migration_path))
+            logger.info("Applied migration 044_tenant_soft_isolation.sql")
+        except asyncpg.PostgresError as e:
+            if "already exists" in str(e).lower():
+                logger.info("Migration 044 already applied")
+            else:
+                logger.exception("Failed to apply migration 044")
 
     # =========================================================================
     # 服务定义表 (services)

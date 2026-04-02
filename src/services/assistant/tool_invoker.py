@@ -298,6 +298,9 @@ class RegistryToolInvoker(ToolInvoker):
         tool_registry: ToolRegistry,
         rate_limiter: Callable[[str, str], bool] | None = None,
         metrics_collector: Callable[[str, float, bool], None] | None = None,
+        tenant_tool_policy: Any | None = None,
+        tenant_mcp_config: Any | None = None,
+        tool_audit: Any | None = None,
     ):
         """
         Initialize the RegistryToolInvoker.
@@ -308,10 +311,16 @@ class RegistryToolInvoker(ToolInvoker):
                           Returns True if request should be rate limited
             metrics_collector: Optional callable(tool_name, duration_ms, success)
                                Called after each invocation for metrics
+            tenant_tool_policy: TenantToolPolicyService for per-tenant tool filtering
+            tenant_mcp_config: TenantMCPConfigService for per-tenant MCP filtering
+            tool_audit: ToolAuditService for audit logging
         """
         self.tool_registry = tool_registry
         self.rate_limiter = rate_limiter
         self.metrics_collector = metrics_collector
+        self.tenant_tool_policy = tenant_tool_policy
+        self.tenant_mcp_config = tenant_mcp_config
+        self.tool_audit = tool_audit
 
     async def invoke(
         self,
@@ -409,6 +418,26 @@ class RegistryToolInvoker(ToolInvoker):
                 self.metrics_collector(tool_name, duration_ms, result.success)
             except Exception as e:
                 logger.error(f"Failed to record metrics: {e}")
+
+        # Audit log (fire-and-forget)
+        if self.tool_audit:
+            try:
+                from .audit.tool_audit import ToolAuditEntry
+                entry = ToolAuditEntry(
+                    tenant_id=context.tenant_id,
+                    user_id=context.user_id,
+                    session_id=context.session_id,
+                    request_id=context.request_id,
+                    tool_type=self.tool_audit.classify_tool_type(tool_name),
+                    tool_name=tool_name,
+                    input_summary=self.tool_audit.summarize_input(arguments),
+                    output_status="success" if result.success else "error",
+                    error_message=result.error if not result.success else None,
+                    latency_ms=duration_ms,
+                )
+                asyncio.create_task(self.tool_audit.log(entry))
+            except Exception as e:
+                logger.debug(f"Audit log failed: {e}")
 
         return result
 
@@ -664,6 +693,35 @@ class RegistryToolInvoker(ToolInvoker):
             tools = [t for t in tools if t.name in tool_names]
         return tools
 
+    async def get_tool_definitions_filtered(
+        self,
+        context: ToolInvocationContext,
+        tool_names: list[str] | None = None,
+    ) -> list[ToolDefinition]:
+        """Get tool definitions with per-tenant policy + MCP filtering (async).
+
+        Falls back to `get_tool_definitions()` if no policies are configured.
+        """
+        tools = self.get_tool_definitions(context, tool_names)
+
+        # Apply tenant tool policy (whitelist/blacklist/category)
+        if self.tenant_tool_policy and context.tenant_id:
+            try:
+                policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
+                tools = self.tenant_tool_policy.filter_tools(tools, policy)
+            except Exception as e:
+                logger.warning(f"Tenant tool policy filter failed: {e}")
+
+        # Apply tenant MCP config (per-tenant MCP server access)
+        if self.tenant_mcp_config and context.tenant_id:
+            try:
+                mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
+                tools = self.tenant_mcp_config.filter_mcp_tools(tools, mcp_config)
+            except Exception as e:
+                logger.warning(f"Tenant MCP config filter failed: {e}")
+
+        return tools
+
 
 # =============================================================================
 # Factory Functions
@@ -674,6 +732,9 @@ def create_tool_invoker(
     tool_registry: ToolRegistry | None = None,
     rate_limiter: Callable[[str, str], bool] | None = None,
     metrics_collector: Callable[[str, float, bool], None] | None = None,
+    tenant_tool_policy: Any | None = None,
+    tenant_mcp_config: Any | None = None,
+    tool_audit: Any | None = None,
 ) -> ToolInvoker:
     """
     Create a ToolInvoker instance.
@@ -682,6 +743,9 @@ def create_tool_invoker(
         tool_registry: Optional ToolRegistry (uses global if not provided)
         rate_limiter: Optional rate limiting callback
         metrics_collector: Optional metrics collection callback
+        tenant_tool_policy: TenantToolPolicyService for per-tenant filtering
+        tenant_mcp_config: TenantMCPConfigService for per-tenant MCP filtering
+        tool_audit: ToolAuditService for audit logging
 
     Returns:
         Configured ToolInvoker instance
@@ -694,6 +758,9 @@ def create_tool_invoker(
         tool_registry=registry,
         rate_limiter=rate_limiter,
         metrics_collector=metrics_collector,
+        tenant_tool_policy=tenant_tool_policy,
+        tenant_mcp_config=tenant_mcp_config,
+        tool_audit=tool_audit,
     )
 
 
