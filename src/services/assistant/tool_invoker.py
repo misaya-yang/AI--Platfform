@@ -354,7 +354,7 @@ class RegistryToolInvoker(ToolInvoker):
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _is_cacheable(self, tool_name: str) -> bool:
-        return any(tool_name.startswith(p) or tool_name == p for p in self._cacheable_prefixes)
+        return any(tool_name.startswith(p) for p in self._cacheable_prefixes)
 
     def _cache_get(self, session_id: str, key: str) -> Any | None:
         entry = self._result_cache.get((session_id, key))
@@ -406,7 +406,11 @@ class RegistryToolInvoker(ToolInvoker):
         # ADR-003 Phase 3: Check result cache for idempotent tools
         cache_key = None
         if self._is_cacheable(tool_name):
-            cache_key = self._cache_key(tool_name, arguments)
+            # Include kb_dataset_ids in cache key for KB search (auto-injected later)
+            cache_args = arguments
+            if tool_name == "search_knowledge_base" and not arguments.get("dataset_ids") and context.kb_dataset_ids:
+                cache_args = {**arguments, "dataset_ids": context.kb_dataset_ids}
+            cache_key = self._cache_key(tool_name, cache_args)
             cached = self._cache_get(context.session_id, cache_key)
             if cached is not None:
                 logger.info(f"Cache hit: tool={tool_name} session={context.session_id[:12]}")

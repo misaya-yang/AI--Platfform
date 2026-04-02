@@ -15,7 +15,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from ....core.observability.logging import get_logger
-from .constants import ToolName, QA_TOOLS
+from .constants import ToolName
 
 if TYPE_CHECKING:
     from .tool_registry import ToolDefinition
@@ -37,7 +37,7 @@ ALWAYS_INCLUDE = {ToolName.SEARCH_KB, ToolName.UPDATE_MEMORY}
 # Keyword → tool relevance mappings
 _TOOL_KEYWORDS: dict[str, list[str]] = {
     ToolName.SEARCH_KB: [
-        "search", "find", "knowledge", "kb", "document", "查找", "搜索", "知识", "文档",
+        "knowledge base", "knowledge", "kb", "internal document", "查找", "知识库", "知识", "文档",
     ],
     ToolName.SEARCH_WEB: [
         "web", "internet", "news", "current", "latest", "online", "网上", "新闻", "最新",
@@ -79,7 +79,7 @@ def _estimate_tool_tokens(tool_def: ToolDefinition, compact: bool = True) -> int
     """Estimate token count for a tool's schema."""
     try:
         schema = tool_def.to_openai_schema(compact=compact)
-        text = json.dumps(schema, ensure_ascii=False)
+        text = json.dumps(schema, ensure_ascii=False, default=str)
         # Rough estimate: ~4 chars per token for JSON
         return len(text) // 4
     except Exception:
@@ -110,7 +110,15 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
                 if hits:
                     return min(0.4 + hits * 0.2, 1.0)
                 return 0.0  # MCP tool but no relevance signal — exclude
-        return 0.0  # Unknown MCP server — exclude by default
+        # Fallback for unknown MCP servers: match server name or tool action against message
+        parts = name.split("__", 1)
+        server_part = parts[0].replace("mcp_", "") if parts else ""
+        action_part = parts[1] if len(parts) > 1 else ""
+        if server_part and server_part in message_lower:
+            return 0.6
+        if action_part and action_part.replace("_", " ") in message_lower:
+            return 0.5
+        return 0.0
 
     # Skill tools: moderate baseline
     if tool_def.category and tool_def.category.value == "skill":
