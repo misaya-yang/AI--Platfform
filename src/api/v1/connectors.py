@@ -23,8 +23,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from ...core.auth.user_resolver import UserContext, get_current_user
-from ...core.database import get_database
+from ...core.auth.user_resolver import UserContext
+from ..deps import get_user_context
 from ...core.observability.logging import get_logger
 
 logger = get_logger(__name__)
@@ -49,6 +49,10 @@ class ConnectorSearchRequest(BaseModel):
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
+
+def _get_db(request: Request):
+    return getattr(request.app.state, "database", None)
+
 
 async def _get_connector_config(db, provider: str, tenant_id: str = "") -> dict | None:
     row = await db.fetchrow(
@@ -127,10 +131,12 @@ async def _refresh_token_if_needed(db, connector: dict, config: dict) -> str:
 @router.get("/available")
 async def list_available_connectors(
     request: Request,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_user_context),
 ):
     """List all configured connectors with user's connection status."""
-    db = get_database()
+    db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
     configs = await db.fetch(
         "SELECT * FROM connector_configs WHERE (tenant_id = $1 OR tenant_id = '') AND enabled = true",
         user.tenant_id,
@@ -156,9 +162,11 @@ async def list_available_connectors(
 
 
 @router.get("/mine")
-async def list_my_connectors(user: UserContext = Depends(get_current_user)):
+async def list_my_connectors(request: Request, user: UserContext = Depends(get_user_context)):
     """List user's connected services."""
-    db = get_database()
+    db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
     rows = await db.fetch(
         """SELECT provider, display_name, status, last_used_at, provider_metadata, created_at
            FROM user_connectors WHERE tenant_id = $1 AND user_id = $2 AND status != 'revoked'""",
@@ -171,10 +179,12 @@ async def list_my_connectors(user: UserContext = Depends(get_current_user)):
 async def initiate_oauth(
     provider: str,
     request: Request,
-    user: UserContext = Depends(get_current_user),
+    user: UserContext = Depends(get_user_context),
 ):
     """Initiate OAuth flow — returns the authorization URL to redirect the user."""
-    db = get_database()
+    db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
     config = await _get_connector_config(db, provider, user.tenant_id)
     if not config:
         raise HTTPException(404, f"Connector not configured: {provider}")
@@ -221,7 +231,7 @@ async def oauth_callback(
         raise HTTPException(400, "Invalid state parameter")
     tenant_id, user_id = parts[0], parts[1]
 
-    db = get_database()
+    db = _get_db(request)
     config = await _get_connector_config(db, provider, tenant_id)
     if not config:
         raise HTTPException(404, f"Connector not configured: {provider}")
@@ -290,10 +300,11 @@ async def oauth_callback(
 @router.delete("/{provider}")
 async def disconnect_connector(
     provider: str,
-    user: UserContext = Depends(get_current_user),
+    request: Request,
+    user: UserContext = Depends(get_user_context),
 ):
     """Disconnect a connector — revokes tokens."""
-    db = get_database()
+    db = _get_db(request)
     await db.execute(
         """UPDATE user_connectors SET status = 'revoked', access_token = NULL,
            refresh_token = NULL, updated_at = NOW()
@@ -307,10 +318,11 @@ async def disconnect_connector(
 async def search_connector(
     provider: str,
     body: ConnectorSearchRequest,
-    user: UserContext = Depends(get_current_user),
+    request: Request,
+    user: UserContext = Depends(get_user_context),
 ):
     """Search connector data (e.g., Confluence pages, emails)."""
-    db = get_database()
+    db = _get_db(request)
     connector = await _get_user_connector(db, user.tenant_id, user.user_id, provider)
     if not connector or connector["status"] != "connected":
         raise HTTPException(400, f"Not connected to {provider}. Connect first.")
