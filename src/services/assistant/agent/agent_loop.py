@@ -1614,7 +1614,8 @@ class AgentLoop:
                                 ctx.session_id,
                             )
 
-                    asyncio.create_task(_persist_user_message())
+                    _task = asyncio.create_task(_persist_user_message())
+                    _task.add_done_callback(lambda t: logger.error(f"User message persist failed: {t.exception()}") if not t.cancelled() and t.exception() else None)
                 except (RuntimeError, TypeError) as e:
                     logger.exception("Failed to schedule user message persistence")
 

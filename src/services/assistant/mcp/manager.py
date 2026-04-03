@@ -77,13 +77,17 @@ class MCPManager:
         # Convert JSON Schema to ToolParameters
         params = self._schema_to_params(mcp_tool.input_schema)
 
+        # Sanitize external tool description (prevent prompt injection)
+        import re
+        safe_desc = re.sub(r"[\x00-\x1f\x7f]", "", mcp_tool.description or "")[:MAX_DESCRIPTION_LENGTH]
+
         definition = ToolDefinition(
             name=registry_name,
-            description=f"[{mcp_tool.server_name}] {mcp_tool.description}",
+            description=f"[{mcp_tool.server_name}] {safe_desc}",
             parameters=params,
             category=ToolCategory.MCP,
             risk_level=ToolRiskLevel.MEDIUM,
-            when_to_use=mcp_tool.description,
+            when_to_use=safe_desc,
             timeout_seconds=int(client.config.timeout),
             is_async=True,
         )

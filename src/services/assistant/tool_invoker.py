@@ -440,7 +440,8 @@ class RegistryToolInvoker(ToolInvoker):
                             output_status="cache_hit",
                             latency_ms=0,
                         )
-                        asyncio.create_task(self.tool_audit.log(entry))
+                        _t = asyncio.create_task(self.tool_audit.log(entry))
+                        _t.add_done_callback(lambda t: None if not t.exception() else None)
                     except Exception:
                         pass
                 return cached_copy

@@ -1038,7 +1038,8 @@ Please use this web search context to inform your response when relevant."""
                             f"[CRITICAL] User message persistence failed for session {session_id}: {persist_err}"
                         )
 
-                asyncio.create_task(_persist_user_message())
+                _task = asyncio.create_task(_persist_user_message())
+                _task.add_done_callback(lambda t: logger.error(f"User message persist failed: {t.exception()}") if not t.cancelled() and t.exception() else None)
             except Exception as e:
                 logger.warning(f"Failed to persist user message: {e}")
 
@@ -2939,9 +2940,10 @@ Please use this web search context to inform your response when relevant."""
         return self._tool_orchestrator
 
     def _legacy_get_working_memory(self, session_id: str) -> WorkingMemory:
-        """Get or create working memory for a session."""
+        """Get or create working memory for a session (TTL-bounded)."""
         if not hasattr(self, "_working_memories"):
-            self._working_memories = {}
+            from cachetools import TTLCache
+            self._working_memories = TTLCache(maxsize=10000, ttl=3600)
 
         if session_id not in self._working_memories:
             self._working_memories[session_id] = WorkingMemory(session_id=session_id)

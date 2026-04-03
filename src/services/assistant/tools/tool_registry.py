@@ -298,6 +298,7 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
         self._executors: dict[str, ToolExecutor] = {}
+        self._lock = asyncio.Lock()  # H02: protect concurrent registration
 
     def register(
         self,

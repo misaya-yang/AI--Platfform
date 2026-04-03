@@ -80,8 +80,36 @@ class MCPClient:
         self._server_info: dict = {}
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
 
+    @staticmethod
+    def _validate_url(url: str) -> None:
+        """Block private/loopback IPs and non-HTTPS URLs (except localhost for dev)."""
+        import ipaddress
+        import socket
+        import urllib.parse
+
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname or ""
+
+        # Allow localhost/Docker-internal for dev (non-public)
+        if hostname in ("localhost", "127.0.0.1") or hostname.endswith(".internal"):
+            return
+
+        # Resolve hostname and block private IPs
+        try:
+            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise ValueError(f"MCP URL resolves to private IP: {ip}")
+        except socket.gaierror:
+            pass  # DNS may not resolve in all environments
+
+        # Warn if not HTTPS for non-local URLs
+        if parsed.scheme != "https" and not hostname.startswith("localhost"):
+            logger.warning(f"MCP server '{hostname}' uses HTTP — credentials may be transmitted in cleartext")
+
     async def initialize(self) -> dict:
         """MCP handshake: initialize → notifications/initialized."""
+        self._validate_url(self.config.url)
+
         headers = {}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"

@@ -388,26 +388,30 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
 
-    # Count CJK characters (Chinese, Japanese, Korean)
-    cjk_count = sum(
+    # Count non-Latin characters that tokenize differently
+    # CJK: ~1.5 tokens/char; Arabic/Hebrew: ~2 tokens/char
+    non_latin_count = sum(
         1
         for c in text
-        if "\u4e00" <= c <= "\u9fff"
-        or "\u3040" <= c <= "\u30ff"  # Japanese hiragana/katakana
-        or "\uac00" <= c <= "\ud7af"
-    )  # Korean
+        if "\u4e00" <= c <= "\u9fff"         # CJK Unified
+        or "\u3040" <= c <= "\u30ff"          # Japanese hiragana/katakana
+        or "\uac00" <= c <= "\ud7af"          # Korean
+        or "\u0600" <= c <= "\u06ff"          # Arabic
+        or "\u0750" <= c <= "\u077f"          # Arabic Supplement
+        or "\ufb50" <= c <= "\ufdff"          # Arabic Presentation Forms-A
+        or "\ufe70" <= c <= "\ufeff"          # Arabic Presentation Forms-B
+        or "\u0590" <= c <= "\u05ff"          # Hebrew
+    )
 
-    # Non-CJK characters
-    ascii_count = len(text) - cjk_count
+    ascii_count = len(text) - non_latin_count
 
-    # Estimate: CJK ~1.5 tokens/char, ASCII ~0.25 tokens/char
-    # Using conservative estimates to avoid overflow
-    cjk_tokens = cjk_count * 1.5
+    # Estimate: CJK/Arabic ~1.5 tokens/char, ASCII ~0.25 tokens/char
+    non_latin_tokens = non_latin_count * 1.5
     ascii_tokens = ascii_count / 3.5  # ~3.5 chars per token for English
 
     # Add 15% safety margin to prevent context overflow
     # This accounts for tokenizer variations across different models
-    base_estimate = cjk_tokens + ascii_tokens
+    base_estimate = non_latin_tokens + ascii_tokens
     return int(base_estimate * 1.15)
 
 
