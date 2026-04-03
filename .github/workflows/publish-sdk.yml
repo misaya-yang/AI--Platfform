@@ -25,19 +25,23 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: cd sdk/python && twine upload dist/*
 
-  publish-npm:
-    name: Publish TypeScript SDK to npm
+  publish-cli:
+    name: Publish @hejaz/ai-cli to npm
     runs-on: ubuntu-latest
-    if: false  # Enable when TypeScript SDK is ready
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      - name: Install & Build
+        run: |
+          cd sdk/cli
+          npm ci
+          npm run build
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cd sdk/typescript
+          cd sdk/cli
           npm publish --access public
