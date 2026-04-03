@@ -1,9 +1,10 @@
 /**
  * edit_file — Exact string replacement in a file (like sed but exact match).
+ * P2.4: Enhanced with unified diff display.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, basename } from "node:path";
 import { validatePath } from "../permissions.js";
 
 interface EditFileArgs {
@@ -11,6 +12,20 @@ interface EditFileArgs {
   old_string: string;
   new_string: string;
   replace_all?: boolean;
+}
+
+/** Generate a minimal unified diff between old and new strings. */
+function miniDiff(oldStr: string, newStr: string, filePath: string): string {
+  const oldLines = oldStr.split("\n");
+  const newLines = newStr.split("\n");
+  const lines: string[] = [
+    `--- a/${basename(filePath)}`,
+    `+++ b/${basename(filePath)}`,
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+  ];
+  for (const l of oldLines) lines.push(`- ${l}`);
+  for (const l of newLines) lines.push(`+ ${l}`);
+  return lines.join("\n");
 }
 
 export function editFile(args: EditFileArgs): string {
@@ -26,23 +41,27 @@ export function editFile(args: EditFileArgs): string {
   }
 
   let updated: string;
+  let count: number;
+
   if (replace_all) {
+    count = content.split(old_string).length - 1;
     updated = content.split(old_string).join(new_string);
-    const count = content.split(old_string).length - 1;
-    writeFileSync(absPath, updated, "utf-8");
-    return `Replaced ${count} occurrence(s) in ${absPath}`;
+  } else {
+    // Check uniqueness for single replacement
+    const firstIdx = content.indexOf(old_string);
+    const secondIdx = content.indexOf(old_string, firstIdx + 1);
+    if (secondIdx !== -1) {
+      return `Error: old_string matches multiple locations in ${absPath}. Use replace_all=true or provide more context.`;
+    }
+    count = 1;
+    updated = content.replace(old_string, new_string);
   }
 
-  // Check uniqueness for single replacement
-  const firstIdx = content.indexOf(old_string);
-  const secondIdx = content.indexOf(old_string, firstIdx + 1);
-  if (secondIdx !== -1) {
-    return `Error: old_string matches multiple locations in ${absPath}. Use replace_all=true or provide more context.`;
-  }
-
-  updated = content.replace(old_string, new_string);
   writeFileSync(absPath, updated, "utf-8");
-  return `Edited ${absPath} — replaced 1 occurrence`;
+
+  // P2.4: Show diff in result
+  const diff = miniDiff(old_string, new_string, absPath);
+  return `Edited ${absPath} — replaced ${count} occurrence(s)\n\n\`\`\`diff\n${diff}\n\`\`\``;
 }
 
 export const editFileDefinition = {

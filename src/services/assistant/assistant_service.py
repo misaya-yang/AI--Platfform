@@ -911,6 +911,17 @@ Please use this web search context to inform your response when relevant."""
             )
             return
 
+        # ========== P2.2: Auto error recovery on user correction ==========
+        if self._detect_user_correction(message):
+            correction_ctx = (
+                "The user has corrected your previous response. "
+                "Acknowledge the correction briefly, re-execute any necessary tool calls "
+                "with corrected parameters, and provide an updated answer. "
+                "Do NOT just apologize — actually fix the issue."
+            )
+            existing = (config.system_prompt or "").strip()
+            config.system_prompt = f"{existing}\n\n{correction_ctx}" if existing else correction_ctx
+
         # ========== Agent Loop Mode (Experimental) ==========
         # If use_agent_loop is enabled, delegate to the unified 8-step AgentLoop
         if config.use_agent_loop:
@@ -3301,6 +3312,19 @@ Please use this web search context to inform your response when relevant."""
                 event_type=StreamEventType.ERROR.value,
                 data={"message": f"Planning execution failed: {str(e)}", "recoverable": True},
             )
+
+    # P2.2: Correction detection patterns
+    _CORRECTION_RE = __import__("re").compile(
+        r"你搞错了|不对|错了|有问题|你的.*有误|搞混了|弄反了|"
+        r"今天是\d{4}年|现在是\d{4}|"
+        r"that'?s wrong|incorrect|you'?re wrong|not right|that'?s not|"
+        r"no[,.]?\s*(it'?s|the|actually)|wrong answer|fix this|try again",
+        __import__("re").IGNORECASE,
+    )
+
+    def _detect_user_correction(self, message: str) -> bool:
+        """Detect if the user is correcting a previous AI response."""
+        return bool(self._CORRECTION_RE.search(message))
 
     def _is_document_generation_task(self, message: str) -> bool:
         """

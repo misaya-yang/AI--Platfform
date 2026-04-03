@@ -10,6 +10,7 @@ import { grep, grepDefinition } from "./grep.js";
 import { bash, bashDefinition } from "./bash.js";
 import { listDir, listDirDefinition } from "./list-dir.js";
 import { tree, treeDefinition } from "./tree.js";
+import { todoWrite, todoDefinition } from "./todo.js";
 
 export const OS_TOOL_DEFINITIONS = [
   readFileDefinition,
@@ -20,6 +21,7 @@ export const OS_TOOL_DEFINITIONS = [
   bashDefinition,
   listDirDefinition,
   treeDefinition,
+  todoDefinition,
 ];
 
 /**
@@ -77,6 +79,8 @@ export async function executeOSTool(
       return listDir(args as any);
     case "tree":
       return tree(args as any);
+    case "todo_write":
+      return todoWrite(args as any);
     default:
       throw new Error(`Unknown OS tool: ${name}`);
   }

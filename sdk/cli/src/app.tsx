@@ -402,8 +402,36 @@ export function App({ config }: { config: CLIConfig }) {
           if (result.action === "compact") {
             const userMsgs = messages.filter((m) => m.role !== "system");
             if (userMsgs.length <= 2) { sysMsg("Conversation too short to compact."); return; }
-            const summary = userMsgs.map((m) => `${m.role}: ${m.content.slice(0, 200)}`).join("\n");
-            setMessages([{ role: "system", content: `[Compacted ${messages.length} messages]\n\n${summary.slice(0, 1500)}` }]); return;
+            // P2.1: LLM-powered summarization via gateway
+            setBusy(true); setStatusMsg("Compacting conversation with AI...");
+            try {
+              const historyForSummary = userMsgs.slice(-30).map((m) => ({
+                role: m.role, content: m.content.slice(0, 500),
+              }));
+              let summaryText = "";
+              for await (const evt of client.streamSSE("/api/v1/assistant/chat/stream", {
+                message: "Please summarize the entire conversation above in under 500 words. " +
+                  "Preserve all important context: file paths, code decisions, key facts, and action items. " +
+                  "Output ONLY the summary, no preamble.",
+                session_id: sessionId || "compact-temp",
+                model_id: model,
+                history: historyForSummary,
+              })) {
+                if (evt.event_type === "text_delta") {
+                  summaryText += typeof evt.data === "string" ? evt.data : (evt.data as any)?.text || "";
+                }
+              }
+              if (!summaryText.trim()) {
+                // Fallback to naive truncation if LLM fails
+                summaryText = userMsgs.map((m) => `${m.role}: ${m.content.slice(0, 200)}`).join("\n").slice(0, 2000);
+              }
+              setMessages([{ role: "system", content: `[Compacted ${userMsgs.length} messages → AI summary]\n\n${summaryText}` }]);
+            } catch {
+              // Fallback
+              const fallback = userMsgs.map((m) => `${m.role}: ${m.content.slice(0, 200)}`).join("\n").slice(0, 2000);
+              setMessages([{ role: "system", content: `[Compacted ${userMsgs.length} messages]\n\n${fallback}` }]);
+            } finally { setBusy(false); setStatusMsg(""); }
+            return;
           }
           if (result.action === "memory") {
             if (result.memoryText === "__list__") sysMsg(listMemories());
