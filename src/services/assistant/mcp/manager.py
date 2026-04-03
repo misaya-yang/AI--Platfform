@@ -79,7 +79,7 @@ class MCPManager:
 
         # Sanitize external tool description (prevent prompt injection)
         import re
-        safe_desc = re.sub(r"[\x00-\x1f\x7f]", "", mcp_tool.description or "")[:MAX_DESCRIPTION_LENGTH]
+        safe_desc = re.sub(r"[\x00-\x1f\x7f]", "", mcp_tool.description or "")[:500]
 
         definition = ToolDefinition(
             name=registry_name,
