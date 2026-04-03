@@ -277,8 +277,6 @@ class ReActExecutor:
         context: dict[str, Any],
     ) -> AsyncGenerator[ReActEvent, None]:
         """Execute a structured plan with AG-UI compatible events."""
-        time.time()
-
         for _group_idx, group in enumerate(plan.parallel_groups):
             # Execute tasks in parallel group
             for task_id in group:

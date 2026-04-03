@@ -2728,20 +2728,41 @@ class AgentLoop:
                         if kb_query_fp:
                             kb_query_fingerprints_seen.add(kb_query_fp)
 
-                    # Add tool result to messages
+                    # Add tool result to messages with lifecycle management
+                    # M02: Truncate large tool results to prevent context rot
+                    _tool_content = tool_result_for_model or (
+                        str(tool_result)
+                        if not isinstance(tool_result, str)
+                        else tool_result
+                    )
+                    _MAX_TOOL_RESULT_LEN = 2000
+                    if len(_tool_content) > _MAX_TOOL_RESULT_LEN:
+                        _tool_content = _tool_content[:_MAX_TOOL_RESULT_LEN] + "\n...[truncated]"
+
                     messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": tool_id,
                             "name": tool_name,
-                            "content": tool_result_for_model
-                            or (
-                                str(tool_result)
-                                if not isinstance(tool_result, str)
-                                else tool_result
-                            ),
+                            "content": _tool_content,
                         }
                     )
+
+                    # M02: Summarize old tool results beyond the 5 most recent
+                    # to keep context window lean across multi-iteration loops
+                    _TOOL_RESULT_KEEP_RECENT = 5
+                    _tool_msg_indices = [
+                        i for i, m in enumerate(messages) if m.get("role") == "tool"
+                    ]
+                    if len(_tool_msg_indices) > _TOOL_RESULT_KEEP_RECENT:
+                        for _old_idx in _tool_msg_indices[:-_TOOL_RESULT_KEEP_RECENT]:
+                            _old_msg = messages[_old_idx]
+                            _old_content = str(_old_msg.get("content") or "")
+                            if len(_old_content) > 200:
+                                _old_msg["content"] = (
+                                    _old_content[:200]
+                                    + f"\n...[summarized: {len(_old_content)} chars, see recent results for details]"
+                                )
 
                 # Continue loop to get LLM's response to tool results
 

@@ -376,7 +376,7 @@ class KBSearchExecutor(ToolExecutor):
             )
 
         except Exception as e:
-            logger.error(f"KB search failed: {e}")
+            logger.exception(f"KB search failed: {e}")
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
@@ -517,7 +517,7 @@ class WebSearchExecutor(ToolExecutor):
             )
 
         except Exception as e:
-            logger.error(f"Web search failed: {e}")
+            logger.exception(f"Web search failed: {e}")
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,

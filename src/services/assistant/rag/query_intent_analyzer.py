@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import re
+
 from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -36,6 +38,12 @@ if TYPE_CHECKING:
 CacheEntry = tuple["QueryIntent", float]
 
 logger = get_logger(__name__)
+
+# L02: Precompiled regex patterns (avoid re-compiling on every call)
+_SLASH_COMMAND_RE = re.compile(r"^/([a-z][a-z0-9\-_]{1,48})\b")
+_USE_SKILL_RE = re.compile(
+    r"(?:use|用|调用|启用)\s*(?:skill|技能)\s*[:\s]*([a-z][a-z0-9\-_]+)"
+)
 
 
 class QueryType(str, Enum):
@@ -217,8 +225,7 @@ class QueryIntentAnalyzer:
         query_len = len(query)
 
         # 0. Skill slash-command detection: /skill-name or "use skill X"
-        import re as _re
-        slash_match = _re.match(r"^/([a-z][a-z0-9\-_]{1,48})\b", query_lower)
+        slash_match = _SLASH_COMMAND_RE.match(query_lower)
         if slash_match:
             return QueryIntent(
                 requires_kb_search=False,
@@ -232,7 +239,7 @@ class QueryIntentAnalyzer:
                 tier_used="fast_rule",
                 skill_name=slash_match.group(1),
             )
-        use_skill_match = _re.search(r"(?:use|用|调用|启用)\s*(?:skill|技能)\s*[:\s]*([a-z][a-z0-9\-_]+)", query_lower)
+        use_skill_match = _USE_SKILL_RE.search(query_lower)
         if use_skill_match:
             return QueryIntent(
                 requires_kb_search=False,

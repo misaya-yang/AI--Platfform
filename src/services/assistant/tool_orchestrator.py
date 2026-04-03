@@ -212,7 +212,7 @@ class ToolOrchestrator:
         self.tool_invoker = tool_invoker
         self.tool_registry = tool_registry
         self.max_parallel = max_parallel
-        self.semaphore = asyncio.Semaphore(max_parallel)
+        self._semaphore: asyncio.Semaphore | None = None
         self._default_invocation_context = invocation_context
         self._execution_gateway = execution_gateway
         self._routed_request = routed_request
@@ -224,6 +224,21 @@ class ToolOrchestrator:
             self.tool_invoker = create_tool_invoker(tool_registry=tool_registry)
 
         logger.info(f"ToolOrchestrator initialized with max_parallel={max_parallel}")
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore:
+        """Lazy-initialize the semaphore inside the running event loop.
+
+        Creating an ``asyncio.Semaphore`` before an event loop is active
+        (e.g. at module-import time or in ``__init__`` of a long-lived
+        singleton) can bind it to the wrong loop and cause
+        "got Future attached to a different loop" errors.  By deferring
+        creation to first access we guarantee the semaphore belongs to the
+        loop that is actually executing the coroutines.
+        """
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_parallel)
+        return self._semaphore
 
     async def execute_plan(
         self,
@@ -507,10 +522,13 @@ class ToolOrchestrator:
 
         return resolved
 
+    _MAX_RESOLVE_DEPTH: int = 10
+
     def _resolve_value(
         self,
         value: Any,
         prior_results: dict[str, ToolExecutionResult],
+        _depth: int = 0,
     ) -> Any:
         """
         Recursively resolve references in a value.
@@ -518,16 +536,32 @@ class ToolOrchestrator:
         Args:
             value: The value to resolve (can be string, dict, list, or other)
             prior_results: Results from previously completed tasks
+            _depth: Current recursion depth (internal use only)
 
         Returns:
             The resolved value
+
+        Raises:
+            ValueError: If recursion exceeds ``_MAX_RESOLVE_DEPTH`` (likely a
+                circular reference in tool parameters).
         """
+        if _depth > self._MAX_RESOLVE_DEPTH:
+            raise ValueError(
+                f"Circular dependency detected in tool parameters (depth > {self._MAX_RESOLVE_DEPTH})"
+            )
+
         if isinstance(value, str):
             return self._resolve_string(value, prior_results)
         elif isinstance(value, dict):
-            return {k: self._resolve_value(v, prior_results) for k, v in value.items()}
+            return {
+                k: self._resolve_value(v, prior_results, _depth + 1)
+                for k, v in value.items()
+            }
         elif isinstance(value, list):
-            return [self._resolve_value(item, prior_results) for item in value]
+            return [
+                self._resolve_value(item, prior_results, _depth + 1)
+                for item in value
+            ]
         else:
             # For non-string primitives (int, float, bool, None), return as-is
             return value
