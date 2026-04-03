@@ -11,7 +11,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { CustomizeDialog } from "@/pages/assistant/components/CustomizeDialog";
 import {
@@ -30,6 +30,112 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { SessionSummary } from "@/api/sessions";
 import { updateSession } from "@/api/sessions";
+
+// ── Folder Input Dialog ──────────────────────────────────────────────
+
+function FolderDialog({
+  isOpen, onClose, onConfirm, existingFolders,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: (folder: string) => void;
+  existingFolders: string[];
+}) {
+  const { t } = useTranslation();
+  const [value, setValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  if (!isOpen) return null;
+
+  const handleConfirm = () => {
+    const trimmed = value.trim();
+    if (trimmed) { onConfirm(trimmed); setValue(""); onClose(); }
+  };
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 8 }}
+            transition={{ type: "spring", duration: 0.3, bounce: 0.15 }}
+            className="relative w-full max-w-sm mx-4 rounded-2xl bg-popover border border-border shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 pt-5 pb-3">
+              <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-primary" />
+                {t("assistant.moveToFolder", "Move to folder")}
+              </h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                {t("assistant.folderHint", "Enter a folder name or select an existing one")}
+              </p>
+            </div>
+
+            <div className="px-5 pb-2">
+              <input
+                ref={inputRef}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleConfirm(); if (e.key === "Escape") onClose(); }}
+                placeholder={t("assistant.folderPlaceholder", "e.g. Islamic Research")}
+                className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
+                autoFocus
+              />
+            </div>
+
+            {/* Existing folders as quick-select */}
+            {existingFolders.length > 0 && (
+              <div className="px-5 pb-2 flex flex-wrap gap-1.5">
+                {existingFolders.map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    className={cn(
+                      "px-2.5 py-1 rounded-lg text-xs transition-all",
+                      value === f
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                    onClick={() => setValue(f)}
+                  >
+                    <FolderOpen className="h-3 w-3 inline mr-1" />{f}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border/50 bg-muted/30">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 rounded-xl text-sm text-muted-foreground hover:bg-muted transition-colors"
+              >
+                {t("common.cancel", "Cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                disabled={!value.trim()}
+                className="px-4 py-2 rounded-xl text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors"
+              >
+                {t("common.confirm", "Move")}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
+  );
+}
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -100,7 +206,7 @@ function groupSessions(sessions: SessionSummary[]): GroupedSessions {
 // ── Session Item (with inline rename) ────────────────────────────────
 
 function SessionItem({
-  session, isActive, onSelect, onDelete, onRename, onMoveToFolder, fallbackLabel,
+  session, isActive, onSelect, onDelete, onRename, onMoveToFolder, onOpenFolderDialog, fallbackLabel,
 }: {
   session: SessionSummary;
   isActive: boolean;
@@ -108,6 +214,7 @@ function SessionItem({
   onDelete: () => void;
   onRename: (newTitle: string) => void;
   onMoveToFolder: (folder: string | null) => void;
+  onOpenFolderDialog: () => void;
   fallbackLabel: string;
 }) {
   const { t } = useTranslation();
@@ -180,7 +287,7 @@ function SessionItem({
             <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={startEdit}>
               <Pencil className="h-3.5 w-3.5" /> {t("assistant.rename", "Rename")}
             </button>
-            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={() => { setShowMenu(false); const f = prompt(t("assistant.folderName", "Folder name:")); if (f) onMoveToFolder(f.trim()); }}>
+            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={() => { setShowMenu(false); onOpenFolderDialog(); }}>
               <FolderOpen className="h-3.5 w-3.5" /> {t("assistant.moveToFolder", "Move to folder")}
             </button>
             {getSessionFolder(session) && (
@@ -202,7 +309,7 @@ function SessionItem({
 // ── Section Group ────────────────────────────────────────────────────
 
 function SectionGroup({
-  label, icon, sessions, activeSessionId, onSelectSession, onDeleteSession, onRename, onMoveToFolder, fallbackLabel, collapsible = false,
+  label, icon, sessions, activeSessionId, onSelectSession, onDeleteSession, onRename, onMoveToFolder, onOpenFolderDialog, fallbackLabel, collapsible = false,
 }: {
   label: string;
   icon?: React.ReactNode;
@@ -212,6 +319,7 @@ function SectionGroup({
   onDeleteSession: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onMoveToFolder: (id: string, folder: string | null) => void;
+  onOpenFolderDialog: (id: string) => void;
   fallbackLabel: string;
   collapsible?: boolean;
 }) {
@@ -240,6 +348,7 @@ function SectionGroup({
               onDelete={() => onDeleteSession(s.session_id)}
               onRename={(title) => onRename(s.session_id, title)}
               onMoveToFolder={(folder) => onMoveToFolder(s.session_id, folder)}
+              onOpenFolderDialog={() => onOpenFolderDialog(s.session_id)}
               fallbackLabel={fallbackLabel}
             />
           ))}
@@ -273,8 +382,25 @@ export function ConversationSidebar({
 
   const grouped = useMemo(() => groupSessions(filtered), [filtered]);
   const folderNames = Object.keys(grouped.folders).sort();
+  // Also collect folders from ALL sessions (not just filtered) for the dialog
+  const allFolderNames = useMemo(() => {
+    const folders = new Set<string>();
+    for (const s of sessions) {
+      const f = getSessionFolder(s);
+      if (f) folders.add(f);
+    }
+    return Array.from(folders).sort();
+  }, [sessions]);
 
   const hasNoSessions = !isLoading && filtered.length === 0;
+
+  // Folder dialog state
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [folderDialogTarget, setFolderDialogTarget] = useState<string | null>(null);
+  const openFolderDialog = useCallback((sessionId: string) => {
+    setFolderDialogTarget(sessionId);
+    setFolderDialogOpen(true);
+  }, []);
 
   const handleRename = useCallback(async (sessionId: string, newTitle: string) => {
     try {
@@ -301,7 +427,8 @@ export function ConversationSidebar({
 
   const commonProps = {
     activeSessionId, onSelectSession, onDeleteSession,
-    onRename: handleRename, onMoveToFolder: handleMoveToFolder, fallbackLabel: fallback,
+    onRename: handleRename, onMoveToFolder: handleMoveToFolder,
+    onOpenFolderDialog: openFolderDialog, fallbackLabel: fallback,
   };
 
   return (
@@ -385,6 +512,16 @@ export function ConversationSidebar({
         </button>
       </div>
       <CustomizeDialog open={showCustomize} onClose={() => setShowCustomize(false)} />
+
+      {/* Folder move dialog */}
+      <FolderDialog
+        isOpen={folderDialogOpen}
+        onClose={() => { setFolderDialogOpen(false); setFolderDialogTarget(null); }}
+        onConfirm={(folder) => {
+          if (folderDialogTarget) handleMoveToFolder(folderDialogTarget, folder);
+        }}
+        existingFolders={allFolderNames}
+      />
     </div>
   );
 }
