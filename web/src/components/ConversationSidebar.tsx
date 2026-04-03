@@ -160,14 +160,14 @@ function SessionItem({
         </button>
       )}
 
-      {/* Action buttons (hover) */}
+      {/* Action buttons (visible on hover) */}
       {!isEditing && (
-        <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
-          <button type="button" onClick={startEdit} className="rounded p-1 hover:bg-muted" title={t("assistant.rename", "Rename")}>
-            <Pencil className="h-3 w-3 text-muted-foreground" />
+        <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 rounded-md px-0.5">
+          <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded p-1.5 hover:bg-muted" title={t("assistant.rename", "Rename")}>
+            <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
           </button>
-          <button type="button" onClick={onDelete} className="rounded p-1 hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
-            <Trash2 className="h-3 w-3" />
+          <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded p-1.5 hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       )}
@@ -373,17 +373,6 @@ export function ConversationSidebar({
         )}
       </div>
 
-      {/* Customize */}
-      <div className="p-3 border-t border-border/40 shrink-0">
-        <button
-          type="button"
-          onClick={() => setShowCustomize(true)}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-        >
-          <Settings className="h-4 w-4" />
-          {t("assistant.customize", "自定义")}
-        </button>
-      </div>
       <CustomizeDialog open={showCustomize} onClose={() => setShowCustomize(false)} />
     </div>
   );
