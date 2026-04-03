@@ -285,6 +285,10 @@ class QueryIntentAnalyzer:
             )
 
         # 1.6 Common conversational patterns - no KB
+        # Guard: skip this rule if enterprise keywords are present (need KB)
+        enterprise_guard = ["公司", "产品", "客户", "流程", "政策", "内部", "审批", "员工", "部门", "报表"]
+        has_enterprise_kw = any(kw in query_lower for kw in enterprise_guard)
+
         conversational_patterns = [
             "谢谢", "感谢", "好的", "明白", "了解", "知道了", "收到",
             "没问题", "可以", "不用了", "算了", "再见", "拜拜",
@@ -292,7 +296,7 @@ class QueryIntentAnalyzer:
             "帮我写", "帮我翻译", "翻译一下", "总结一下", "帮我改",
             "写一个", "写一段", "生成一个", "创建一个",
         ]
-        if any(query_lower.startswith(p) or query_lower == p for p in conversational_patterns):
+        if not has_enterprise_kw and any(query_lower.startswith(p) or query_lower == p for p in conversational_patterns):
             return QueryIntent(
                 requires_kb_search=False,
                 decision=RetrievalDecision.SKIP,
@@ -305,9 +309,9 @@ class QueryIntentAnalyzer:
                 tier_used="fast_rule",
             )
 
-        # 1.7 Code-related queries - rarely need KB
+        # 1.7 Code-related queries - rarely need KB (also guarded by enterprise keywords)
         code_patterns = ["代码", "bug", "报错", "error", "debug", "修复", "重构", "refactor", "实现"]
-        if any(p in query_lower for p in code_patterns) and not any(k in query_lower for k in ["文档", "知识库"]):
+        if not has_enterprise_kw and any(p in query_lower for p in code_patterns) and not any(k in query_lower for k in ["文档", "知识库"]):
             return QueryIntent(
                 requires_kb_search=False,
                 decision=RetrievalDecision.SKIP,

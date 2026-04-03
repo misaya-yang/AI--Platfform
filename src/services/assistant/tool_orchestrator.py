@@ -440,9 +440,9 @@ class ToolOrchestrator:
 
         # Cache lookup for idempotent tools
         if task.tool in self._cacheable_tools:
-            import hashlib
+            import hashlib, json as _json
             cache_key = hashlib.md5(
-                f"{task.tool}|{sorted(task.parameters.items())}".encode()
+                f"{task.tool}|{_json.dumps(task.parameters, sort_keys=True, default=str)}".encode()
             ).hexdigest()
             if cache_key in self._result_cache:
                 cached = self._result_cache[cache_key]

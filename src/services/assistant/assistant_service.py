@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from .code_executor import InputFile, KBDocument
     from .memory_service import MemoryService
 
+from cachetools import TTLCache
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError
 from ..knowledge.knowledge_service import KnowledgeService
@@ -587,7 +588,6 @@ Please use this web search context to inform your response when relevant."""
         )
 
         # Per-session working memory with TTL auto-cleanup (1h expiry, max 5000 sessions)
-        from cachetools import TTLCache
         self._working_memories: TTLCache = TTLCache(maxsize=5000, ttl=3600)
 
         # Quality Guardrails (ensure content meets minimum quality standards)

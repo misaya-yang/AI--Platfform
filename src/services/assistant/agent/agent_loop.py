@@ -3013,7 +3013,7 @@ class AgentLoop:
         if self.memory_service:
             try:
                 # Layer 1 + 2: Parallel load (independent DB queries)
-                long_term_ctx, session_ctx = await asyncio.gather(
+                _results = await asyncio.gather(
                     self.memory_service.get_long_term_context(
                         tenant_id=user.tenant_id,
                         user_id=user.user_id,
@@ -3022,7 +3022,15 @@ class AgentLoop:
                         tenant_id=user.tenant_id,
                         session_id=ctx.session_id,
                     ),
+                    return_exceptions=True,
                 )
+                # Handle partial failures gracefully
+                long_term_ctx = _results[0] if not isinstance(_results[0], Exception) else None
+                session_ctx = _results[1] if not isinstance(_results[1], Exception) else None
+                if isinstance(_results[0], Exception):
+                    logger.warning(f"Long-term memory load failed: {_results[0]}")
+                if isinstance(_results[1], Exception):
+                    logger.warning(f"Session memory load failed: {_results[1]}")
 
                 ctx.long_term_memory = long_term_ctx
                 ctx.user_preferences = long_term_ctx.get("preferences") if long_term_ctx else None

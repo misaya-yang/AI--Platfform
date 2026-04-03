@@ -139,10 +139,15 @@ export function runPostToolHooks(
 
     if (rule.action === "command" && rule.command) {
       try {
-        const cmd = rule.command
-          .replace(/\$FILE_PATH/g, args.file_path ?? args.path ?? "")
-          .replace(/\$TOOL_NAME/g, toolName);
-        execSync(cmd, { encoding: "utf-8", timeout: 15000, stdio: "ignore" });
+        // Use environment variables (not string interpolation) to prevent command injection
+        const env = {
+          ...process.env,
+          TOOL_NAME: toolName,
+          FILE_PATH: args.file_path ?? args.path ?? "",
+          ARGUMENTS: JSON.stringify(args),
+          TOOL_RESULT: result.slice(0, 5000),
+        };
+        execSync(rule.command, { encoding: "utf-8", timeout: 15000, stdio: "ignore", env });
       } catch {
         // Non-blocking — silently continue
       }

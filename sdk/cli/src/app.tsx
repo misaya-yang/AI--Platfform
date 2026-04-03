@@ -105,7 +105,6 @@ export function App({ config }: { config: CLIConfig }) {
   const [kbIds, setKbIds] = useState<string[]>(config.kb_dataset_ids ?? []);
 
   // Stream cancellation
-  const abortRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
 
   // Refs for final commit
@@ -578,7 +577,6 @@ export function App({ config }: { config: CLIConfig }) {
       setBusy(true);
       resetStreamState();
       setStatusMsg("Thinking...");
-      abortRef.current = new AbortController();
 
       try {
         for await (const event of chat.stream(trimmed, {

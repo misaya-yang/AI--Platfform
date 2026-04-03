@@ -283,7 +283,6 @@ class ScenarioAwareRetriever:
         Returns:
             ScenarioRetrievalContext with ranked results
         """
-        import hashlib
         import time
 
         start_time = time.time()
@@ -491,6 +490,7 @@ class ScenarioAwareRetriever:
         self,
         user_query: str,
         dataset_ids: list[str],
+        user: UserContext,
         top_k: int | None = None,
     ) -> ScenarioRetrievalContext:
         """
@@ -500,7 +500,6 @@ class ScenarioAwareRetriever:
         """
         from .scenario_analyzer import ScenarioDetectionResult
 
-        # Create a minimal scenario detection result
         minimal_scenario = ScenarioDetectionResult(
             primary_scenario=ScenarioType.GENERAL_INQUIRY,
             confidence=0.5,
@@ -510,6 +509,7 @@ class ScenarioAwareRetriever:
             user_query=user_query,
             scenario=minimal_scenario,
             dataset_ids=dataset_ids,
+            user=user,
             top_k=top_k,
         )
 
