@@ -9,6 +9,7 @@
 
 import { isOSTool, executeOSTool, getOSToolSchemas } from "../tools/index.js";
 import { checkPermission, type PermissionCheck } from "../permissions.js";
+import { runPreToolHooks, runPostToolHooks } from "../hooks.js";
 
 export interface PendingToolCall {
   callId: string;
@@ -75,9 +76,22 @@ export async function executeTool(
       }
     }
 
+    // Pre-tool hooks
+    const hookResult = runPreToolHooks(call.name, call.arguments);
+    if (!hookResult.allowed) {
+      return {
+        callId: call.callId,
+        name: call.name,
+        result: `Hook blocked: ${hookResult.message ?? "denied by hook"}`,
+        durationMs: Date.now() - start,
+        status: "denied",
+      };
+    }
+
     // Execute OS tool
     try {
       const result = await executeOSTool(call.name, call.arguments);
+      runPostToolHooks(call.name, call.arguments, result);
       return {
         callId: call.callId,
         name: call.name,

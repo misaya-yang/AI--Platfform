@@ -138,11 +138,13 @@ export function parseSlashCommand(
     // ─── /kb ─────────────────────────────────────────────────
     case "/kb":
       if (args[0] === "list") {
-        return {
-          handled: true,
-          action: "none",
-          stateUpdates: { _fetchKBList: true },
-        };
+        return { handled: true, action: "none", stateUpdates: { _fetchKBList: true } };
+      }
+      if (args[0] === "search" && args[1]) {
+        return { handled: true, action: "none", stateUpdates: { _kbSearch: args.slice(1).join(" ") } };
+      }
+      if (args[0] === "status") {
+        return { handled: true, action: "none", stateUpdates: { _kbStatus: true } };
       }
       if (args.length > 0) {
         const ids = args.join(" ").split(",").map((s) => s.trim()).filter(Boolean);
@@ -155,8 +157,8 @@ export function parseSlashCommand(
       return {
         handled: true,
         output: state.kbDatasetIds.length
-          ? `Current KBs: ${state.kbDatasetIds.join(", ")}\n  /kb list — show available | /kb id1, id2 — bind`
-          : "No KBs bound. /kb list — show available | /kb id1, id2 — bind",
+          ? `Current KBs: ${state.kbDatasetIds.join(", ")}\n  /kb list | /kb search <query> | /kb status | /kb <id1, id2>`
+          : "No KBs bound.\n  /kb list | /kb search <query> | /kb status | /kb <id1, id2>",
       };
 
     // ─── /session ────────────────────────────────────────────
@@ -272,6 +274,50 @@ export function parseSlashCommand(
           "  /skill test <name> <input>     — Test a skill",
       };
 
+    // ─── /image ──────────────────────────────────────────────
+    case "/image":
+      if (args.length === 0) return { handled: true, output: "Usage: /image <prompt>" };
+      return { handled: true, action: "none", stateUpdates: { _imagePrompt: args.join(" ") } };
+
+    // ─── /artifact ───────────────────────────────────────────
+    case "/artifact":
+    case "/artifacts":
+      if (args[0] === "list") return { handled: true, action: "none", stateUpdates: { _artifactList: true } };
+      if (args[0] === "download" && args[1]) return { handled: true, action: "none", stateUpdates: { _artifactDownload: args[1] } };
+      return { handled: true, output: "Artifact Management:\n  /artifact list             — List session artifacts\n  /artifact download <id>    — Download artifact" };
+
+    // ─── /usage ──────────────────────────────────────────────
+    case "/usage":
+      return { handled: true, action: "none", stateUpdates: { _usage: true } };
+
+    // ─── /whoami ─────────────────────────────────────────────
+    case "/whoami":
+      return { handled: true, action: "none", stateUpdates: { _whoami: true } };
+
+    // ─── /models ─────────────────────────────────────────────
+    case "/models":
+      return { handled: true, action: "none", stateUpdates: { _modelsList: true } };
+
+    // ─── /agent ─────────────────────────────────────────────
+    case "/agent":
+      if (args[0] === "list") {
+        return { handled: true, action: "none", stateUpdates: { _agentList: true } };
+      }
+      if (args[0] === "run" && args[1]) {
+        return {
+          handled: true, action: "none",
+          stateUpdates: { _agentRun: args[1], _agentPrompt: args.slice(2).join(" ") },
+        };
+      }
+      return {
+        handled: true,
+        output:
+          "Agent Management:\n" +
+          "  /agent list              — List available agents (builtin + custom)\n" +
+          "  /agent run <name> <prompt> — Run an agent with a task\n" +
+          "\nCustom agents: ~/.hejaz/agents/*.md or .hejaz/agents/*.md",
+      };
+
     // ─── /share ──────────────────────────────────────────────
     case "/share":
       return {
@@ -282,7 +328,13 @@ export function parseSlashCommand(
       };
 
     case "/export":
-      return { handled: true, output: "Export: /export markdown | /export json (coming soon)" };
+      if (args[0] === "markdown" || args[0] === "md") {
+        return { handled: true, action: "none", stateUpdates: { _export: "markdown" } };
+      }
+      if (args[0] === "json") {
+        return { handled: true, action: "none", stateUpdates: { _export: "json" } };
+      }
+      return { handled: true, output: "Usage: /export markdown | /export json" };
 
     default:
       return {
@@ -318,6 +370,10 @@ Hejaz AI CLI Commands:
     /mcp connect <n> <cmd> [args]
     /mcp disconnect <n>
 
+  Agents
+    /agent list           List available agents
+    /agent run <name> <prompt>
+
   Skills
     /skill list           List installed skills
     /skill create <name>  Create a new skill
@@ -325,8 +381,16 @@ Hejaz AI CLI Commands:
     /skill enable|disable|delete <name>
     /skill test <name> <input>
 
+  Generation
+    /image <prompt>       Generate an image
+    /artifact list|download
+    /usage                Show API usage stats
+    /whoami               Current user info
+    /models               List available models
+
   Other
     /share                Share conversation link
+    /export markdown|json Export conversation
     /help                 Show this help
     /exit                 Quit
 `.trim();
