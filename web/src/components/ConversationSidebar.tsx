@@ -373,6 +373,17 @@ export function ConversationSidebar({
         )}
       </div>
 
+      {/* Skills & MCP Config */}
+      <div className="p-3 border-t border-border/40 shrink-0">
+        <button
+          type="button"
+          onClick={() => setShowCustomize(true)}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+        >
+          <Settings className="h-4 w-4" />
+          {t("assistant.customize", "Skills & MCP")}
+        </button>
+      </div>
       <CustomizeDialog open={showCustomize} onClose={() => setShowCustomize(false)} />
     </div>
   );
