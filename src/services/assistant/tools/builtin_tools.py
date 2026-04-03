@@ -562,10 +562,5 @@ def register_builtin_tools(
         register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
         logger.info("Registered memory tool")
 
-    # Register Confluence tools (direct API integration)
-    try:
-        from .confluence_tool import register_confluence_tools
-
-        register_confluence_tools(database=database)
-    except Exception as e:
-        logger.warning(f"Failed to register Confluence tools: {e}")
+    # Confluence tools are registered dynamically via MCP when user connects.
+    # See: ConnectorMCPService.start_confluence_mcp()

@@ -311,7 +311,83 @@ async def disconnect_connector(
            WHERE tenant_id = $1 AND user_id = $2 AND provider = $3""",
         user.tenant_id, user.user_id, provider,
     )
+    # Stop MCP server if running
+    try:
+        from ...services.assistant.mcp.connector_mcp import get_connector_mcp_service
+        mcp = get_connector_mcp_service()
+        await mcp.stop_connector(user.tenant_id, provider)
+    except Exception:
+        pass
+
     return {"status": "disconnected", "provider": provider}
+
+
+@router.post("/{provider}/activate")
+async def activate_connector_mcp(
+    provider: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Activate MCP server for a connected service.
+
+    Spawns the appropriate MCP server process (e.g., mcp-atlassian)
+    with the user's stored credentials. AI tools become available after this.
+    """
+    if provider != "confluence":
+        raise HTTPException(400, f"MCP activation not supported for: {provider}")
+
+    # Get Confluence connection from the existing confluence_connections table
+    db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
+
+    row = await db.fetchrow(
+        """SELECT domain, email, api_token FROM confluence_connections
+           WHERE tenant_id = $1 AND status = 'active'
+           ORDER BY created_at DESC LIMIT 1""",
+        user.tenant_id,
+    )
+    if not row:
+        raise HTTPException(400, "No active Confluence connection. Connect first via Settings.")
+
+    from ...services.assistant.mcp.connector_mcp import get_connector_mcp_service
+    mcp = get_connector_mcp_service()
+
+    try:
+        tools = await mcp.start_confluence(
+            tenant_id=user.tenant_id,
+            domain=row["domain"],
+            email=row["email"],
+            api_token=row["api_token"],
+        )
+        return {
+            "status": "activated",
+            "provider": provider,
+            "tools": [{"name": t.name, "description": t.description} for t in tools],
+            "tool_count": len(tools),
+        }
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
+
+@router.get("/{provider}/mcp-status")
+async def connector_mcp_status(
+    provider: str,
+    user: UserContext = Depends(get_user_context),
+):
+    """Check if MCP server is running for a provider."""
+    from ...services.assistant.mcp.connector_mcp import get_connector_mcp_service
+    mcp = get_connector_mcp_service()
+
+    connected = mcp.is_connected(user.tenant_id, provider)
+    tools = mcp.get_tools(user.tenant_id, provider) if connected else []
+
+    return {
+        "provider": provider,
+        "mcp_active": connected,
+        "tools": [{"name": t.name, "description": t.description} for t in tools],
+        "tool_count": len(tools),
+    }
 
 
 @router.post("/{provider}/search")

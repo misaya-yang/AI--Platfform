@@ -19,6 +19,7 @@ import {
   deleteConnection,
 } from "@/api/confluence";
 import type { ConfluenceConnection } from "@/types/confluence";
+import { api } from "@/lib/api";
 
 interface ConnectorsPanelProps {
   open: boolean;
@@ -39,12 +40,23 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
   const [formToken, setFormToken] = useState("");
   const [formError, setFormError] = useState("");
   const [formSubmitting, setFormSubmitting] = useState(false);
+  const [mcpActive, setMcpActive] = useState(false);
+  const [mcpTools, setMcpTools] = useState<Array<{ name: string; description: string }>>([]);
+  const [activating, setActivating] = useState(false);
 
   const loadConnections = useCallback(async () => {
     setLoading(true);
     try {
       const data = await listConnections();
       setConnections(data);
+      // Check MCP status
+      if (data.some((c: any) => c.status === "active")) {
+        try {
+          const { data: status } = await api.get("/api/v1/connectors/confluence/mcp-status");
+          setMcpActive(status.mcp_active);
+          setMcpTools(status.tools || []);
+        } catch { /* ignore */ }
+      }
     } catch {
       // No connections yet
     }
@@ -95,6 +107,19 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
     }
   };
 
+  const handleActivateMCP = async () => {
+    setActivating(true);
+    try {
+      const { data } = await api.post("/api/v1/connectors/confluence/activate");
+      setMcpActive(true);
+      setMcpTools(data.tools || []);
+      alert(`✅ AI 工具已激活！发现 ${data.tool_count} 个 Confluence 工具`);
+    } catch (err: any) {
+      alert(`激活失败: ${err?.response?.data?.detail || err?.message}`);
+    }
+    setActivating(false);
+  };
+
   if (!open) return null;
 
   return (
@@ -142,30 +167,60 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
               <>
                 {/* Existing connections */}
                 {connections.map((conn) => (
-                  <div key={conn.connection_id}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 dark:border-zinc-700 mb-2">
-                    <div className={`w-2 h-2 rounded-full ${conn.status === "active" ? "bg-green-500" : conn.status === "error" ? "bg-red-500" : "bg-zinc-400"}`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">{conn.name}</div>
-                      <div className="text-xs text-zinc-500 truncate">{conn.domain} · {conn.email}</div>
-                      {conn.last_sync_at && (
-                        <div className="text-xs text-zinc-400">最后同步: {new Date(conn.last_sync_at).toLocaleString()}</div>
-                      )}
+                  <div key={conn.connection_id} className="rounded-lg border border-zinc-200 dark:border-zinc-700 mb-2 overflow-hidden">
+                    <div className="flex items-center gap-3 p-3">
+                      <div className={`w-2 h-2 rounded-full ${conn.status === "active" ? "bg-green-500" : conn.status === "error" ? "bg-red-500" : "bg-zinc-400"}`} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium truncate">{conn.name}</div>
+                        <div className="text-xs text-zinc-500 truncate">{conn.domain} · {conn.email}</div>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button onClick={() => handleTest(conn.connection_id)}
+                          className="px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition">
+                          测试
+                        </button>
+                        <button onClick={() => { navigate(`/tasks`); onClose(); }}
+                          className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition">
+                          管理
+                        </button>
+                        <button onClick={() => handleDelete(conn.connection_id)}
+                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition">
+                          删除
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex gap-1.5">
-                      <button onClick={() => handleTest(conn.connection_id)}
-                        className="px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded transition">
-                        测试
-                      </button>
-                      <button onClick={() => { navigate(`/tasks`); onClose(); }}
-                        className="px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition">
-                        管理
-                      </button>
-                      <button onClick={() => handleDelete(conn.connection_id)}
-                        className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition">
-                        删除
-                      </button>
-                    </div>
+
+                    {/* MCP Activation Bar */}
+                    {conn.status === "active" && (
+                      <div className={`px-3 py-2 border-t ${mcpActive ? "bg-green-50 dark:bg-green-900/10 border-green-200 dark:border-green-800" : "bg-amber-50 dark:bg-amber-900/10 border-amber-200 dark:border-amber-800"}`}>
+                        {mcpActive ? (
+                          <div>
+                            <div className="flex items-center gap-2 text-xs text-green-700 dark:text-green-400">
+                              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                              AI 工具已激活 · {mcpTools.length} 个工具可用
+                            </div>
+                            {mcpTools.length > 0 && (
+                              <div className="mt-1 text-[10px] text-green-600/70 dark:text-green-400/60 truncate">
+                                {mcpTools.slice(0, 5).map(t => t.name).join(", ")}{mcpTools.length > 5 ? ` +${mcpTools.length - 5} more` : ""}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-amber-700 dark:text-amber-400">
+                              已连接但 AI 工具未激活
+                            </span>
+                            <button
+                              onClick={handleActivateMCP}
+                              disabled={activating}
+                              className="px-3 py-1 text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg transition disabled:opacity-50"
+                            >
+                              {activating ? "激活中..." : "激活 AI 工具"}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
 
