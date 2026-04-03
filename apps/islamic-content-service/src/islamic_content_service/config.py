@@ -391,7 +391,7 @@ class GeminiSettings(BaseModel):
     )
     model: str = "gemini-2.0-flash"
     base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
-    temperature: float = 0.8
+    temperature: float = 0.6  # L-4: lower for more consistent question quality
     max_tokens: int = 1024
     timeout_seconds: float = 30.0
 

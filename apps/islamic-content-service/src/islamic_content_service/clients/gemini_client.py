@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -28,7 +29,10 @@ Respond with a JSON array only — no markdown fences, no extra text:
 
 
 class GeminiClient:
-    """Call Gemini Flash via the OpenAI-compatible endpoint."""
+    """Call Gemini Flash via the OpenAI-compatible endpoint.
+
+    M-4 fix: reuse a single AsyncClient for connection pooling.
+    """
 
     def __init__(self, settings) -> None:
         self._api_key = settings.api_key
@@ -36,7 +40,17 @@ class GeminiClient:
         self._base_url = settings.base_url.rstrip("/")
         self._temperature = settings.temperature
         self._max_tokens = settings.max_tokens
-        self._timeout = settings.timeout_seconds
+        self._client = httpx.AsyncClient(
+            timeout=settings.timeout_seconds,
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.aclose()
 
     async def generate_recommended_questions(
         self, history_text: str, count: int = 5,
@@ -61,16 +75,19 @@ class GeminiClient:
             "max_tokens": self._max_tokens,
         }
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
+        # H-2 fix: catch HTTP errors and re-raise with sanitized message
+        try:
+            resp = await self._client.post(
                 f"{self._base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
                 json=payload,
             )
             resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.error("Gemini API returned %s: %s", e.response.status_code, e.response.text[:200])
+            raise RuntimeError("AI recommendation service temporarily unavailable") from None
+        except httpx.RequestError as e:
+            logger.error("Gemini API request failed: %s", e)
+            raise RuntimeError("AI recommendation service temporarily unavailable") from None
 
         raw_content = resp.json()["choices"][0]["message"]["content"]
         return self._parse_response(raw_content, count)
@@ -93,10 +110,9 @@ class GeminiClient:
         except json.JSONDecodeError:
             pass
 
-        # Fallback: try to find JSON array in the text
+        # H-5 fix: non-greedy regex to avoid matching across multiple arrays
         if items is None:
-            import re
-            match = re.search(r"\[.*\]", text, re.DOTALL)
+            match = re.search(r"\[.*?\]", text, re.DOTALL)
             if match:
                 try:
                     parsed = json.loads(match.group())

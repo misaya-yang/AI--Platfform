@@ -1,7 +1,9 @@
 """Sheikh Wahda recommendation & interaction API routes."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import uuid as _uuid
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ..deps import get_wahda_service
 from ..schemas.wahda import (
@@ -14,6 +16,23 @@ from ..schemas.wahda import (
     TypeaheadResponse,
     UpdateRecommendedQuestionRequest,
 )
+
+
+def _require_user(request: Request) -> tuple[str, str]:
+    """Extract tenant/user from headers; reject anonymous on mutation endpoints."""
+    tenant_id = request.headers.get("X-Tenant-Id", "default")
+    user_id = request.headers.get("X-User-Id", "")
+    if not user_id or user_id == "anonymous":
+        raise HTTPException(401, "X-User-Id header required")
+    return tenant_id, user_id
+
+
+def _read_user(request: Request) -> tuple[str, str]:
+    """Extract tenant/user from headers for read-only endpoints."""
+    return (
+        request.headers.get("X-Tenant-Id", "default"),
+        request.headers.get("X-User-Id", "anonymous"),
+    )
 
 router = APIRouter(prefix="/wahda", tags=["Sheikh Wahda"])
 
@@ -106,6 +125,7 @@ async def get_share(
 
 # ------------------------------------------------------------------
 # Recommended Questions (personalized, AI-generated)
+# C-1 fix: /history BEFORE /{question_id} routes (FastAPI best practice)
 # ------------------------------------------------------------------
 
 @router.get("/recommended-questions", response_model=RecommendedQuestionsResponse)
@@ -116,8 +136,7 @@ async def get_recommended_questions(
 ):
     """Get today's personalized recommended questions for the current user."""
     from datetime import date as Date
-    tenant_id = request.headers.get("X-Tenant-Id", "default")
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    tenant_id, user_id = _read_user(request)
     target_date = None
     if date:
         try:
@@ -128,6 +147,19 @@ async def get_recommended_questions(
     return RecommendedQuestionsResponse(**result)
 
 
+@router.get("/recommended-questions/history", response_model=RecommendedQuestionsResponse)
+async def get_recommendations_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    svc=Depends(get_wahda_service),
+):
+    """Get paginated history of all recommended questions for the current user."""
+    tenant_id, user_id = _read_user(request)
+    result = await svc.get_recommendations_history(tenant_id, user_id, limit, offset)
+    return RecommendedQuestionsResponse(**result)
+
+
 @router.post("/recommended-questions/generate", response_model=GenerateRecommendationsResponse)
 async def generate_recommendations(
     body: GenerateRecommendationsRequest,
@@ -135,8 +167,7 @@ async def generate_recommendations(
     svc=Depends(get_wahda_service),
 ):
     """Generate recommended questions from the user's conversation history."""
-    tenant_id = request.headers.get("X-Tenant-Id", "default")
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    tenant_id, user_id = _require_user(request)
     try:
         result = await svc.generate_recommendations(
             tenant_id=tenant_id,
@@ -145,8 +176,10 @@ async def generate_recommendations(
             count=body.count,
             date_strategy=body.date_strategy,
         )
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+    except RuntimeError:
+        raise HTTPException(503, "AI recommendation service temporarily unavailable")
+    except Exception:
+        raise HTTPException(502, "Failed to generate recommendations")
     return GenerateRecommendationsResponse(**result)
 
 
@@ -160,17 +193,17 @@ async def regenerate_question(
     svc=Depends(get_wahda_service),
 ):
     """Regenerate a single recommended question (dismisses old, creates new)."""
-    import uuid as _uuid
     try:
         _uuid.UUID(question_id)
     except ValueError:
         raise HTTPException(400, "Invalid question_id format (expected UUID)")
-    tenant_id = request.headers.get("X-Tenant-Id", "default")
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    tenant_id, user_id = _require_user(request)
     try:
         result = await svc.regenerate_question(tenant_id, user_id, question_id)
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+    except RuntimeError:
+        raise HTTPException(503, "AI recommendation service temporarily unavailable")
+    except Exception:
+        raise HTTPException(502, "Failed to regenerate question")
     if not result:
         raise HTTPException(404, "Question not found or could not regenerate")
     return RecommendedQuestionItem(**result)
@@ -184,28 +217,12 @@ async def update_question_status(
     svc=Depends(get_wahda_service),
 ):
     """Update the status of a recommended question (dismiss, mark used)."""
-    import uuid as _uuid
     try:
         _uuid.UUID(question_id)
     except ValueError:
         raise HTTPException(400, "Invalid question_id format (expected UUID)")
-    tenant_id = request.headers.get("X-Tenant-Id", "default")
-    user_id = request.headers.get("X-User-Id", "anonymous")
+    tenant_id, user_id = _require_user(request)
     updated = await svc.update_question_status(tenant_id, user_id, question_id, body.status)
     if not updated:
         raise HTTPException(404, "Question not found or not owned by user")
     return {"status": "ok", "question_id": question_id}
-
-
-@router.get("/recommended-questions/history", response_model=RecommendedQuestionsResponse)
-async def get_recommendations_history(
-    request: Request,
-    limit: int = 20,
-    offset: int = 0,
-    svc=Depends(get_wahda_service),
-):
-    """Get paginated history of all recommended questions for the current user."""
-    tenant_id = request.headers.get("X-Tenant-Id", "default")
-    user_id = request.headers.get("X-User-Id", "anonymous")
-    result = await svc.get_recommendations_history(tenant_id, user_id, limit, offset)
-    return RecommendedQuestionsResponse(**result)

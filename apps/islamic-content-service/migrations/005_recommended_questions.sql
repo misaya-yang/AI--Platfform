@@ -28,3 +28,23 @@ CREATE INDEX IF NOT EXISTS idx_rq_session
 -- Cleanup / expiry scans
 CREATE INDEX IF NOT EXISTS idx_rq_created
     ON islamic_content.recommended_questions (created_at);
+
+-- L-1: History pagination query index
+CREATE INDEX IF NOT EXISTS idx_rq_user_history
+    ON islamic_content.recommended_questions (tenant_id, user_id, created_at DESC);
+
+-- M-3: Auto-update updated_at on row modification
+CREATE OR REPLACE FUNCTION islamic_content.update_rq_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger WHERE tgname = 'trg_rq_updated_at'
+  ) THEN
+    CREATE TRIGGER trg_rq_updated_at
+      BEFORE UPDATE ON islamic_content.recommended_questions
+      FOR EACH ROW EXECUTE FUNCTION islamic_content.update_rq_updated_at();
+  END IF;
+END $$;

@@ -52,8 +52,11 @@ class Runtime:
     hadith_query_service: HadithQueryService
     dua_query_service: DuaQueryService
     wahda_service: object = None  # WahdaService (optional)
+    gemini_client: object = None  # GeminiClient (optional, M-4)
 
     async def close(self) -> None:
+        if self.gemini_client and hasattr(self.gemini_client, "close"):
+            await self.gemini_client.close()
         await self.quran_client.close()
         await self.quran_user_client.close()
         await self.hadith_client.close()
@@ -133,6 +136,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         hadith_query_service=hadith_query_service,
         dua_query_service=dua_query_service,
         wahda_service=wahda_service,
+        gemini_client=gemini_client,
     )
 
 

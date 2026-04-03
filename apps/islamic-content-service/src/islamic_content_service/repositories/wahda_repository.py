@@ -248,22 +248,26 @@ class WahdaRepository:
     async def insert_recommended_questions(
         self, questions: list[dict[str, Any]],
     ) -> list[str]:
-        """Bulk-insert recommended questions. Returns list of generated UUIDs."""
-        ids = []
-        for q in questions:
-            row = await self._db.fetchrow("""
-                INSERT INTO islamic_content.recommended_questions
-                (tenant_id, user_id, session_id, date_trigger, question_text,
-                 is_regen, source_message_index, source_topic)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING question_id::text
-            """,
-                q["tenant_id"], q["user_id"], q.get("session_id"),
-                q["date_trigger"], q["question_text"],
-                q.get("is_regen", False), q.get("source_message_index"),
-                q.get("source_topic"),
-            )
-            ids.append(row["question_id"])
+        """Bulk-insert recommended questions in a transaction. Returns UUIDs."""
+        # H-1 fix: wrap in transaction to avoid partial writes
+        pool = self._db._pool
+        ids: list[str] = []
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for q in questions:
+                    row = await conn.fetchrow("""
+                        INSERT INTO islamic_content.recommended_questions
+                        (tenant_id, user_id, session_id, date_trigger, question_text,
+                         is_regen, source_message_index, source_topic)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        RETURNING question_id::text
+                    """,
+                        q["tenant_id"], q["user_id"], q.get("session_id"),
+                        q["date_trigger"], q["question_text"],
+                        q.get("is_regen", False), q.get("source_message_index"),
+                        q.get("source_topic"),
+                    )
+                    ids.append(row["question_id"])
         return ids
 
     async def update_recommended_question_status(
@@ -276,25 +280,68 @@ class WahdaRepository:
             WHERE question_id = $2::uuid
               AND tenant_id = $3 AND user_id = $4
         """, new_status, question_id, tenant_id, user_id)
-        return result.endswith("1")  # "UPDATE 1" means success
+        # M-1 fix: exact match instead of fragile endswith
+        return result == "UPDATE 1"
+
+    async def dismiss_if_active(
+        self, question_id: str, tenant_id: str, user_id: str,
+    ) -> bool:
+        """Atomically dismiss only if still active (M-6: race-safe)."""
+        result = await self._db.execute("""
+            UPDATE islamic_content.recommended_questions
+            SET status = 'dismissed', updated_at = NOW()
+            WHERE question_id = $1::uuid
+              AND tenant_id = $2 AND user_id = $3
+              AND status = 'active'
+        """, question_id, tenant_id, user_id)
+        return result == "UPDATE 1"
+
+    async def count_active_questions(
+        self, tenant_id: str, user_id: str, target_date: date,
+    ) -> int:
+        """Count active questions for a user on a date (H-3: rate limiting)."""
+        return await self._db.fetchval("""
+            SELECT COUNT(*) FROM islamic_content.recommended_questions
+            WHERE tenant_id = $1 AND user_id = $2
+              AND date_trigger >= $3 AND status = 'active'
+        """, tenant_id, user_id, target_date) or 0
 
     async def get_recent_user_sessions(
         self, tenant_id: str, user_id: str, days: int = 7, limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Get recent sessions with history from public.sessions (cross-schema)."""
+        """Get recent sessions from public.sessions (cross-schema).
+
+        H-4 fix: only fetch last 20 messages per session via jsonb_agg slice
+        to avoid fetching megabytes of full history.
+        """
         try:
             sql = """
-            SELECT session_id, history, metadata, updated_at
-            FROM public.sessions
-            WHERE tenant_id = $1 AND user_id = $2
-              AND status = 'active'
-              AND updated_at > NOW() - ($3 || ' days')::interval
-              AND jsonb_array_length(history) > 0
-            ORDER BY updated_at DESC
-            LIMIT $4
+            SELECT session_id,
+                   history #> '{}' AS history,
+                   metadata, updated_at
+            FROM (
+                SELECT session_id,
+                       CASE
+                         WHEN jsonb_array_length(history) > 20
+                         THEN (
+                           SELECT jsonb_agg(elem)
+                           FROM jsonb_array_elements(history) WITH ORDINALITY AS t(elem, idx)
+                           WHERE t.idx > jsonb_array_length(history) - 20
+                         )
+                         ELSE history
+                       END AS history,
+                       metadata, updated_at
+                FROM public.sessions
+                WHERE tenant_id = $1 AND user_id = $2
+                  AND status = 'active'
+                  AND updated_at > NOW() - ($3 || ' days')::interval
+                  AND jsonb_array_length(history) > 0
+                ORDER BY updated_at DESC
+                LIMIT $4
+            ) sub
             """
             rows = await self._db.fetch(sql, tenant_id, user_id, str(days), limit)
             return [dict(r) for r in rows]
         except Exception as e:
-            logger.warning("Cross-schema session query failed: %s", e)
+            logger.error("Cross-schema session query failed: %s", e)
             return []

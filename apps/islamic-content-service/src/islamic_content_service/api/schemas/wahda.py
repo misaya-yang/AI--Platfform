@@ -96,8 +96,8 @@ class RecommendedQuestionsResponse(BaseModel):
 
 class GenerateRecommendationsRequest(BaseModel):
     session_ids: list[str] | None = Field(
-        default=None,
-        description="Specific session IDs to analyze. If empty, uses recent sessions.",
+        default=None, max_length=10,
+        description="Specific session IDs to analyze (max 10). If empty, uses recent sessions.",
     )
     count: int = Field(default=5, ge=1, le=20, description="Number of questions to generate")
     date_strategy: str = Field(

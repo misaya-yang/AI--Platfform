@@ -244,6 +244,8 @@ class WahdaService:
             "total": len(questions),
         }
 
+    _MAX_ACTIVE_QUESTIONS = 30  # H-3: rate limit cap per user
+
     async def generate_recommendations(
         self, tenant_id: str, user_id: str,
         session_ids: list[str] | None = None,
@@ -251,7 +253,13 @@ class WahdaService:
     ) -> dict[str, Any]:
         """Generate recommended questions from conversation history using Gemini."""
         if not self._gemini:
-            raise RuntimeError("Gemini client not configured — set GEMINI_API_KEY")
+            raise RuntimeError("AI recommendation service not configured")
+
+        # H-3: rate limit — reject if user already has too many active questions
+        today = date.today()
+        active_count = await self._repo.count_active_questions(tenant_id, user_id, today)
+        if active_count >= self._MAX_ACTIVE_QUESTIONS:
+            return {"generated": 0, "questions": []}
 
         # Fetch conversation history
         if session_ids:
@@ -323,16 +331,16 @@ class WahdaService:
     ) -> dict[str, Any] | None:
         """Regenerate a single recommended question. Dismisses old, creates new with is_regen=True."""
         if not self._gemini:
-            raise RuntimeError("Gemini client not configured — set GEMINI_API_KEY")
+            raise RuntimeError("AI recommendation service not configured")
 
         old = await self._repo.get_recommended_question(question_id)
         if not old or old["tenant_id"] != tenant_id or old["user_id"] != user_id:
             return None
 
-        # Dismiss the old question
-        await self._repo.update_recommended_question_status(
-            question_id, tenant_id, user_id, "dismissed",
-        )
+        # M-6 fix: atomically dismiss only if still active (race-safe)
+        dismissed = await self._repo.dismiss_if_active(question_id, tenant_id, user_id)
+        if not dismissed:
+            return None  # already dismissed by a concurrent request
 
         # Get history from the source session to regenerate
         sessions = []
@@ -420,14 +428,18 @@ class WahdaService:
             "created_at": ca.isoformat() if isinstance(ca, datetime) else str(ca) if ca else None,
         }
 
+    _PROMPT_CHAR_BUDGET = 10_000  # M-5: cap total prompt chars to ~2500 tokens
+
     def _format_sessions_for_llm(self, sessions: list[dict[str, Any]]) -> str:
         """Format session histories into a compact text for the LLM prompt."""
-        parts = []
+        parts: list[str] = []
+        total_chars = 0
         for s in sessions[:5]:
+            if total_chars >= self._PROMPT_CHAR_BUDGET:
+                break
             history = s.get("history", [])
             if isinstance(history, str):
                 history = json.loads(history)
-            # Take last 20 messages per session
             messages = self._clean_messages(
                 [{"role": m.get("role", ""), "content": m.get("content", "")} for m in history[-20:]]
             )
@@ -436,7 +448,13 @@ class WahdaService:
             sid = s.get("session_id", "unknown")
             lines = [f"--- Session {sid} ---"]
             for m in messages:
-                lines.append(f"{m['role'].upper()}: {m['content'][:500]}")
+                remaining = self._PROMPT_CHAR_BUDGET - total_chars
+                if remaining <= 0:
+                    break
+                snippet = m["content"][:min(500, remaining)]
+                line = f"{m['role'].upper()}: {snippet}"
+                lines.append(line)
+                total_chars += len(line)
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 

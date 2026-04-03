@@ -40,5 +40,8 @@ def get_cache(request: Request) -> RedisCache:
 
 
 def get_wahda_service(request: Request):
-    from ..services.wahda_service import WahdaService
-    return request.app.state.wahda_service
+    from fastapi import HTTPException as _HTTPExc
+    svc = request.app.state.wahda_service
+    if svc is None:
+        raise _HTTPExc(503, "Wahda service not available")
+    return svc
