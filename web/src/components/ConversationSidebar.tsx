@@ -16,7 +16,6 @@ import { cn } from "@/lib/utils";
 import { CustomizeDialog } from "@/pages/assistant/components/CustomizeDialog";
 import {
   FolderOpen,
-  FolderPlus,
   MessageSquare,
   Pencil,
   Plus,
@@ -400,6 +399,7 @@ export function ConversationSidebar({
   const openFolderDialog = useCallback((sessionId: string) => {
     setFolderDialogTarget(sessionId);
     setFolderDialogOpen(true);
+    // FolderDialog resets its own value via the key prop below
   }, []);
 
   const handleRename = useCallback(async (sessionId: string, newTitle: string) => {
@@ -515,6 +515,7 @@ export function ConversationSidebar({
 
       {/* Folder move dialog */}
       <FolderDialog
+        key={folderDialogTarget || "closed"}
         isOpen={folderDialogOpen}
         onClose={() => { setFolderDialogOpen(false); setFolderDialogTarget(null); }}
         onConfirm={(folder) => {
