@@ -11,7 +11,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { CustomizeDialog } from "@/pages/assistant/components/CustomizeDialog";
 import {
@@ -27,6 +27,21 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { SessionSummary } from "@/api/sessions";
 import { updateSession } from "@/api/sessions";
 
@@ -42,97 +57,86 @@ function FolderDialog({
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
 
-  if (!isOpen) return null;
+  function handleClose(): void {
+    setValue("");
+    onClose();
+  }
 
-  const handleConfirm = () => {
+  function handleConfirm(): void {
     const trimmed = value.trim();
-    if (trimmed) { onConfirm(trimmed); setValue(""); onClose(); }
-  };
+    if (trimmed) {
+      onConfirm(trimmed);
+      handleClose();
+    }
+  }
 
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
+      <DialogContent className="max-w-sm rounded-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <FolderOpen className="h-4 w-4 text-primary" />
+            {t("assistant.moveToFolder", "Move to folder")}
+          </DialogTitle>
+          <DialogDescription>
+            {t("assistant.folderHint", "Enter a folder name or select an existing one")}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div>
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleConfirm();
+              if (e.key === "Escape") handleClose();
+            }}
+            placeholder={t("assistant.folderPlaceholder", "e.g. Islamic Research")}
+            className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
+            autoFocus
           />
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 8 }}
-            transition={{ type: "spring", duration: 0.3, bounce: 0.15 }}
-            className="relative w-full max-w-sm mx-4 rounded-2xl bg-popover border border-border shadow-2xl overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-5 pt-5 pb-3">
-              <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-                <FolderOpen className="h-4 w-4 text-primary" />
-                {t("assistant.moveToFolder", "Move to folder")}
-              </h3>
-              <p className="text-xs text-muted-foreground mt-1">
-                {t("assistant.folderHint", "Enter a folder name or select an existing one")}
-              </p>
-            </div>
-
-            <div className="px-5 pb-2">
-              <input
-                ref={inputRef}
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleConfirm(); if (e.key === "Escape") onClose(); }}
-                placeholder={t("assistant.folderPlaceholder", "e.g. Islamic Research")}
-                className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
-                autoFocus
-              />
-            </div>
-
-            {/* Existing folders as quick-select */}
-            {existingFolders.length > 0 && (
-              <div className="px-5 pb-2 flex flex-wrap gap-1.5">
-                {existingFolders.map((f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    className={cn(
-                      "px-2.5 py-1 rounded-lg text-xs transition-all",
-                      value === f
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                    onClick={() => setValue(f)}
-                  >
-                    <FolderOpen className="h-3 w-3 inline mr-1" />{f}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border/50 bg-muted/30">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 rounded-xl text-sm text-muted-foreground hover:bg-muted transition-colors"
-              >
-                {t("common.cancel", "Cancel")}
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirm}
-                disabled={!value.trim()}
-                className="px-4 py-2 rounded-xl text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors"
-              >
-                {t("common.confirm", "Move")}
-              </button>
-            </div>
-          </motion.div>
         </div>
-      )}
-    </AnimatePresence>
+
+        {existingFolders.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {existingFolders.map((f) => (
+              <button
+                key={f}
+                type="button"
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-xs transition-all",
+                  value === f
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground"
+                )}
+                onClick={() => setValue(f)}
+              >
+                <FolderOpen className="h-3 w-3 inline mr-1" />{f}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <DialogFooter>
+          <button
+            type="button"
+            onClick={handleClose}
+            className="px-4 py-2 rounded-xl text-sm text-muted-foreground hover:bg-muted transition-colors"
+          >
+            {t("common.cancel", "Cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={!value.trim()}
+            className="px-4 py-2 rounded-xl text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40 transition-colors"
+          >
+            {t("common.confirm", "Move")}
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -219,22 +223,22 @@ function SessionItem({
   const { t } = useTranslation();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState("");
-  const [showMenu, setShowMenu] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const title = getSessionTitle(session, fallbackLabel);
 
-  const startEdit = useCallback(() => {
+  function startEdit(): void {
     setEditValue(title);
     setIsEditing(true);
-    setShowMenu(false);
     setTimeout(() => inputRef.current?.select(), 50);
-  }, [title]);
+  }
 
-  const commitEdit = useCallback(() => {
+  function commitEdit(): void {
     setIsEditing(false);
     const trimmed = editValue.trim();
     if (trimmed && trimmed !== title) onRename(trimmed);
-  }, [editValue, title, onRename]);
+  }
+
+  const hasFolder = Boolean(getSessionFolder(session));
 
   return (
     <motion.div layout className="group relative">
@@ -245,61 +249,65 @@ function SessionItem({
             value={editValue}
             onChange={(e) => setEditValue(e.target.value)}
             onBlur={commitEdit}
-            onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setIsEditing(false); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitEdit();
+              if (e.key === "Escape") setIsEditing(false);
+            }}
             className="w-full rounded-md border border-primary/40 bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
             autoFocus
           />
         </div>
       ) : (
-        <button
-          type="button"
-          className={cn(
-            "flex w-full items-center gap-2 rounded-lg px-3 py-2 pr-16 text-left transition-all",
-            isActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-          )}
-          onClick={onSelect}
-          onDoubleClick={startEdit}
-          onContextMenu={(e) => { e.preventDefault(); setShowMenu(!showMenu); }}
-        >
-          <MessageSquare className="h-4 w-4 shrink-0" />
-          <span className="flex-1 truncate text-sm">{title}</span>
-        </button>
-      )}
-
-      {/* Action buttons (visible on hover) */}
-      {!isEditing && (
-        <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 rounded-md px-0.5">
-          <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded p-1.5 hover:bg-muted" title={t("assistant.rename", "Rename")}>
-            <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
-          </button>
-          <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded p-1.5 hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
-      {/* Context menu */}
-      {showMenu && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-          <div className="absolute left-8 top-full z-50 w-48 rounded-lg border bg-popover p-1 shadow-lg">
-            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={startEdit}>
-              <Pencil className="h-3.5 w-3.5" /> {t("assistant.rename", "Rename")}
-            </button>
-            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={() => { setShowMenu(false); onOpenFolderDialog(); }}>
-              <FolderOpen className="h-3.5 w-3.5" /> {t("assistant.moveToFolder", "Move to folder")}
-            </button>
-            {getSessionFolder(session) && (
-              <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted" onClick={() => { setShowMenu(false); onMoveToFolder(null); }}>
-                <X className="h-3.5 w-3.5" /> {t("assistant.removeFromFolder", "Remove from folder")}
-              </button>
+        <div className="flex items-center">
+          <button
+            type="button"
+            className={cn(
+              "flex w-full items-center gap-2 rounded-lg px-3 py-2 pr-16 text-left transition-all",
+              isActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
             )}
-            <hr className="my-1 border-border/50" />
-            <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10" onClick={() => { setShowMenu(false); onDelete(); }}>
-              <Trash2 className="h-3.5 w-3.5" /> {t("assistant.delete", "Delete")}
+            onClick={onSelect}
+            onDoubleClick={startEdit}
+          >
+            <MessageSquare className="h-4 w-4 shrink-0" />
+            <span className="flex-1 truncate text-sm">{title}</span>
+          </button>
+
+          {/* Action buttons (visible on hover) */}
+          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 rounded-md px-0.5">
+            <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded p-1.5 hover:bg-muted" title={t("assistant.rename", "Rename")}>
+              <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button type="button" className="rounded p-1.5 hover:bg-muted" title={t("assistant.more", "More")}>
+                  <span className="text-muted-foreground text-xs font-bold">...</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={startEdit}>
+                  <Pencil className="h-3.5 w-3.5 mr-2" /> {t("assistant.rename", "Rename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={onOpenFolderDialog}>
+                  <FolderOpen className="h-3.5 w-3.5 mr-2" /> {t("assistant.moveToFolder", "Move to folder")}
+                </DropdownMenuItem>
+                {hasFolder && (
+                  <DropdownMenuItem onClick={() => onMoveToFolder(null)}>
+                    <X className="h-3.5 w-3.5 mr-2" /> {t("assistant.removeFromFolder", "Remove from folder")}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={onDelete}>
+                  <Trash2 className="h-3.5 w-3.5 mr-2" /> {t("assistant.delete", "Delete")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded p-1.5 hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
+              <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
-        </>
+        </div>
       )}
     </motion.div>
   );
@@ -381,7 +389,8 @@ export function ConversationSidebar({
 
   const grouped = useMemo(() => groupSessions(filtered), [filtered]);
   const folderNames = Object.keys(grouped.folders).sort();
-  // Also collect folders from ALL sessions (not just filtered) for the dialog
+
+  // Collect folders from ALL sessions (not just filtered) for the dialog
   const allFolderNames = useMemo(() => {
     const folders = new Set<string>();
     for (const s of sessions) {
@@ -396,11 +405,11 @@ export function ConversationSidebar({
   // Folder dialog state
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderDialogTarget, setFolderDialogTarget] = useState<string | null>(null);
-  const openFolderDialog = useCallback((sessionId: string) => {
+
+  function openFolderDialog(sessionId: string): void {
     setFolderDialogTarget(sessionId);
     setFolderDialogOpen(true);
-    // FolderDialog resets its own value via the key prop below
-  }, []);
+  }
 
   const handleRename = useCallback(async (sessionId: string, newTitle: string) => {
     try {
@@ -515,7 +524,6 @@ export function ConversationSidebar({
 
       {/* Folder move dialog */}
       <FolderDialog
-        key={folderDialogTarget || "closed"}
         isOpen={folderDialogOpen}
         onClose={() => { setFolderDialogOpen(false); setFolderDialogTarget(null); }}
         onConfirm={(folder) => {
