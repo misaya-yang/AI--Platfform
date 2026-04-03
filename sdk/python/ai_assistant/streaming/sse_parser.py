@@ -102,8 +102,12 @@ class SSEParser:
         if timestamp is None:
             timestamp = time.time()
 
+        # Unwrap nested "data" field from gateway's SSE format:
+        # {"event_type": "...", "data": {actual_payload}, "timestamp": ...}
+        inner = payload.get("data", payload)
+
         return StreamEvent(
             event_type=event_type,
-            data=payload,
+            data=inner,
             timestamp=float(timestamp),
         )

@@ -41,6 +41,7 @@ from ai_assistant.auth import AuthConfig, AuthManager
 from ai_assistant.chat import ChatModule
 from ai_assistant.images import ImageModule
 from ai_assistant.knowledge import KnowledgeModule
+from ai_assistant.mcp import MCPManager
 from ai_assistant.sessions import SessionModule
 from ai_assistant.tools import ToolModule
 from ai_assistant.transport.http import HTTPTransport
@@ -101,6 +102,7 @@ class AssistantClient:
         self.images = ImageModule(self._transport)
         self.artifacts = ArtifactModule(self._transport)
         self.tools = ToolModule(self._transport)
+        self.mcp = MCPManager()
 
     # -- Configuration accessors ---------------------------------------------
 
@@ -112,10 +114,11 @@ class AssistantClient:
     # -- Lifecycle -----------------------------------------------------------
 
     async def close(self) -> None:
-        """Release all underlying HTTP connections.
+        """Release all underlying HTTP connections and MCP servers.
 
         Safe to call multiple times.
         """
+        await self.mcp.disconnect()
         await self._transport.close()
 
     async def __aenter__(self) -> AssistantClient:
