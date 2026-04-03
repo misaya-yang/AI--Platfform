@@ -90,8 +90,14 @@ class MCPClient:
         parsed = urllib.parse.urlparse(url)
         hostname = parsed.hostname or ""
 
-        # Allow localhost/Docker-internal for dev (non-public)
+        # Allow localhost and Docker-internal networks for dev/deployment
         if hostname in ("localhost", "127.0.0.1") or hostname.endswith(".internal"):
+            return
+
+        # Allow Docker Compose service names (resolve to 172.x private IPs)
+        # In production, MCP servers run as Docker containers on the same network
+        import os
+        if os.environ.get("DOCKER_NETWORK_ALLOW_PRIVATE", "true").lower() == "true":
             return
 
         # Resolve hostname and block private IPs
