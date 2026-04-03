@@ -2730,11 +2730,11 @@ class AgentLoop:
 
                     # Add tool result to messages with lifecycle management
                     # M02: Truncate large tool results to prevent context rot
-                    _tool_content = tool_result_for_model or (
-                        str(tool_result)
-                        if not isinstance(tool_result, str)
-                        else tool_result
-                    )
+                    _tool_content = (
+                        tool_result_for_model
+                        if tool_result_for_model is not None
+                        else (str(tool_result) if not isinstance(tool_result, str) else tool_result)
+                    ) or ""
                     _MAX_TOOL_RESULT_LEN = 2000
                     if len(_tool_content) > _MAX_TOOL_RESULT_LEN:
                         _tool_content = _tool_content[:_MAX_TOOL_RESULT_LEN] + "\n...[truncated]"
