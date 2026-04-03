@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hejaz-ai-sdk"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python SDK for the AI Gateway assistant API — chat, streaming, knowledge base, image generation, artifacts, and session management."
 readme = "README.md"
 license = "MIT"

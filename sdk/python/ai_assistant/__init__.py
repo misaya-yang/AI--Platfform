@@ -19,7 +19,7 @@ Quick start::
                 print(event.text, end="", flush=True)
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 from ai_assistant.client import AssistantClient
 from ai_assistant.exceptions import (
