@@ -217,6 +217,13 @@ class ToolOrchestrator:
         self._execution_gateway = execution_gateway
         self._routed_request = routed_request
 
+        # Tool result cache for idempotent tools (search, retrieval)
+        self._result_cache: dict[str, ToolExecutionResult] = {}
+        self._cacheable_tools = frozenset({
+            "search_knowledge_base", "search_web", "search_documents",
+            "list_datasets", "get_dataset_info",
+        })
+
         # If no invoker provided, create one from registry or default
         if self.tool_invoker is None:
             from .tool_invoker import create_tool_invoker
@@ -431,6 +438,23 @@ class ToolOrchestrator:
         """
         start_time = time.time()
 
+        # Cache lookup for idempotent tools
+        if task.tool in self._cacheable_tools:
+            import hashlib
+            cache_key = hashlib.md5(
+                f"{task.tool}|{sorted(task.parameters.items())}".encode()
+            ).hexdigest()
+            if cache_key in self._result_cache:
+                cached = self._result_cache[cache_key]
+                logger.debug(f"Tool cache HIT: {task.tool} (task {task.id})")
+                return ToolExecutionResult(
+                    task_id=task.id, tool=task.tool,
+                    success=cached.success, result=cached.result,
+                    error=cached.error, duration_ms=0.1,
+                )
+        else:
+            cache_key = None
+
         async with self.semaphore:
             try:
                 # Resolve parameter references
@@ -463,7 +487,7 @@ class ToolOrchestrator:
 
                 duration_ms = (time.time() - start_time) * 1000
 
-                return ToolExecutionResult(
+                result = ToolExecutionResult(
                     task_id=task.id,
                     tool=task.tool,
                     success=tool_result.success,
@@ -471,6 +495,12 @@ class ToolOrchestrator:
                     error=tool_result.error,
                     duration_ms=duration_ms,
                 )
+
+                # Store in cache for idempotent tools
+                if cache_key and result.success:
+                    self._result_cache[cache_key] = result
+
+                return result
 
             except Exception as e:
                 duration_ms = (time.time() - start_time) * 1000

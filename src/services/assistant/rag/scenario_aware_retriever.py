@@ -258,6 +258,10 @@ class ScenarioAwareRetriever:
         self.max_queries = max_queries
         self.results_per_query = results_per_query
 
+        # Session-scoped RAG cache: (query_hash, dataset_ids_hash) -> results
+        self._cache: dict[str, ScenarioRetrievalContext] = {}
+        self._cache_max = 50  # Max cached results per session
+
     async def retrieve(
         self,
         user_query: str,
@@ -279,11 +283,21 @@ class ScenarioAwareRetriever:
         Returns:
             ScenarioRetrievalContext with ranked results
         """
+        import hashlib
         import time
 
         start_time = time.time()
 
         top_k = top_k or self.default_top_k
+
+        # Cache lookup: reuse results for identical/similar queries within session
+        cache_key = hashlib.md5(
+            f"{user_query}|{','.join(sorted(dataset_ids))}|{top_k}".encode()
+        ).hexdigest()
+        if cache_key in self._cache:
+            cached = self._cache[cache_key]
+            logger.info(f"[SCENARIO RETRIEVE] Cache HIT for '{user_query[:50]}' ({len(cached.results)} results)")
+            return cached
 
         # Step 1: Expand queries based on scenario
         if scenario.suggested_kb_queries:
@@ -353,7 +367,7 @@ class ScenarioAwareRetriever:
             f"final={len(final_results)}, time={retrieval_time:.1f}ms"
         )
 
-        return ScenarioRetrievalContext(
+        result_ctx = ScenarioRetrievalContext(
             user_query=user_query,
             scenario=scenario,
             results=final_results,
@@ -362,6 +376,14 @@ class ScenarioAwareRetriever:
             after_dedupe=after_dedupe,
             retrieval_time_ms=retrieval_time,
         )
+
+        # Store in session cache (evict oldest if full)
+        if len(self._cache) >= self._cache_max:
+            oldest_key = next(iter(self._cache))
+            del self._cache[oldest_key]
+        self._cache[cache_key] = result_ctx
+
+        return result_ctx
 
     async def _retrieve_single(
         self,

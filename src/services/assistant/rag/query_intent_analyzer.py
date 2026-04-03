@@ -269,6 +269,57 @@ class QueryIntentAnalyzer:
                 tier_used="fast_rule",
             )
 
+        # 1.5 Simple/short queries - no KB needed
+        # Queries under 10 chars are almost always greetings, thanks, or simple commands
+        if query_len <= 10 and not any(k in query_lower for k in ["搜索", "查询", "查找", "查一下", "找"]):
+            return QueryIntent(
+                requires_kb_search=False,
+                decision=RetrievalDecision.SKIP,
+                decision_reason="Short simple query",
+                query_type=QueryType.CONVERSATIONAL,
+                domain="general",
+                complexity=0.1,
+                retrieval_strategy="none",
+                confidence=0.85,
+                tier_used="fast_rule",
+            )
+
+        # 1.6 Common conversational patterns - no KB
+        conversational_patterns = [
+            "谢谢", "感谢", "好的", "明白", "了解", "知道了", "收到",
+            "没问题", "可以", "不用了", "算了", "再见", "拜拜",
+            "thank", "thanks", "ok", "okay", "got it", "sure", "yes", "no",
+            "帮我写", "帮我翻译", "翻译一下", "总结一下", "帮我改",
+            "写一个", "写一段", "生成一个", "创建一个",
+        ]
+        if any(query_lower.startswith(p) or query_lower == p for p in conversational_patterns):
+            return QueryIntent(
+                requires_kb_search=False,
+                decision=RetrievalDecision.SKIP,
+                decision_reason="Conversational/creative pattern",
+                query_type=QueryType.CONVERSATIONAL,
+                domain="general",
+                complexity=0.2,
+                retrieval_strategy="none",
+                confidence=0.8,
+                tier_used="fast_rule",
+            )
+
+        # 1.7 Code-related queries - rarely need KB
+        code_patterns = ["代码", "bug", "报错", "error", "debug", "修复", "重构", "refactor", "实现"]
+        if any(p in query_lower for p in code_patterns) and not any(k in query_lower for k in ["文档", "知识库"]):
+            return QueryIntent(
+                requires_kb_search=False,
+                decision=RetrievalDecision.SKIP,
+                decision_reason="Code/technical task - use model knowledge",
+                query_type=QueryType.ANALYTICAL,
+                domain="code",
+                complexity=0.5,
+                retrieval_strategy="none",
+                confidence=0.75,
+                tier_used="fast_rule",
+            )
+
         # 2. System capability questions - no KB needed
         capability_patterns = [
             "你能做什么",

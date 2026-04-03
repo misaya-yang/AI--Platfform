@@ -45,13 +45,6 @@ export function useFileHandler() {
           true
         );
 
-        // Debug: Log upload response
-        console.log("[useFileHandler] Upload success:", {
-          filename: fileEntry.file.name,
-          response,
-          file_path: response?.file_path,
-        });
-
         setFiles((prev) =>
           prev.map((f) =>
             f.file === fileEntry.file

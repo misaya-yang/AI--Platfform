@@ -293,17 +293,6 @@ export function AssistantPage() {
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
     const filePaths = successfulUploads.map((f) => f.response!.file_path);
 
-    // Debug: Log file upload info with detailed status
-    console.log("[handleSend] Files detail:", files.map(f => ({
-      name: f.file.name,
-      status: f.status,
-      hasResponse: !!f.response,
-      filePath: f.response?.file_path,
-      error: f.error
-    })));
-    console.log("[handleSend] Successful uploads count:", successfulUploads.length);
-    console.log("[handleSend] File paths:", filePaths);
-
     let messageContent = input.trim();
     if (successfulUploads.length > 0 && !messageContent) {
       messageContent = t("assistant.analyzeFiles", "Please analyze these uploaded files.");

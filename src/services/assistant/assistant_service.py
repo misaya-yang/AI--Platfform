@@ -586,9 +586,9 @@ Please use this web search context to inform your response when relevant."""
             redis_client=redis_client,
         )
 
-        # Context Engine for KV-Cache optimization (Phase 5)
-        # Per-session working memory for task tracking
-        self._working_memories: dict[str, WorkingMemory] = {}
+        # Per-session working memory with TTL auto-cleanup (1h expiry, max 5000 sessions)
+        from cachetools import TTLCache
+        self._working_memories: TTLCache = TTLCache(maxsize=5000, ttl=3600)
 
         # Quality Guardrails (ensure content meets minimum quality standards)
         self.quality_guardrails = quality_guardrails or QualityGuardrails()
@@ -2941,13 +2941,8 @@ Please use this web search context to inform your response when relevant."""
 
     def _legacy_get_working_memory(self, session_id: str) -> WorkingMemory:
         """Get or create working memory for a session (TTL-bounded)."""
-        if not hasattr(self, "_working_memories"):
-            from cachetools import TTLCache
-            self._working_memories = TTLCache(maxsize=10000, ttl=3600)
-
         if session_id not in self._working_memories:
             self._working_memories[session_id] = WorkingMemory(session_id=session_id)
-
         return self._working_memories[session_id]
 
     async def _execute_agent_loop(

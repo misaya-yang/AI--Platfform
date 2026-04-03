@@ -3012,13 +3012,21 @@ class AgentLoop:
 
         if self.memory_service:
             try:
-                # Layer 1: Long-term Memory (user preferences and patterns)
-                long_term_ctx = await self.memory_service.get_long_term_context(
-                    tenant_id=user.tenant_id,
-                    user_id=user.user_id,
+                # Layer 1 + 2: Parallel load (independent DB queries)
+                long_term_ctx, session_ctx = await asyncio.gather(
+                    self.memory_service.get_long_term_context(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                    ),
+                    self.memory_service.get_session_context(
+                        tenant_id=user.tenant_id,
+                        session_id=ctx.session_id,
+                    ),
                 )
+
                 ctx.long_term_memory = long_term_ctx
                 ctx.user_preferences = long_term_ctx.get("preferences") if long_term_ctx else None
+                ctx.session_memory = session_ctx
 
                 yield AgentLoopEvent(
                     phase=phase,
@@ -3030,13 +3038,6 @@ class AgentLoop:
                         else 0,
                     },
                 )
-
-                # Layer 2: Session Memory (conversation context, task state)
-                session_ctx = await self.memory_service.get_session_context(
-                    tenant_id=user.tenant_id,
-                    session_id=ctx.session_id,
-                )
-                ctx.session_memory = session_ctx
 
                 yield AgentLoopEvent(
                     phase=phase,
