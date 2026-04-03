@@ -1134,6 +1134,7 @@ def get_streaming_first_prompt(
     web_search_enabled: bool = False,
     available_tools: list[str] | None = None,
     dataset_name_map: dict[str, str] | None = None,
+    os_agent_enabled: bool = False,
 ) -> str:
     """
     Get an ultra-minimal system prompt for Streaming-First mode.
@@ -1238,19 +1239,46 @@ Web search is available. Use it intelligently when:
 For general knowledge questions you can answer confidently, respond directly without searching.
 """
 
-    return f"""You are an enterprise AI assistant.
+    # P1.1: Inject current time (via dynamic section, not in static prefix to preserve KV-cache)
+    from datetime import datetime as _dt
+    _now = _dt.now()
+    time_context = f"""
+## Current Time
+Today is {_now.strftime('%Y-%m-%d')} ({_now.strftime('%A')}). Current time: {_now.strftime('%H:%M')}.
+Always use this as "today". When searching the web, include the year {_now.year} in time-sensitive queries.
+"""
 
+    # P1.3: OS Agent instructions when enabled
+    os_agent_hint = ""
+    if os_agent_enabled:
+        os_agent_hint = """
+## Local OS Agent (ENABLED)
+You have DIRECT access to the user's local file system and terminal. You are NOT a cloud-only assistant.
+When the user asks to create files, write code, run commands, or edit files:
+1. ALWAYS use the appropriate tool (write_file, edit_file, bash) to execute DIRECTLY
+2. NEVER say "I cannot access your local system" — you CAN and MUST
+3. NEVER just print code in chat when the user asks to "create a file" or "write to disk"
+4. For file paths: use the user's working directory or the path they specify
+
+Available local tools: read_file, write_file, edit_file, bash, glob, grep, list_dir, tree.
+Read-only tools (auto-approved): read_file, glob, grep, list_dir, tree.
+Write tools (require user confirmation): write_file, edit_file, bash.
+"""
+
+    return f"""You are an enterprise AI assistant.
+{time_context}
 ## Response Priority (CRITICAL)
-1. For simple questions you can answer confidently: respond directly without tools
-2. If you need to search for information: first acknowledge the request with a brief message, then use the tool
-3. Never make the user wait in silence - always provide immediate feedback
+1. For simple greetings (hi, hello, 你好): reply briefly (1-2 sentences), do NOT list capabilities
+2. For simple questions you can answer confidently: respond directly without tools
+3. If you need to search for information: first acknowledge the request with a brief message, then use the tool
+4. Never make the user wait in silence - always provide immediate feedback
 
 ## Core Principles
 - Be helpful, accurate, and concise
 - Use tools intelligently based on context
 - Cite sources when using retrieved information
 - Admit uncertainty rather than hallucinate
-{tools_hint}{kb_hint}{web_hint}
+{os_agent_hint}{tools_hint}{kb_hint}{web_hint}
 ## Response Style
 - Use clear, professional language
 - Format with markdown when helpful

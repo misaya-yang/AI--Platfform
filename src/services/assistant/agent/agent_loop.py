@@ -1792,6 +1792,7 @@ class AgentLoop:
                 web_search_enabled=ctx.config.web_search_enabled,  # Preference hint for AI
                 available_tools=available_tool_names or None,
                 dataset_name_map=dataset_name_map,
+                os_agent_enabled=ctx.config.os_agent_enabled,  # P1.3: inject OS tools prompt
             )
             extra_prompt = (ctx.config.system_prompt or "").strip()
             if extra_prompt:

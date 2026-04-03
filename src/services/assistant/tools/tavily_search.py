@@ -14,7 +14,9 @@ Features:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -22,6 +24,18 @@ import httpx
 from ....core.observability.logging import get_logger
 
 logger = get_logger(__name__)
+
+# P1.2: Time-sensitive query patterns
+_TIME_SENSITIVE_RE = re.compile(
+    r"今天|today|最新|latest|当前|current|本周|this week|今年|this year|"
+    r"昨天|yesterday|近期|recently|现在|now|刚刚|just|tonight|今晚|"
+    r"这个月|this month|上周|last week",
+    re.IGNORECASE,
+)
+
+# P1.4: Token budget constants for search results
+_MAX_CONTENT_CHARS = 1200  # per result
+_MAX_TOTAL_CHARS = 5000    # across all results
 
 
 @dataclass
@@ -148,14 +162,26 @@ class TavilySearchTool:
         search_depth = search_depth or self.search_depth
         include_answer = include_answer if include_answer is not None else self.include_answer
 
+        # P1.2: Enhance time-sensitive queries with current year + recency filter
+        enhanced_query = query
+        days_limit = None
+        if _TIME_SENSITIVE_RE.search(query):
+            year = datetime.now().year
+            if str(year) not in query:
+                enhanced_query = f"{query} {year}"
+            days_limit = 7
+            logger.debug("Time-sensitive query detected, enhanced: %s (days=%s)", enhanced_query, days_limit)
+
         payload = {
             "api_key": self.api_key,
-            "query": query,
+            "query": enhanced_query,
             "max_results": max_results,
             "search_depth": search_depth,
             "include_answer": include_answer,
             "topic": topic,
         }
+        if days_limit:
+            payload["days"] = days_limit
 
         if self.include_domains:
             payload["include_domains"] = self.include_domains
@@ -208,6 +234,8 @@ class TavilySearchTool:
         """
         Format search results for LLM context injection.
 
+        P1.4: Token budget control — truncates per-result and total to prevent overflow.
+
         Args:
             response: Search response to format.
             max_results: Limit number of results in context.
@@ -219,15 +247,20 @@ class TavilySearchTool:
         parts = ["## Web Search Results\n"]
 
         if response.answer:
-            parts.append(f"**Summary:** {response.answer}\n")
+            parts.append(f"**Summary:** {response.answer[:500]}\n")
 
         results_to_show = response.results[:max_results] if max_results else response.results
 
+        total_chars = 0
         for idx, result in enumerate(results_to_show, 1):
+            if total_chars >= _MAX_TOTAL_CHARS:
+                break
+            content = result.content[:_MAX_CONTENT_CHARS]
             parts.append(f"\n### [{idx}] {result.title}")
             if include_urls:
                 parts.append(f"**Source:** {result.url}")
-            parts.append(f"\n{result.content}\n")
+            parts.append(f"\n{content}\n")
+            total_chars += len(content)
 
         if not results_to_show:
             parts.append("\n*No relevant results found.*")
