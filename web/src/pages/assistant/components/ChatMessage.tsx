@@ -68,10 +68,8 @@ function InlineArtifactCard({
     .filter(Boolean)
     .join(" · ");
 
-  const openArtifact = () => {
-    if (!artifact.url) return;
-    window.open(artifact.url, "_blank", "noopener,noreferrer");
-  };
+  // Only show "Open in new tab" for browser-previewable formats
+  const previewable = /^(png|jpg|jpeg|gif|webp|svg|pdf|md|txt|html|json|csv)$/i.test(artifact.format || "");
 
   return (
     <div className="rounded-xl border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/60 p-3">
@@ -83,22 +81,24 @@ function InlineArtifactCard({
         </div>
         {hasUrl && (
           <>
-            <button
-              type="button"
-              onClick={openArtifact}
-              className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
-            >
-              <ExternalLink className="h-3 w-3" />
-              {t("common.openInNewTab", "Open")}
-            </button>
+            {previewable && (
+              <a
+                href={artifact.url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
+              >
+                <ExternalLink className="h-3 w-3" />
+                {t("common.openInNewTab", "新标签页打开")}
+              </a>
+            )}
             <a
               href={artifact.url}
-              target="_blank"
-              rel="noreferrer"
+              download={artifact.filename || title}
               className="inline-flex items-center gap-1 rounded-md border border-[hsl(var(--assistant-border-soft))] px-2 py-1 text-[11px] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
             >
               <Download className="h-3 w-3" />
-              {t("artifact.download", "Save")}
+              {t("artifact.download", "下载")}
             </a>
           </>
         )}
