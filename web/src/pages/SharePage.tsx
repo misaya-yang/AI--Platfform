@@ -73,7 +73,8 @@ export function SharePage() {
     fetch(`/api/v1/assistant/shares/${shareId}`)
       .then((resp) => {
         if (resp.ok) return resp.json().then((d: ConversationShareData) => setConvShare(d));
-        // Fall back to legacy Islamic Content share
+        if (resp.status !== 404) throw new Error("Server error");
+        // 404 only: fall back to legacy Islamic Content share
         return fetch(`/api/v1/islamic/wahda/share/${shareId}`)
           .then((r) => {
             if (!r.ok) throw new Error(r.status === 404 ? "Conversation not found or expired" : "Failed to load");

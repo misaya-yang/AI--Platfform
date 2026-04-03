@@ -2113,18 +2113,23 @@ class AgentLoop:
                 if len(_subagent_calls) > 1 and self.model_registry:
                     sub_mgr = self._get_subagent_manager()
                     sub_configs, sub_ids = self._parse_subagent_configs(_subagent_calls)
-                    _current_results: dict[str, str] = {}
+                    # Map agent_id → tool_call_id for correct result mapping regardless of finish order
+                    _aid_to_tcid: dict[str, str] = {}
                     async for sub_event in sub_mgr.spawn_parallel(
                         sub_configs, parent_user=user, parent_tenant_id=ctx.tenant_id,
                         kb_dataset_ids=ctx.config.kb_dataset_ids or [],
                     ):
                         yield AgentLoopEvent(phase=phase, event_type=sub_event["event_type"], data=sub_event["data"])
-                        if sub_event["event_type"] == "subagent_finished":
+                        if sub_event["event_type"] == "subagent_started":
                             aid = sub_event["data"].get("agent_id", "")
-                            _current_results[aid] = sub_event["data"].get("result_summary", "")
-                    result_values = list(_current_results.values())
-                    for i, tc_id in enumerate(sub_ids):
-                        _subagent_results[tc_id] = result_values[i] if i < len(result_values) else ""
+                            idx = len(_aid_to_tcid)
+                            if idx < len(sub_ids):
+                                _aid_to_tcid[aid] = sub_ids[idx]
+                        elif sub_event["event_type"] == "subagent_finished":
+                            aid = sub_event["data"].get("agent_id", "")
+                            tc_id = _aid_to_tcid.get(aid, "")
+                            if tc_id:
+                                _subagent_results[tc_id] = sub_event["data"].get("result_summary", "")
                     logger.info(f"[STREAMING-FIRST] Parallel sub-agents completed: {len(_subagent_results)} results")
 
                 # Execute each tool call

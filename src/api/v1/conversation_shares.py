@@ -8,7 +8,7 @@ import string
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -76,7 +76,7 @@ async def create_share(
     )
     if not session:
         raise HTTPException(404, "Session not found")
-    if session["user_id"] and session["user_id"] != user.user_id:
+    if not session["user_id"] or session["user_id"] != user.user_id:
         raise HTTPException(403, "Not your session")
 
     history = session["history"] if isinstance(session["history"], (list, dict)) else json.loads(session["history"])
@@ -119,6 +119,9 @@ async def create_share(
         )
         if not existing:
             break
+        share_code = _generate_share_code()
+    else:
+        raise HTTPException(409, "Could not generate unique share code, try again")
         share_code = _generate_share_code()
 
     expires_at = None
@@ -241,7 +244,7 @@ async def download_shared_artifact(share_code: str, artifact_id: str, request: R
 async def list_shares(
     request: Request,
     user: UserContext = Depends(get_user_context),
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=200),
 ):
     """List shares created by the current user."""
     db = _get_db(request)

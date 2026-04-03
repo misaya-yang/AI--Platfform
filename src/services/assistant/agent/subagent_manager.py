@@ -223,9 +223,13 @@ Rules:
 
         tool_schemas = [t.to_openai_schema(compact=True) for t in tools] if tools else None
 
-        for turn in range(config.max_turns):
-            state.turns_completed = turn + 1
+        deadline = time.time() + config.timeout_seconds
 
+        for turn in range(config.max_turns):
+            if time.time() > deadline:
+                raise asyncio.TimeoutError()
+
+            state.turns_completed = turn + 1
             yield {
                 "event_type": "subagent_step",
                 "data": {"agent_id": agent_id, "step": f"Turn {turn + 1}/{config.max_turns}", "status": "running"},
@@ -303,7 +307,7 @@ Rules:
                     )
                 duration = (time.time() - start) * 1000
 
-                result_str = str(result.result)[:2000] if result.success else (result.error or "Error")
+                result_str = str(result.result or "")[:2000] if result.success else (result.error or "Error")
 
                 yield {
                     "event_type": "subagent_tool_result",
