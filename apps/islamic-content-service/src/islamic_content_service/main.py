@@ -73,6 +73,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         await db.migrate(migrations_dir / "002_dua_tables.sql")
         await db.migrate(migrations_dir / "003_wahda_features.sql")
         await db.migrate(migrations_dir / "004_share_conversations.sql")
+        await db.migrate(migrations_dir / "005_recommended_questions.sql")
     cache = RedisCache(settings.cache)
     await cache.connect()
 
@@ -97,11 +98,15 @@ async def build_runtime(settings: Settings) -> Runtime:
     dua_sync_service = DuaSyncService(dua_data_path, dua_repository)
     dua_query_service = DuaQueryService(settings.cache, dua_repository, cache)
 
-    # Wahda recommendation service
+    # Wahda recommendation service (+ optional Gemini client for AI question generation)
     from .repositories.wahda_repository import WahdaRepository
     from .services.wahda_service import WahdaService
     wahda_repo = WahdaRepository(db)
-    wahda_service = WahdaService(wahda_repo)
+    gemini_client = None
+    if settings.gemini.api_key:
+        from .clients.gemini_client import GeminiClient
+        gemini_client = GeminiClient(settings.gemini)
+    wahda_service = WahdaService(wahda_repo, gemini_client=gemini_client)
 
     bootstrap_service = BootstrapService(
         settings,

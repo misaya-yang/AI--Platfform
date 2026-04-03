@@ -1,9 +1,9 @@
-"""Sheikh Wahda business logic — recommendations, typeahead, trending, feedback, share."""
+"""Sheikh Wahda business logic — recommendations, typeahead, trending, feedback, share, recommended questions."""
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 class WahdaService:
-    def __init__(self, repo: WahdaRepository) -> None:
+    def __init__(self, repo: WahdaRepository, gemini_client=None) -> None:
         self._repo = repo
+        self._gemini = gemini_client
 
     # ------------------------------------------------------------------
     # Recommendations (§3.1 + §3.2)
@@ -225,6 +226,233 @@ class WahdaService:
     def _gateway_url(self) -> str:
         import os
         return os.getenv("GATEWAY_URL", "http://gateway:8080")
+
+    # ------------------------------------------------------------------
+    # Recommended Questions — AI-generated personalized follow-ups
+    # ------------------------------------------------------------------
+
+    async def get_recommended_questions(
+        self, tenant_id: str, user_id: str, target_date: date | None = None,
+    ) -> dict[str, Any]:
+        """Get today's personalized recommended questions for a user."""
+        target_date = target_date or date.today()
+        rows = await self._repo.get_recommended_questions(tenant_id, user_id, target_date)
+        questions = [self._row_to_item(r) for r in rows]
+        return {
+            "questions": questions,
+            "date": target_date.isoformat(),
+            "total": len(questions),
+        }
+
+    async def generate_recommendations(
+        self, tenant_id: str, user_id: str,
+        session_ids: list[str] | None = None,
+        count: int = 5, date_strategy: str = "spaced",
+    ) -> dict[str, Any]:
+        """Generate recommended questions from conversation history using Gemini."""
+        if not self._gemini:
+            raise RuntimeError("Gemini client not configured — set GEMINI_API_KEY")
+
+        # Fetch conversation history
+        if session_ids:
+            all_recent = await self._repo.get_recent_user_sessions(
+                tenant_id, user_id, days=90, limit=20,
+            )
+            wanted = set(session_ids[:5])
+            sessions = [s for s in all_recent if s["session_id"] in wanted]
+        else:
+            sessions = await self._repo.get_recent_user_sessions(
+                tenant_id, user_id, days=7, limit=5,
+            )
+
+        if not sessions:
+            return {"generated": 0, "questions": []}
+
+        # Format conversation history for the LLM
+        history_text = self._format_sessions_for_llm(sessions)
+        if not history_text.strip():
+            return {"generated": 0, "questions": []}
+
+        # Call Gemini to generate questions
+        raw_items = await self._gemini.generate_recommended_questions(history_text, count)
+        if not raw_items:
+            return {"generated": 0, "questions": []}
+
+        # Assign date_trigger based on strategy
+        today = date.today()
+        self._assign_date_triggers(raw_items, date_strategy, today)
+
+        # Build DB records — use first session_id as default source
+        default_session = sessions[0]["session_id"] if sessions else None
+        db_records = []
+        for item in raw_items:
+            db_records.append({
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "session_id": default_session,
+                "date_trigger": item.get("date_trigger", today),
+                "question_text": item.get("question_text", ""),
+                "is_regen": False,
+                "source_topic": item.get("source_topic"),
+            })
+        db_records = [r for r in db_records if r["question_text"]]
+
+        if not db_records:
+            return {"generated": 0, "questions": []}
+
+        ids = await self._repo.insert_recommended_questions(db_records)
+
+        # Build response
+        questions = []
+        for rec, qid in zip(db_records, ids):
+            questions.append({
+                "question_id": qid,
+                "date_trigger": rec["date_trigger"].isoformat(),
+                "question_text": rec["question_text"],
+                "is_regen": False,
+                "session_id": rec["session_id"],
+                "source_topic": rec.get("source_topic"),
+                "status": "active",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        return {"generated": len(questions), "questions": questions}
+
+    async def regenerate_question(
+        self, tenant_id: str, user_id: str, question_id: str,
+    ) -> dict[str, Any] | None:
+        """Regenerate a single recommended question. Dismisses old, creates new with is_regen=True."""
+        if not self._gemini:
+            raise RuntimeError("Gemini client not configured — set GEMINI_API_KEY")
+
+        old = await self._repo.get_recommended_question(question_id)
+        if not old or old["tenant_id"] != tenant_id or old["user_id"] != user_id:
+            return None
+
+        # Dismiss the old question
+        await self._repo.update_recommended_question_status(
+            question_id, tenant_id, user_id, "dismissed",
+        )
+
+        # Get history from the source session to regenerate
+        sessions = []
+        if old.get("session_id"):
+            all_sessions = await self._repo.get_recent_user_sessions(
+                tenant_id, user_id, days=90, limit=10,
+            )
+            sessions = [s for s in all_sessions if s["session_id"] == old["session_id"]]
+
+        if not sessions:
+            sessions = await self._repo.get_recent_user_sessions(
+                tenant_id, user_id, days=7, limit=3,
+            )
+
+        if not sessions:
+            return None
+
+        history_text = self._format_sessions_for_llm(sessions)
+        raw_items = await self._gemini.generate_recommended_questions(history_text, 1)
+        if not raw_items:
+            return None
+
+        item = raw_items[0]
+        db_record = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": old.get("session_id"),
+            "date_trigger": old["date_trigger"],
+            "question_text": item.get("question_text", ""),
+            "is_regen": True,
+            "source_topic": item.get("source_topic"),
+        }
+        if not db_record["question_text"]:
+            return None
+
+        ids = await self._repo.insert_recommended_questions([db_record])
+        return {
+            "question_id": ids[0],
+            "date_trigger": db_record["date_trigger"].isoformat()
+            if isinstance(db_record["date_trigger"], date)
+            else str(db_record["date_trigger"]),
+            "question_text": db_record["question_text"],
+            "is_regen": True,
+            "session_id": db_record["session_id"],
+            "source_topic": db_record.get("source_topic"),
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def update_question_status(
+        self, tenant_id: str, user_id: str, question_id: str, new_status: str,
+    ) -> bool:
+        return await self._repo.update_recommended_question_status(
+            question_id, tenant_id, user_id, new_status,
+        )
+
+    async def get_recommendations_history(
+        self, tenant_id: str, user_id: str, limit: int = 20, offset: int = 0,
+    ) -> dict[str, Any]:
+        rows, total = await self._repo.get_recommended_questions_history(
+            tenant_id, user_id, limit, offset,
+        )
+        questions = [self._row_to_item(r) for r in rows]
+        return {
+            "questions": questions,
+            "date": date.today().isoformat(),
+            "total": total,
+        }
+
+    # --- helpers ---
+
+    @staticmethod
+    def _row_to_item(row: dict[str, Any]) -> dict[str, Any]:
+        """Convert a DB row to a RecommendedQuestionItem-compatible dict."""
+        dt = row.get("date_trigger")
+        ca = row.get("created_at")
+        return {
+            "question_id": str(row["question_id"]),
+            "date_trigger": dt.isoformat() if isinstance(dt, date) else str(dt),
+            "question_text": row["question_text"],
+            "is_regen": row.get("is_regen", False),
+            "session_id": row.get("session_id"),
+            "source_topic": row.get("source_topic"),
+            "status": row.get("status", "active"),
+            "created_at": ca.isoformat() if isinstance(ca, datetime) else str(ca) if ca else None,
+        }
+
+    def _format_sessions_for_llm(self, sessions: list[dict[str, Any]]) -> str:
+        """Format session histories into a compact text for the LLM prompt."""
+        parts = []
+        for s in sessions[:5]:
+            history = s.get("history", [])
+            if isinstance(history, str):
+                history = json.loads(history)
+            # Take last 20 messages per session
+            messages = self._clean_messages(
+                [{"role": m.get("role", ""), "content": m.get("content", "")} for m in history[-20:]]
+            )
+            if not messages:
+                continue
+            sid = s.get("session_id", "unknown")
+            lines = [f"--- Session {sid} ---"]
+            for m in messages:
+                lines.append(f"{m['role'].upper()}: {m['content'][:500]}")
+            parts.append("\n".join(lines))
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _assign_date_triggers(
+        items: list[dict[str, Any]], strategy: str, base_date: date,
+    ) -> None:
+        """Assign date_trigger to each item in-place based on strategy."""
+        urgency_offsets = {"high": 1, "medium": 3, "low": 7}
+        for item in items:
+            if strategy == "today":
+                item["date_trigger"] = base_date
+            else:
+                urgency = item.get("urgency", "medium")
+                offset_days = urgency_offsets.get(urgency, 3)
+                item["date_trigger"] = base_date + timedelta(days=offset_days)
 
     # ------------------------------------------------------------------
     # Seed data import

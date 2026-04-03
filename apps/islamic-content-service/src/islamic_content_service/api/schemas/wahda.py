@@ -73,3 +73,44 @@ class ShareContentResponse(BaseModel):
     agent_name: str = "Sheikh Wahda"
     created_at: str
     expires_at: str | None = None
+
+
+# --- Recommended Questions (personalized, AI-generated) ---
+
+class RecommendedQuestionItem(BaseModel):
+    question_id: str
+    date_trigger: str = Field(description="ISO date (YYYY-MM-DD) when this should be shown")
+    question_text: str
+    is_regen: bool = False
+    session_id: str | None = None
+    source_topic: str | None = None
+    status: str = "active"
+    created_at: str | None = None
+
+
+class RecommendedQuestionsResponse(BaseModel):
+    questions: list[RecommendedQuestionItem]
+    date: str
+    total: int
+
+
+class GenerateRecommendationsRequest(BaseModel):
+    session_ids: list[str] | None = Field(
+        default=None,
+        description="Specific session IDs to analyze. If empty, uses recent sessions.",
+    )
+    count: int = Field(default=5, ge=1, le=20, description="Number of questions to generate")
+    date_strategy: str = Field(
+        default="spaced",
+        pattern="^(today|spaced)$",
+        description="'today' = all for today, 'spaced' = distribute over days by urgency",
+    )
+
+
+class GenerateRecommendationsResponse(BaseModel):
+    generated: int
+    questions: list[RecommendedQuestionItem]
+
+
+class UpdateRecommendedQuestionRequest(BaseModel):
+    status: str = Field(pattern="^(active|dismissed|used)$")

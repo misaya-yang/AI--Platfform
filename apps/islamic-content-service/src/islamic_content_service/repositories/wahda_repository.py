@@ -187,3 +187,114 @@ class WahdaRepository:
         except Exception as e:
             logger.warning("Trending query failed (usage_records may not exist): %s", e)
             return []
+
+    # ------------------------------------------------------------------
+    # Recommended Questions (AI-generated, personalized)
+    # ------------------------------------------------------------------
+
+    async def get_recommended_questions(
+        self, tenant_id: str, user_id: str, target_date: date,
+        status: str = "active",
+    ) -> list[dict[str, Any]]:
+        """Get recommended questions for a user on a specific date."""
+        sql = """
+        SELECT question_id::text, tenant_id, user_id, session_id,
+               date_trigger, question_text, is_regen,
+               source_message_index, source_topic, status, created_at
+        FROM islamic_content.recommended_questions
+        WHERE tenant_id = $1 AND user_id = $2
+          AND date_trigger = $3 AND status = $4
+        ORDER BY created_at DESC
+        """
+        rows = await self._db.fetch(sql, tenant_id, user_id, target_date, status)
+        return [dict(r) for r in rows]
+
+    async def get_recommended_questions_history(
+        self, tenant_id: str, user_id: str, limit: int = 20, offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Get paginated history of all recommended questions for a user."""
+        count_sql = """
+        SELECT COUNT(*) FROM islamic_content.recommended_questions
+        WHERE tenant_id = $1 AND user_id = $2
+        """
+        total = await self._db.fetchval(count_sql, tenant_id, user_id)
+
+        sql = """
+        SELECT question_id::text, tenant_id, user_id, session_id,
+               date_trigger, question_text, is_regen,
+               source_message_index, source_topic, status, created_at
+        FROM islamic_content.recommended_questions
+        WHERE tenant_id = $1 AND user_id = $2
+        ORDER BY created_at DESC
+        LIMIT $3 OFFSET $4
+        """
+        rows = await self._db.fetch(sql, tenant_id, user_id, limit, offset)
+        return [dict(r) for r in rows], total or 0
+
+    async def get_recommended_question(
+        self, question_id: str,
+    ) -> dict[str, Any] | None:
+        """Get a single recommended question by ID."""
+        sql = """
+        SELECT question_id::text, tenant_id, user_id, session_id,
+               date_trigger, question_text, is_regen,
+               source_message_index, source_topic, status, created_at
+        FROM islamic_content.recommended_questions
+        WHERE question_id = $1::uuid
+        """
+        row = await self._db.fetchrow(sql, question_id)
+        return dict(row) if row else None
+
+    async def insert_recommended_questions(
+        self, questions: list[dict[str, Any]],
+    ) -> list[str]:
+        """Bulk-insert recommended questions. Returns list of generated UUIDs."""
+        ids = []
+        for q in questions:
+            row = await self._db.fetchrow("""
+                INSERT INTO islamic_content.recommended_questions
+                (tenant_id, user_id, session_id, date_trigger, question_text,
+                 is_regen, source_message_index, source_topic)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING question_id::text
+            """,
+                q["tenant_id"], q["user_id"], q.get("session_id"),
+                q["date_trigger"], q["question_text"],
+                q.get("is_regen", False), q.get("source_message_index"),
+                q.get("source_topic"),
+            )
+            ids.append(row["question_id"])
+        return ids
+
+    async def update_recommended_question_status(
+        self, question_id: str, tenant_id: str, user_id: str, new_status: str,
+    ) -> bool:
+        """Update status with ownership check. Returns True if updated."""
+        result = await self._db.execute("""
+            UPDATE islamic_content.recommended_questions
+            SET status = $1, updated_at = NOW()
+            WHERE question_id = $2::uuid
+              AND tenant_id = $3 AND user_id = $4
+        """, new_status, question_id, tenant_id, user_id)
+        return result.endswith("1")  # "UPDATE 1" means success
+
+    async def get_recent_user_sessions(
+        self, tenant_id: str, user_id: str, days: int = 7, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Get recent sessions with history from public.sessions (cross-schema)."""
+        try:
+            sql = """
+            SELECT session_id, history, metadata, updated_at
+            FROM public.sessions
+            WHERE tenant_id = $1 AND user_id = $2
+              AND status = 'active'
+              AND updated_at > NOW() - ($3 || ' days')::interval
+              AND jsonb_array_length(history) > 0
+            ORDER BY updated_at DESC
+            LIMIT $4
+            """
+            rows = await self._db.fetch(sql, tenant_id, user_id, str(days), limit)
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.warning("Cross-schema session query failed: %s", e)
+            return []

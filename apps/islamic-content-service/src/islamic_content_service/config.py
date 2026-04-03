@@ -381,6 +381,21 @@ class ModulesSettings(BaseModel):
     )
 
 
+class GeminiSettings(BaseModel):
+    api_key: str = Field(
+        default_factory=lambda: _fallback(
+            "ISLAMIC_CONTENT_GEMINI__API_KEY",
+            "GEMINI_API_KEY",
+            "",
+        )
+    )
+    model: str = "gemini-2.0-flash"
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    temperature: float = 0.8
+    max_tokens: int = 1024
+    timeout_seconds: float = 30.0
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="ISLAMIC_CONTENT_",
@@ -398,3 +413,4 @@ class Settings(BaseSettings):
     dua: DuaSettings = Field(default_factory=DuaSettings)
     bootstrap: BootstrapSettings = Field(default_factory=BootstrapSettings)
     modules: ModulesSettings = Field(default_factory=ModulesSettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
