@@ -45,6 +45,7 @@ import {
 } from "./components";
 import { ChatInputArea } from "./components/ChatInputArea";
 import { ShareDialog } from "./components/ShareDialog";
+import ConnectorsPanel from "./components/ConnectorsPanel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
@@ -120,6 +121,8 @@ export function AssistantPage() {
   const [input, setInput] = useState("");
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
+  const [showConnectors, setShowConnectors] = useState(false);
+  const [connectorCount] = useState(0); // TODO: fetch from API
   const [isMobile, setIsMobile] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
@@ -653,6 +656,8 @@ export function AssistantPage() {
               handleImageGenerate={handleImageGenerate}
               selectedStyle={selectedStyle}
               setSelectedStyle={setSelectedStyle}
+              onOpenConnectors={() => setShowConnectors(true)}
+              connectorCount={connectorCount}
             />
           </div>
 
@@ -720,6 +725,12 @@ export function AssistantPage() {
       artifactCount={artifacts.length}
       isOpen={showShareDialog}
       onClose={() => setShowShareDialog(false)}
+    />
+
+    {/* Connectors Panel */}
+    <ConnectorsPanel
+      open={showConnectors}
+      onClose={() => setShowConnectors(false)}
     />
     </>
   );

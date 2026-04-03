@@ -37,6 +37,8 @@ interface ChatInputAreaProps {
   handleImageGenerate: () => void;
   selectedStyle: string;
   setSelectedStyle: (style: string) => void;
+  onOpenConnectors?: () => void;
+  connectorCount?: number;
 }
 
 export function ChatInputArea({
@@ -63,6 +65,8 @@ export function ChatInputArea({
   handleImageGenerate,
   selectedStyle,
   setSelectedStyle,
+  onOpenConnectors,
+  connectorCount = 0,
 }: ChatInputAreaProps) {
   const { t } = useTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -188,10 +192,12 @@ export function ChatInputArea({
               onFileUpload={() => fileInputRef.current?.click()}
               onImageGenerate={handleImageGenerate}
               onToggleWebSearch={() => setWebSearchEnabled(!webSearchEnabled)}
+              onOpenConnectors={onOpenConnectors}
               webSearchEnabled={webSearchEnabled}
               kbAvailable={config?.kb_enabled ?? false}
               webSearchAvailable={config?.web_search_enabled ?? false}
               disabled={isStreaming || isGeneratingImage}
+              connectorCount={connectorCount}
               datasets={datasets}
               selectedDatasets={selectedDatasets}
               onToggleDataset={onToggleDataset}
