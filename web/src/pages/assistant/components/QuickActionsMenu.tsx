@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, ImagePlus, Database, Globe, ChevronRight, ChevronLeft, Check, Palette } from "lucide-react";
+import { Plus, ImagePlus, Database, Globe, ChevronRight, ChevronLeft, Check, Palette, Link2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -25,10 +25,12 @@ interface QuickActionsMenuProps {
   onFileUpload: () => void;
   onImageGenerate: () => void;
   onToggleWebSearch: () => void;
+  onOpenConnectors?: () => void;
   webSearchEnabled: boolean;
   kbAvailable: boolean;
   webSearchAvailable: boolean;
   disabled: boolean;
+  connectorCount?: number;
   // KB selection props
   datasets: DatasetInfo[];
   selectedDatasets: string[];
@@ -39,10 +41,12 @@ export function QuickActionsMenu({
   onFileUpload,
   onImageGenerate,
   onToggleWebSearch,
+  onOpenConnectors,
   webSearchEnabled,
   kbAvailable,
   webSearchAvailable,
   disabled,
+  connectorCount = 0,
   datasets,
   selectedDatasets,
   onToggleDataset,
@@ -168,6 +172,32 @@ export function QuickActionsMenu({
                   {webSearchEnabled && (
                     <Badge className="bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 text-[10px] px-1.5 py-0">
                       ON
+                    </Badge>
+                  )}
+                </button>
+              )}
+
+              {/* Connectors - 连接器 (Confluence, Outlook, GitHub, etc.) */}
+              {onOpenConnectors && (
+                <button
+                  onClick={() => {
+                    onOpenConnectors();
+                    setOpen(false);
+                  }}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-left group"
+                >
+                  <Link2 className={cn(
+                    "h-5 w-5",
+                    connectorCount > 0
+                      ? "text-purple-500"
+                      : "text-slate-500 dark:text-slate-400"
+                  )} />
+                  <span className="flex-1 text-sm text-slate-700 dark:text-slate-200">
+                    {t("assistant.connectors", "连接器")}
+                  </span>
+                  {connectorCount > 0 && (
+                    <Badge className="bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 text-[10px] px-1.5 py-0">
+                      {connectorCount}
                     </Badge>
                   )}
                 </button>
