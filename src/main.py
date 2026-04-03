@@ -1199,7 +1199,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     tool_registry = get_tool_registry()
     effective_kb_service = kb_service or getattr(app.state, "kb_proxy", None)
     register_builtin_tools(
-        kb_service=effective_kb_service, tavily_tool=tavily_tool, memory_service=memory_service
+        kb_service=effective_kb_service, tavily_tool=tavily_tool, memory_service=memory_service,
+        database=getattr(app.state, "database", None),
     )
 
     # Register code executor tool if available
