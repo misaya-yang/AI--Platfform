@@ -24,7 +24,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-gateway}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
       # Note: Database schema is auto-initialized by gateway service (AUTO_INIT=true)
@@ -54,7 +54,7 @@ services:
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     networks:
@@ -71,8 +71,8 @@ services:
     image: qdrant/qdrant:v1.14.0
     container_name: ai-gateway-qdrant
     ports:
-      - "${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_GRPC_PORT:-6334}:6334"
+      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     networks:
@@ -227,7 +227,7 @@ services:
       - kb-data:/app/data
       - ./apps/knowledge-service/src/knowledge_service:/usr/local/lib/python3.12/site-packages/knowledge_service
     ports:
-      - "${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
+      - "127.0.0.1:${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
     networks:
       - ai-gateway-net
     depends_on:
@@ -260,8 +260,10 @@ services:
       ISLAMIC_CONTENT_DATABASE__AUTO_MIGRATE: "true"
       ISLAMIC_CONTENT_CACHE__REDIS_URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/1"
       ISLAMIC_CONTENT_BOOTSTRAP__ON_START: "true"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      GATEWAY_URL: "http://gateway:8080"
     ports:
-      - "${ISLAMIC_CONTENT_PORT:-8091}:8091"
+      - "127.0.0.1:${ISLAMIC_CONTENT_PORT:-8091}:8091"
     networks:
       - ai-gateway-net
     depends_on:
