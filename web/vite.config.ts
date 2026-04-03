@@ -43,31 +43,11 @@ export default defineConfig(({ mode }) => {
       // Optimize chunk splitting
       rollupOptions: {
         output: {
-          manualChunks(id) {
-            // React core
-            if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom/") || id.includes("node_modules/react-router")) {
-              return "vendor-react";
-            }
-            // Ant Design (largest dep)
-            if (id.includes("node_modules/antd") || id.includes("node_modules/@ant-design")) {
-              return "vendor-antd";
-            }
-            // Radix UI components
-            if (id.includes("node_modules/@radix-ui")) {
-              return "vendor-radix";
-            }
-            // Markdown / code highlight
-            if (id.includes("node_modules/react-markdown") || id.includes("node_modules/remark") || id.includes("node_modules/rehype") || id.includes("node_modules/react-syntax-highlighter")) {
-              return "vendor-markdown";
-            }
-            // Charts / visualization
-            if (id.includes("node_modules/recharts") || id.includes("node_modules/d3")) {
-              return "vendor-charts";
-            }
-            // i18n
-            if (id.includes("node_modules/i18next") || id.includes("node_modules/react-i18next")) {
-              return "vendor-i18n";
-            }
+          manualChunks: {
+            // React + React DOM + Router must stay together (shared hooks context)
+            vendor: ["react", "react-dom", "react-router-dom"],
+            // Ant Design UI library (largest dep, ~1MB)
+            ui: ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
           },
         },
       },
