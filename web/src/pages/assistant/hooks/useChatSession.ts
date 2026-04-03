@@ -2082,6 +2082,7 @@ export function useChatSession() {
 
   return {
     sessions,
+    setSessions,
     activeSessionId,
     messages,
     setMessages,

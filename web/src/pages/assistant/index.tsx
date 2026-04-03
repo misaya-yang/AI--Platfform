@@ -128,6 +128,7 @@ export function AssistantPage() {
   // 4. Complex Logic Hooks
   const {
     sessions,
+    setSessions,
     activeSessionId,
     messages,
     setMessages,
@@ -407,6 +408,7 @@ export function AssistantPage() {
                     onNewChat={onNewChat}
                     onSelectSession={onSessionSelect}
                     onDeleteSession={handleDeleteSession}
+                    onSessionsChange={setSessions}
                   />
                 </div>
               </motion.aside>
