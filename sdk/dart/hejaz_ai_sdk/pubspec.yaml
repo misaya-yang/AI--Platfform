@@ -1,0 +1,14 @@
+name: hejaz_ai_sdk
+description: >
+  Official Hejaz AI Assistant SDK for Flutter/Dart.
+  Provides streaming and non-streaming chat, session management,
+  and artifact access for the AI Gateway.
+version: 1.0.0
+homepage: https://github.com/hejaz-io/ai-gateway
+repository: https://github.com/hejaz-io/ai-gateway/tree/main/sdk/dart/hejaz_ai_sdk
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  http: ^1.2.0
