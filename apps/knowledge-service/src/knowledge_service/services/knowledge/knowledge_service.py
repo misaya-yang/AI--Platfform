@@ -3943,9 +3943,63 @@ class KnowledgeService:
                 return [], 0
 
         async def _bm25_search(query_text: str) -> tuple[list, int]:
-            """BM25 (keyword) retrieval task for a single query."""
+            """BM25 (keyword) retrieval task for a single query.
+
+            Tries Qdrant native BM25 (sparse vectors) first for speed.
+            Falls back to PostgreSQL FTS + client-side BM25 if sparse
+            vectors are not available in the collection.
+            """
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
+
+            # --- Try Qdrant native BM25 via sparse vectors ---
+            try:
+                from .retrieval import query_to_sparse_vector
+
+                sparse_indices, sparse_values = query_to_sparse_vector(query_text)
+                if sparse_indices and collection:
+                    from qdrant_client.http import models as qm
+
+                    sparse_query = qm.SparseVector(
+                        indices=sparse_indices, values=sparse_values,
+                    )
+                    resp = await self.vector_store._call(
+                        lambda: self.vector_store._client.query_points(
+                            collection_name=collection,
+                            query=sparse_query,
+                            using="bm25",
+                            limit=keyword_pool_k,
+                            with_payload=True,
+                        )
+                    )
+                    qdrant_hits = list(getattr(resp, "points", None) or [])
+                    if qdrant_hits:
+                        hits = []
+                        for h in qdrant_hits:
+                            payload = dict(h.payload or {})
+                            text = str(payload.get("text") or "").strip()
+                            if not text:
+                                continue
+                            seg_metadata = _ensure_dict(payload.get("metadata"))
+                            hits.append(
+                                {
+                                    "segment_id": str(h.id),
+                                    "document_id": str(payload.get("document_id") or ""),
+                                    "text": text,
+                                    "metadata": seg_metadata,
+                                    "bm25_score": float(h.score),
+                                }
+                            )
+                        hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
+                        logger.debug(
+                            f"[BM25] Qdrant native sparse search: {len(hits)} hits"
+                        )
+                        return hits[:keyword_k], len(qdrant_hits)
+            except Exception as sparse_err:
+                # Sparse vectors not available — fall back to PostgreSQL FTS
+                logger.debug(f"[BM25] Sparse search unavailable ({sparse_err}), using PostgreSQL FTS")
+
+            # --- Fallback: PostgreSQL FTS + client-side BM25 ---
             q_lang = detect_language(query_text)
             query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
             max_terms = 20 if q_lang in ("ar", "mixed") else 12
