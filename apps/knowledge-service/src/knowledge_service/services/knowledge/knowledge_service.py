@@ -5885,6 +5885,13 @@ class KnowledgeService:
                 continue
         raise ValidationFailedError("Unable to decode uploaded file as text")
 
+    # ========================================================================
+    # TEXT EXTRACTION (P4 candidate for extraction to DocumentProcessor)
+    # These methods are self-contained file format parsers. A dedicated
+    # DocumentProcessor class exists in src/services/knowledge/document_processor.py
+    # and should eventually replace these inline implementations.
+    # ========================================================================
+
     def _clean_pdf_content(self, text: str) -> str:
         """Clean PDF extracted content, removing TOC lines and noise."""
         if not text:

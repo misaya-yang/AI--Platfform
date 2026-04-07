@@ -329,12 +329,12 @@ class RetrieveResult:
 
 @dataclass
 class RetrievalConfig:
-    """Configuration for retrieval.
+    """Lightweight retrieval config for RetrievalService.
 
-    Provides both flat fields (for simple callers) and optional nested
-    sub-configs (rerank, mmr, fusion) from retrieval_config.py. Accessing
-    nested configs is safe — they default to ``None`` and callers must
-    guard with ``if config.rerank and config.rerank.enabled``.
+    For the full pipeline config with nested sub-configs (VectorRetrievalConfig,
+    KeywordRetrievalConfig, FusionConfig, RerankConfig, MMRConfig, etc.), use
+    ``retrieval_config.RetrievalConfig`` instead. This class exists for backward
+    compatibility with callers that pass flat fields.
     """
 
     mode: str = "auto"  # auto, dense, sparse, hybrid
@@ -350,10 +350,31 @@ class RetrievalConfig:
     fusion_method: str = "rrf"  # "rrf" or "weighted"
     use_adaptive_weights: bool = True
 
-    # Optional nested configs (from retrieval_config.py)
+    # Optional nested configs (from retrieval_config.py canonical types)
     rerank: Any = None  # RerankConfig or None
     fusion: Any = None  # FusionConfig or None
     mmr: Any = None     # MMRConfig or None
+
+    @classmethod
+    def from_canonical(cls, cfg: Any) -> "RetrievalConfig":
+        """Convert from retrieval_config.RetrievalConfig to this flat config."""
+        mode = getattr(cfg.mode, "value", str(cfg.mode)) if hasattr(cfg, "mode") else "auto"
+        rc = cls(
+            mode=mode,
+            top_k=getattr(cfg, "top_k", 5),
+            score_threshold=getattr(cfg, "score_threshold", 0.5) or 0.5,
+        )
+        if hasattr(cfg, "mmr") and cfg.mmr:
+            rc.use_mmr = getattr(cfg.mmr, "enabled", False)
+            rc.mmr_diversity = getattr(cfg.mmr, "lambda_mult", 0.3)
+        if hasattr(cfg, "rerank"):
+            rc.rerank = cfg.rerank
+        if hasattr(cfg, "fusion"):
+            rc.fusion = cfg.fusion
+            rc.fusion_method = getattr(cfg.fusion, "strategy", "rrf")
+            if hasattr(rc.fusion_method, "value"):
+                rc.fusion_method = rc.fusion_method.value
+        return rc
 
 
 class RetrievalService:

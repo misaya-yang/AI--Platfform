@@ -57,6 +57,21 @@ class IngestionService:
         self.settings = settings
         self.db = database
         self.vector_store = vector_store
+        # P4: Document-level lock to prevent concurrent ingestion of the same document
+        self._document_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
+    async def _get_document_lock(self, document_id: str) -> asyncio.Lock:
+        """Get or create a per-document lock (prevents concurrent ingestion)."""
+        async with self._locks_guard:
+            if document_id not in self._document_locks:
+                self._document_locks[document_id] = asyncio.Lock()
+            return self._document_locks[document_id]
+
+    async def _release_document_lock(self, document_id: str) -> None:
+        """Clean up lock after ingestion completes."""
+        async with self._locks_guard:
+            self._document_locks.pop(document_id, None)
 
     # ========================================================================
     # Main Ingestion Pipeline
@@ -78,7 +93,28 @@ class IngestionService:
         2. Generate embeddings
         3. Store in vector database
         4. Update document status
+
+        Thread-safe: uses per-document locks to prevent concurrent ingestion.
         """
+        lock = await self._get_document_lock(document_id)
+        if lock.locked():
+            logger.warning(f"Document {document_id} is already being ingested, waiting...")
+
+        async with lock:
+            return await self._ingest_document_impl(
+                dataset_id, document_id, text, doc_metadata, chunking_config, embedding_config,
+            )
+
+    async def _ingest_document_impl(
+        self,
+        dataset_id: str,
+        document_id: str,
+        text: str,
+        doc_metadata: dict[str, Any] | None = None,
+        chunking_config: ChunkingConfig | None = None,
+        embedding_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Internal implementation of document ingestion (called under lock)."""
         doc_metadata = doc_metadata or {}
         doc_name = doc_metadata.get("title", document_id)
 
