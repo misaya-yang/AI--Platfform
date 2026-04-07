@@ -197,11 +197,11 @@ export function ToolCallBlock({
         </div>
       )}
 
-      {/* Header */}
+      {/* Compact Header — single line: chevron + icon + name + args + status */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className={cn(
-          "flex w-full items-center gap-2 px-3 py-2 text-left",
+          "flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left",
           "transition-colors duration-150",
           "bg-white/50 dark:bg-white/[0.02]",
           "hover:bg-slate-50/80 dark:hover:bg-white/[0.04]",
@@ -209,62 +209,38 @@ export function ToolCallBlock({
         )}
         type="button"
       >
-        {/* Expand chevron */}
         <motion.div
           animate={{ rotate: isExpanded ? 90 : 0 }}
           transition={{ duration: 0.15, ease: "easeOut" }}
           className="flex-shrink-0"
         >
-          <ChevronRight className="h-3 w-3 text-slate-400 dark:text-slate-500" />
+          <ChevronRight className="h-2.5 w-2.5 text-slate-400 dark:text-slate-500" />
         </motion.div>
 
-        {/* Step number (optional) */}
-        {stepNumber != null && (
-          <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-slate-200/70 dark:bg-slate-700/60 text-[9px] font-bold text-slate-500 dark:text-slate-400 flex-shrink-0">
-            {stepNumber}
-          </span>
-        )}
-
-        {/* Status icon */}
-        <div
+        <StatusIcon
           className={cn(
-            "flex h-5 w-5 items-center justify-center rounded-md flex-shrink-0",
-            config.iconBg
+            "h-3 w-3 flex-shrink-0",
+            config.text,
+            isRunning && "animate-spin"
           )}
-        >
-          <StatusIcon
-            className={cn(
-              "h-3 w-3",
-              config.text,
-              isRunning && "animate-spin"
-            )}
-          />
-        </div>
+        />
 
-        {/* Tool name */}
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <span className="font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-200 tracking-tight truncate inline-block max-w-full">
+        {/* Tool name + inline args — all on one line */}
+        <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+          <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate flex-shrink-0">
             {formatToolName(toolCall.name)}
           </span>
-          {/* Inline preview when collapsed */}
           {!isExpanded && argsPreview && (
-            <span className="ml-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate block max-w-[200px]">
+            <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate">
               {argsPreview}
             </span>
           )}
         </div>
 
-        {/* Status area */}
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          {isRunning && (
-            <ElapsedTimer className={config.text} />
-          )}
-          <span
-            className={cn(
-              "text-[10px] font-semibold uppercase tracking-wider",
-              config.text
-            )}
-          >
+        {/* Status badge */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {isRunning && <ElapsedTimer className={config.text} />}
+          <span className={cn("text-[9px] font-semibold uppercase tracking-wider", config.text)}>
             {t(config.labelKey, config.label)}
           </span>
         </div>

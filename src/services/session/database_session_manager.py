@@ -296,21 +296,19 @@ class DatabaseSessionManager:
         session_id: str,
         additional_seconds: int = None,
     ) -> bool:
-        """延长会话有效期"""
-        session = await self.get(session_id)
-        if not session:
-            return False
+        """延长会话有效期 — only updates expires_at, NOT updated_at.
 
+        Uses direct SQL instead of save_session() which hardcodes updated_at=NOW().
+        """
         seconds = additional_seconds or self.default_session_ttl
-        session.expires_at = datetime.utcnow() + timedelta(seconds=seconds)
-        # Don't update updated_at — it should reflect the last user activity, not TTL extensions
+        new_expires = datetime.utcnow() + timedelta(seconds=seconds)
 
-        # 保存到数据库
-        await self._save_to_db(session)
-
-        # 更新缓存
-        await self._cache_session(session)
-
+        if self.database and getattr(self.database, "_pool", None):
+            async with self.database._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE sessions SET expires_at = $1 WHERE session_id = $2",
+                    new_expires, session_id,
+                )
         return True
 
     async def cleanup_expired(self) -> int:
