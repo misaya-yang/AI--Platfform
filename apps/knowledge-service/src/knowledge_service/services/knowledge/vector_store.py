@@ -190,6 +190,9 @@ class VectorStore:
             ("madhab", qmodels.PayloadSchemaType.KEYWORD),
             ("authority_rank", qmodels.PayloadSchemaType.INTEGER),
             ("section_title", qmodels.PayloadSchemaType.KEYWORD),
+            # P1: Generic LLM metadata indexes
+            ("metadata.topic", qmodels.PayloadSchemaType.KEYWORD),
+            ("metadata.keywords", qmodels.PayloadSchemaType.KEYWORD),
         )
         for field_name, field_schema in payload_indexes:
             try:

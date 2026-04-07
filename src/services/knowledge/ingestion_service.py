@@ -495,6 +495,11 @@ class IngestionService:
                             "document_title",
                             "madhab",
                             "language",
+                            # P1: Generic LLM metadata fields
+                            "topic",
+                            "entities",
+                            "keywords",
+                            "summary",
                         )
                         if meta.get(key) is not None
                     }
@@ -505,7 +510,7 @@ class IngestionService:
                             "payload": {
                                 "document_id": document_id,
                                 "dataset_id": dataset_id,
-                                "text": seg["text"][:500],  # Truncate for payload
+                                "text": seg["text"][:1000],  # Truncate for payload
                                 "metadata": payload_meta,
                                 "source_type": payload_meta.get("source_type"),
                                 "citation_text": payload_meta.get("citation_text"),

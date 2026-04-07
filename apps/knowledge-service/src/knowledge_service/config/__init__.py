@@ -149,6 +149,19 @@ class OCRSettings(BaseModel):
         raise ValueError(f"Invalid OCR language: {v}")
 
 
+class MetadataLLMSettings(BaseModel):
+    """LLM-based metadata extraction settings (P1)."""
+
+    enabled: bool = False
+    provider: str = "gemini"  # gemini | dashscope
+    api_key: str = ""  # Provider API key; falls back to env var
+    model: str = "gemini-2.0-flash"  # gemini-2.0-flash | qwen3.6-plus
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    max_concurrent: int = 5
+    batch_size: int = 10  # Chunks per LLM call
+    timeout_seconds: float = 30.0
+
+
 class ProcessingSettings(BaseModel):
     """Document processing and worker settings."""
 
@@ -238,5 +251,6 @@ class Settings(BaseSettings):
         default_factory=MultimodalEmbeddingSettings,
     )
     ocr: OCRSettings = Field(default_factory=OCRSettings)
+    metadata_llm: MetadataLLMSettings = Field(default_factory=MetadataLLMSettings)
     processing: ProcessingSettings = Field(default_factory=ProcessingSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)

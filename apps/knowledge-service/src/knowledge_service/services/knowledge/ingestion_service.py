@@ -102,6 +102,17 @@ class IngestionService:
             )
             return {"success": False, "error": "no segments generated"}
 
+        # Step 2.5: LLM metadata extraction (optional, non-blocking)
+        if self.settings.metadata_llm.enabled and self.settings.metadata_llm.api_key:
+            try:
+                chunks = await self._enrich_chunks_with_llm(chunks)
+                logger.info(
+                    f"[Ingest] LLM metadata extracted for {len(chunks)} chunks "
+                    f"(doc={document_id})"
+                )
+            except Exception as llm_err:
+                logger.warning(f"[Ingest] LLM metadata extraction failed (non-fatal): {llm_err}")
+
         # Step 3: Embedding
         await self.db.update_document_status(document_id, status="embedding", progress=50)
 
@@ -410,6 +421,59 @@ class IngestionService:
         return result if result else [chunk]
 
     # ========================================================================
+    # LLM Metadata Enrichment (P1)
+    # ========================================================================
+
+    async def _enrich_chunks_with_llm(
+        self,
+        chunks: list[tuple[str, int, str, dict[str, Any]]],
+    ) -> list[tuple[str, int, str, dict[str, Any]]]:
+        """Enrich chunk metadata using LLM extraction (Qwen 3.6-Plus).
+
+        Non-destructive: only fills in topic/entities/keywords/summary if
+        not already present in the chunk metadata.
+        """
+        from .metadata_extractor import MetadataExtractor
+
+        cfg = self.settings.metadata_llm
+        extractor = MetadataExtractor(
+            api_key=cfg.api_key,
+            model=cfg.model,
+            base_url=cfg.base_url,
+            provider=cfg.provider,
+            max_concurrent=cfg.max_concurrent,
+            timeout=cfg.timeout_seconds,
+        )
+
+        try:
+            texts = [c[0] for c in chunks]
+            results = await extractor.extract_batch(texts, batch_size=cfg.batch_size)
+
+            enriched = []
+            success_count = 0
+            for (text, token_count, content_hash, meta), result in zip(chunks, results):
+                if result.success:
+                    success_count += 1
+                    updated_meta = {**meta}
+                    # Only fill gaps — don't override existing metadata
+                    if not updated_meta.get("topic"):
+                        updated_meta["topic"] = result.topic
+                    if not updated_meta.get("entities"):
+                        updated_meta["entities"] = result.entities
+                    if not updated_meta.get("keywords"):
+                        updated_meta["keywords"] = result.keywords
+                    if not updated_meta.get("summary"):
+                        updated_meta["summary"] = result.summary
+                    enriched.append((text, token_count, content_hash, updated_meta))
+                else:
+                    enriched.append((text, token_count, content_hash, meta))
+
+            logger.info(f"[LLM Metadata] Enriched {success_count}/{len(chunks)} chunks")
+            return enriched
+        finally:
+            await extractor.close()
+
+    # ========================================================================
     # Embedding and Storage
     # ========================================================================
 
@@ -521,6 +585,11 @@ class IngestionService:
                             "document_title",
                             "madhab",
                             "language",
+                            # P1: Generic LLM metadata fields
+                            "topic",
+                            "entities",
+                            "keywords",
+                            "summary",
                         )
                         if meta.get(key) is not None
                     }
@@ -531,7 +600,7 @@ class IngestionService:
                             "payload": {
                                 "document_id": document_id,
                                 "dataset_id": dataset_id,
-                                "text": seg["text"][:500],  # Truncate for payload
+                                "text": seg["text"][:1000],  # Truncate for payload
                                 "metadata": payload_meta,
                                 "source_type": payload_meta.get("source_type"),
                                 "citation_text": payload_meta.get("citation_text"),
