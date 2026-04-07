@@ -1385,8 +1385,10 @@ async def generate_image(
         }
         aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
 
+        is_edit = bool(body.reference_image)
         logger.info(
-            "Image generation request - model_id=%s, provider=%s, prefer_gemini=%s, prompt=%s..., size=%s, n=%s",
+            "Image %s request - model_id=%s, provider=%s, prefer_gemini=%s, prompt=%s..., size=%s, n=%s",
+            "edit" if is_edit else "generation",
             body.model_id,
             selected_provider,
             prefer_gemini,
@@ -1402,6 +1404,7 @@ async def generate_image(
             style=style,
             aspect_ratio=aspect_ratio,
             prefer_gemini=prefer_gemini,
+            reference_image=body.reference_image,
         )
 
         if not res.success:

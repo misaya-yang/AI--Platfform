@@ -5,6 +5,7 @@ Routes image generation across providers with safe fallback rules:
 - Prefer Gemini native image generation when configured
 - If Gemini fails with a non-safety error, fallback to DashScope Wanx when configured
 - If Gemini is blocked by safety filters, DO NOT fallback (avoid provider bypass)
+- Iterative editing (reference_image) is Gemini-only — DashScope does not support image input
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ class SmartImageGenerationResult:
     success: bool
     provider: str
     images: list[dict[str, Any]] = field(default_factory=list)
+    text: str | None = None  # Model text response (e.g., edit description)
     error: str | None = None
     error_code: str | None = None
     blocked: bool = False
@@ -38,6 +40,7 @@ class SmartImageGenerator:
     Provider router for image generation.
 
     Routes to the preferred provider first, falls back to the other on non-safety errors.
+    When reference_image is provided (iterative editing), always routes to Gemini.
     """
 
     async def generate(
@@ -49,11 +52,38 @@ class SmartImageGenerator:
         negative_prompt: str = "",
         aspect_ratio: str = "1:1",
         prefer_gemini: bool = True,
+        reference_image: str | None = None,
     ) -> SmartImageGenerationResult:
         start = time.time()
 
         gemini = get_gemini_image_generator()
         dash = get_image_generator()
+
+        # Iterative editing: Gemini only (DashScope doesn't support image input)
+        if reference_image:
+            if not gemini.is_configured:
+                return SmartImageGenerationResult(
+                    success=False,
+                    provider="none",
+                    error="Iterative image editing requires Gemini (GEMINI_API_KEY). DashScope does not support image input.",
+                    duration_ms=(time.time() - start) * 1000,
+                )
+            logger.info("Iterative edit mode → routing to Gemini (reference image provided)")
+            gemini_res = await gemini.generate(
+                prompt=prompt, n=n, aspect_ratio=aspect_ratio,
+                reference_image=reference_image,
+            )
+            return SmartImageGenerationResult(
+                success=gemini_res.success,
+                provider="google",
+                images=gemini_res.images if gemini_res.success else [],
+                text=gemini_res.text,
+                error=gemini_res.error,
+                error_code=gemini_res.error_code,
+                blocked=gemini_res.blocked,
+                block_reason=gemini_res.block_reason,
+                duration_ms=gemini_res.duration_ms,
+            )
 
         # Gemini first (if preferred + configured)
         if prefer_gemini and gemini.is_configured:
@@ -63,6 +93,7 @@ class SmartImageGenerator:
                     success=True,
                     provider="google",
                     images=gemini_res.images,
+                    text=gemini_res.text,
                     duration_ms=gemini_res.duration_ms,
                 )
 
@@ -101,7 +132,6 @@ class SmartImageGenerator:
                     used_fallback=True,
                 )
 
-            # No fallback configured
             return SmartImageGenerationResult(
                 success=False,
                 provider="google",
@@ -139,6 +169,7 @@ class SmartImageGenerator:
                     success=gemini_res.success,
                     provider="google",
                     images=gemini_res.images if gemini_res.success else [],
+                    text=gemini_res.text,
                     error=gemini_res.error,
                     error_code=gemini_res.error_code,
                     blocked=gemini_res.blocked,
@@ -147,7 +178,6 @@ class SmartImageGenerator:
                     used_fallback=True,
                 )
 
-            # No fallback configured
             return SmartImageGenerationResult(
                 success=False,
                 provider="dashscope",
@@ -179,6 +209,7 @@ class SmartImageGenerator:
                 success=gemini_res.success,
                 provider="google",
                 images=gemini_res.images if gemini_res.success else [],
+                text=gemini_res.text,
                 error=gemini_res.error,
                 error_code=gemini_res.error_code,
                 blocked=gemini_res.blocked,
@@ -201,7 +232,6 @@ _smart_image_generator: SmartImageGenerator | None = None
 
 
 def get_smart_image_generator(prefer_gemini: bool = True) -> SmartImageGenerator:
-    """Get or create a global SmartImageGenerator instance."""
     global _smart_image_generator
     if _smart_image_generator is None:
         _smart_image_generator = SmartImageGenerator()

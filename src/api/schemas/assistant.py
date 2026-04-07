@@ -511,13 +511,21 @@ class EnhancedSessionMessage(BaseModel):
 
 
 class ImageGenerationRequest(BaseModel):
-    """Request for image generation with smart routing."""
+    """Request for image generation with smart routing.
 
-    prompt: str = Field(..., description="Text description of the image to generate", min_length=1)
+    For iterative editing: provide reference_image (base64 or data URL of previous image)
+    along with an edit instruction in prompt. The model will edit the reference image.
+    """
+
+    prompt: str = Field(..., description="Text description or edit instruction", min_length=1)
     model_id: str = Field(..., description="Current model ID to determine provider routing")
     style: str | None = Field(default="default", description="Image style (DashScope only)")
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
+    reference_image: str | None = Field(
+        default=None,
+        description="Base64-encoded image or data URL for iterative editing (Gemini only)",
+    )
 
 
 class GeneratedImage(BaseModel):
