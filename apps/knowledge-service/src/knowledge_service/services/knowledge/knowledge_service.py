@@ -3998,7 +3998,11 @@ class KnowledgeService:
                         return hits[:keyword_k], len(qdrant_hits)
             except Exception as sparse_err:
                 # Sparse vectors not available — fall back to PostgreSQL FTS
-                logger.info(f"[BM25] Sparse fallback to PostgreSQL FTS ({sparse_err})")
+                import traceback
+                logger.warning(
+                    f"[BM25] Sparse fallback to PostgreSQL FTS: {type(sparse_err).__name__}: {sparse_err}\n"
+                    f"{traceback.format_exc()}"
+                )
 
             # --- Fallback: PostgreSQL FTS + client-side BM25 ---
             q_lang = detect_language(query_text)
