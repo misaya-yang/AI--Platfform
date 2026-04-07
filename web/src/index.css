@@ -149,10 +149,37 @@
 .ant-btn-lg { border-radius: 8px !important; }
 .ant-btn-sm { border-radius: 6px !important; }
 
-.ant-btn-primary:not(:disabled):hover { opacity: 0.9; }
-.ant-btn-primary:not(.ant-btn-dangerous) { background: hsl(var(--primary)) !important; border: none !important; box-shadow: none !important; }
-.ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) { background: hsl(263 70% 52%) !important; }
-.ant-btn-dangerous.ant-btn-primary { background: hsl(var(--destructive)) !important; border: none !important; box-shadow: none !important; }
+/* Primary button — light bg + colored text (Linear/Vercel style) */
+.ant-btn-primary:not(.ant-btn-dangerous) {
+  background: hsl(var(--primary) / 0.08) !important;
+  color: hsl(var(--primary)) !important;
+  border: 1px solid hsl(var(--primary) / 0.15) !important;
+  box-shadow: none !important;
+  font-weight: 500 !important;
+}
+.ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
+  background: hsl(var(--primary) / 0.14) !important;
+  border-color: hsl(var(--primary) / 0.25) !important;
+}
+.dark .ant-btn-primary:not(.ant-btn-dangerous) {
+  background: hsl(var(--primary) / 0.10) !important;
+  border-color: hsl(var(--primary) / 0.20) !important;
+}
+.dark .ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
+  background: hsl(var(--primary) / 0.18) !important;
+  border-color: hsl(var(--primary) / 0.30) !important;
+}
+/* Danger button — same light pattern */
+.ant-btn-dangerous.ant-btn-primary {
+  background: hsl(var(--destructive) / 0.08) !important;
+  color: hsl(var(--destructive)) !important;
+  border: 1px solid hsl(var(--destructive) / 0.15) !important;
+  box-shadow: none !important;
+}
+.ant-btn-dangerous.ant-btn-primary:hover:not(:disabled) {
+  background: hsl(var(--destructive) / 0.14) !important;
+  border-color: hsl(var(--destructive) / 0.25) !important;
+}
 
 /* Card — no hover transform, just border change */
 .ant-card { transition: border-color var(--transition-fast) ease !important; border-radius: 8px !important; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
@@ -180,8 +207,8 @@
 .ant-table-tbody > tr:hover > td { background: hsl(var(--accent)) !important; }
 
 /* Pagination */
-.ant-pagination-item-active { background: hsl(var(--primary)) !important; border-color: transparent !important; }
-.ant-pagination-item-active a { color: white !important; }
+.ant-pagination-item-active { background: hsl(var(--primary) / 0.08) !important; border-color: hsl(var(--primary) / 0.20) !important; }
+.ant-pagination-item-active a { color: hsl(var(--primary)) !important; }
 
 /* Tooltip */
 .ant-tooltip-inner { border-radius: 6px !important; }

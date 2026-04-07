@@ -225,7 +225,7 @@ export function AppLayout() {
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
             <div className="flex items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
-              <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-white" style={{ background: darkMode ? '#a78bfa' : '#7c3aed' }}>
+              <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-primary bg-primary/10 border border-primary/15">
                 {userInitials}
               </div>
               <Text className="hidden sm:inline" style={{ fontSize: 13, fontWeight: 500 }}>
