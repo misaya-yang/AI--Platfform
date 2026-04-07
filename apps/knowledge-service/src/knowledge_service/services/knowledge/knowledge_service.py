@@ -3953,13 +3953,12 @@ class KnowledgeService:
                 return [], 0
 
             # --- Try Qdrant native BM25 via sparse vectors ---
-            # Capture collection_name locally — the outer `collection` variable
-            # can be cleared to "" by the concurrent embedding-prep degradation path.
             _bm25_collection = collection
             try:
                 from .retrieval import query_to_sparse_vector
 
                 sparse_indices, sparse_values = query_to_sparse_vector(query_text)
+                print(f"[DIAG] sparse_indices={len(sparse_indices)}, collection='{_bm25_collection}'", flush=True)
                 if sparse_indices and _bm25_collection:
                     from qdrant_client.http import models as qm
 
