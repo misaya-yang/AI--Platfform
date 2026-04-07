@@ -132,8 +132,8 @@ export function AppLayout() {
         width={200} collapsedWidth={isMobile ? 0 : 56}
         style={{
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
-          borderRight: 'none',
-          background: darkMode ? '#111118' : '#ffffff',
+          borderRight: darkMode ? '1px solid #27272a' : '1px solid #e5e5e5',
+          background: darkMode ? '#0f0f12' : '#ffffff',
           transition: 'all 0.2s ease',
         }}
         theme={resolvedTheme}
@@ -185,7 +185,7 @@ export function AppLayout() {
           </nav>
 
           {/* Footer */}
-          <div className={`border-t p-2 space-y-[2px] ${darkMode ? 'border-white/[0.06]' : 'border-[#e5e7eb]'}`}>
+          <div className={`border-t p-2 space-y-[2px] ${darkMode ? 'border-[#27272a]' : 'border-[#e5e5e5]'}`}>
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
@@ -214,7 +214,7 @@ export function AppLayout() {
         {/* Header */}
         <Header style={{
           padding: '0 20px', background: 'transparent',
-          borderBottom: darkMode ? '1px solid rgba(255,255,255,0.06)' : '1px solid #e5e7eb',
+          borderBottom: darkMode ? '1px solid #27272a' : '1px solid #e5e5e5',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           position: 'relative', zIndex: 50, height: 48,
         }}>
@@ -228,7 +228,7 @@ export function AppLayout() {
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
             <div className="flex items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
-              <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-white" style={{ background: darkMode ? '#818cf8' : '#4f46e5' }}>
+              <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-white" style={{ background: darkMode ? '#a78bfa' : '#7c3aed' }}>
                 {userInitials}
               </div>
               <Text className="hidden sm:inline" style={{ fontSize: 13, fontWeight: 500 }}>
@@ -252,9 +252,7 @@ export function AppLayout() {
       <ProfileModal open={showProfileModal} onClose={() => setShowProfileModal(false)} />
 
       <style>{`
-        .ant-layout-sider, .ant-layout-sider *, .ant-layout-sider-children {
-          border-right: none !important; border-inline-end: none !important; box-shadow: none !important;
-        }
+        .ant-layout-sider-children { box-shadow: none !important; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>

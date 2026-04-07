@@ -186,10 +186,10 @@ export function LoginPage() {
 
       <style>{`
         .login-brand {
-          background: linear-gradient(135deg, #312e81 0%, #4338ca 50%, #4f46e5 100%);
+          background: linear-gradient(160deg, #2e1065 0%, #4c1d95 40%, #6d28d9 100%);
         }
-        @media (prefers-color-scheme: dark) {
-          .login-brand { background: linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #3730a3 100%); }
+        .dark .login-brand {
+          background: linear-gradient(160deg, #1a0533 0%, #2e1065 40%, #4c1d95 100%);
         }
       `}</style>
     </div>

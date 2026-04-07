@@ -1,27 +1,25 @@
 import type { ThemeConfig } from 'antd';
 
-// ─── Linear / Vercel–grade Design System ───────────────────────────────
-// Single primary hue (indigo-600), strict 4-variant tag system,
-// layered surface hierarchy, restrained palette.
+// shadcn/ui zinc theme — single purple primary, all else grayscale
 
 export const colors = {
   primary: {
-    50: '#eef2ff', 100: '#e0e7ff', 200: '#c7d2fe', 300: '#a5b4fc',
-    400: '#818cf8', 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca',
-    800: '#3730a3', 900: '#312e81',
+    50: '#f5f3ff', 100: '#ede9fe', 200: '#ddd6fe', 300: '#c4b5fd',
+    400: '#a78bfa', 500: '#8b5cf6', 600: '#7c3aed', 700: '#6d28d9',
+    800: '#5b21b6', 900: '#4c1d95',
   },
   neutral: {
-    50: '#f8f9fb', 100: '#f1f3f5', 200: '#e5e7eb', 300: '#d1d5db',
-    400: '#9ca3af', 500: '#6b7280', 600: '#4b5563', 700: '#374151',
-    800: '#1f2937', 900: '#111827', 950: '#030712',
+    50: '#fafafa', 100: '#f5f5f5', 200: '#e5e5e5', 300: '#d4d4d4',
+    400: '#a3a3a3', 500: '#737373', 600: '#525252', 700: '#404040',
+    800: '#262626', 900: '#171717', 950: '#09090b',
   },
 };
 
 const sharedComponents: ThemeConfig['components'] = {
-  Button: { borderRadius: 8, primaryShadow: 'none' },
-  Card: { borderRadiusLG: 12 },
-  Input: { borderRadius: 8 },
-  Select: { borderRadius: 8 },
+  Button: { borderRadius: 6, primaryShadow: 'none' },
+  Card: { borderRadiusLG: 8 },
+  Input: { borderRadius: 6 },
+  Select: { borderRadius: 6 },
   Table: { borderRadius: 8 },
   Modal: { borderRadiusLG: 12 },
   Tag: { borderRadiusSM: 6 },
@@ -29,73 +27,72 @@ const sharedComponents: ThemeConfig['components'] = {
 
 export const lightTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#4f46e5',
-    colorInfo: '#6366f1',
-    colorSuccess: '#059669',
-    colorWarning: '#d97706',
-    colorError: '#dc2626',
+    colorPrimary: '#7c3aed',
+    colorInfo: '#8b5cf6',
+    colorSuccess: '#22c55e',
+    colorWarning: '#f59e0b',
+    colorError: '#ef4444',
     fontFamily: '"IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
     fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBgLayout: '#f8f9fb',
-    colorText: '#111827',
-    colorTextSecondary: '#4b5563',
-    colorTextTertiary: '#6b7280',
-    colorBorder: '#e5e7eb',
-    colorBorderSecondary: '#f1f3f5',
-    borderRadius: 8,
-    borderRadiusLG: 12,
+    colorBgLayout: '#f5f5f5',
+    colorText: '#09090b',
+    colorTextSecondary: '#525252',
+    colorTextTertiary: '#737373',
+    colorBorder: '#e5e5e5',
+    colorBorderSecondary: '#f5f5f5',
+    borderRadius: 6,
+    borderRadiusLG: 8,
     borderRadiusSM: 6,
     borderRadiusXS: 4,
     boxShadow: 'none',
-    boxShadowSecondary: '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.06)',
+    boxShadowSecondary: '0 1px 2px rgba(0,0,0,0.05)',
   },
   components: {
     ...sharedComponents,
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(79,70,229,0.06)',
-      itemSelectedColor: '#4f46e5',
-      itemHoverBg: '#f8f9fb',
-      itemBorderRadius: 8,
+      itemSelectedBg: 'rgba(124,58,237,0.06)',
+      itemSelectedColor: '#7c3aed',
+      itemHoverBg: '#f5f5f5',
+      itemBorderRadius: 6,
     },
   },
 };
 
 export const darkTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#818cf8',
-    colorInfo: '#818cf8',
-    colorSuccess: '#34d399',
+    colorPrimary: '#a78bfa',
+    colorInfo: '#a78bfa',
+    colorSuccess: '#4ade80',
     colorWarning: '#fbbf24',
     colorError: '#f87171',
     fontFamily: '"IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
     fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
-    // ── Linear-style layered surfaces ──
-    colorBgContainer: '#16161f',
-    colorBgElevated: '#1c1c28',
-    colorBgLayout: '#0a0a0f',
-    colorText: '#e8e8ed',
-    colorTextSecondary: '#8b8b9e',
-    colorTextTertiary: '#5c5c6f',
-    colorBorder: 'rgba(255,255,255,0.06)',
-    colorBorderSecondary: 'rgba(255,255,255,0.04)',
-    borderRadius: 8,
-    borderRadiusLG: 12,
+    colorBgContainer: '#18181b',  // --card
+    colorBgElevated: '#1e1e22',
+    colorBgLayout: '#09090b',     // --background
+    colorText: '#fafafa',
+    colorTextSecondary: '#a3a3a3',
+    colorTextTertiary: '#737373',
+    colorBorder: '#27272a',       // --border: solid hex, not rgba
+    colorBorderSecondary: '#1e1e22',
+    borderRadius: 6,
+    borderRadiusLG: 8,
     borderRadiusSM: 6,
     borderRadiusXS: 4,
     boxShadow: 'none',
-    boxShadowSecondary: '0 1px 3px rgba(0,0,0,0.4)',
+    boxShadowSecondary: 'none',
   },
   components: {
     ...sharedComponents,
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(129,140,248,0.08)',
-      itemSelectedColor: '#a5b4fc',
-      itemHoverBg: 'rgba(255,255,255,0.03)',
-      itemBorderRadius: 8,
+      itemSelectedBg: 'rgba(167,139,250,0.08)',
+      itemSelectedColor: '#c4b5fd',
+      itemHoverBg: 'rgba(255,255,255,0.04)',
+      itemBorderRadius: 6,
     },
   },
 };

@@ -1,21 +1,22 @@
+/* shadcn/ui zinc theme surfaces */
 :root {
   color-scheme: light;
-  --surface-canvas: 220 14% 97%;
+  --surface-canvas: 0 0% 96%;
   --surface-panel: 0 0% 100%;
   --surface-elevated: 0 0% 100%;
-  --ink-strong: 220 26% 14%;
-  --ink-muted: 220 9% 46%;
-  --line-subtle: 220 13% 91%;
-  --accent-strong: 239 84% 67%;
+  --ink-strong: 240 10% 4%;
+  --ink-muted: 240 4% 46%;
+  --line-subtle: 240 6% 90%;
+  --accent-strong: 263 70% 58%;
 }
 
 .dark {
   color-scheme: dark;
-  --surface-canvas: 240 33% 4%;
-  --surface-panel: 240 20% 10%;
-  --surface-elevated: 240 18% 13%;
-  --ink-strong: 240 10% 93%;
-  --ink-muted: 240 8% 58%;
-  --line-subtle: 0 0% 100% / 0.06;
-  --accent-strong: 234 89% 74%;
+  --surface-canvas: 240 10% 4%;
+  --surface-panel: 240 6% 10%;
+  --surface-elevated: 240 5% 13%;
+  --ink-strong: 0 0% 98%;
+  --ink-muted: 240 5% 65%;
+  --line-subtle: 240 6% 17%;
+  --accent-strong: 263 70% 68%;
 }

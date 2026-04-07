@@ -160,25 +160,12 @@ function KPICard({
         outline: "none",
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.transform = "translateY(-2px)";
         e.currentTarget.style.borderColor = colors.borderHover;
-        e.currentTarget.style.boxShadow = colors.shadowMd;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.transform = "translateY(0)";
         e.currentTarget.style.borderColor = colors.border;
-        e.currentTarget.style.boxShadow = colors.shadowSm;
-      }}
-      onFocus={(e) => {
-        e.currentTarget.style.outline = `2px solid ${colors.accent}`;
-        e.currentTarget.style.outlineOffset = "2px";
-      }}
-      onBlur={(e) => {
-        e.currentTarget.style.outline = "none";
       }}
     >
-      {/* Top accent bar */}
-      <div style={{ position: "absolute", left: 0, right: 0, top: 0, height: 2, background: accentColor, borderRadius: '12px 12px 0 0' }} />
 
       {loading ? (
         <div style={{ textAlign: "center", padding: 16 }}>
