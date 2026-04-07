@@ -169,7 +169,9 @@ class ImamPolicy:
             "Ground every answer in the authenticated knowledge base.",
             # 2. Source constraint [Imam.md §2-3]
             "Use ONLY the retrieved knowledge base content. NEVER supplement with external or general knowledge. "
-            "If the KB does not cover the question, decline: state the topic is not in the current knowledge base.",
+            "If the retrieved [REF-N] results do not specifically address the user's question — even if they are "
+            "about Islam generally — decline and state this specific topic is not covered in the current knowledge base. "
+            "You may briefly note what related content IS available, but do not answer beyond what the REFs support.",
             # 3. Citation integrity [Imam.md §11-14] — binds to REF-N format from tool
             "When citing, use the exact Citation field from [REF-N] results. Do not construct, modify, or "
             "invent citations. Sort sources by authority: Quran > Hadith > Tafsir > Fiqh. "

@@ -386,11 +386,32 @@ class KBSearchExecutor(ToolExecutor):
             )
 
     def _format_results(self, results: list[dict[str, Any]], query: str) -> str:
-        """Format search results for LLM consumption."""
+        """Format search results for LLM consumption.
+
+        Includes retrieval quality signals so the model can judge relevance
+        without hardcoded thresholds (Guide-layer context enrichment).
+        """
         if not results:
             return f"No relevant results found for query: {query}"
 
-        parts = [f"Found {len(results)} relevant results for: {query}\n"]
+        # Surface retrieval quality signal — let the model judge
+        exact_matches = sum(
+            1 for r in results
+            if (r.get("metadata") or {}).get("_exact_match")
+        )
+        avg_term_ratio = 0.0
+        term_ratios = [
+            float((r.get("metadata") or {}).get("_term_ratio") or 0)
+            for r in results
+        ]
+        if term_ratios:
+            avg_term_ratio = sum(term_ratios) / len(term_ratios)
+
+        header = f"Found {len(results)} results for: {query}"
+        if avg_term_ratio < 0.2 and exact_matches == 0:
+            header += "\n[Note: Low keyword overlap — results may be semantically related but not directly on-topic]"
+
+        parts = [header + "\n"]
 
         for i, r in enumerate(results, 1):
             source = r.get("source_url", "")
