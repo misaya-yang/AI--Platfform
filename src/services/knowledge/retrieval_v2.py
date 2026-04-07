@@ -397,12 +397,15 @@ def rrf_fusion(
             rrf_score += bm25_weight / (k + bm25_rank[c.segment_id])
         c.fusion_score = rrf_score
 
-    # Normalize RRF scores to [0, 1]
-    max_rrf = max((c.fusion_score or 0 for c in typed_candidates), default=1.0)
-    if max_rrf > 0:
+    # Normalize RRF scores to [0, 1] using min-max (not just divide by max)
+    fusion_values = [c.fusion_score for c in typed_candidates if c.fusion_score is not None]
+    if fusion_values:
+        max_rrf = max(fusion_values)
+        min_rrf = min(fusion_values)
+        rrf_range = max_rrf - min_rrf
         for c in typed_candidates:
             if c.fusion_score is not None:
-                c.fusion_score /= max_rrf
+                c.fusion_score = (c.fusion_score - min_rrf) / rrf_range if rrf_range > 1e-9 else 0.5
 
     return typed_candidates
 

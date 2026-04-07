@@ -20,7 +20,7 @@ services:
     container_name: ai-gateway-pg
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-111111}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: ${POSTGRES_DB:-gateway}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
@@ -46,11 +46,11 @@ services:
     container_name: ai-gateway-redis
     environment:
       # Pass password to container for healthcheck access
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-111111}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     command: >
       redis-server
       --appendonly yes
-      --requirepass ${REDIS_PASSWORD:-111111}
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
     ports:
@@ -60,7 +60,7 @@ services:
     networks:
       - ai-gateway-net
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a '${REDIS_PASSWORD:-111111}' ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli -a '${REDIS_PASSWORD:?REDIS_PASSWORD is required}' ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -104,16 +104,16 @@ services:
 
       # Database
       GATEWAY_DATABASE__ENABLED: "true"
-      GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-111111}@postgres:5432/${POSTGRES_DB:-gateway}"
+      GATEWAY_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
       GATEWAY_DATABASE__AUTO_INIT: "true"
 
       # Redis
       GATEWAY_REDIS__ENABLED: "true"
-      GATEWAY_REDIS__URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/0"
+      GATEWAY_REDIS__URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
 
       # Authentication
       GATEWAY_AUTHENTICATION__JWT__ENABLED: "true"
-      GATEWAY_AUTHENTICATION__JWT__SECRET: "${JWT_SECRET:-change-me-in-production-use-strong-secret}"
+      GATEWAY_AUTHENTICATION__JWT__SECRET: "${JWT_SECRET:?JWT_SECRET is required}"
       GATEWAY_AUTHENTICATION__JWT__ALGORITHMS: '["HS256"]'
 
       # LangGraph (optional)
@@ -203,11 +203,12 @@ services:
     image: knowledge-service:${TAG:-latest}
     container_name: ai-gateway-knowledge
     environment:
+      KNOWLEDGE_CORS__ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:80,http://localhost:3000}"
       KNOWLEDGE_APP__HOST: "0.0.0.0"
       KNOWLEDGE_APP__PORT: "8092"
-      KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-111111}@postgres:5432/${POSTGRES_DB:-gateway}"
+      KNOWLEDGE_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
       KNOWLEDGE_REDIS__ENABLED: "true"
-      KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/2"
+      KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/2"
       KNOWLEDGE_QDRANT__URL: "http://qdrant:6333"
       KNOWLEDGE_EMBEDDINGS__PROVIDER: "${KB_EMBEDDING_PROVIDER:-gemini}"
       KNOWLEDGE_EMBEDDINGS__API_KEY: "${KB_EMBEDDING_API_KEY:-}"
@@ -255,10 +256,10 @@ services:
     environment:
       ISLAMIC_CONTENT_APP__HOST: "0.0.0.0"
       ISLAMIC_CONTENT_APP__PORT: "8091"
-      ISLAMIC_CONTENT_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-111111}@postgres:5432/${POSTGRES_DB:-gateway}"
+      ISLAMIC_CONTENT_DATABASE__DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
       ISLAMIC_CONTENT_DATABASE__SCHEMA: "${ISLAMIC_CONTENT_SCHEMA:-islamic_content}"
       ISLAMIC_CONTENT_DATABASE__AUTO_MIGRATE: "true"
-      ISLAMIC_CONTENT_CACHE__REDIS_URL: "redis://:${REDIS_PASSWORD:-111111}@redis:6379/1"
+      ISLAMIC_CONTENT_CACHE__REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/1"
       ISLAMIC_CONTENT_BOOTSTRAP__ON_START: "true"
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GATEWAY_URL: "http://gateway:8080"
@@ -292,8 +293,9 @@ services:
     ports:
       - "8093:8093"
     environment:
-      DATABASE_URL: postgresql://postgres:${PG_PASSWORD:-111111}@postgres:5432/gateway
-      REDIS_URL: redis://:${REDIS_PASSWORD:-111111}@redis:6379/0
+      ASSISTANT_CORS__ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:80,http://localhost:3000}"
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/gateway
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       KB_SERVICE_URL: http://knowledge-service:8092
       ASSISTANT_APP__ALLOW_ANONYMOUS: "true"  # Internal network, gateway handles auth
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}

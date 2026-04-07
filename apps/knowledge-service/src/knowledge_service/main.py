@@ -308,10 +308,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # --- CORS ---
+    _origins = resolved.cors.allow_origins
+    _credentials = "*" not in _origins
+    if not _credentials:
+        logger.warning("cors_wildcard_with_credentials_disabled",
+                       hint="Set KNOWLEDGE_CORS__ALLOW_ORIGINS to explicit origins")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=_origins,
+        allow_credentials=_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )

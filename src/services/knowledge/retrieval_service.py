@@ -639,9 +639,10 @@ class RetrievalService:
             limit=config.top_k * 3,
         )
 
-        # Calculate BM25 scores
+        # Calculate BM25 scores — tokenize candidates (bm25_scores expects Sequence[Sequence[str]])
         candidate_texts = [c.get("text", "") for c in candidates]
-        scores = bm25_scores(query_tokens, candidate_texts)
+        tokenized_candidates = [tokenize(text) for text in candidate_texts]
+        scores = bm25_scores(query_tokens, tokenized_candidates)
 
         # Build results
         results = []
@@ -856,35 +857,35 @@ class RetrievalService:
         try:
             # Get embeddings for MMR calculation
             embedder = await get_cached_embedder(self.settings)
-            query_embedding = await embedder.embed_query(query)
 
-            # Get result embeddings (from metadata or compute)
-            result_embeddings = []
+            # Build candidate data structures for mmr_select
+            candidate_ids: list[str] = []
+            relevance: dict[str, float] = {}
+            vectors: dict[str, Any] = {}
+
             for r in results:
+                candidate_ids.append(r.segment_id)
+                relevance[r.segment_id] = r.score
                 emb = r.metadata.get("embedding")
-                if emb:
-                    result_embeddings.append(emb)
-                else:
-                    # Compute embedding if not cached
+                if not emb:
                     try:
-                        emb = await embedder.embed_query(r.text[:500])  # Truncate for speed
-                        result_embeddings.append(emb)
+                        emb = await embedder.embed_query(r.text[:500])
                     except Exception:
-                        result_embeddings.append([0.0] * len(query_embedding))
+                        emb = [0.0] * 1024  # Fallback zero vector
+                vectors[r.segment_id] = emb
 
-            # Import MMR from retrieval module
-            from .retrieval import mmr_select
-
-            # MMR selection
-            selected_indices = mmr_select(
-                query_embedding,
-                result_embeddings,
-                k=len(results),
-                lambda_param=1 - diversity,
+            # MMR selection with correct signature
+            selected_ids, _ = mmr_select(
+                candidates=candidate_ids,
+                relevance=relevance,
+                vectors=vectors,
+                top_k=len(results),
+                lambda_mult=1 - diversity,
             )
 
-            # Reorder results
-            mmr_results = [results[i] for i in selected_indices]
+            # Reorder results by selected IDs
+            id_to_result = {r.segment_id: r for r in results}
+            mmr_results = [id_to_result[sid] for sid in selected_ids if sid in id_to_result]
 
             logger.info(f"[MMR] Applied diversity={diversity}, selected {len(mmr_results)} results")
             return mmr_results
@@ -936,14 +937,26 @@ class RetrievalService:
         # Sort by RRF score
         rrf_scores.sort(key=lambda x: x[1], reverse=True)
 
-        # Build final results
+        # Normalize RRF scores to [0, 1] — raw RRF scores are tiny (e.g. 0.03)
+        # which makes downstream score_threshold filtering useless
+        top_entries = rrf_scores[:top_k]
+        if top_entries:
+            max_rrf = top_entries[0][1]  # Already sorted descending
+            min_rrf = top_entries[-1][1]
+            rrf_range = max_rrf - min_rrf
+        else:
+            rrf_range = 0.0
+            min_rrf = 0.0
+
+        # Build final results with normalized scores
         final_results = []
-        for segment_id, score, result in rrf_scores[:top_k]:
+        for segment_id, score, result in top_entries:
+            norm_score = (score - min_rrf) / rrf_range if rrf_range > 1e-9 else 0.5
             final_results.append(
                 RetrieveResult(
                     segment_id=result.segment_id,
                     document_id=result.document_id,
-                    score=min(score, 1.0),
+                    score=max(0.0, min(1.0, norm_score)),
                     text=result.text,
                     metadata=result.metadata,
                     content_type=result.content_type,
@@ -1006,25 +1019,33 @@ class RetrievalService:
         diversity: float,
     ) -> list[RetrieveResult]:
         """Apply Maximal Marginal Relevance for diversity."""
-        # Get embeddings for results
-        result_embeddings = []
-        for r in results:
-            emb = r.metadata.get("embedding")
-            if emb:
-                result_embeddings.append(emb)
-            else:
-                # Use zero vector as fallback
-                result_embeddings.append([0.0] * len(query_embedding))
+        if not results or len(results) <= 1:
+            return results
 
-        # MMR selection
-        selected_indices = mmr_select(
-            query_embedding,
-            result_embeddings,
-            k=len(results),
-            lambda_param=1 - diversity,
+        # Build candidate data structures for mmr_select
+        candidate_ids: list[str] = []
+        relevance: dict[str, float] = {}
+        vectors: dict[str, Any] = {}
+
+        for r in results:
+            candidate_ids.append(r.segment_id)
+            relevance[r.segment_id] = r.score
+            emb = r.metadata.get("embedding")
+            if not emb:
+                emb = [0.0] * len(query_embedding)
+            vectors[r.segment_id] = emb
+
+        # MMR selection with correct signature
+        selected_ids, _ = mmr_select(
+            candidates=candidate_ids,
+            relevance=relevance,
+            vectors=vectors,
+            top_k=len(results),
+            lambda_mult=1 - diversity,
         )
 
-        return [results[i] for i in selected_indices]
+        id_to_result = {r.segment_id: r for r in results}
+        return [id_to_result[sid] for sid in selected_ids if sid in id_to_result]
 
     # ========================================================================
     # Expansion and Rewriting

@@ -6,6 +6,8 @@ and double-underscore nesting (e.g. ``KNOWLEDGE_QDRANT__URL``).
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +15,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ---------------------------------------------------------------------------
 # Sub-models
 # ---------------------------------------------------------------------------
+
+class CORSSettings(BaseModel):
+    """CORS origin whitelist. Set via KNOWLEDGE_CORS__ALLOW_ORIGINS (comma-separated)."""
+
+    allow_origins: list[str] = Field(default_factory=lambda: ["http://localhost:80", "http://localhost:3000"])
+
+    @field_validator("allow_origins", mode="before")
+    @classmethod
+    def parse_origins(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            return [o.strip() for o in v.split(",") if o.strip()]
+        return v
+
 
 class AppSettings(BaseModel):
     """General application settings."""
@@ -213,6 +228,7 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
+    cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

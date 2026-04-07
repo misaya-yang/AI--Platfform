@@ -205,9 +205,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_origins = settings.cors.allow_origins
+_credentials = "*" not in _origins
+if not _credentials:
+    logger.warning("CORS wildcard origin detected — credentials disabled. "
+                   "Set ASSISTANT_CORS__ALLOW_ORIGINS to explicit origins.")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_origins,
+    allow_credentials=_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

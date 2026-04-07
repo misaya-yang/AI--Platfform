@@ -67,7 +67,11 @@ def build_service_query(
 
 
 class DatabaseStorage:
-    """PostgreSQL 数据库存储"""
+    """PostgreSQL 数据库存储
+
+    Acts as a facade over domain-specific repositories.
+    See ``src/persistence/repositories/`` for the extracted implementations.
+    """
 
     def __init__(
         self,
@@ -101,6 +105,23 @@ class DatabaseStorage:
         self._api_key_usage_buffer: dict[str, int] = {}
         self._api_key_usage_lock = asyncio.Lock()
         self._api_key_usage_task: asyncio.Task | None = None
+
+        # Domain-specific repositories (Phase 2 refactoring)
+        from .repositories.api_key_repository import DatabaseAPIKeyRepository
+        from .repositories.knowledge_repository import DatabaseKnowledgeRepository
+        from .repositories.service_repository import DatabaseServiceRepository
+        from .repositories.session_repository import DatabaseSessionRepository
+        from .repositories.task_repository import DatabaseTaskRepository
+        from .repositories.user_repository import DatabaseUserRepository
+
+        self.repos = {
+            "services": DatabaseServiceRepository(self),
+            "sessions": DatabaseSessionRepository(self),
+            "tasks": DatabaseTaskRepository(self),
+            "users": DatabaseUserRepository(self),
+            "api_keys": DatabaseAPIKeyRepository(self),
+            "knowledge": DatabaseKnowledgeRepository(self),
+        }
 
     async def _get_cached_permissions(self, user_id: str) -> list[str] | None:
         if self._permission_cache_ttl_seconds <= 0:

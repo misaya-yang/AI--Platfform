@@ -4,6 +4,7 @@
 提供各实体的数据访问抽象，支持内存和数据库两种存储后端
 """
 
+from .base import BaseRepository
 from .api_key_repository import APIKeyRepository, DatabaseAPIKeyRepository
 from .knowledge_repository import DatabaseKnowledgeRepository, KnowledgeRepository
 from .service_repository import DatabaseServiceRepository, ServiceRepository
@@ -12,6 +13,7 @@ from .task_repository import DatabaseTaskRepository, TaskRepository
 from .user_repository import DatabaseUserRepository, UserRepository
 
 __all__ = [
+    "BaseRepository",
     "ServiceRepository",
     "DatabaseServiceRepository",
     "SessionRepository",
