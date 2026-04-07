@@ -578,8 +578,8 @@ export default function BindSpacePage() {
         {currentStep === 0 && (
           <Card className="p-6 border-border/60">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500/10 to-purple-500/10 border border-violet-500/20 flex items-center justify-center">
-                <Database className="h-5 w-5 text-violet-500" />
+              <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center">
+                <Database className="h-5 w-5 text-primary" />
               </div>
               <div>
                 <h2 className="font-semibold text-foreground">{t("confluence.bind.selectDataset")}</h2>
@@ -601,8 +601,8 @@ export default function BindSpacePage() {
                 loading={loadingDatasets}
                 renderOption={(option, isSelected) => (
                   <div className="flex items-center gap-3 w-full">
-                    <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center flex-shrink-0">
-                      <Database className="h-4 w-4 text-violet-500" />
+                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                      <Database className="h-4 w-4 text-primary" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="font-medium truncate">{option.label}</div>
@@ -856,7 +856,7 @@ export default function BindSpacePage() {
             {/* Summary */}
             <div className="mb-6 p-4 bg-muted/30 rounded-lg border border-border/50">
               <div className="flex items-center gap-2 text-sm flex-wrap">
-                <Database className="h-4 w-4 text-violet-500" />
+                <Database className="h-4 w-4 text-primary" />
                 <span className="font-medium">
                   {datasets.find((d) => d.dataset_id === selectedDatasetId)?.name}
                 </span>
@@ -887,11 +887,11 @@ export default function BindSpacePage() {
               {/* Include Options */}
               <div className="space-y-4">
                 {/* Image Sync - Primary Feature */}
-                <div className="p-4 border rounded-lg bg-gradient-to-r from-violet-500/5 to-purple-500/5 border-violet-500/20">
+                <div className="p-4 border rounded-lg bg-primary/5 border-primary/20">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-violet-500/10 flex items-center justify-center">
-                        <ImageIcon className="h-5 w-5 text-violet-500" />
+                      <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <ImageIcon className="h-5 w-5 text-primary" />
                       </div>
                       <div className="space-y-0.5">
                         <Label className="text-sm font-medium">{t("confluence.bind.syncImages")}</Label>
@@ -906,7 +906,7 @@ export default function BindSpacePage() {
                     />
                   </div>
                   {syncImages && (
-                    <div className="mt-4 pt-4 border-t border-violet-500/20 flex items-center justify-between">
+                    <div className="mt-4 pt-4 border-t border-primary/20 flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label className="text-xs font-medium text-muted-foreground">{t("confluence.bind.maxImageSize")}</Label>
                       </div>

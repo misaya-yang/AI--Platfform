@@ -42,8 +42,8 @@ export function ModelSelector({
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/10 to-purple-500/10">
-          <Sparkles className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+        <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-primary/10">
+          <Sparkles className="h-4 w-4 text-primary" />
         </div>
         <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
           {t("assistant.model", "Model")}
@@ -80,14 +80,14 @@ export function ModelSelector({
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     {selectedModel === model.id && (
-                      <Check className="h-4 w-4 shrink-0 text-violet-500" />
+                      <Check className="h-4 w-4 shrink-0 text-primary" />
                     )}
                     {selectedModel !== model.id && <div className="w-4" />}
                     <span className="truncate">{model.name}</span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     {model.supports_vision && (
-                      <Badge variant="secondary" className="text-[9px] px-1 py-0 bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300">
+                      <Badge variant="secondary" className="text-[9px] px-1 py-0 bg-primary/10 dark:bg-primary/20 text-primary dark:text-primary/80">
                         Vision
                       </Badge>
                     )}

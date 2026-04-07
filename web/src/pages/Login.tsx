@@ -90,12 +90,8 @@ export function LoginPage() {
 
       const response = await login({ email: normalizedEmail, password });
 
-      // Set auth state with rememberMe flag
-      // rememberMe=true -> localStorage (persist after browser close)
-      // rememberMe=false -> sessionStorage (clear on browser close)
       setAuth(response.access_token, response.user, response.force_password_change, rememberMe);
 
-      // Check if password change is required
       if (response.force_password_change) {
         setShowPasswordChange(true);
       } else {
@@ -142,32 +138,31 @@ export function LoginPage() {
   };
 
   return (
-    <div className="login-shell relative min-h-screen overflow-hidden bg-[#f5f8fc]">
-      <div className="login-background">
-        <div className="login-blob blob-left" />
-        <div className="login-blob blob-right" />
-        <div className="login-grid" />
-      </div>
+    <div className="login-shell relative min-h-screen overflow-hidden">
+      {/* Background */}
+      <div className="login-background" />
 
       <div className="relative z-10 flex min-h-screen items-center justify-center px-4 py-12">
-        <div className="w-full max-w-[480px]">
-          <div className="mb-6 flex items-center justify-center">
+        <div className="w-full max-w-[440px]">
+          {/* Brand chip */}
+          <div className="mb-8 flex items-center justify-center">
             <span className="brand-chip">AI Platform</span>
           </div>
 
-          <div className="login-card relative overflow-hidden rounded-[24px] border border-[#e2e8f0] bg-white/98 px-8 pb-10 pt-8 shadow-[0_20px_60px_rgba(71,85,105,0.12)] sm:px-10 sm:pt-10">
-            <div className="corner-fold" />
-
+          {/* Login card */}
+          <div className="login-card rounded-2xl border border-slate-200/80 bg-white/95 px-8 pb-10 pt-8 shadow-[0_20px_50px_rgba(30,41,59,0.08)] backdrop-blur-sm sm:px-10 sm:pt-10 dark:border-white/[0.08] dark:bg-[#1A1D27]/95 dark:shadow-[0_20px_50px_rgba(0,0,0,0.3)]">
             <div className="text-center">
-              <h1 className="login-title text-2xl font-semibold text-slate-800">{t("login.title")}</h1>
-              <p className="mt-2 text-sm text-slate-500">
+              <h1 className="text-xl font-semibold tracking-tight text-slate-800 dark:text-slate-100">
+                {t("login.title")}
+              </h1>
+              <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
                 {t("login.loginWith")}
               </p>
             </div>
 
             <form onSubmit={handleSubmit} className="mt-8 space-y-5">
               <div className="space-y-2">
-                <Label htmlFor="email" className="text-sm text-slate-600">
+                <Label htmlFor="email" className="text-sm text-slate-600 dark:text-slate-300">
                   {t("login.emailLabel")}
                 </Label>
                 <div className="relative">
@@ -186,7 +181,7 @@ export function LoginPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-sm text-slate-600">
+                <Label htmlFor="password" className="text-sm text-slate-600 dark:text-slate-300">
                   {t("login.passwordLabel")}
                 </Label>
                 <div className="relative">
@@ -204,14 +199,14 @@ export function LoginPage() {
                     type="button"
                     aria-label={showPassword ? t("login.hidePassword") : t("login.showPassword")}
                     onClick={() => setShowPassword((prev) => !prev)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 transition hover:text-slate-600"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 transition hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
                   >
                     {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between text-sm text-slate-500">
+              <div className="flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <Checkbox
                     checked={rememberMe}
@@ -222,27 +217,27 @@ export function LoginPage() {
                 <button
                   type="button"
                   onClick={handleForgotPassword}
-                  className="text-blue-500 hover:text-blue-600 transition"
+                  className="text-indigo-500 hover:text-indigo-600 transition dark:text-indigo-400 dark:hover:text-indigo-300"
                 >
                   {t("login.forgotPassword")}
                 </button>
               </div>
 
               {error && (
-                <div className="text-center text-sm text-rose-500">
+                <div className="text-center text-sm text-rose-500 dark:text-rose-400">
                   {error}
                 </div>
               )}
 
               <Button
                 type="submit"
-                className="h-12 w-full rounded-xl bg-[#3b6cff] text-base font-medium text-white shadow-[0_8px_24px_rgba(59,108,255,0.25)] transition hover:bg-[#325be6]"
+                className="login-submit-btn h-11 w-full rounded-lg text-sm font-medium text-white transition-all"
                 disabled={isLoading}
               >
                 {isLoading ? t("login.loggingIn") : t("login.loginButton")}
               </Button>
 
-              <div className="text-center text-xs text-slate-400 pt-2">
+              <div className="text-center text-xs text-slate-400 dark:text-slate-500 pt-1">
                 {t("login.enterpriseOnly", { domain: allowedDomain })}
               </div>
             </form>
@@ -257,83 +252,67 @@ export function LoginPage() {
 
       <style>{`
         .login-shell {
-          --ink: #1e293b;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-          color: var(--ink);
         }
 
         .login-background {
           position: absolute;
           inset: 0;
-          background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 50%, #e2e8f0 100%);
+          background: linear-gradient(135deg, #F8FAFC 0%, #EEF2FF 50%, #E0E7FF 100%);
         }
 
-        .login-blob {
-          position: absolute;
-          border-radius: 999px;
-          filter: blur(60px);
-          opacity: 0.5;
-        }
-
-        .blob-left {
-          width: 400px;
-          height: 400px;
-          top: -150px;
-          left: -150px;
-          background: radial-gradient(circle at 30% 30%, #93c5fd, transparent 70%);
-        }
-
-        .blob-right {
-          width: 450px;
-          height: 450px;
-          bottom: -180px;
-          right: -180px;
-          background: radial-gradient(circle at 30% 30%, #a5b4fc, transparent 70%);
-        }
-
-        .login-grid {
-          position: absolute;
-          inset: 0;
-          background-image:
-            linear-gradient(135deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0) 60%);
-          opacity: 0.6;
-          pointer-events: none;
+        .dark .login-background {
+          background: linear-gradient(135deg, #0F1117 0%, #151825 50%, #0F1117 100%);
         }
 
         .brand-chip {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          padding: 6px 18px;
+          padding: 6px 16px;
           border-radius: 999px;
-          background: rgba(255, 255, 255, 0.85);
-          border: 1px solid #e2e8f0;
+          background: rgba(255, 255, 255, 0.8);
+          border: 1px solid rgba(226, 232, 240, 0.6);
           color: #475569;
-          font-size: 12px;
-          letter-spacing: 0.25em;
+          font-size: 11px;
+          letter-spacing: 0.2em;
           text-transform: uppercase;
-          font-weight: 500;
+          font-weight: 600;
+          backdrop-filter: blur(8px);
         }
 
-        .login-title {
-          letter-spacing: 0.12em;
+        .dark .brand-chip {
+          background: rgba(26, 29, 39, 0.8);
+          border-color: rgba(255, 255, 255, 0.08);
+          color: #94A3B8;
         }
 
         .login-input {
-          height: 48px;
-          border-radius: 10px;
-          border: 1px solid #e2e8f0;
+          height: 44px;
+          border-radius: 8px !important;
+          border: 1px solid #E2E8F0;
           background: #fff;
-          font-size: 15px;
+          font-size: 14px;
           padding-left: 14px;
-          color: #1e293b;
+          color: #0F172A;
           transition: all 0.2s;
         }
 
+        .dark .login-input {
+          border-color: rgba(255, 255, 255, 0.10);
+          background: rgba(255, 255, 255, 0.04);
+          color: #E2E8F0;
+        }
+
         .login-input:focus-visible {
-          border-color: #3b82f6;
-          box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+          border-color: #4F46E5;
+          box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
           outline: none;
+        }
+
+        .dark .login-input:focus-visible {
+          border-color: #818CF8;
+          box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.15);
         }
 
         .email-suffix {
@@ -342,36 +321,34 @@ export function LoginPage() {
           top: 50%;
           transform: translateY(-50%);
           font-weight: 500;
-          color: #64748b;
-          font-size: 14px;
+          color: #64748B;
+          font-size: 13px;
           pointer-events: none;
         }
 
-        .corner-fold {
-          position: absolute;
-          top: 0;
-          right: 0;
-          width: 90px;
-          height: 90px;
-          background: linear-gradient(145deg, rgba(147, 197, 253, 0.4), rgba(255, 255, 255, 0.6));
-          clip-path: polygon(35% 0, 100% 0, 100% 65%);
+        .dark .email-suffix {
+          color: #64748B;
         }
 
-        .corner-fold::after {
-          content: "";
-          position: absolute;
-          inset: 14px 8px auto auto;
-          width: 50px;
-          height: 50px;
-          clip-path: polygon(35% 0, 100% 0, 100% 65%);
-          background-image:
-            linear-gradient(45deg, rgba(59, 130, 246, 0.4) 25%, transparent 25%),
-            linear-gradient(-45deg, rgba(59, 130, 246, 0.4) 25%, transparent 25%),
-            linear-gradient(45deg, transparent 75%, rgba(59, 130, 246, 0.4) 75%),
-            linear-gradient(-45deg, transparent 75%, rgba(59, 130, 246, 0.4) 75%);
-          background-size: 8px 8px;
-          background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
-          opacity: 0.6;
+        .login-submit-btn {
+          background: #4F46E5 !important;
+          box-shadow: 0 1px 2px rgba(79, 70, 229, 0.2);
+        }
+
+        .login-submit-btn:hover:not(:disabled) {
+          background: #4338CA !important;
+          transform: translateY(-1px);
+          box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
+        }
+
+        .dark .login-submit-btn {
+          background: #818CF8 !important;
+          box-shadow: 0 1px 2px rgba(129, 140, 248, 0.2);
+        }
+
+        .dark .login-submit-btn:hover:not(:disabled) {
+          background: #6366F1 !important;
+          box-shadow: 0 4px 12px rgba(129, 140, 248, 0.3);
         }
       `}</style>
     </div>

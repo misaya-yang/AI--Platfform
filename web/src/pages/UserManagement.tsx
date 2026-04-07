@@ -331,7 +331,6 @@ export function UserManagementPage() {
         {canCreate && (
           <Button
             onClick={() => setShowCreateModal(true)}
-            className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
           >
             {t('users.addUser')}
           </Button>
@@ -412,9 +411,9 @@ export function UserManagementPage() {
                       {user.roles.map((role) => {
                         // Role color differentiation
                         const roleColors: Record<string, string> = {
-                          admin: "bg-purple-500/15 text-purple-700 dark:text-purple-400 border-purple-500/30",
-                          manager: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
-                          user: "bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/30",
+                          admin: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20",
+                          manager: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
+                          user: "bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-400/20",
                         };
                         const colorClass = roleColors[role.toLowerCase()] || roleColors.user;
                         return (

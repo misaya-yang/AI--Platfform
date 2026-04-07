@@ -253,6 +253,19 @@
   "dashboard": {
     "title": "仪表盘",
     "loadingServices": "加载服务中...",
+    "tabs": {
+      "summary": "总览",
+      "operations": "运营",
+      "reliability": "可靠性",
+      "governance": "治理",
+      "tracing": "追踪"
+    },
+    "actions": {
+      "fullscreen": "全屏"
+    },
+    "panel": {
+      "loadError": "数据加载失败"
+    },
     "metrics": {
       "title": "指标概览",
       "totalRequests": "总请求数",
@@ -309,7 +322,9 @@
       "internalShort": "内",
       "externalShort": "外",
       "reset": "重置",
-      "anonymousUser": "匿名用户 {{id}}"
+      "anonymousUser": "匿名用户 {{id}}",
+      "byDay": "按天",
+      "byHour": "按小时"
     },
     "refresh": {
       "manual": "手动",
@@ -317,13 +332,18 @@
       "now": "立即刷新",
       "seconds": "{{count}}秒",
       "minutes": "{{count}}分钟",
-      "lastUpdated": "最近更新：{{time}}"
+      "lastUpdated": "最近更新：{{time}}",
+      "30s": "30秒",
+      "1min": "1分钟",
+      "5min": "5分钟"
     },
     "fullscreen": {
       "enter": "进入全屏",
       "exit": "退出全屏"
     },
     "trend": {
+      "up": "增长",
+      "down": "下降",
       "vsPrevious": "较上期",
       "noBaseline": "无基线对比"
     },
@@ -458,7 +478,7 @@
       }
     },
     "kpi": {
-      "noRealData": "暂无真实请求数据",
+      "noRealData": "暂无数据",
       "totalCostUsd": "总成本 (USD)"
     },
     "failure": {

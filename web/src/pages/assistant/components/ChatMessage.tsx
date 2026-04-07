@@ -810,7 +810,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               "rounded-3xl px-5 py-3",
               ASSISTANT_UI_V2
                 ? "bg-[hsl(var(--assistant-user-bubble))] text-[hsl(var(--assistant-text-primary))]"
-                : "bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-sm shadow-violet-500/15"
+                : "bg-primary text-white shadow-sm shadow-primary/15"
             )}
           >
             <div className="whitespace-pre-wrap leading-relaxed text-[15px]">

@@ -353,7 +353,7 @@ export function MultimodalInput({
             className={cn(
               "h-10 w-10 shrink-0 rounded-xl transition-colors",
               files.length > 0
-                ? "text-purple-600 hover:text-purple-700 bg-purple-100 dark:bg-purple-900/30"
+                ? "text-primary hover:text-primary/80 bg-primary/10 dark:bg-primary/20"
                 : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
             )}
           >
@@ -413,7 +413,7 @@ export function MultimodalInput({
             className={cn(
               "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
               canSend
-                ? "bg-gradient-to-br from-violet-500 via-purple-500 to-fuchsia-500 hover:from-violet-600 hover:via-purple-600 hover:to-fuchsia-600 shadow-purple-500/30 hover:shadow-purple-500/40 hover:scale-105"
+                ? "bg-primary hover:bg-primary/90 shadow-sm hover:shadow-md hover:scale-105"
                 : "bg-muted text-muted-foreground opacity-50"
             )}
           >

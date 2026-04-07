@@ -34,7 +34,6 @@ import { languages } from "@/i18n";
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
 
-// 导航菜单配置 (使用翻译键)
 const navItems = [
   {
     key: "/dashboard",
@@ -70,7 +69,7 @@ const navItems = [
     key: "/tasks",
     labelKey: "nav.tasks",
     icon: <UnorderedListOutlined />,
-    permission: null, // 所有用户可见
+    permission: null,
   },
   {
     key: "/users",
@@ -86,10 +85,32 @@ const navItems = [
   },
 ];
 
+// Get page title key from path
+function getPageTitleKey(pathname: string): string {
+  const segment = pathname.split("/")[1] || "dashboard";
+  const map: Record<string, string> = {
+    dashboard: "nav.dashboard",
+    services: "nav.services",
+    knowledge: "nav.knowledge",
+    playground: "nav.playground",
+    assistant: "nav.assistant",
+    tasks: "nav.tasks",
+    users: "nav.users",
+    settings: "nav.settings",
+    exams: "nav.exams",
+  };
+  return map[segment] || "nav.dashboard";
+}
 
-
-// Theme toggle button - simple version
-
+// Generate initials from display name
+function getInitials(name?: string): string {
+  if (!name) return "U";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }
+  return name.slice(0, 2).toUpperCase();
+}
 
 export function AppLayout() {
   const { t, i18n } = useTranslation();
@@ -108,10 +129,8 @@ export function AppLayout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  // Profile modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
 
-  // 语言切换
   const handleLanguageChange = (langCode: string) => {
     i18n.changeLanguage(langCode);
   };
@@ -128,7 +147,6 @@ export function AppLayout() {
     return () => mediaQuery.removeEventListener("change", sync);
   }, []);
 
-  // 语言子菜单
   const languageMenuItems: MenuProps['items'] = languages.map(lang => ({
     key: lang.code,
     label: `${lang.flag} ${t(lang.nameKey, lang.nativeName)}`,
@@ -156,7 +174,6 @@ export function AppLayout() {
     },
   ];
 
-  // 用户下拉菜单
   const userMenuItems: MenuProps['items'] = [
     { key: 'profile', label: t('user.profile'), icon: <UserOutlined /> },
     { key: 'change-password', label: t('user.changePassword'), icon: <SettingOutlined /> },
@@ -177,7 +194,6 @@ export function AppLayout() {
     { key: 'logout', label: t('user.logout'), icon: <LogoutOutlined />, danger: true },
   ];
 
-  // Handle user menu click
   const handleUserMenuClick = async ({ key }: { key: string }) => {
     if (key === 'logout') {
       try {
@@ -196,7 +212,6 @@ export function AppLayout() {
     }
   };
 
-  // Show password change modal if forced
   useEffect(() => {
     if (forcePasswordChange) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- Intentional: modal state from auth
@@ -204,21 +219,15 @@ export function AppLayout() {
     }
   }, [forcePasswordChange]);
 
-  // 生成菜单项 - 根据权限过滤
   const filteredNavItems = navItems.filter(item =>
     item.permission === null || hasPermission(item.permission)
   );
 
-  const currentThemeLabel =
-    themeMode === "system"
-      ? `${t("theme.mode.system", "System")} · ${resolvedTheme === "dark" ? t("theme.mode.dark", "Dark") : t("theme.mode.light", "Light")}`
-      : themeMode === "dark"
-        ? t("theme.mode.dark", "Dark")
-        : t("theme.mode.light", "Light");
-
   const siderOffset = isMobile ? (collapsed ? -210 : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : 210;
 
+  const pageTitleKey = getPageTitleKey(location.pathname);
+  const userInitials = getInitials(user?.display_name || user?.user_id);
 
   return (
     <Layout className="app-layout" style={{ minHeight: '100vh' }}>
@@ -237,27 +246,27 @@ export function AppLayout() {
           bottom: 0,
           zIndex: 100,
           borderRight: 'none',
-          background: darkMode ? '#0A0A0B' : '#FFFFFF',
+          background: darkMode ? '#0F1117' : '#FFFFFF',
           transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
         theme={resolvedTheme}
       >
         <div className="flex flex-col h-full">
           {/* Logo area */}
-          <div className="h-[48px] flex items-center px-5">
+          <div className="h-[52px] flex items-center px-5 mb-2">
             <Logo collapsed={collapsed} />
           </div>
 
-          {/* Custom Navigation Menu */}
-          <div className="flex-1 overflow-y-auto py-6 px-3 space-y-1 scrollbar-hide">
+          {/* Navigation */}
+          <div className="flex-1 overflow-y-auto py-2 px-3 space-y-0.5 scrollbar-hide">
             {filteredNavItems.map((item) => (
               <NavLink
                 key={item.key}
                 to={item.key}
                 className={({ isActive }) => `
-                  relative group flex items-center px-4 py-3.5 my-1.5 rounded-xl transition-all duration-300 ease-out
+                  relative group flex items-center px-3 py-2.5 rounded-lg transition-all duration-200 ease-out
                   ${isActive
-                    ? 'bg-primary/10 text-primary font-semibold shadow-sm shadow-primary/5'
+                    ? 'text-primary font-semibold'
                     : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
                   }
                   ${collapsed ? 'justify-center px-2' : ''}
@@ -265,29 +274,33 @@ export function AppLayout() {
               >
                 {({ isActive }) => (
                   <>
+                    {/* Left active indicator bar */}
+                    {isActive && !collapsed && (
+                      <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 bg-primary rounded-r-full" />
+                    )}
+
                     <span className={`
-                      text-xl transition-all duration-300 transform group-hover:scale-110 flex-shrink-0
+                      text-[18px] transition-all duration-200 flex-shrink-0
                       ${isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground'}
                     `}>
                       {item.icon}
                     </span>
 
                     {!collapsed && (
-                      <span className={`ml-3.5 truncate transition-all duration-300 ${isActive ? 'translate-x-1' : 'group-hover:translate-x-1'}`}>
+                      <span className="ml-3 text-sm truncate">
                         {t(item.labelKey)}
                       </span>
                     )}
 
-                    {/* Active Indicator (Left Bar) */}
-                    {isActive && !collapsed && (
-                      <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-primary rounded-r-full shadow-[0_0_12px_rgba(var(--primary),0.5)] animate-in slide-in-from-left-2 fade-in duration-300" />
+                    {/* Active subtle background */}
+                    {isActive && (
+                      <div className="absolute inset-0 bg-primary/[0.06] dark:bg-primary/[0.10] rounded-lg -z-10" />
                     )}
 
-                    {/* Hover Tooltip for Collapsed State */}
+                    {/* Collapsed tooltip */}
                     {collapsed && (
-                      <div className="absolute left-full ml-4 px-3 py-1.5 bg-popover text-popover-foreground text-sm font-medium rounded-lg shadow-xl opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-200 pointer-events-none whitespace-nowrap z-50 border border-border/50">
+                      <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-popover text-popover-foreground text-xs font-medium rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-150 pointer-events-none whitespace-nowrap z-50 border border-border/50">
                         {t(item.labelKey)}
-                        <div className="absolute left-0 top-1/2 -translate-y-1/2 -ml-1 w-2 h-2 bg-popover rotate-45 border-l border-b border-border/50" />
                       </div>
                     )}
                   </>
@@ -296,45 +309,43 @@ export function AppLayout() {
             ))}
           </div>
 
-          {/* Footer Actions */}
-          <div className="p-4 space-y-3">
+          {/* Footer — divider + actions */}
+          <div className={`border-t ${darkMode ? 'border-white/[0.06]' : 'border-slate-100'} p-3 space-y-1`}>
             {/* Theme Toggle */}
-            <div className={`
-              flex items-center transition-all duration-300 rounded-xl p-1
-              ${collapsed ? 'justify-center flex-col gap-2' : 'justify-between px-3'}
-            `}>
+            <button
+              onClick={toggleDarkMode}
+              aria-label={darkMode ? t("theme.mode.light", "Light mode") : t("theme.mode.dark", "Dark mode")}
+              className={`
+                flex items-center w-full rounded-lg transition-all duration-200 hover:bg-muted/60
+                ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 gap-3'}
+              `}
+            >
+              <span className={`text-[16px] ${darkMode ? 'text-indigo-400' : 'text-amber-500'}`}>
+                {darkMode ? <MoonOutlined /> : <SunOutlined />}
+              </span>
               {!collapsed && (
-                <span className="text-xs font-medium text-muted-foreground ml-1">
-                  {currentThemeLabel}
+                <span className="text-xs text-muted-foreground">
+                  {darkMode ? t("theme.mode.dark", "Dark") : t("theme.mode.light", "Light")}
                 </span>
               )}
-              <button
-                onClick={toggleDarkMode}
-                className={`
-                  relative flex items-center justify-center rounded-lg transition-all duration-300 hover:scale-105 active:scale-95
-                  ${collapsed ? 'w-10 h-10' : 'w-8 h-8'}
-                  ${darkMode ? 'bg-indigo-950/30 text-indigo-400' : 'bg-orange-50 text-orange-500'}
-                `}
-              >
-                {darkMode ? <MoonOutlined /> : <SunOutlined />}
-              </button>
-            </div>
+            </button>
 
             {/* Collapse Button */}
             <button
               onClick={() => setCollapsed(!collapsed)}
+              aria-label={collapsed ? t("nav.expandSidebar", "Expand sidebar") : t("nav.collapseSidebar", "Collapse sidebar")}
               className={`
-                flex items-center justify-center w-full rounded-xl transition-all duration-300
-                hover:bg-primary/5 active:scale-95 text-muted-foreground hover:text-primary
-                ${collapsed ? 'h-10' : 'h-10 gap-3'}
+                flex items-center w-full rounded-lg transition-all duration-200
+                hover:bg-muted/60 text-muted-foreground hover:text-foreground
+                ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 gap-3'}
               `}
             >
               {collapsed ? (
-                <MenuUnfoldOutlined className="text-lg" />
+                <MenuUnfoldOutlined className="text-[16px]" />
               ) : (
                 <>
-                  <MenuFoldOutlined className="text-lg" />
-                  <span className="text-sm font-medium">{t('nav.collapseSidebar')}</span>
+                  <MenuFoldOutlined className="text-[16px]" />
+                  <span className="text-xs">{t('nav.collapseSidebar')}</span>
                 </>
               )}
             </button>
@@ -349,52 +360,64 @@ export function AppLayout() {
         background: 'transparent',
         minHeight: '100vh',
       }}>
-        {/* 顶部栏 — 只保留用户菜单，不重复页面标题 */}
+        {/* Header bar */}
         <Header style={{
-          padding: '0 16px',
+          padding: '0 20px',
           background: 'transparent',
           borderBottom: 'none',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'flex-end',
+          justifyContent: 'space-between',
           position: 'relative',
           zIndex: 50,
-          height: 40,
+          height: 48,
         }}>
-          {isMobile && (
-            <button
-              type="button"
-              onClick={() => setCollapsed((prev) => !prev)}
-              className="h-8 w-8 inline-flex items-center justify-center rounded-md mr-auto"
-              aria-label={t("nav.toggleSidebar", "Toggle sidebar")}
-            >
-              <MenuOutlined />
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {isMobile && (
+              <button
+                type="button"
+                onClick={() => setCollapsed((prev) => !prev)}
+                className="h-8 w-8 inline-flex items-center justify-center rounded-md"
+                aria-label={t("nav.toggleSidebar", "Toggle sidebar")}
+              >
+                <MenuOutlined />
+              </button>
+            )}
+            {/* Breadcrumb / Page title */}
+            <nav className="flex items-center text-sm text-muted-foreground" aria-label="Breadcrumb">
+              <span className="font-medium text-foreground">{t(pageTitleKey)}</span>
+            </nav>
+          </div>
+
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-            <div className="flex items-center gap-2 px-2 py-1 rounded-lg cursor-pointer hover:bg-accent/50 transition-colors">
-              <div className="w-7 h-7 rounded-md bg-primary/10 flex items-center justify-center">
-                <UserOutlined className="text-primary text-xs" />
+            <div className="flex items-center gap-2.5 px-2 py-1 rounded-lg cursor-pointer hover:bg-accent/50 transition-colors">
+              <div
+                className="w-7 h-7 rounded-md flex items-center justify-center text-[11px] font-semibold text-primary-foreground"
+                style={{ background: darkMode ? '#818CF8' : '#4F46E5' }}
+              >
+                {userInitials}
               </div>
-              <Text style={{ fontSize: 12, fontWeight: 500 }}>{user?.display_name || user?.user_id || t('common.user')}</Text>
+              <Text style={{ fontSize: 13, fontWeight: 500 }} className="hidden sm:inline">
+                {user?.display_name || user?.user_id || t('common.user')}
+              </Text>
             </div>
           </Dropdown>
         </Header>
 
         {/* Main content */}
         <Content style={{
-          padding: isMobile ? '8px' : '0 16px 16px 16px',
-          minHeight: 'calc(100vh - 44px)',
+          padding: isMobile ? '8px' : '0 20px 20px 20px',
+          minHeight: 'calc(100vh - 48px)',
           overflow: 'auto',
         }}>
-          <Outlet />
+          <div className="page-transition">
+            <Outlet />
+          </div>
         </Content>
       </Layout>
 
-      {/* 帮助文档模态框 */}
       <HelpModal open={helpModalOpen} onClose={() => setHelpModalOpen(false)} />
 
-      {/* 密码修改模态框 */}
       <PasswordChangeModal
         open={showPasswordChange}
         allowClose={!forcePasswordChange}
@@ -405,15 +428,12 @@ export function AppLayout() {
         }}
       />
 
-      {/* 个人设置模态框 */}
       <ProfileModal
         open={showProfileModal}
         onClose={() => setShowProfileModal(false)}
       />
 
-      {/* Global styles */}
       <style>{`
-        /* Kill any Ant Design sider borders/shadows */
         .ant-layout-sider,
         .ant-layout-sider *,
         .ant-layout-sider-children {
@@ -421,63 +441,11 @@ export function AppLayout() {
           border-inline-end: none !important;
           box-shadow: none !important;
         }
-        .app-sider .ant-menu-item {
-          margin: 4px 12px !important;
-          border-radius: 10px !important;
-          height: 44px !important;
-          line-height: 44px !important;
-          width: calc(100% - 24px) !important;
-          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-          /* Improved contrast for dark mode - use brighter text color */
-          color: ${darkMode ? '#D1D5DB' : '#374151'} !important;
-        }
 
-        .app-sider .ant-menu-item .ant-menu-item-icon {
-          font-size: 16px !important;
-          transition: transform 0.2s !important;
-          /* Icon color matching text for better readability */
-          color: ${darkMode ? '#9CA3AF' : '#6B7280'} !important;
-        }
-
-        .app-sider .ant-menu-item:hover .ant-menu-item-icon {
-          transform: scale(1.1);
-          color: ${darkMode ? '#E5E7EB' : '#374151'} !important;
-        }
-
-        .app-sider .ant-menu-item:hover {
-          background: ${darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.03)'} !important;
-          color: ${darkMode ? '#F9FAFB' : '#111827'} !important;
-        }
-
-        .app-sider .ant-menu-item-selected {
-          background: ${darkMode
-          ? 'rgba(59, 130, 246, 0.12)'
-          : 'rgba(59, 130, 246, 0.06)'} !important;
-          color: #3B82F6 !important;
-          font-weight: 600 !important;
-        }
-
-        .app-sider .ant-menu-item-selected .ant-menu-item-icon {
-          color: #3B82F6 !important;
-        }
-
-        .app-sider .ant-menu-item-selected::after {
-          content: '';
-          position: absolute;
-          left: 0;
-          top: 12px;
-          bottom: 12px;
-          width: 3px;
-          background: #3B82F6;
-          border-radius: 0 4px 4px 0;
-          display: block !important;
-        }
-
-        /* Scrollbar styling */
         .app-sider::-webkit-scrollbar,
         .ant-layout-content::-webkit-scrollbar {
-          width: 6px;
-          height: 6px;
+          width: 4px;
+          height: 4px;
         }
 
         .app-sider::-webkit-scrollbar-track,
@@ -486,12 +454,12 @@ export function AppLayout() {
         }
 
         .app-sider::-webkit-scrollbar-thumb {
-          background: ${darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'};
-          border-radius: 3px;
+          background: ${darkMode ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.08)'};
+          border-radius: 2px;
         }
 
         .app-sider::-webkit-scrollbar-thumb:hover {
-          background: ${darkMode ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.2)'};
+          background: ${darkMode ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.15)'};
         }
       `}</style>
     </Layout>

@@ -328,7 +328,7 @@ function ThinkingIndicator({ message }: { message?: string }) {
       exit={{ opacity: 0, y: -10 }}
       className="flex items-center gap-3 py-2"
     >
-      <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center">
+      <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center">
         <Brain className="h-3.5 w-3.5 text-white animate-pulse" />
       </div>
       <div className="flex items-center gap-2">

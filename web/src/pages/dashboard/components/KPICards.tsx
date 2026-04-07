@@ -6,11 +6,6 @@ import {
   ArrowUp,
   ArrowDown,
   Minus,
-  Activity,
-  DollarSign,
-  Zap,
-  CheckCircle,
-  Database,
 } from "lucide-react";
 import { AreaChart, Area, ResponsiveContainer } from "recharts";
 import { useMemo } from "react";
@@ -65,7 +60,7 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
       <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 600, color: colors.accent, marginTop: 6 }}>
         <span>NEW</span>
         <span style={{ color: colors.textSecondary, fontWeight: 400, marginLeft: 2 }}>
-          {t("dashboard.trend.noBaseline", "无基线对比")}
+          {t("dashboard.trend.noBaseline")}
         </span>
       </div>
     );
@@ -84,8 +79,8 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
   const isGood = isUp === isPositiveGood;
   const color = isGood ? colors.success : colors.error;
   const trendLabel = isUp
-    ? t("dashboard.trend.up", "增长")
-    : t("dashboard.trend.down", "下降");
+    ? t("dashboard.trend.up")
+    : t("dashboard.trend.down");
 
   return (
     <div
@@ -103,8 +98,7 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
 }
 
 // ── Mini sparkline (7-day trend) ────────────────────────────────────
-function Sparkline({ color, darkMode }: { color: string; darkMode: boolean }) {
-  // Memoize sparkline data to prevent re-render jitter
+function Sparkline({ id, color }: { id: string; color: string }) {
   const data = useMemo(
     () => Array.from({ length: 7 }, (_, i) => ({
       v: 40 + Math.sin(i * 0.8) * 20 + ((i * 17 + 7) % 15),
@@ -112,12 +106,14 @@ function Sparkline({ color, darkMode }: { color: string; darkMode: boolean }) {
     []
   );
 
+  const gradientId = `spark-${id}`;
+
   return (
     <div style={{ height: 32, marginTop: 8, opacity: 0.7 }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
           <defs>
-            <linearGradient id={`spark-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={color} stopOpacity={0.3} />
               <stop offset="100%" stopColor={color} stopOpacity={0} />
             </linearGradient>
@@ -127,7 +123,7 @@ function Sparkline({ color, darkMode }: { color: string; darkMode: boolean }) {
             dataKey="v"
             stroke={color}
             strokeWidth={1.5}
-            fill={`url(#spark-${color.replace('#', '')})`}
+            fill={`url(#${gradientId})`}
             isAnimationActive={false}
           />
         </AreaChart>
@@ -281,7 +277,7 @@ function KPICard({
 
       {/* Sparkline at bottom */}
       {!loading && !noData && (
-        <Sparkline color={accentColor} darkMode={darkMode} />
+        <Sparkline id={id} color={accentColor} />
       )}
     </article>
   );
@@ -342,14 +338,14 @@ export function KPICards() {
     },
     {
       id: "cost",
-      title: t("dashboard.kpi.totalCostUsd", "总成本 (USD)"),
+      title: t("dashboard.kpi.totalCostUsd"),
       value: hasData ? formatCurrency(data?.total_cost_usd || 0) : "--",
       accentColor: colors.success,
       trend: costTrend,
       isPositiveGood: false,
       isNewData,
       noData: !hasData,
-      ariaLabel: `${t("dashboard.kpi.totalCostUsd", "总成本")} ${hasData ? data?.total_cost_usd?.toFixed(2) : 0} USD`,
+      ariaLabel: `${t("dashboard.kpi.totalCostUsd")} ${hasData ? data?.total_cost_usd?.toFixed(2) : 0} USD`,
     },
     {
       id: "latency",

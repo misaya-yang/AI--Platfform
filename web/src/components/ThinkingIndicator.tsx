@@ -102,7 +102,7 @@ export function ThinkingIndicator({
       >
         {/* Pulsing ring indicator */}
         <div className="relative">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/20 animate-thinking-ring">
+          <div className="w-14 h-14 rounded-2xl bg-primary flex items-center justify-center shadow-lg shadow-primary/20 animate-thinking-ring">
             <Icon className="w-7 h-7 text-white" />
           </div>
         </div>
@@ -122,8 +122,8 @@ export function ThinkingIndicator({
         </AnimatePresence>
 
         {/* Shimmer bar */}
-        <div className="w-32 h-1 rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-transparent via-violet-500/60 to-transparent animate-shimmer" />
+        <div className="w-32 h-1 rounded-full bg-primary/10 dark:bg-primary/20 overflow-hidden">
+          <div className="h-full bg-gradient-to-r from-transparent via-primary/60 to-transparent animate-shimmer" />
         </div>
       </div>
     );
@@ -136,15 +136,15 @@ export function ThinkingIndicator({
       animate={{ opacity: 1, y: 0 }}
       className={cn(
         "inline-flex items-center gap-3 py-2.5 px-4 rounded-xl",
-        "bg-gradient-to-r from-violet-50/60 to-purple-50/60",
-        "dark:from-violet-900/15 dark:to-purple-900/15",
-        "border border-violet-200/40 dark:border-violet-700/25",
+        "bg-primary/5 dark:bg-primary/10",
+        "",
+        "border border-primary/15 dark:border-primary/20",
         className
       )}
     >
       {/* Animated indicator */}
       <div className="relative flex-shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-md shadow-violet-500/20 animate-thinking-ring">
+        <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-md shadow-primary/20 animate-thinking-ring">
           <Icon className="w-4 h-4 text-white" />
         </div>
       </div>

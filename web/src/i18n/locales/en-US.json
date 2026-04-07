@@ -253,6 +253,19 @@
   "dashboard": {
     "title": "Dashboard",
     "loadingServices": "Loading services...",
+    "tabs": {
+      "summary": "Overview",
+      "operations": "Operations",
+      "reliability": "Reliability",
+      "governance": "Governance",
+      "tracing": "Tracing"
+    },
+    "actions": {
+      "fullscreen": "Fullscreen"
+    },
+    "panel": {
+      "loadError": "Failed to load data"
+    },
     "metrics": {
       "title": "Metrics Overview",
       "totalRequests": "Total Requests",
@@ -309,7 +322,9 @@
       "internalShort": "Internal",
       "externalShort": "External",
       "reset": "Reset",
-      "anonymousUser": "Anonymous user {{id}}"
+      "anonymousUser": "Anonymous user {{id}}",
+      "byDay": "Daily",
+      "byHour": "Hourly"
     },
     "refresh": {
       "manual": "Manual",
@@ -317,15 +332,20 @@
       "now": "Refresh now",
       "seconds": "{{count}}s",
       "minutes": "{{count}}m",
-      "lastUpdated": "Last updated: {{time}}"
+      "lastUpdated": "Last updated: {{time}}",
+      "30s": "30s",
+      "1min": "1 min",
+      "5min": "5 min"
     },
     "fullscreen": {
       "enter": "Enter fullscreen",
       "exit": "Exit fullscreen"
     },
     "trend": {
-      "vsPrevious": "vs previous period",
-      "noBaseline": "No baseline comparison"
+      "up": "up",
+      "down": "down",
+      "vsPrevious": "vs prev.",
+      "noBaseline": "No baseline"
     },
     "serviceHealth": {
       "title": "Service Health",
@@ -458,7 +478,7 @@
       }
     },
     "kpi": {
-      "noRealData": "No real request data",
+      "noRealData": "No data in period",
       "totalCostUsd": "Total Cost (USD)"
     },
     "failure": {

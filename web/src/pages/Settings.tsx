@@ -239,11 +239,11 @@ export function SettingsPage() {
       {/* 配置层级说明 */}
       <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-r from-primary/5 to-transparent dark:from-primary/10 dark:to-transparent">
         {/* Left gradient border */}
-        <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-violet-500 via-purple-500 to-fuchsia-500" />
+        <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary" />
         <CardContent className="pt-4 pl-5">
           <div className="flex items-start gap-3">
-            <div className="mt-0.5 p-1.5 rounded-full bg-gradient-to-br from-violet-500/20 to-purple-500/20 dark:from-violet-500/30 dark:to-purple-500/30">
-              <svg className="h-4 w-4 text-violet-600 dark:text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="mt-0.5 p-1.5 rounded-full bg-primary/10 dark:bg-primary/20">
+              <svg className="h-4 w-4 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
             </div>
@@ -398,7 +398,7 @@ export function SettingsPage() {
             <Button
               onClick={() => updateAuthMutation.mutate({ ...authForm, enabled: authForm.jwt_enabled || authForm.api_key_enabled, provider: "custom" })}
               disabled={updateAuthMutation.isPending}
-              className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
+              className="transition-all duration-200"
             >
               {updateAuthMutation.isPending ? t("settings.auth.saving") : t("settings.auth.save")}
             </Button>
@@ -493,7 +493,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createRateLimitMutation.mutate({ ...rateLimitForm, enabled: true })}
                 disabled={createRateLimitMutation.isPending}
-                className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
+                className="transition-all duration-200"
               >
                 {t("settings.rateLimit.addRule")}
               </Button>
@@ -557,19 +557,19 @@ export function SettingsPage() {
                     key={s.value}
                     className={`flex items-center justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 ${
                       lbStrategy === s.value
-                        ? "border-violet-500/50 bg-gradient-to-r from-violet-500/10 to-purple-500/5 shadow-md shadow-violet-500/10"
+                        ? "border-primary/40 bg-primary/5 dark:bg-primary/10 shadow-sm"
                         : "hover:bg-muted/50 hover:border-border/80"
                     }`}
                     onClick={() => setLbStrategy(s.value)}
                   >
                     <div>
-                      <div className={`font-medium ${lbStrategy === s.value ? "text-violet-700 dark:text-violet-300" : ""}`}>{s.label}</div>
+                      <div className={`font-medium ${lbStrategy === s.value ? "text-primary" : ""}`}>{s.label}</div>
                       <div className="text-sm text-muted-foreground">{s.description}</div>
                     </div>
                     <div
                       className={`h-5 w-5 rounded-full border-2 transition-all duration-200 flex items-center justify-center ${
                         lbStrategy === s.value
-                          ? "border-violet-500 bg-gradient-to-br from-violet-500 to-purple-500"
+                          ? "border-primary bg-primary"
                           : "border-muted-foreground/50"
                       }`}
                     >
@@ -587,7 +587,7 @@ export function SettingsPage() {
                 <Button
                   onClick={() => updateLbMutation.mutate({ strategy: lbStrategy })}
                   disabled={updateLbMutation.isPending}
-                  className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
+                  className="transition-all duration-200"
                 >
                   {updateLbMutation.isPending ? t("settings.loadBalancer.saving") : t("settings.loadBalancer.save")}
                 </Button>
@@ -626,7 +626,7 @@ export function SettingsPage() {
               <Button
                 onClick={() => createApiKeyMutation.mutate(apiKeyForm)}
                 disabled={createApiKeyMutation.isPending || !apiKeyForm.name}
-                className="bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-md shadow-purple-500/25 hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200"
+                className="transition-all duration-200"
               >
                 {t("settings.apiKeys.generate")}
               </Button>

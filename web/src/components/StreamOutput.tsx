@@ -354,7 +354,7 @@ export const StreamOutput = memo(function StreamOutput({
       {isStreaming && (
         <span className="inline-flex items-center ml-0.5 align-text-bottom">
           <span
-            className="inline-block w-[2px] h-[18px] rounded-full bg-gradient-to-b from-violet-500 to-purple-500"
+            className="inline-block w-[2px] h-[18px] rounded-full bg-primary"
             style={{
               animation: 'cursor-blink 1s ease-in-out infinite',
             }}

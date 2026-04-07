@@ -5,8 +5,6 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Spin, Modal, Table, Tag, Tooltip } from "antd";
 import {
-  CheckCircleOutlined,
-  CloseCircleOutlined,
   CloudOutlined,
   RobotOutlined,
   ThunderboltOutlined,
@@ -20,7 +18,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { api } from "@/lib/api";
 
 // Import unified layout from dashboard styles
-import { LAYOUT, getColors, gridStyles, TRANSITION } from "@/pages/dashboard/styles";
+import { LAYOUT, getColors, TRANSITION } from "@/pages/dashboard/styles";
 import { PanelWrapper } from "@/pages/dashboard/components/PanelWrapper";
 
 // Provider configuration
@@ -92,6 +90,8 @@ function ProviderRow({
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
+  const config = PROVIDER_CONFIG[providerKey];
+  const brandColor = config?.color || colors.textMuted;
 
   return (
     <div
@@ -100,7 +100,7 @@ function ProviderRow({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "10px 16px",
+        padding: "10px 14px",
         borderRadius: 8,
         cursor: configured ? "pointer" : "default",
         transition: TRANSITION.fast,
@@ -116,38 +116,58 @@ function ProviderRow({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {/* Status dot */}
+        {/* Provider brand icon */}
         <div
           style={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            background: configured ? colors.success : "transparent",
-            border: configured ? "none" : `1.5px solid ${colors.textSecondary}`,
+            width: 28,
+            height: 28,
+            borderRadius: 6,
+            background: configured ? `${brandColor}15` : colors.innerBg,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: configured ? brandColor : colors.textMuted,
+            fontSize: 13,
             flexShrink: 0,
           }}
-        />
+        >
+          {config?.icon || <CloudOutlined />}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <span
+            style={{
+              fontSize: 14,
+              fontWeight: configured ? 500 : 400,
+              color: configured ? colors.textPrimary : colors.textSecondary,
+              lineHeight: 1.3,
+            }}
+          >
+            {name}
+          </span>
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {configured && modelCount > 0 && (
+          <span style={{ fontSize: 12, color: colors.textMuted }}>
+            {t("services.providersStatus.modelsCount", { count: modelCount })}
+          </span>
+        )}
+        {/* Status badge with text */}
         <span
           style={{
-            fontSize: 14,
-            fontWeight: configured ? 500 : 400,
-            color: configured ? colors.textPrimary : colors.textSecondary,
+            fontSize: 11,
+            fontWeight: 500,
+            padding: "2px 8px",
+            borderRadius: 4,
+            background: configured ? colors.successBg : colors.innerBg,
+            color: configured ? colors.success : colors.textMuted,
           }}
         >
-          {name}
+          {configured
+            ? t("services.providersStatus.table.enabled", "Online")
+            : t("services.providersStatus.unconfigured")}
         </span>
       </div>
-      <span
-        style={{
-          fontSize: 13,
-          color: configured ? colors.textSecondary : colors.textSecondary,
-          fontWeight: 400,
-        }}
-      >
-        {configured && modelCount > 0
-          ? t("services.providersStatus.modelsCount", { count: modelCount })
-          : t("services.providersStatus.unconfigured")}
-      </span>
     </div>
   );
 }

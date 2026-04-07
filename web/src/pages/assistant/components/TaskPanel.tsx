@@ -167,8 +167,8 @@ function CollectedInfoSection({ collectedInfo }: { collectedInfo: CollectedInfo[
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 transition-colors group"
       >
-        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-gradient-to-br from-violet-500/20 to-purple-500/20 group-hover:from-violet-500/30 group-hover:to-purple-500/30 transition-colors">
-          <Database className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
+        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-primary/15 group-hover:bg-primary/25 transition-colors">
+          <Database className="h-3.5 w-3.5 text-primary" />
         </div>
         <span>
           {collectedInfo.length}{" "}
@@ -191,7 +191,7 @@ function CollectedInfoSection({ collectedInfo }: { collectedInfo: CollectedInfo[
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="mt-3 space-y-2 p-3 rounded-2xl bg-gradient-to-br from-violet-50/80 to-purple-50/80 dark:from-violet-950/30 dark:to-purple-950/30 border border-violet-200/50 dark:border-violet-800/30">
+            <div className="mt-3 space-y-2 p-3 rounded-2xl bg-primary/5 dark:bg-primary/10 border border-primary/15 dark:border-primary/20">
               {collectedInfo.map((info, idx) => (
                 <motion.div
                   key={`${info.key}-${idx}`}

@@ -30,13 +30,13 @@ export function SegmentCard({
     return (
       <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-md transition-all duration-200 bg-card overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2.5 bg-gradient-to-r from-violet-50/80 to-card dark:from-violet-950/30 dark:to-card border-b border-border/60">
+        <div className="flex items-center justify-between px-4 py-2.5 bg-primary/[0.03] dark:bg-primary/[0.06] border-b border-border/60">
           <div className="flex items-center gap-3">
-            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 text-white text-xs font-bold shadow-sm">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-primary text-white text-xs font-bold shadow-sm">
               <ImageIcon className="w-3.5 h-3.5" />
             </span>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="text-xs font-mono bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800">
+              <Badge variant="outline" className="text-xs font-mono bg-primary/5 dark:bg-primary/10 text-primary border-primary/20">
                 {t("knowledge.segment.image")}
               </Badge>
               {segment.image_filename && (

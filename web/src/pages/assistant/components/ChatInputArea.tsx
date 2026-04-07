@@ -142,7 +142,7 @@ export function ChatInputArea({
                     f.status === "error"
                       ? "bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400"
                       : f.status === "uploading"
-                        ? "bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400"
+                        ? "bg-primary/10 dark:bg-primary/20 text-primary dark:text-primary"
                         : f.status === "success"
                           ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
                           : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
@@ -186,7 +186,7 @@ export function ChatInputArea({
       <div className="p-4">
         <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
           {/* Input container */}
-          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm focus-within:border-violet-300 dark:focus-within:border-violet-700 focus-within:shadow-lg focus-within:shadow-violet-500/5 transition-all duration-200">
+          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm focus-within:border-primary/30 dark:focus-within:border-primary/40 focus-within:shadow-lg focus-within:shadow-primary/5 transition-all duration-200">
             {/* Quick actions menu */}
             <QuickActionsMenu
               onFileUpload={() => fileInputRef.current?.click()}
@@ -240,7 +240,7 @@ export function ChatInputArea({
               className={cn(
                 "flex-1 min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-sm text-slate-700 dark:text-slate-200",
                 isImageMode
-                  ? "placeholder:text-violet-500 dark:placeholder:text-violet-400"
+                  ? "placeholder:text-primary dark:placeholder:text-primary/80"
                   : "placeholder:text-slate-400 dark:placeholder:text-slate-500"
               )}
               disabled={isStreaming || isGeneratingImage}
@@ -264,8 +264,8 @@ export function ChatInputArea({
                   "h-10 w-10 shrink-0 rounded-xl transition-all duration-200",
                   canSend
                     ? isImageMode
-                      ? "bg-gradient-to-r from-pink-500 to-rose-600 hover:from-pink-600 hover:to-rose-700 shadow-lg shadow-pink-500/25 hover:shadow-pink-500/40 hover:scale-105"
-                      : "bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 hover:scale-105"
+                      ? "bg-pink-500 hover:bg-pink-600 shadow-sm hover:shadow-md hover:scale-105"
+                      : "bg-primary hover:bg-primary/90 shadow-sm hover:shadow-md hover:scale-105"
                     : "bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed"
                 )}
                 onClick={onSend}

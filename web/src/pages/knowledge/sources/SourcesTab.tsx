@@ -86,11 +86,11 @@ export function SourcesTab({
       description: t("knowledge.sources.webImportDesc"),
       icon: Link,
       colorClass: {
-        gradient: "from-violet-500/10 to-purple-500/10",
-        border: "border-violet-500/20",
-        iconBg: "bg-gradient-to-br from-violet-500/10 to-purple-500/10 border-violet-500/20",
-        iconColor: "text-violet-500",
-        buttonHover: "hover:bg-violet-500/10 hover:text-violet-600 hover:border-violet-500/30",
+        gradient: "from-primary/10 to-primary/5",
+        border: "border-primary/20",
+        iconBg: "bg-gradient-to-br from-primary/10 to-primary/5 border-primary/20",
+        iconColor: "text-primary",
+        buttonHover: "hover:bg-primary/10 hover:text-primary hover:border-primary/30",
       },
       stat: {
         label: t("knowledge.sources.importedPages"),

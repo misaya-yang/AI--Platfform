@@ -21,10 +21,10 @@ export function PromptCard({ prompt, onClick }: PromptCardProps) {
       whileHover={{ scale: 1.02, y: -2 }}
       whileTap={{ scale: 0.98 }}
       onClick={onClick}
-      className="flex flex-col items-start gap-2 p-4 rounded-2xl bg-white dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/50 hover:border-violet-300 dark:hover:border-violet-700 hover:shadow-lg hover:shadow-violet-500/5 transition-all duration-200 text-left group"
+      className="flex flex-col items-start gap-2 p-4 rounded-2xl bg-white dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/50 hover:border-primary/30 dark:hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5 transition-all duration-200 text-left group"
     >
       <div className="flex items-center gap-2">
-        <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500/10 to-purple-500/10 text-violet-600 dark:text-violet-400 group-hover:from-violet-500/20 group-hover:to-purple-500/20 transition-colors">
+        <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-primary/10 text-primary group-hover:bg-primary/20 transition-colors">
           {prompt.icon}
         </div>
         <Badge variant="secondary" className="text-[10px] px-1.5 py-0 bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400">

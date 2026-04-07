@@ -74,9 +74,11 @@ export default {
         },
       },
       borderRadius: {
-        lg: "0.5rem",    // 8px - cards, modals
-        md: "0.375rem",  // 6px - buttons, inputs
-        sm: "0.25rem",   // 4px - badges, tags
+        xl: "1rem",     // 16px - modals, large containers
+        lg: "0.75rem",  // 12px - cards
+        md: "0.5rem",   // 8px - buttons, inputs
+        sm: "0.375rem", // 6px - badges, tags, small components
+        xs: "0.25rem",  // 4px - minimal
       },
       keyframes: {
         "accordion-down": {

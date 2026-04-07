@@ -80,8 +80,8 @@ export function ServiceCard({
     <>
       <Card
         className={cn(
-          "relative overflow-hidden cursor-pointer group transition-all duration-300 border bg-card hover:shadow-md hover:border-primary/50",
-          selected && "ring-2 ring-primary border-primary shadow-sm"
+          "relative overflow-hidden cursor-pointer group transition-all duration-200 border bg-card hover:shadow-md hover:border-primary/30",
+          selected && "ring-1 ring-primary/50 border-primary/40 shadow-sm bg-primary/[0.02] dark:bg-primary/[0.04]"
         )}
         onClick={onSelect}
       >

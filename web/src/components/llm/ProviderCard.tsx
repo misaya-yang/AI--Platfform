@@ -11,7 +11,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
-  Cloud,
   Key,
   Settings,
   Trash2,
@@ -22,6 +21,23 @@ import {
 } from "lucide-react";
 import type { Provider } from "@/api/providers";
 import { testProviderConnection, getApiTypeDisplayName } from "@/api/providers";
+
+// Provider brand colors for visual differentiation
+const PROVIDER_BRANDS: Record<string, { bg: string; text: string; darkBg: string; darkText: string; initial: string }> = {
+  openai:    { bg: "bg-emerald-50", text: "text-emerald-700", darkBg: "dark:bg-emerald-950/40", darkText: "dark:text-emerald-400", initial: "OA" },
+  anthropic: { bg: "bg-amber-50", text: "text-amber-700", darkBg: "dark:bg-amber-950/40", darkText: "dark:text-amber-400", initial: "AN" },
+  deepseek:  { bg: "bg-indigo-50", text: "text-indigo-700", darkBg: "dark:bg-indigo-950/40", darkText: "dark:text-indigo-400", initial: "DS" },
+  google:    { bg: "bg-blue-50", text: "text-blue-700", darkBg: "dark:bg-blue-950/40", darkText: "dark:text-blue-400", initial: "GG" },
+  dashscope: { bg: "bg-orange-50", text: "text-orange-700", darkBg: "dark:bg-orange-950/40", darkText: "dark:text-orange-400", initial: "DS" },
+};
+
+function getProviderBrand(id: string) {
+  const key = id.toLowerCase();
+  for (const [k, v] of Object.entries(PROVIDER_BRANDS)) {
+    if (key.includes(k)) return v;
+  }
+  return { bg: "bg-slate-50", text: "text-slate-700", darkBg: "dark:bg-slate-800", darkText: "dark:text-slate-400", initial: id.slice(0, 2).toUpperCase() };
+}
 
 interface ProviderCardProps {
   provider: Provider;
@@ -63,10 +79,18 @@ export function ProviderCard({ provider, onEdit, onDelete }: ProviderCardProps) 
     >
       <CardContent className="p-4 relative">
         <div className="flex items-center gap-4">
-          {/* Icon */}
-          <div className="flex-shrink-0 p-2.5 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400 group-hover:bg-blue-100 dark:group-hover:bg-blue-900/60 transition-colors duration-300 border border-blue-100 dark:border-blue-900">
-            <Cloud className="h-6 w-6" />
-          </div>
+          {/* Provider brand icon */}
+          {(() => {
+            const brand = getProviderBrand(provider.provider_id);
+            return (
+              <div className={cn(
+                "flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold transition-colors duration-200",
+                brand.bg, brand.text, brand.darkBg, brand.darkText
+              )}>
+                {brand.initial}
+              </div>
+            );
+          })()}
 
           {/* Content */}
           <div className="flex-1 min-w-0">
@@ -104,8 +128,8 @@ export function ProviderCard({ provider, onEdit, onDelete }: ProviderCardProps) 
             </div>
           </div>
 
-          {/* Actions */}
-          <div className="flex-shrink-0 flex items-center gap-1">
+          {/* Actions — visible on hover */}
+          <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
             <Button
               variant="ghost"
               size="icon"

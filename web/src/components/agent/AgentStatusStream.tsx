@@ -114,19 +114,19 @@ const statusConfig: Record<AgentStatus, {
   },
   thinking: {
     icon: Brain,
-    color: "text-violet-500",
-    bgColor: "bg-gradient-to-r from-violet-500/5 via-purple-500/5 to-fuchsia-500/5",
-    borderColor: "border-violet-500/30 dark:border-violet-400/30",
-    glowColor: "shadow-[0_0_20px_-5px] shadow-violet-500/30",
+    color: "text-primary",
+    bgColor: "bg-primary/5",
+    borderColor: "border-primary/30 dark:border-primary/30",
+    glowColor: "shadow-[0_0_20px_-5px] shadow-primary/30",
     label: "Thinking",
     animate: true,
   },
   retrieving: {
     icon: Search,
-    color: "text-purple-500",
-    bgColor: "bg-gradient-to-r from-purple-500/5 via-indigo-500/5 to-blue-500/5",
-    borderColor: "border-purple-500/30 dark:border-purple-400/30",
-    glowColor: "shadow-[0_0_20px_-5px] shadow-purple-500/30",
+    color: "text-primary",
+    bgColor: "bg-gradient-to-r from-primary/5 via-indigo-500/5 to-blue-500/5",
+    borderColor: "border-primary/30 dark:border-primary/30",
+    glowColor: "shadow-[0_0_20px_-5px] shadow-primary/30",
     label: "Retrieving",
     animate: true,
   },
@@ -230,7 +230,7 @@ function ThinkingContent({ state }: { state: AgentStatusStreamState }) {
           <div className="flex items-center gap-2 mt-2">
             <div className="flex-1 h-1 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
               <motion.div
-                className="h-full bg-gradient-to-r from-violet-500 to-purple-500 rounded-full"
+                className="h-full bg-primary rounded-full"
                 initial={{ width: 0 }}
                 animate={{ width: `${(state.phaseProgress.current / state.phaseProgress.total) * 100}%` }}
                 transition={{ duration: 0.3 }}
@@ -254,14 +254,14 @@ function RetrievalContent({ state }: { state: AgentStatusStreamState }) {
   return (
     <div className="flex-1 min-w-0 space-y-2">
       <div className="flex items-center gap-2">
-        <Database className="h-4 w-4 text-purple-500" />
+        <Database className="h-4 w-4 text-primary" />
         <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
           {t("agent.status.retrieving", "Searching knowledge base (RAG)...")}
         </p>
       </div>
 
       {retrieval?.query && (
-        <div className="px-3 py-2 bg-purple-500/5 rounded-lg border border-purple-500/10">
+        <div className="px-3 py-2 bg-primary/5 rounded-lg border border-primary/10">
           <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
             {t("agent.status.searchQuery", "Search query:")}
           </p>
@@ -291,7 +291,7 @@ function RetrievalContent({ state }: { state: AgentStatusStreamState }) {
             {[0, 1, 2].map((i) => (
               <motion.div
                 key={i}
-                className="w-1.5 h-1.5 rounded-full bg-purple-500"
+                className="w-1.5 h-1.5 rounded-full bg-primary"
                 animate={{
                   scale: [1, 1.5, 1],
                   opacity: [0.5, 1, 0.5],

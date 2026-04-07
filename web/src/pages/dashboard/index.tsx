@@ -64,11 +64,11 @@ function DashboardContent() {
   };
 
   const tabs: { key: DashTab; label: string }[] = [
-    { key: "summary", label: "总览" },
-    { key: "operations", label: "运营" },
-    { key: "reliability", label: "可靠性" },
-    { key: "governance", label: "治理" },
-    { key: "tracing", label: "追踪" },
+    { key: "summary", label: t("dashboard.tabs.summary") },
+    { key: "operations", label: t("dashboard.tabs.operations") },
+    { key: "reliability", label: t("dashboard.tabs.reliability") },
+    { key: "governance", label: t("dashboard.tabs.governance") },
+    { key: "tracing", label: t("dashboard.tabs.tracing") },
   ];
 
   const workspaceMap: Record<string, string> = {
@@ -76,8 +76,8 @@ function DashboardContent() {
   };
 
   const refreshOptions: { label: string; value: RefreshInterval }[] = [
-    { label: "手动", value: 0 }, { label: "30秒", value: 30 },
-    { label: "1分钟", value: 60 }, { label: "5分钟", value: 300 },
+    { label: t("dashboard.refresh.manual"), value: 0 }, { label: t("dashboard.refresh.30s"), value: 30 },
+    { label: t("dashboard.refresh.1min"), value: 60 }, { label: t("dashboard.refresh.5min"), value: 300 },
   ];
 
   const P = LAYOUT.PAGE_PADDING;
@@ -99,8 +99,8 @@ function DashboardContent() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Select size="small" value={refreshInterval} onChange={setRefreshInterval}
               options={refreshOptions} style={{ width: 80 }} />
-            <Tooltip title="刷新"><button onClick={triggerRefresh} className="dash-icon-btn"><SyncOutlined /></button></Tooltip>
-            <Tooltip title="全屏"><button onClick={() => document.documentElement.requestFullscreen?.()} className="dash-icon-btn"><ExpandOutlined /></button></Tooltip>
+            <Tooltip title={t("common.refresh")}><button onClick={triggerRefresh} className="dash-icon-btn"><SyncOutlined /></button></Tooltip>
+            <Tooltip title={t("dashboard.actions.fullscreen")}><button onClick={() => document.documentElement.requestFullscreen?.()} className="dash-icon-btn"><ExpandOutlined /></button></Tooltip>
           </div>
         </div>
 
@@ -115,7 +115,7 @@ function DashboardContent() {
           <UserOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
           <Select size="small" value={userId} onChange={setUserId} options={userOptions} style={{ minWidth: 110 }} />
           <Select size="small" value={source} onChange={(v: string) => setSource(v as SourceFilter)}
-            options={[{ label: "全部来源", value: "all" }, { label: "内部", value: "internal" }, { label: "外部", value: "external" }]}
+            options={[{ label: t("dashboard.filters.allSources"), value: "all" }, { label: t("dashboard.filters.internal"), value: "internal" }, { label: t("dashboard.filters.external"), value: "external" }]}
             style={{ minWidth: 90 }} />
           <div style={{ width: 1, height: 18, background: colors.border, margin: "0 2px" }} />
           <CalendarOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
@@ -124,7 +124,7 @@ function DashboardContent() {
             onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
             format="YYYY-MM-DD" allowClear={false} style={{ width: 220 }} />
           <Select size="small" value={granularity} onChange={setGranularity}
-            options={[{ label: "按天", value: "day" }, { label: "按小时", value: "hour" }]}
+            options={[{ label: t("dashboard.filters.byDay"), value: "day" }, { label: t("dashboard.filters.byHour"), value: "hour" }]}
             style={{ width: 75 }} />
         </div>
 
