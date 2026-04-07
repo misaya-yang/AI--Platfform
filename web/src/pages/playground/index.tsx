@@ -259,7 +259,7 @@ export function PlaygroundPage() {
                   (s.metadata?.title as string | undefined) ||
                   (s.metadata?.name as string | undefined) ||
                   t("playground.newChat", "New chat");
-                const ts = (s.updated_at || s.created_at) as string;
+                const ts = (s.created_at || s.updated_at) as string;
                 const active = activeSessionId === s.session_id;
                 const colorVariants = [
                   { bg: "bg-blue-500/10", border: "border-l-blue-500", accent: "text-blue-600 dark:text-blue-400" },
