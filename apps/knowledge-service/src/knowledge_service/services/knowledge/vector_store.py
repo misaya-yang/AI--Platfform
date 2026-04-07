@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient

@@ -634,16 +634,11 @@ class IngestionService:
                     }
                     # P2a: Generate BM25 sparse vector for native Qdrant search
                     sparse_indices, sparse_values = text_to_sparse_vector(seg["text"])
-                    vector: dict | list = (
-                        {
-                            "": embeddings[j],
-                            "bm25": qmodels.SparseVector(
-                                indices=sparse_indices, values=sparse_values,
-                            ),
-                        }
-                        if sparse_indices
-                        else embeddings[j]  # Fallback to dense-only if no tokens
-                    )
+                    vector: dict = {"": embeddings[j]}
+                    if sparse_indices:
+                        vector["bm25"] = qmodels.SparseVector(
+                            indices=sparse_indices, values=sparse_values,
+                        )
                     points.append(
                         {
                             "id": seg["segment_id"],

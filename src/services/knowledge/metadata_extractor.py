@@ -131,18 +131,20 @@ class MetadataExtractor:
         batch_size = min(batch_size, 20)
         results: list[ExtractionResult] = []
 
-        # Process in batches
+        # Process in batches — track actual batch lengths for error padding
         tasks = []
+        batch_lengths = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
+            batch_lengths.append(len(batch))
             tasks.append(self._call_llm_batch(batch))
 
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for br in batch_results:
+        for br, actual_len in zip(batch_results, batch_lengths):
             if isinstance(br, Exception):
                 logger.warning(f"Batch extraction failed: {br}")
-                results.extend([ExtractionResult() for _ in range(batch_size)])
+                results.extend([ExtractionResult() for _ in range(actual_len)])
             else:
                 results.extend(br)
 
@@ -171,14 +173,16 @@ class MetadataExtractor:
         return parsed
 
     async def _call_api(self, prompt: str, max_tokens: int = 300) -> str | None:
-        """Make the actual API call (supports dashscope and gemini)."""
+        """Make the actual API call (supports dashscope and gemini).
+
+        Note: caller (extract_single/extract_batch) manages the semaphore.
+        """
         client = await self._get_client()
         try:
-            async with self._semaphore:
-                if self.provider == "gemini":
-                    return await self._call_gemini(client, prompt, max_tokens)
-                else:
-                    return await self._call_openai_compat(client, prompt, max_tokens)
+            if self.provider == "gemini":
+                return await self._call_gemini(client, prompt, max_tokens)
+            else:
+                return await self._call_openai_compat(client, prompt, max_tokens)
         except Exception as e:
             logger.warning(f"LLM metadata extraction API error: {e}")
             return None
