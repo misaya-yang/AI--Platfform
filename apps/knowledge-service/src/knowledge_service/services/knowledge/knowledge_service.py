@@ -3958,7 +3958,6 @@ class KnowledgeService:
                 from .retrieval import query_to_sparse_vector
 
                 sparse_indices, sparse_values = query_to_sparse_vector(query_text)
-                print(f"[DIAG] sparse_indices={len(sparse_indices)}, collection='{_bm25_collection}'", flush=True)
                 if sparse_indices and _bm25_collection:
                     from qdrant_client.http import models as qm
 
@@ -3975,6 +3974,7 @@ class KnowledgeService:
                         )
                     )
                     qdrant_hits = list(getattr(resp, "points", None) or [])
+                    print(f"[DIAG] Qdrant sparse: {len(qdrant_hits)} hits, resp_type={type(resp).__name__}", flush=True)
                     if qdrant_hits:
                         hits = []
                         for h in qdrant_hits:
