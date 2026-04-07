@@ -9,6 +9,57 @@ from ...knowledge.constants import ISLAMIC_SYNONYMS
 
 _ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 
+# ---------------------------------------------------------------------------
+# Multilingual validation patterns — infrastructure handles language, not prompt
+# ---------------------------------------------------------------------------
+_CLOSING_PHRASES: dict[str, str] = {
+    "en": "All information provided is sourced from authenticated Islamic materials. For matters requiring personal guidance based on your specific circumstances, please consult with a qualified Islamic scholar.",
+    "ar": "جميع المعلومات المقدمة مستمدة من مواد إسلامية موثقة",
+    "zh": "所有信息均来源于经过认证的伊斯兰教材料",
+    "id": "Semua informasi yang diberikan bersumber dari materi Islam yang terotentikasi",
+    "ur": "فراہم کردہ تمام معلومات مستند اسلامی مواد سے ماخوذ ہیں",
+    "hi": "प्रदान की गई सभी जानकारी प्रमाणित इस्लामी सामग्री से ली गई है",
+    "ms": "Semua maklumat yang diberikan bersumber daripada bahan Islam yang disahkan",
+}
+
+_SOURCES_PATTERNS: list[str] = [
+    r"^\s*\*?\*?Sources\*?\*?",       # English
+    r"^\s*\*?\*?المصادر\*?\*?",       # Arabic
+    r"^\s*\*?\*?来源\*?\*?",          # Chinese
+    r"^\s*\*?\*?Sumber\*?\*?",        # Indonesian/Malay
+    r"^\s*\*?\*?ذرائع\*?\*?",        # Urdu
+    r"^\s*\*?\*?स्रोत\*?\*?",         # Hindi
+    r"^\s*\*?\*?参考文献\*?\*?",       # Chinese alt
+]
+
+_SCHOLAR_TERMS: list[str] = [
+    "qualified islamic scholar",       # English
+    "عالم إسلامي مؤهل",               # Arabic
+    "合格的伊斯兰学者",                # Chinese
+    "ulama yang berkualifikasi",       # Indonesian
+    "اسلامی عالم",                    # Urdu
+]
+
+_CITATION_TERMS_PATTERN = re.compile(
+    r"\b(Quran|Sahih|Tafsir|Hadith|Fiqh|القرآن|صحيح|تفسير|حديث|فقه|古兰经|圣训)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_response_language(text: str) -> str:
+    """Detect response language from text content."""
+    arabic = sum(1 for ch in text if 0x0600 <= ord(ch) <= 0x08FF or 0xFB50 <= ord(ch) <= 0xFEFF)
+    cjk = sum(1 for ch in text if 0x4E00 <= ord(ch) <= 0x9FFF)
+    latin = sum(1 for ch in text if 0x0041 <= ord(ch) <= 0x007A)
+    total = arabic + cjk + latin
+    if total == 0:
+        return "en"
+    if arabic > latin and arabic > cjk:
+        return "ar"
+    if cjk > latin:
+        return "zh"
+    return "en"
+
 
 @dataclass(frozen=True)
 class PolicyDecision:
@@ -19,11 +70,7 @@ class PolicyDecision:
 
 @dataclass(frozen=True)
 class ImamPolicyConfig:
-    closing_phrase: str = (
-        "All information provided is sourced from authenticated Islamic materials. "
-        "For matters requiring personal guidance based on your specific circumstances, "
-        "please consult with a qualified Islamic scholar."
-    )
+    closing_phrase: str = _CLOSING_PHRASES["en"]
     decline_out_of_scope: str = (
         "I don't have sufficient information in my current knowledge base to provide "
         "a reliable answer to this question. I recommend consulting with a qualified "
@@ -250,29 +297,31 @@ class ImamPolicy:
             return issues
 
         normalized_answer = self._normalize_ws(answer)
-        normalized_closing = self._normalize_ws(self.config.closing_phrase)
 
-        # --- Structural checks ---
-
-        closing_occurrences = normalized_answer.count(normalized_closing)
-        if closing_occurrences == 0:
+        # --- Multilingual closing phrase check ---
+        closing_found = 0
+        for lang_closing in _CLOSING_PHRASES.values():
+            closing_found += normalized_answer.count(self._normalize_ws(lang_closing))
+        if closing_found == 0:
             issues.append("missing_closing_phrase")
-        elif closing_occurrences > 1:
+        elif closing_found > 1:
             issues.append("duplicate_closing_phrase")
 
-        scholar_mentions = normalized_answer.count("qualified islamic scholar")
-        if scholar_mentions > 1:
+        # Multilingual scholar mention check
+        scholar_count = sum(normalized_answer.count(term) for term in _SCHOLAR_TERMS)
+        if scholar_count > 2:
             issues.append("duplicate_consultation_reminder")
 
-        # Require citation markers in content and a sources section
+        # Citation markers — multilingual
         has_citation_marker = bool(re.search(r"\[[0-9]+\]", answer)) or bool(
-            re.search(r"\b(Quran|Sahih|Tafsir|Hadith|Fiqh)\b", answer, re.IGNORECASE)
+            _CITATION_TERMS_PATTERN.search(answer)
         )
         if not has_citation_marker:
             issues.append("missing_citations")
 
-        has_sources = bool(re.search(r"^\s*\*\*Sources", answer, re.MULTILINE)) or bool(
-            re.search(r"^\s*Sources:", answer, re.MULTILINE)
+        # Sources section — multilingual
+        has_sources = any(
+            re.search(pat, answer, re.MULTILINE) for pat in _SOURCES_PATTERNS
         )
         if not has_sources:
             issues.append("missing_sources_section")
@@ -318,7 +367,10 @@ class ImamPolicy:
                 "Add citations after each paragraph and include a **Sources:** list at the end ordered by authority."
             )
         if "missing_closing_phrase" in issues:
-            repairs.append(f'Append the exact closing phrase: "{self.config.closing_phrase}".')
+            repairs.append(
+                "Append the closing phrase in the SAME language as your response. "
+                "Do NOT switch to English if the response is in another language."
+            )
         if "duplicate_closing_phrase" in issues or "duplicate_consultation_reminder" in issues:
             repairs.append(
                 "Remove repeated advisory/disclaimer text. Keep only one consultation reminder by using "
@@ -343,26 +395,27 @@ class ImamPolicy:
         """
         Normalize advisory content to avoid duplicated reminders.
 
-        - Remove standalone "Important Note" advisory blocks that repeat scholar-consultation guidance.
-        - Ensure the fixed closing phrase appears exactly once at the end.
+        Language-aware: detects response language and uses the appropriate
+        closing phrase instead of forcing English.
         """
         if not answer or not answer.strip():
             return answer
 
         text = answer.strip()
-        closing = self.config.closing_phrase.strip()
+        lang = _detect_response_language(text)
+        closing = _CLOSING_PHRASES.get(lang, _CLOSING_PHRASES["en"]).strip()
 
         # Remove redundant advisory paragraphs that duplicate the closing phrase intent.
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
         kept: list[str] = []
         for para in paragraphs:
             normalized = self._normalize_ws(para)
-            is_duplicate_advisory = (
-                "qualified islamic scholar" in normalized
-                and (
-                    "important note" in normalized
-                    or "this answer addresses the general islamic principle" in normalized
-                )
+            is_duplicate_advisory = any(
+                term in normalized for term in _SCHOLAR_TERMS
+            ) and (
+                "important note" in normalized
+                or "ملاحظة" in normalized
+                or "this answer addresses the general islamic principle" in normalized
             )
             if is_duplicate_advisory:
                 continue
@@ -370,17 +423,19 @@ class ImamPolicy:
 
         body = "\n\n".join(kept).strip()
 
-        # Remove all existing closing-phrase occurrences, then append exactly once.
-        closing_pattern = re.compile(re.escape(closing), re.IGNORECASE)
-        body = closing_pattern.sub("", body).strip()
+        # Remove all existing closing-phrase occurrences (any language), then append once.
+        for lang_closing in _CLOSING_PHRASES.values():
+            pattern = re.compile(re.escape(lang_closing.strip()), re.IGNORECASE)
+            body = pattern.sub("", body).strip()
         body = re.sub(r"\n{3,}", "\n\n", body)
 
         if body:
             return f"{body}\n\n{closing}"
         return closing
 
-    def _build_decline(self, reason_text: str) -> str:
-        return f"{reason_text}\n\n{self.config.closing_phrase}"
+    def _build_decline(self, reason_text: str, lang: str = "en") -> str:
+        closing = _CLOSING_PHRASES.get(lang, _CLOSING_PHRASES["en"])
+        return f"{reason_text}\n\n{closing}"
 
 
 class DomainPolicyResolver:
