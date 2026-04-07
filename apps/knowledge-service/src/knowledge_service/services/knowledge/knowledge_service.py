@@ -3974,7 +3974,6 @@ class KnowledgeService:
                         )
                     )
                     qdrant_hits = list(getattr(resp, "points", None) or [])
-                    print(f"[DIAG] Qdrant sparse: {len(qdrant_hits)} hits, resp_type={type(resp).__name__}", flush=True)
                     if qdrant_hits:
                         hits = []
                         for h in qdrant_hits:
