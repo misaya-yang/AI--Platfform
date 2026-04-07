@@ -242,13 +242,13 @@ export function ToolCallBlock({
         </div>
 
         {/* Tool name */}
-        <div className="flex-1 min-w-0">
-          <span className="font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-200 tracking-tight">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <span className="font-mono text-[12px] font-semibold text-slate-700 dark:text-slate-200 tracking-tight truncate inline-block max-w-full">
             {formatToolName(toolCall.name)}
           </span>
           {/* Inline preview when collapsed */}
           {!isExpanded && argsPreview && (
-            <span className="ml-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate">
+            <span className="ml-2 text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate block max-w-[200px]">
               {argsPreview}
             </span>
           )}

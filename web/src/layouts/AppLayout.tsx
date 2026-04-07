@@ -37,14 +37,14 @@ const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
 
 const navItems = [
-  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={18} />, permission: "console:dashboard:view" },
-  { key: "/services", labelKey: "nav.services", icon: <Server size={18} />, permission: "console:services:view" },
-  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={18} />, permission: "knowledge:dataset:view" },
-  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={18} />, permission: "conversation:playground:access" },
-  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={18} />, permission: "conversation:playground:access" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={18} />, permission: null },
-  { key: "/users", labelKey: "nav.users", icon: <Users size={18} />, permission: "user:list" },
-  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={18} />, permission: "console:settings:view" },
+  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={22} />, permission: "console:dashboard:view" },
+  { key: "/services", labelKey: "nav.services", icon: <Server size={22} />, permission: "console:services:view" },
+  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={22} />, permission: "knowledge:dataset:view" },
+  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={22} />, permission: "conversation:playground:access" },
+  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={22} />, permission: "conversation:playground:access" },
+  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={22} />, permission: null },
+  { key: "/users", labelKey: "nav.users", icon: <Users size={22} />, permission: "user:list" },
+  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={22} />, permission: "console:settings:view" },
 ];
 
 function getPageTitleKey(pathname: string): string {
@@ -120,8 +120,8 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const siderOffset = isMobile ? (collapsed ? -210 : 0) : 0;
-  const contentMarginLeft = isMobile ? 0 : collapsed ? 56 : 200;
+  const siderOffset = isMobile ? (collapsed ? -230 : 0) : 0;
+  const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : 230;
   const pageTitleKey = getPageTitleKey(location.pathname);
   const userInitials = getInitials(user?.display_name || user?.user_id);
 
@@ -129,7 +129,7 @@ export function AppLayout() {
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
         collapsible collapsed={collapsed} onCollapse={setCollapsed} trigger={null}
-        width={200} collapsedWidth={isMobile ? 0 : 56}
+        width={230} collapsedWidth={isMobile ? 0 : 64}
         style={{
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
           borderRight: darkMode ? '1px solid #27272a' : '1px solid #e5e5e5',
@@ -145,32 +145,32 @@ export function AppLayout() {
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto px-2 pt-1 pb-2 scrollbar-hide">
-            <div className="space-y-[2px]">
+          <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-2 scrollbar-hide">
+            <div className="space-y-1">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
-                    `relative group flex items-center gap-2.5 rounded-md transition-colors duration-150 ${
-                      collapsed ? 'justify-center px-0 py-2' : 'px-2.5 py-[7px]'
+                    `relative group flex items-center gap-3 rounded-md transition-colors duration-150 ${
+                      collapsed ? 'justify-center px-0 py-3' : 'px-4 py-3'
                     } ${
                       isActive
-                        ? 'text-primary bg-primary/[0.06] dark:bg-primary/[0.08]'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                        ? 'text-primary font-medium bg-primary/[0.06] dark:bg-primary/[0.08]'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                     }`
                   }
                 >
                   {({ isActive }) => (
                     <>
                       {isActive && !collapsed && (
-                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 bg-primary rounded-r-full" />
+                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-5 bg-primary rounded-r-full" />
                       )}
                       <span className={`flex-shrink-0 ${isActive ? 'text-primary' : ''}`}>
                         {item.icon}
                       </span>
                       {!collapsed && (
-                        <span className="text-[13px] truncate">{t(item.labelKey)}</span>
+                        <span className="text-[15px] truncate">{t(item.labelKey)}</span>
                       )}
                       {collapsed && (
                         <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
@@ -185,26 +185,26 @@ export function AppLayout() {
           </nav>
 
           {/* Footer */}
-          <div className={`border-t p-2 space-y-[2px] ${darkMode ? 'border-[#27272a]' : 'border-[#e5e5e5]'}`}>
+          <div className={`border-t px-3 py-2 space-y-1 ${darkMode ? 'border-[#27272a]' : 'border-[#e5e5e5]'}`}>
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-muted/50 ${
-                collapsed ? 'justify-center py-2' : 'gap-2.5 px-2.5 py-[7px]'
+              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-accent ${
+                collapsed ? 'justify-center py-3' : 'gap-3 px-4 py-2.5'
               }`}
             >
-              {darkMode ? <Moon size={18} /> : <Sun size={18} />}
-              {!collapsed && <span className="text-[13px]">{darkMode ? t("theme.mode.dark") : t("theme.mode.light")}</span>}
+              {darkMode ? <Moon size={20} /> : <Sun size={20} />}
+              {!collapsed && <span className="text-[14px]">{darkMode ? t("theme.mode.dark") : t("theme.mode.light")}</span>}
             </button>
             <button
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-muted/50 ${
-                collapsed ? 'justify-center py-2' : 'gap-2.5 px-2.5 py-[7px]'
+              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-accent ${
+                collapsed ? 'justify-center py-3' : 'gap-3 px-4 py-2.5'
               }`}
             >
-              {collapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
-              {!collapsed && <span className="text-[13px]">{t('nav.collapseSidebar')}</span>}
+              {collapsed ? <PanelLeft size={20} /> : <PanelLeftClose size={20} />}
+              {!collapsed && <span className="text-[14px]">{t('nav.collapseSidebar')}</span>}
             </button>
           </div>
         </div>

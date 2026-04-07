@@ -303,7 +303,7 @@ class DatabaseSessionManager:
 
         seconds = additional_seconds or self.default_session_ttl
         session.expires_at = datetime.utcnow() + timedelta(seconds=seconds)
-        session.updated_at = datetime.utcnow()
+        # Don't update updated_at — it should reflect the last user activity, not TTL extensions
 
         # 保存到数据库
         await self._save_to_db(session)
