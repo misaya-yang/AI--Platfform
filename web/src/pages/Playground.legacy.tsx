@@ -1945,7 +1945,7 @@ export function PlaygroundPage() {
                   (s.metadata?.title as string | undefined) ||
                   (s.metadata?.name as string | undefined) ||
                   t("playground.newChat", "New chat");
-                const ts = (s.updated_at || s.created_at) as string;
+                const ts = (s.created_at || s.updated_at) as string;
                 const active = activeSessionId === s.session_id;
                 // Color variants for visual variety
                 const colorVariants = [

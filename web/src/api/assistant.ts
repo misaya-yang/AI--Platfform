@@ -754,7 +754,7 @@ export function groupSessionsByDate(sessions: AssistantSession[]): Record<string
   };
 
   for (const session of sessions) {
-    const date = session.updated_at ? new Date(session.updated_at) : new Date(session.created_at || 0);
+    const date = session.created_at ? new Date(session.created_at) : new Date(session.updated_at || 0);
 
     if (date >= today) {
       groups.today.push(session);
