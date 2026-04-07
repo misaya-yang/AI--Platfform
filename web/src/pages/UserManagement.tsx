@@ -273,15 +273,17 @@ export function UserManagementPage() {
   };
 
   // Delete user
-  const handleDelete = async () => {
+  const handleDelete = async (e?: React.MouseEvent) => {
+    e?.preventDefault();
     if (!selectedUser) return;
     try {
       await deleteUser(selectedUser.user_id);
+    } catch (err) {
+      console.error("Failed to delete user:", err);
+    } finally {
       setShowDeleteDialog(false);
       setSelectedUser(null);
       loadUsers();
-    } catch (err) {
-      console.error("Failed to delete user:", err);
     }
   };
 
@@ -816,7 +818,7 @@ export function UserManagementPage() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>Delete</AlertDialogAction>
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); handleDelete(e); }}>Delete</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
