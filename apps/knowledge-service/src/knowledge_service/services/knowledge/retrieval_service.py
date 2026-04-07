@@ -362,7 +362,7 @@ class RetrievalConfig:
         rc = cls(
             mode=mode,
             top_k=getattr(cfg, "top_k", 5),
-            score_threshold=getattr(cfg, "score_threshold", 0.5) or 0.5,
+            score_threshold=getattr(cfg, "score_threshold", None) if getattr(cfg, "score_threshold", None) is not None else 0.5,
         )
         if hasattr(cfg, "mmr") and cfg.mmr:
             rc.use_mmr = getattr(cfg.mmr, "enabled", False)
@@ -746,7 +746,10 @@ class RetrievalService:
                 document_id=filters.get("document_id") if filters else None,
             )
         except Exception as e:
-            logger.warning(f"[Retrieval] Native hybrid failed ({e}), falling back to dense-only")
+            logger.warning(
+                f"[Retrieval] Native hybrid failed: {type(e).__name__}: {e}. "
+                f"Falling back to dense-only. If persistent, run migrate_sparse_vectors.py"
+            )
             hits = await self.vector_store.search(
                 collection_name=dataset_id,
                 query_vector=query_embedding,

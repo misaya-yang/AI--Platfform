@@ -97,13 +97,13 @@ class IngestionService:
         Thread-safe: uses per-document locks to prevent concurrent ingestion.
         """
         lock = await self._get_document_lock(document_id)
-        if lock.locked():
-            logger.warning(f"Document {document_id} is already being ingested, waiting...")
-
-        async with lock:
-            return await self._ingest_document_impl(
-                dataset_id, document_id, text, doc_metadata, chunking_config, embedding_config,
-            )
+        try:
+            async with lock:
+                return await self._ingest_document_impl(
+                    dataset_id, document_id, text, doc_metadata, chunking_config, embedding_config,
+                )
+        finally:
+            await self._release_document_lock(document_id)
 
     async def _ingest_document_impl(
         self,

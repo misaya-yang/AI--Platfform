@@ -130,7 +130,8 @@ async def migrate(
     except Exception:
         pass
 
-    dist = getattr(qm.Distance, str(distance).upper(), qm.Distance.COSINE)
+    _dist_map = {"cosine": qm.Distance.COSINE, "dot": qm.Distance.DOT, "euclid": qm.Distance.EUCLID}
+    dist = _dist_map.get(str(distance).lower(), qm.Distance.COSINE)
     await client.create_collection(
         collection_name=new_collection,
         vectors_config=qm.VectorParams(size=dim, distance=dist),
@@ -197,8 +198,16 @@ async def migrate(
         for p in results:
             # Get dense vector
             vec = p.vector
+            if vec is None:
+                logger.warning(f"Point {p.id} has no vector, skipping")
+                continue
             if isinstance(vec, dict):
-                dense = vec.get("") or vec.get("default") or list(vec.values())[0]
+                dense = vec.get("") or vec.get("default")
+                if dense is None and vec:
+                    dense = list(vec.values())[0]
+                if dense is None:
+                    logger.warning(f"Point {p.id} has no usable dense vector, skipping")
+                    continue
             else:
                 dense = vec
 
