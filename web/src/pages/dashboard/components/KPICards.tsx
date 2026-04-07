@@ -1,5 +1,5 @@
 // web/src/pages/dashboard/components/KPICards.tsx
-// KPI Summary Cards — Redesigned with left color stripe, sparkline, ARIA
+// KPI Summary Cards — Top accent bar, content-sized, ARIA
 
 import { Spin } from "antd";
 import {
@@ -7,8 +7,6 @@ import {
   ArrowDown,
   Minus,
 } from "lucide-react";
-import { AreaChart, Area, ResponsiveContainer } from "recharts";
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
@@ -97,41 +95,6 @@ function Trend({ value, isPositiveGood = true, isNewData = false }: TrendProps) 
   );
 }
 
-// ── Mini sparkline (7-day trend) ────────────────────────────────────
-function Sparkline({ id, color }: { id: string; color: string }) {
-  const data = useMemo(
-    () => Array.from({ length: 7 }, (_, i) => ({
-      v: 40 + Math.sin(i * 0.8) * 20 + ((i * 17 + 7) % 15),
-    })),
-    []
-  );
-
-  const gradientId = `spark-${id}`;
-
-  return (
-    <div style={{ height: 32, marginTop: 8, opacity: 0.7 }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.3} />
-              <stop offset="100%" stopColor={color} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <Area
-            type="monotone"
-            dataKey="v"
-            stroke={color}
-            strokeWidth={1.5}
-            fill={`url(#${gradientId})`}
-            isAnimationActive={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
 // ── KPI Card ────────────────────────────────────────────────────────
 interface KPICardProps {
   id: string;
@@ -185,7 +148,7 @@ function KPICard({
         background: colors.cardBg,
         border: `1px solid ${colors.border}`,
         boxShadow: colors.shadowSm,
-        height: LAYOUT.KPI_HEIGHT,
+        minHeight: 100,
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
@@ -214,25 +177,15 @@ function KPICard({
         e.currentTarget.style.outline = "none";
       }}
     >
-      {/* Left accent stripe */}
-      <div
-        style={{
-          position: "absolute",
-          left: 0,
-          top: 12,
-          bottom: 12,
-          width: 3,
-          borderRadius: "0 2px 2px 0",
-          background: accentColor,
-        }}
-      />
+      {/* Top accent bar */}
+      <div style={{ position: "absolute", left: 0, right: 0, top: 0, height: 2, background: accentColor, borderRadius: '12px 12px 0 0' }} />
 
       {loading ? (
         <div style={{ textAlign: "center", padding: 16 }}>
           <Spin size="small" />
         </div>
       ) : (
-        <div style={{ paddingLeft: 8 }}>
+        <div style={{ paddingLeft: 0 }}>
           {/* Title */}
           <div
             id={`kpi-${id}`}
@@ -275,10 +228,6 @@ function KPICard({
         </div>
       )}
 
-      {/* Sparkline at bottom */}
-      {!loading && !noData && (
-        <Sparkline id={id} color={accentColor} />
-      )}
     </article>
   );
 }

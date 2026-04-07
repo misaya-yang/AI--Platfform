@@ -9,7 +9,7 @@ import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { useAppStore } from "@/store/useAppStore";
 import { LAYOUT, getColors, TYPOGRAPHY } from "./styles";
 import { Select, DatePicker, Tooltip } from "antd";
-import { SyncOutlined, ExpandOutlined, AppstoreOutlined, UserOutlined, CalendarOutlined } from "@ant-design/icons";
+import { SyncOutlined, ExpandOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 import { useDashboardEntityLabels } from "./hooks/useDashboardEntityLabels";
@@ -92,7 +92,7 @@ function DashboardContent() {
             <h1 style={{ ...TYPOGRAPHY.pageTitle, margin: 0, color: colors.textPrimary, letterSpacing: "-0.02em" }}>
               {t("metrics.title")}
             </h1>
-            <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12, background: colors.accentBg, color: colors.accent, fontWeight: 600 }}>
+            <span style={{ fontSize: 12, color: colors.textMuted, fontWeight: 400, marginLeft: 8 }}>
               {dayjs(lastRefresh).format("HH:mm:ss")}
             </span>
           </div>
@@ -106,19 +106,14 @@ function DashboardContent() {
 
         {/* ─── Row 2: Inline Filters ─── */}
         <div style={{
-          display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap",
-          padding: "6px 10px", borderRadius: 8,
-          background: darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+          display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap",
+          background: "transparent",
         }}>
-          <AppstoreOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
           <Select size="small" value={serviceId} onChange={setServiceId} options={serviceOptions} style={{ minWidth: 120 }} />
-          <UserOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
           <Select size="small" value={userId} onChange={setUserId} options={userOptions} style={{ minWidth: 110 }} />
           <Select size="small" value={source} onChange={(v: string) => setSource(v as SourceFilter)}
             options={[{ label: t("dashboard.filters.allSources"), value: "all" }, { label: t("dashboard.filters.internal"), value: "internal" }, { label: t("dashboard.filters.external"), value: "external" }]}
             style={{ minWidth: 90 }} />
-          <div style={{ width: 1, height: 18, background: colors.border, margin: "0 2px" }} />
-          <CalendarOutlined style={{ color: colors.textMuted, fontSize: 13 }} />
           <RangePicker size="small"
             value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
             onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
@@ -156,10 +151,10 @@ function DashboardContent() {
       </div>
 
       <style>{`
-        .dash-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 8px; background: ${darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'}; width: fit-content; }
-        .dash-tab { padding: 5px 14px; border-radius: 6px; border: none; background: transparent; color: ${darkMode ? '#8B8B8E' : '#6B7280'}; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
-        .dash-tab:hover { color: ${darkMode ? '#EDEDEF' : '#111'}; background: ${darkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'}; }
-        .dash-tab.active { color: ${darkMode ? '#EDEDEF' : '#111'}; background: ${darkMode ? 'rgba(255,255,255,0.08)' : '#fff'}; box-shadow: ${darkMode ? 'none' : '0 1px 2px rgba(0,0,0,0.06)'}; }
+        .dash-tabs { display: flex; gap: 0; border-bottom: 1px solid ${darkMode ? 'rgba(255,255,255,0.06)' : '#e5e7eb'}; width: 100%; }
+        .dash-tab { padding: 8px 16px; border: none; background: transparent; color: ${darkMode ? '#5c5c6f' : '#9ca3af'}; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+        .dash-tab:hover { color: ${darkMode ? '#e8e8ed' : '#111827'}; }
+        .dash-tab.active { color: ${darkMode ? '#e8e8ed' : '#111827'}; border-bottom-color: ${darkMode ? '#818cf8' : '#4f46e5'}; font-weight: 600; }
         .dash-icon-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid ${darkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}; background: transparent; color: ${darkMode ? '#8B8B8E' : '#6B7280'}; cursor: pointer; transition: all 0.15s; font-size: 13px; }
         .dash-icon-btn:hover { background: ${darkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'}; color: ${darkMode ? '#EDEDEF' : '#111'}; }
       `}</style>

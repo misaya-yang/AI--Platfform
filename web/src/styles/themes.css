@@ -1,21 +1,21 @@
 :root {
   color-scheme: light;
-  --surface-canvas: 210 40% 98%;
+  --surface-canvas: 220 14% 97%;
   --surface-panel: 0 0% 100%;
   --surface-elevated: 0 0% 100%;
-  --ink-strong: 222 47% 11%;
-  --ink-muted: 215 16% 47%;
-  --line-subtle: 214 32% 91%;
+  --ink-strong: 220 26% 14%;
+  --ink-muted: 220 9% 46%;
+  --line-subtle: 220 13% 91%;
   --accent-strong: 239 84% 67%;
 }
 
 .dark {
   color-scheme: dark;
-  --surface-canvas: 228 25% 7%;
-  --surface-panel: 226 22% 14%;
-  --surface-elevated: 225 20% 17%;
-  --ink-strong: 210 40% 93%;
-  --ink-muted: 215 20% 65%;
-  --line-subtle: 220 14% 22%;
+  --surface-canvas: 240 33% 4%;
+  --surface-panel: 240 20% 10%;
+  --surface-elevated: 240 18% 13%;
+  --ink-strong: 240 10% 93%;
+  --ink-muted: 240 8% 58%;
+  --line-subtle: 0 0% 100% / 0.06;
   --accent-strong: 234 89% 74%;
 }
