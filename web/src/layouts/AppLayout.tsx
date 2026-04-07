@@ -146,14 +146,14 @@ export function AppLayout() {
 
           {/* Navigation */}
           <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-2 scrollbar-hide">
-            <div className="space-y-1">
+            <div className="space-y-0.5">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
-                    `relative group flex items-center gap-3 rounded-md transition-colors duration-150 ${
-                      collapsed ? 'justify-center px-0 py-3' : 'px-4 py-3'
+                    `relative group flex items-center gap-3 rounded-lg transition-colors duration-150 ${
+                      collapsed ? 'justify-center px-0 py-2.5' : 'px-4 py-2.5'
                     } ${
                       isActive
                         ? 'text-primary font-medium bg-primary/[0.06] dark:bg-primary/[0.08]'
@@ -163,9 +163,6 @@ export function AppLayout() {
                 >
                   {({ isActive }) => (
                     <>
-                      {isActive && !collapsed && (
-                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-5 bg-primary rounded-r-full" />
-                      )}
                       <span className={`flex-shrink-0 ${isActive ? 'text-primary' : ''}`}>
                         {item.icon}
                       </span>
