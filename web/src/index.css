@@ -162,12 +162,13 @@
   border-color: hsl(var(--primary) / 0.25) !important;
 }
 .dark .ant-btn-primary:not(.ant-btn-dangerous) {
-  background: hsl(var(--primary) / 0.10) !important;
-  border-color: hsl(var(--primary) / 0.20) !important;
+  background: hsl(var(--primary) / 0.12) !important;
+  color: hsl(var(--primary)) !important;
+  border-color: hsl(var(--primary) / 0.22) !important;
 }
 .dark .ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
-  background: hsl(var(--primary) / 0.18) !important;
-  border-color: hsl(var(--primary) / 0.30) !important;
+  background: hsl(var(--primary) / 0.20) !important;
+  border-color: hsl(var(--primary) / 0.35) !important;
 }
 /* Danger button — same light pattern */
 .ant-btn-dangerous.ant-btn-primary {

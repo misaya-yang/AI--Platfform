@@ -156,7 +156,7 @@ export function AppLayout() {
                       collapsed ? 'justify-center px-0 py-2.5' : 'px-4 py-2.5'
                     } ${
                       isActive
-                        ? 'text-primary font-medium bg-primary/[0.06] dark:bg-primary/[0.08]'
+                        ? 'text-primary bg-primary/[0.06] dark:bg-primary/[0.08]'
                         : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                     }`
                   }
@@ -167,7 +167,7 @@ export function AppLayout() {
                         {item.icon}
                       </span>
                       {!collapsed && (
-                        <span className="text-[15px] truncate">{t(item.labelKey)}</span>
+                        <span className="text-[14px] truncate">{t(item.labelKey)}</span>
                       )}
                       {collapsed && (
                         <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
