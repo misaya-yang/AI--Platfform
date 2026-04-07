@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { ArrowUpDown, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { ArrowUpDown, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,16 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+// AlertDialog removed — was causing page refresh on action click
 import {
   Select,
   SelectContent,
@@ -91,6 +82,9 @@ export function UserManagementPage() {
   const [selectedUser, setSelectedUser] = useState<UserResponse | null>(null);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showResetPasswordDialog, setShowResetPasswordDialog] = useState(false);
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showBatchDeleteDialog, setShowBatchDeleteDialog] = useState(false);
 
   // Form states
   const [formEmail, setFormEmail] = useState("");
@@ -272,18 +266,58 @@ export function UserManagementPage() {
     }
   };
 
-  // Delete user
-  const handleDelete = async (e?: React.MouseEvent) => {
-    e?.preventDefault();
+  // Delete single user
+  const handleDelete = useCallback(async () => {
     if (!selectedUser) return;
+    setIsDeleting(true);
     try {
       await deleteUser(selectedUser.user_id);
     } catch (err) {
       console.error("Failed to delete user:", err);
-    } finally {
-      setShowDeleteDialog(false);
-      setSelectedUser(null);
-      loadUsers();
+    }
+    setIsDeleting(false);
+    setShowDeleteDialog(false);
+    setSelectedUser(null);
+    loadUsers();
+  }, [selectedUser]);
+
+  // Batch delete users
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedUserIds.size === 0) return;
+    setIsDeleting(true);
+    const ids = Array.from(selectedUserIds);
+    for (const id of ids) {
+      try {
+        await deleteUser(id);
+      } catch (err) {
+        console.error(`Failed to delete user ${id}:`, err);
+      }
+    }
+    setIsDeleting(false);
+    setShowBatchDeleteDialog(false);
+    setSelectedUserIds(new Set());
+    loadUsers();
+  }, [selectedUserIds]);
+
+  // Toggle selection for a single user
+  const toggleUserSelection = (userId: string) => {
+    setSelectedUserIds(prev => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+
+  // Select/deselect all deletable users on current page
+  const toggleSelectAll = () => {
+    const deletableUsers = sortedUsers.filter(
+      u => u.user_id !== currentUser?.user_id && u.user_id !== "admin"
+    );
+    if (selectedUserIds.size === deletableUsers.length) {
+      setSelectedUserIds(new Set());
+    } else {
+      setSelectedUserIds(new Set(deletableUsers.map(u => u.user_id)));
     }
   };
 
@@ -329,11 +363,21 @@ export function UserManagementPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="text-xl font-semibold">{t('users.title')}</div>
+        <div className="flex items-center gap-3">
+          <div className="text-xl font-semibold">{t('users.title')}</div>
+          {canDelete && selectedUserIds.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setShowBatchDeleteDialog(true)}
+            >
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              {t('users.actions.batchDelete', `Delete (${selectedUserIds.size})`)}
+            </Button>
+          )}
+        </div>
         {canCreate && (
-          <Button
-            onClick={() => setShowCreateModal(true)}
-          >
+          <Button onClick={() => setShowCreateModal(true)}>
             {t('users.addUser')}
           </Button>
         )}
@@ -364,6 +408,15 @@ export function UserManagementPage() {
         <Table>
           <TableHeader>
             <TableRow>
+              {canDelete && (
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={sortedUsers.length > 0 && selectedUserIds.size === sortedUsers.filter(u => u.user_id !== currentUser?.user_id && u.user_id !== "admin").length}
+                    onCheckedChange={toggleSelectAll}
+                    aria-label="Select all"
+                  />
+                </TableHead>
+              )}
               <TableHead>
                 <SortableHeader field="email">{t('users.fields.email')}</SortableHeader>
               </TableHead>
@@ -384,19 +437,30 @@ export function UserManagementPage() {
           <TableBody>
             {isLoading ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center py-8">
+                <TableCell colSpan={canDelete ? 8 : 7} className="text-center py-8">
                   {t('users.loading')}
                 </TableCell>
               </TableRow>
             ) : sortedUsers.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center py-8">
+                <TableCell colSpan={canDelete ? 8 : 7} className="text-center py-8">
                   {t('users.noUsers')}
                 </TableCell>
               </TableRow>
             ) : (
               sortedUsers.map((user) => (
-                <TableRow key={user.user_id} className="transition-colors hover:bg-primary/5 dark:hover:bg-primary/10">
+                <TableRow key={user.user_id} className="transition-colors hover:bg-accent">
+                  {canDelete && (
+                    <TableCell>
+                      {user.user_id !== currentUser?.user_id && user.user_id !== "admin" ? (
+                        <Checkbox
+                          checked={selectedUserIds.has(user.user_id)}
+                          onCheckedChange={() => toggleUserSelection(user.user_id)}
+                          aria-label={`Select ${user.email}`}
+                        />
+                      ) : null}
+                    </TableCell>
+                  )}
                   <TableCell>{user.email}</TableCell>
                   <TableCell>{user.display_name}</TableCell>
                   <TableCell>
@@ -806,44 +870,57 @@ export function UserManagementPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete Confirmation */}
-      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete User</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete {selectedUser?.email}? This action
-              cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={(e) => { e.preventDefault(); handleDelete(e); }}>Delete</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {/* Delete Confirmation — uses Dialog instead of AlertDialog to prevent page refresh */}
+      <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete User</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {selectedUser?.email}? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteDialog(false)} disabled={isDeleting}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+              {isDeleting ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Batch Delete Confirmation */}
+      <Dialog open={showBatchDeleteDialog} onOpenChange={setShowBatchDeleteDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {selectedUserIds.size} Users</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete {selectedUserIds.size} selected users? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowBatchDeleteDialog(false)} disabled={isDeleting}>Cancel</Button>
+            <Button variant="destructive" onClick={handleBatchDelete} disabled={isDeleting}>
+              {isDeleting ? "Deleting..." : `Delete ${selectedUserIds.size} Users`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Reset Password Confirmation */}
-      <AlertDialog
-        open={showResetPasswordDialog}
-        onOpenChange={setShowResetPasswordDialog}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Reset Password</AlertDialogTitle>
-            <AlertDialogDescription>
-              Reset password for {selectedUser?.email} to default (111111)? The
-              user will be required to change password on next login.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleResetPassword}>
-              Reset Password
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <Dialog open={showResetPasswordDialog} onOpenChange={setShowResetPasswordDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reset Password</DialogTitle>
+            <DialogDescription>
+              Reset password for {selectedUser?.email} to default (111111)? The user will be required to change password on next login.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowResetPasswordDialog(false)}>Cancel</Button>
+            <Button onClick={handleResetPassword}>Reset Password</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
