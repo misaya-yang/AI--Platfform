@@ -11,7 +11,7 @@ class AppSettings(BaseSettings):
     port: int = 8093
     workers: int = 1
     debug: bool = False
-    allow_anonymous: bool = True
+    allow_anonymous: bool = False  # Set True only for dev via ASSISTANT_APP__ALLOW_ANONYMOUS=true
 
     model_config = {"env_prefix": "ASSISTANT_APP__"}
 

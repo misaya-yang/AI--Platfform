@@ -78,7 +78,7 @@ async def get_session(
         raise HTTPException(503, "Session manager not available")
 
     session = await sm.get(session_id)
-    if not session or session.user_id != user.user_id:
+    if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
         raise HTTPException(404, "Session not found")
 
     return {
@@ -87,7 +87,7 @@ async def get_session(
         "created_at": session.created_at,
         "updated_at": session.updated_at,
         "metadata": session.metadata,
-        "message_count": len(session.messages) if session.messages else 0,
+        "message_count": len(session.history) if session.history else 0,
     }
 
 
@@ -103,7 +103,7 @@ async def delete_session(
         raise HTTPException(503, "Session manager not available")
 
     session = await sm.get(session_id)
-    if not session or session.user_id != user.user_id:
+    if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
         raise HTTPException(404, "Session not found")
 
     await sm.delete(session_id)
@@ -123,8 +123,8 @@ async def get_session_history(
         raise HTTPException(503, "Session manager not available")
 
     session = await sm.get(session_id)
-    if not session or session.user_id != user.user_id:
+    if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
         raise HTTPException(404, "Session not found")
 
-    messages = session.messages or []
+    messages = session.history or []
     return {"messages": messages[-limit:], "total": len(messages)}

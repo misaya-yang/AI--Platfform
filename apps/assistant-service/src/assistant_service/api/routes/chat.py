@@ -37,6 +37,12 @@ class ChatRequest(BaseModel):
     memory_mode: str | None = None
     os_agent_enabled: bool | None = None
     enable_task_planning: bool = False
+    confirm_plan: bool = False
+    openclaw_mode: str | None = None
+    queue_mode: str | None = None
+    context_detail: bool = False
+    skills_enabled: bool | None = None
+    memory_profile: str | None = None
     stream: bool = False
 
 
@@ -62,19 +68,25 @@ def _build_config(body: ChatRequest, model_registry):
         model_id=body.model_id,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
-        kb_dataset_ids=body.kb_dataset_ids,
+        kb_dataset_ids=body.kb_dataset_ids or [],
         kb_mode=kb_mode,
-        kb_top_k=body.kb_top_k,
-        kb_score_threshold=body.kb_score_threshold,
-        kb_include_images=body.kb_include_images,
+        kb_top_k=body.kb_top_k or 5,
+        kb_score_threshold=body.kb_score_threshold if body.kb_score_threshold is not None else 0.65,
+        kb_include_images=body.kb_include_images or False,
         web_search_enabled=body.web_search_enabled,
-        web_search_max_results=body.web_search_max_results,
-        file_paths=body.file_paths,
+        web_search_max_results=body.web_search_max_results or 5,
+        file_paths=body.file_paths or [],
         system_prompt=body.system_prompt,
         enable_task_planning=body.enable_task_planning,
+        confirm_plan=body.confirm_plan,
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,
         os_agent_enabled=body.os_agent_enabled,
+        openclaw_mode=body.openclaw_mode,
+        queue_mode=body.queue_mode,
+        context_detail=body.context_detail,
+        skills_enabled=body.skills_enabled,
+        memory_profile=body.memory_profile,
     )
 
 
@@ -106,7 +118,9 @@ async def chat(
             "run_id": result.get("run_id"),
         }
     except Exception as e:
-        raise HTTPException(500, f"Chat failed: {e}")
+        import logging
+        logging.getLogger("assistant-service").error(f"Chat failed: {e}", exc_info=True)
+        raise HTTPException(500, "Chat request failed. Please try again.")
 
 
 @router.post("/chat/stream")
@@ -144,5 +158,6 @@ async def chat_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
+            "X-Session-Id": session_id,
         },
     )

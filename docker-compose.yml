@@ -295,6 +295,7 @@ services:
       DATABASE_URL: postgresql://postgres:${PG_PASSWORD:-111111}@postgres:5432/gateway
       REDIS_URL: redis://:${REDIS_PASSWORD:-111111}@redis:6379/0
       KB_SERVICE_URL: http://knowledge-service:8092
+      ASSISTANT_APP__ALLOW_ANONYMOUS: "true"  # Internal network, gateway handles auth
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
