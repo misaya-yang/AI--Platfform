@@ -224,23 +224,8 @@ class ConfluenceAPIClient:
 class ConfluenceSearchExecutor(ToolExecutor):
     """Executor for search_confluence tool."""
 
-    def __init__(self, database: Any):
-        self.database = database
-
-    async def _get_client(self, tenant_id: str, user_id: str) -> ConfluenceAPIClient | None:
-        """Get Confluence API client from stored connection credentials."""
-        if not self.database:
-            return None
-        row = await self.database.fetchrow(
-            """SELECT c.domain, c.email, c.api_token
-               FROM confluence_connections c
-               WHERE c.tenant_id = $1 AND c.status = 'active'
-               ORDER BY c.created_at DESC LIMIT 1""",
-            tenant_id,
-        )
-        if not row:
-            return None
-        return ConfluenceAPIClient(row["domain"], row["email"], row["api_token"])
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         start = time.time()
@@ -248,20 +233,8 @@ class ConfluenceSearchExecutor(ToolExecutor):
         space_key = request.arguments.get("space_key")
         limit = min(int(request.arguments.get("limit", 5)), 20)
 
-        # Get tenant/user from context
-        tenant_id = getattr(request, "tenant_id", "") or ""
-        user_id = getattr(request, "user_id", "") or ""
-
-        client = await self._get_client(tenant_id, user_id)
-        if not client:
-            return ToolCallResult(
-                success=False,
-                result=None,
-                error="No active Confluence connection. Connect via Settings → Connectors.",
-            )
-
         try:
-            results = await client.search(query, space_key, limit)
+            results = await self.client.search(query, space_key, limit)
             duration = (time.time() - start) * 1000
 
             if not results:
@@ -291,22 +264,8 @@ class ConfluenceSearchExecutor(ToolExecutor):
 class ConfluenceReadExecutor(ToolExecutor):
     """Executor for read_confluence_page tool."""
 
-    def __init__(self, database: Any):
-        self.database = database
-
-    async def _get_client(self, tenant_id: str, user_id: str) -> ConfluenceAPIClient | None:
-        if not self.database:
-            return None
-        row = await self.database.fetchrow(
-            """SELECT c.domain, c.email, c.api_token
-               FROM confluence_connections c
-               WHERE c.tenant_id = $1 AND c.status = 'active'
-               ORDER BY c.created_at DESC LIMIT 1""",
-            tenant_id,
-        )
-        if not row:
-            return None
-        return ConfluenceAPIClient(row["domain"], row["email"], row["api_token"])
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         start = time.time()
@@ -319,18 +278,8 @@ class ConfluenceReadExecutor(ToolExecutor):
                 error="Either page_id or title is required.",
             )
 
-        tenant_id = getattr(request, "tenant_id", "") or ""
-        user_id = getattr(request, "user_id", "") or ""
-
-        client = await self._get_client(tenant_id, user_id)
-        if not client:
-            return ToolCallResult(
-                success=False, result=None,
-                error="No active Confluence connection.",
-            )
-
         try:
-            page = await client.read_page(page_id=page_id, title=title)
+            page = await self.client.read_page(page_id=page_id, title=title)
             if not page:
                 return ToolCallResult(
                     success=True,
@@ -355,8 +304,20 @@ class ConfluenceReadExecutor(ToolExecutor):
 
 # ─── Registration ─────────────────────────────────────────────────────
 
-def register_confluence_tools(database: Any = None) -> None:
-    """Register Confluence tools if a connection exists."""
-    register_tool(SEARCH_CONFLUENCE_DEFINITION, ConfluenceSearchExecutor(database))
-    register_tool(READ_CONFLUENCE_PAGE_DEFINITION, ConfluenceReadExecutor(database))
-    logger.info("Registered Confluence tools: search_confluence, read_confluence_page")
+def register_confluence_tools(
+    domain: str = "",
+    email: str = "",
+    api_token: str = "",
+    tenant_id: str = "",
+    database: Any = None,
+) -> None:
+    """Register Confluence tools with direct credentials or database lookup."""
+    if domain and email and api_token:
+        client = ConfluenceAPIClient(domain, email, api_token)
+    else:
+        logger.warning("Confluence tools registered without credentials — will fail on use")
+        client = ConfluenceAPIClient("", "", "")
+
+    register_tool(SEARCH_CONFLUENCE_DEFINITION, ConfluenceSearchExecutor(client))
+    register_tool(READ_CONFLUENCE_PAGE_DEFINITION, ConfluenceReadExecutor(client))
+    logger.info(f"Registered Confluence tools for {domain or 'unconfigured'}")

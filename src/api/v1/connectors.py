@@ -225,13 +225,20 @@ async def oauth_callback(
     request: Request = None,
 ):
     """OAuth callback — exchanges authorization code for tokens."""
-    # Parse state
+    # Parse and validate state parameter
     parts = state.split(":")
-    if len(parts) < 3:
+    if len(parts) < 4:
         raise HTTPException(400, "Invalid state parameter")
-    tenant_id, user_id = parts[0], parts[1]
+    tenant_id, user_id, state_provider, nonce = parts[0], parts[1], parts[2], parts[3]
+
+    if state_provider != provider:
+        raise HTTPException(400, "State provider mismatch")
+    if not tenant_id or not user_id or not nonce:
+        raise HTTPException(400, "Incomplete state parameter")
 
     db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
     config = await _get_connector_config(db, provider, tenant_id)
     if not config:
         raise HTTPException(404, f"Connector not configured: {provider}")
@@ -305,6 +312,8 @@ async def disconnect_connector(
 ):
     """Disconnect a connector — revokes tokens."""
     db = _get_db(request)
+    if not db:
+        raise HTTPException(500, "Database not available")
     await db.execute(
         """UPDATE user_connectors SET status = 'revoked', access_token = NULL,
            refresh_token = NULL, updated_at = NOW()
@@ -431,7 +440,9 @@ async def _search_confluence(token: str, metadata: dict, query: str, limit: int)
     if not cloud_id:
         raise HTTPException(400, "Confluence cloud_id not found. Reconnect.")
 
-    cql = f'type=page AND text~"{query}"'
+    # Escape CQL special characters to prevent injection
+    safe_query = query.replace("\\", "\\\\").replace('"', '\\"')
+    cql = f'type=page AND text~"{safe_query}"'
     url = f"https://api.atlassian.com/ex/confluence/{cloud_id}/wiki/rest/api/content/search"
 
     async with httpx.AsyncClient() as client:

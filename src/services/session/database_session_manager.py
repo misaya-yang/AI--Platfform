@@ -98,15 +98,15 @@ class DatabaseSessionManager:
 
         session = self._dict_to_session(session_dict)
 
-        # 检查是否过期 (处理时区感知和时区无关的 datetime 比较)
+        # Don't reject expired sessions — auto-extend TTL on access instead.
+        # This prevents sessions from silently vanishing while users actively use them.
         if session.expires_at:
-            expires = (
-                session.expires_at.replace(tzinfo=None)
-                if session.expires_at.tzinfo
-                else session.expires_at
-            )
+            expires = session.expires_at.replace(tzinfo=None) if session.expires_at.tzinfo else session.expires_at
             if expires < datetime.utcnow():
-                return None
+                # Auto-extend by 7 days on access
+                new_ttl = self.default_session_ttl
+                await self.extend_ttl(session.session_id, new_ttl)
+                session.expires_at = datetime.utcnow() + timedelta(seconds=new_ttl)
 
         # 写入缓存
         await self._cache_session(session)
@@ -158,14 +158,12 @@ class DatabaseSessionManager:
             status=status,
             limit=limit,
         )
-        now = datetime.utcnow()
         sessions: list[Session] = []
         for row in sessions_dict:
             s = self._dict_to_session(row)
-            if s.expires_at:
-                expires = s.expires_at.replace(tzinfo=None) if s.expires_at.tzinfo else s.expires_at
-                if expires < now:
-                    continue
+            # Don't silently filter expired sessions — return them all.
+            # The UI should show them (with optional "expired" badge).
+            # Hard expiry cleanup is handled separately by cleanup_expired_sessions().
             sessions.append(s)
         return sessions
 

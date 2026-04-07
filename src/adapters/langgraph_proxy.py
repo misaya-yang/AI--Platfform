@@ -709,17 +709,8 @@ class LangGraphProxy:
         response.raise_for_status()
         results = response.json()
 
-        # Fallback: if non-admin got 0 results, try without owner_id filter
-        # (legacy threads may not have owner_id in metadata)
-        if not results and not is_admin and user.user_id:
-            fallback_payload = {
-                "metadata": metadata or {},
-                "limit": limit,
-                "offset": offset,
-            }
-            response = await client.post("/threads/search", json=fallback_payload, headers=headers)
-            response.raise_for_status()
-            results = response.json()
+        # No unfiltered fallback for non-admin — prevents cross-user thread leakage.
+        # Legacy threads without owner_id are only visible to admin users.
 
         return results
 
