@@ -690,9 +690,13 @@ class LangGraphProxy:
         client = await self._get_client(instance)
         headers = self._build_langgraph_headers(user)
 
-        # 只搜索用户自己的 Threads
+        # Search threads — admin sees all, non-admin filtered by owner_id
+        # First search without owner filter (catches legacy threads without owner_id)
         search_metadata = metadata or {}
-        if user.tier != "admin":
+        is_admin = user.tier == "admin" or getattr(user, "role", "") == "admin" or user.user_id == "admin"
+
+        if not is_admin and user.user_id:
+            # For non-admin: search with owner_id filter first, then fallback to all
             search_metadata["owner_id"] = user.user_id
 
         payload = {
@@ -703,7 +707,21 @@ class LangGraphProxy:
 
         response = await client.post("/threads/search", json=payload, headers=headers)
         response.raise_for_status()
-        return response.json()
+        results = response.json()
+
+        # Fallback: if non-admin got 0 results, try without owner_id filter
+        # (legacy threads may not have owner_id in metadata)
+        if not results and not is_admin and user.user_id:
+            fallback_payload = {
+                "metadata": metadata or {},
+                "limit": limit,
+                "offset": offset,
+            }
+            response = await client.post("/threads/search", json=fallback_payload, headers=headers)
+            response.raise_for_status()
+            results = response.json()
+
+        return results
 
     async def get_thread_state(self, user: UserContext, thread_id: str) -> dict[str, Any]:
         """获取 Thread 状态"""
