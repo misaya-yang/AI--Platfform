@@ -3991,13 +3991,14 @@ class KnowledgeService:
                                 }
                             )
                         hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-                        logger.debug(
-                            f"[BM25] Qdrant native sparse search: {len(hits)} hits"
+                        logger.info(
+                            f"[BM25] Qdrant native sparse: {len(hits)} hits "
+                            f"(collection={collection})"
                         )
                         return hits[:keyword_k], len(qdrant_hits)
             except Exception as sparse_err:
                 # Sparse vectors not available — fall back to PostgreSQL FTS
-                logger.debug(f"[BM25] Sparse search unavailable ({sparse_err}), using PostgreSQL FTS")
+                logger.info(f"[BM25] Sparse fallback to PostgreSQL FTS ({sparse_err})")
 
             # --- Fallback: PostgreSQL FTS + client-side BM25 ---
             q_lang = detect_language(query_text)
