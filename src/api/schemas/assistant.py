@@ -511,10 +511,13 @@ class EnhancedSessionMessage(BaseModel):
 
 
 class ImageGenerationRequest(BaseModel):
-    """Request for image generation with smart routing.
+    """Request for image generation (single-turn or multi-turn).
 
-    For iterative editing: provide reference_image (base64 or data URL of previous image)
-    along with an edit instruction in prompt. The model will edit the reference image.
+    Multi-turn mode (recommended): provide session_id. The backend builds the full
+    conversation history (including previously generated images) and sends to Gemini.
+    The model decides whether to edit a previous image or create something new.
+
+    Single-turn mode: omit session_id. Just prompt → image, no history.
     """
 
     prompt: str = Field(..., description="Text description or edit instruction", min_length=1)
@@ -522,9 +525,9 @@ class ImageGenerationRequest(BaseModel):
     style: str | None = Field(default="default", description="Image style (DashScope only)")
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
-    reference_image: str | None = Field(
+    session_id: str | None = Field(
         default=None,
-        description="Base64-encoded image or data URL for iterative editing (Gemini only)",
+        description="Image chat session ID. Enables multi-turn editing with full conversation history.",
     )
 
 

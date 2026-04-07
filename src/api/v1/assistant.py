@@ -1322,89 +1322,147 @@ async def generate_image(
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
     """
-    Generate images with smart routing based on model_id provider.
+    Generate or iteratively edit images.
 
-    Routing logic:
-    - Google models (gemini-*) → Gemini native image generation, fallback DashScope
-    - DashScope models (qwen-*, wanx-*) → DashScope Wanx, fallback Gemini
-    - Other models → DashScope first (cheaper), fallback Gemini
-    - Safety-blocked requests never fallback across providers
+    Two modes:
+    1. **Single-turn** (no session_id): text → image, no history.
+    2. **Multi-turn** (with session_id): builds full conversation history
+       (including previously generated images) and sends to Gemini.
+       The MODEL decides whether to edit a previous image or create something new.
+
+    Routing: Google models → Gemini first → DashScope fallback.
+    DashScope has no multi-turn support, so sessions with history always route to Gemini.
     """
+    import json as _json
     import time
 
     from ...services.assistant.models.model_registry import ModelProvider
+    from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
     from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
 
     start_time = time.time()
 
     try:
-        # Determine provider preference from model_id
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
-
-        # Route based on model provider: Google → Gemini first, others → DashScope first
         prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
-        router = get_smart_image_generator(prefer_gemini=prefer_gemini)
 
-        # Map style (DashScope only; Gemini ignores style)
-        style_map = {
-            "default": "<auto>",
-            "auto": "<auto>",
-            "photography": "<photography>",
-            "portrait": "<portrait>",
-            "3d": "<3d cartoon>",
-            "anime": "<anime>",
-            "oil": "<oil painting>",
-            "watercolor": "<watercolor>",
-            "sketch": "<sketch>",
-            "flat": "<flat illustration>",
-        }
-        style = style_map.get(body.style or "default", "<auto>")
-
-        # Parse size to get dimensions (for response metadata)
+        # Parse size → aspect ratio
         width, height = 1024, 1024
         if body.size:
             try:
-                parts = body.size.split("*")
-                if len(parts) == 2:
-                    width, height = int(parts[0]), int(parts[1])
+                p = body.size.split("*")
+                if len(p) == 2:
+                    width, height = int(p[0]), int(p[1])
             except ValueError:
-                width, height = 1024, 1024
+                pass
+        ratio = float(width) / float(height) if height else 1.0
+        ar_map = {"1:1": 1.0, "16:9": 16/9, "9:16": 9/16, "4:3": 4/3, "3:4": 3/4}
+        aspect_ratio = min(ar_map, key=lambda k: abs(ratio - ar_map[k]))
 
-        # Map size to Gemini aspect_ratio
-        try:
-            ratio = float(width) / float(height) if height else 1.0
-        except Exception:
-            ratio = 1.0
-        candidates = {
-            "1:1": 1.0,
-            "16:9": 16 / 9,
-            "9:16": 9 / 16,
-            "4:3": 4 / 3,
-            "3:4": 3 / 4,
+        # ------------------------------------------------------------------
+        # Multi-turn mode: build contents from image_chat_history in session
+        # ------------------------------------------------------------------
+        session_mgr = getattr(request.app.state, "session_manager", None)
+
+        if body.session_id and session_mgr and prefer_gemini:
+            gemini = get_gemini_image_generator()
+            if not gemini.is_configured:
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="none",
+                    duration_ms=(time.time() - start_time) * 1000,
+                    error="Gemini API key not configured for multi-turn image chat",
+                )
+
+            # Load existing image chat history from session metadata
+            session = await session_mgr.get(body.session_id)
+            image_history: list[dict] = []
+            if session and session.metadata:
+                image_history = session.metadata.get("image_chat_history", [])
+
+            # Build Gemini contents array from history
+            contents: list[dict] = []
+            for turn in image_history:
+                role = turn.get("role", "user")
+                parts = []
+                if turn.get("text"):
+                    parts.append({"text": turn["text"]})
+                if turn.get("image_base64"):
+                    mime = turn.get("mime_type", "image/jpeg")
+                    parts.append({"inlineData": {"mimeType": mime, "data": turn["image_base64"]}})
+                if parts:
+                    contents.append({"role": role, "parts": parts})
+
+            # Append current user message
+            contents.append({"role": "user", "parts": [{"text": body.prompt}]})
+
+            turn_count = len(contents)
+            logger.info(
+                "Image multi-turn: session=%s, turns=%d, prompt=%s...",
+                body.session_id, turn_count, body.prompt[:50],
+            )
+
+            res = await gemini.generate_chat(
+                contents=contents, n=body.n, aspect_ratio=aspect_ratio,
+            )
+
+            # Persist updated history — append user turn + model response
+            new_user_turn = {"role": "user", "text": body.prompt}
+            image_history.append(new_user_turn)
+
+            if res.success and res.images:
+                model_turn: dict = {"role": "model"}
+                if res.text:
+                    model_turn["text"] = res.text
+                # Store first image in history for future context
+                img = res.images[0]
+                model_turn["image_base64"] = img["content_base64"]
+                model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
+                image_history.append(model_turn)
+
+            # Save back to session metadata
+            if session_mgr and session:
+                meta = dict(session.metadata or {})
+                meta["image_chat_history"] = image_history
+                await session_mgr.update_metadata(body.session_id, meta)
+
+            if not res.success:
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="google",
+                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                    error=res.error or "Image generation failed",
+                )
+
+            images = []
+            for img in res.images:
+                data_url = f"data:{img.get('mime_type', 'image/png')};base64,{img['content_base64']}"
+                images.append(GeneratedImage(url=data_url, width=width, height=height))
+
+            return ImageGenerationResponse(
+                success=True, images=images, provider="google",
+                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+            )
+
+        # ------------------------------------------------------------------
+        # Single-turn mode (no session or DashScope): simple prompt → image
+        # ------------------------------------------------------------------
+        style_map = {
+            "default": "<auto>", "auto": "<auto>", "photography": "<photography>",
+            "portrait": "<portrait>", "3d": "<3d cartoon>", "anime": "<anime>",
+            "oil": "<oil painting>", "watercolor": "<watercolor>",
+            "sketch": "<sketch>", "flat": "<flat illustration>",
         }
-        aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
+        style = style_map.get(body.style or "default", "<auto>")
 
-        is_edit = bool(body.reference_image)
+        router = get_smart_image_generator(prefer_gemini=prefer_gemini)
         logger.info(
-            "Image %s request - model_id=%s, provider=%s, prefer_gemini=%s, prompt=%s..., size=%s, n=%s",
-            "edit" if is_edit else "generation",
-            body.model_id,
-            selected_provider,
-            prefer_gemini,
-            body.prompt[:50],
-            body.size,
-            body.n,
+            "Image single-turn: model_id=%s, prompt=%s..., size=%s",
+            body.model_id, body.prompt[:50], body.size,
         )
 
         res = await router.generate(
-            prompt=body.prompt,
-            n=body.n,
-            size=body.size or "1024*1024",
-            style=style,
-            aspect_ratio=aspect_ratio,
-            prefer_gemini=prefer_gemini,
-            reference_image=body.reference_image,
+            prompt=body.prompt, n=body.n, size=body.size or "1024*1024",
+            style=style, aspect_ratio=aspect_ratio, prefer_gemini=prefer_gemini,
         )
 
         if not res.success:
@@ -1412,47 +1470,25 @@ async def generate_image(
             if res.blocked and res.block_reason:
                 err = f"{err} (blocked: {res.block_reason})"
             return ImageGenerationResponse(
-                success=False,
-                images=[],
-                provider=res.provider,
-                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                error=err,
+                success=False, images=[], provider=res.provider,
+                duration_ms=res.duration_ms or (time.time() - start_time) * 1000, error=err,
             )
 
         images = []
         for img in res.images:
-            mime_type = img.get("mime_type", "image/png")
-            content_base64 = img.get("content_base64", "")
-            size_bytes = img.get("size_bytes", 0)
-            data_url = f"data:{mime_type};base64,{content_base64}"
-
-            logger.debug(
-                f"Image data: mime={mime_type}, base64_len={len(content_base64)}, size_bytes={size_bytes}"
-            )
-
-            images.append(
-                GeneratedImage(
-                    url=data_url,
-                    width=width,
-                    height=height,
-                )
-            )
+            data_url = f"data:{img.get('mime_type', 'image/png')};base64,{img['content_base64']}"
+            images.append(GeneratedImage(url=data_url, width=width, height=height))
 
         return ImageGenerationResponse(
-            success=True,
-            images=images,
-            provider=res.provider,
+            success=True, images=images, provider=res.provider,
             duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
         )
 
     except Exception as e:
         logger.error(f"Image generation failed: {e}")
         return ImageGenerationResponse(
-            success=False,
-            images=[],
-            provider="unknown",
-            duration_ms=(time.time() - start_time) * 1000,
-            error=str(e),
+            success=False, images=[], provider="unknown",
+            duration_ms=(time.time() - start_time) * 1000, error=str(e),
         )
 
 

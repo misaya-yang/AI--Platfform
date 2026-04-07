@@ -52,38 +52,16 @@ class SmartImageGenerator:
         negative_prompt: str = "",
         aspect_ratio: str = "1:1",
         prefer_gemini: bool = True,
-        reference_image: str | None = None,
     ) -> SmartImageGenerationResult:
+        """Single-turn image generation with provider routing.
+
+        Multi-turn editing is handled at the API layer (via session history → Gemini
+        generate_chat), so this method only handles single-turn prompt → image.
+        """
         start = time.time()
 
         gemini = get_gemini_image_generator()
         dash = get_image_generator()
-
-        # Iterative editing: Gemini only (DashScope doesn't support image input)
-        if reference_image:
-            if not gemini.is_configured:
-                return SmartImageGenerationResult(
-                    success=False,
-                    provider="none",
-                    error="Iterative image editing requires Gemini (GEMINI_API_KEY). DashScope does not support image input.",
-                    duration_ms=(time.time() - start) * 1000,
-                )
-            logger.info("Iterative edit mode → routing to Gemini (reference image provided)")
-            gemini_res = await gemini.generate(
-                prompt=prompt, n=n, aspect_ratio=aspect_ratio,
-                reference_image=reference_image,
-            )
-            return SmartImageGenerationResult(
-                success=gemini_res.success,
-                provider="google",
-                images=gemini_res.images if gemini_res.success else [],
-                text=gemini_res.text,
-                error=gemini_res.error,
-                error_code=gemini_res.error_code,
-                blocked=gemini_res.blocked,
-                block_reason=gemini_res.block_reason,
-                duration_ms=gemini_res.duration_ms,
-            )
 
         # Gemini first (if preferred + configured)
         if prefer_gemini and gemini.is_configured:

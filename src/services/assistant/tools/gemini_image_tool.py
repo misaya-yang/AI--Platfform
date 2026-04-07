@@ -1,10 +1,13 @@
 """
-Gemini Native Image Generation & Editing Tool for Assistant Service
+Gemini Native Image Generation & Multi-Turn Editing Tool
 
-Uses gemini-3.1-flash-image-preview for:
-- Text-to-image generation
-- Iterative image editing (send previous image + instruction)
-- Multi-resolution output (0.5K, 1K, 2K, 4K)
+Uses gemini-3.1-flash-image-preview with multi-turn conversation history:
+- Text → Image: pure prompt generation
+- Multi-turn chat: full conversation history (text + images) for iterative editing
+- The MODEL decides whether to edit a previous image or create something new
+
+Architecture: caller builds `contents` array from session history,
+this tool just sends it to Gemini generateContent API.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ class GeminiImageResult:
 
     success: bool
     images: list[dict[str, Any]] = field(default_factory=list)
-    text: str | None = None  # Model may return text alongside images
+    text: str | None = None
     error: str | None = None
     error_code: str | None = None
     blocked: bool = False
@@ -37,17 +40,15 @@ class GeminiImageResult:
 
 
 class GeminiImageGenerator:
-    """Image generator using Google Gemini Native Image API (Nano Banana 2).
+    """Image generator using Gemini multi-turn conversation API.
 
-    Supports:
-    - Text → Image: pure text prompt generation
-    - Image + Text → Image: iterative editing (send reference image + edit instruction)
+    Supports two calling modes:
+    1. Simple: generate(prompt=...) — single turn text-to-image
+    2. Multi-turn: generate_chat(contents=...) — full conversation with history
     """
 
     BASE_URL = "https://generativelanguage.googleapis.com"
-    # Nano Banana 2: gemini-3.1-flash-image-preview — fast, multi-resolution
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
-    # Fallback for compatibility
     FALLBACK_MODEL = "gemini-2.5-flash-image"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
@@ -73,17 +74,47 @@ class GeminiImageGenerator:
         reference_mime_type: str = "image/png",
         image_size: str | None = None,
     ) -> GeminiImageResult:
+        """Simple single-turn generation (backward compatible).
+
+        For multi-turn editing, use generate_chat() instead.
         """
-        Generate or edit images using Gemini.
+        parts: list[dict[str, Any]] = []
+
+        if reference_image:
+            img_data, mime = self._parse_data_url(reference_image, reference_mime_type)
+            parts.append({"inlineData": {"mimeType": mime, "data": img_data}})
+
+        parts.append({"text": prompt})
+        contents = [{"role": "user", "parts": parts}]
+
+        return await self._call_api(contents, n, aspect_ratio, image_size)
+
+    async def generate_chat(
+        self,
+        contents: list[dict[str, Any]],
+        n: int = 1,
+        aspect_ratio: str = "1:1",
+        image_size: str | None = None,
+    ) -> GeminiImageResult:
+        """Multi-turn image generation with full conversation history.
 
         Args:
-            prompt: Text description or edit instruction
+            contents: Gemini contents array — list of {role, parts} dicts.
+                      Previous model responses with images should be included.
             n: Number of images (1-4)
-            aspect_ratio: "1:1", "16:9", "9:16", "4:3", "3:4"
-            reference_image: Base64-encoded image for iterative editing (optional)
-            reference_mime_type: MIME type of reference image
-            image_size: Output resolution — "512px", "1024px", "2048px", "4096px"
+            aspect_ratio: For new generation only
+            image_size: Output resolution
         """
+        return await self._call_api(contents, n, aspect_ratio, image_size)
+
+    async def _call_api(
+        self,
+        contents: list[dict[str, Any]],
+        n: int = 1,
+        aspect_ratio: str = "1:1",
+        image_size: str | None = None,
+    ) -> GeminiImageResult:
+        """Core API call to Gemini generateContent."""
         if not self.is_configured:
             return GeminiImageResult(success=False, error="Google API key not configured")
 
@@ -93,58 +124,26 @@ class GeminiImageGenerator:
             client = await self._get_client()
             endpoint = f"{self.BASE_URL}/v1beta/models/{self.model}:generateContent"
 
-            # Build content parts
-            parts: list[dict[str, Any]] = []
-
-            # If reference image provided → iterative editing mode
-            if reference_image:
-                # Strip data URL prefix if present
-                img_data = reference_image
-                if img_data.startswith("data:"):
-                    # Extract base64 from "data:image/png;base64,..."
-                    comma_idx = img_data.index(",")
-                    header = img_data[:comma_idx]
-                    img_data = img_data[comma_idx + 1:]
-                    if "image/" in header:
-                        reference_mime_type = header.split(";")[0].split(":")[1]
-
-                parts.append({
-                    "inlineData": {
-                        "mimeType": reference_mime_type,
-                        "data": img_data,
-                    }
-                })
-                logger.info("Iterative edit mode: reference image + instruction")
-
-            parts.append({"text": prompt})
-
-            # Generation config
             gen_config: dict[str, Any] = {
                 "responseModalities": ["TEXT", "IMAGE"],
                 "candidateCount": max(1, min(int(n or 1), 4)),
             }
-
-            # Image config
             image_config: dict[str, Any] = {}
-            if aspect_ratio and not reference_image:
-                # Only set aspect ratio for new generation, not editing
+            if aspect_ratio:
                 image_config["aspectRatio"] = aspect_ratio
             if image_size:
                 image_config["outputImageSize"] = image_size
-
             if image_config:
                 gen_config["imageConfig"] = image_config
 
             body = {
-                "contents": [{"parts": parts}],
+                "contents": contents,
                 "generationConfig": gen_config,
             }
 
+            turns = len(contents)
             logger.info(
-                "Gemini image %s: %s (model=%s)",
-                "edit" if reference_image else "generate",
-                prompt[:60],
-                self.model,
+                "Gemini image API: %d turns, model=%s", turns, self.model,
             )
 
             response = await client.post(
@@ -159,39 +158,29 @@ class GeminiImageGenerator:
             if response.status_code != 200:
                 error_text = response.text
                 logger.error("Gemini image API error: %s - %s", response.status_code, error_text[:500])
-                # Try fallback model if primary fails with 404
                 if response.status_code == 404 and self.model != self.FALLBACK_MODEL:
                     logger.info("Retrying with fallback model: %s", self.FALLBACK_MODEL)
                     self.model = self.FALLBACK_MODEL
-                    return await self.generate(
-                        prompt, n, aspect_ratio, reference_image, reference_mime_type, image_size,
-                    )
+                    return await self._call_api(contents, n, aspect_ratio, image_size)
                 try:
-                    error_json = response.json()
-                    error_msg = error_json.get("error", {}).get("message", error_text[:200])
+                    error_msg = response.json().get("error", {}).get("message", error_text[:200])
                 except Exception:
                     error_msg = error_text[:200]
                 return GeminiImageResult(
-                    success=False,
-                    error=f"API error: {response.status_code} - {error_msg}",
+                    success=False, error=f"API error: {response.status_code} - {error_msg}",
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
             result = response.json()
 
             # Safety blocking
-            prompt_feedback = result.get("promptFeedback") or result.get("prompt_feedback") or {}
-            block_reason = prompt_feedback.get("blockReason") or prompt_feedback.get("block_reason")
-            if block_reason:
-                duration_ms = (time.time() - start_time) * 1000
-                logger.warning("Gemini image blocked: %s", block_reason)
+            pf = result.get("promptFeedback") or result.get("prompt_feedback") or {}
+            block = pf.get("blockReason") or pf.get("block_reason")
+            if block:
                 return GeminiImageResult(
-                    success=False,
-                    error="Image generation blocked by safety filters",
-                    error_code="GEMINI_IMAGE_BLOCKED",
-                    blocked=True,
-                    block_reason=str(block_reason),
-                    duration_ms=duration_ms,
+                    success=False, error="Image generation blocked by safety filters",
+                    error_code="GEMINI_IMAGE_BLOCKED", blocked=True, block_reason=str(block),
+                    duration_ms=(time.time() - start_time) * 1000,
                 )
 
             images, text_response = self._extract_response(result)
@@ -200,51 +189,31 @@ class GeminiImageGenerator:
             if not images:
                 logger.warning("Gemini returned no images. Text: %s", (text_response or "")[:200])
                 return GeminiImageResult(
-                    success=False,
-                    text=text_response,
-                    error=text_response or "Model did not generate images. Try a different prompt.",
-                    error_code="GEMINI_NO_IMAGE",
-                    duration_ms=duration_ms,
+                    success=False, text=text_response,
+                    error=text_response or "Model did not generate images.",
+                    error_code="GEMINI_NO_IMAGE", duration_ms=duration_ms,
                 )
 
             logger.info("Gemini generated %d image(s) in %.0fms", len(images), duration_ms)
-
-            return GeminiImageResult(
-                success=True,
-                images=images,
-                text=text_response,
-                duration_ms=duration_ms,
-            )
+            return GeminiImageResult(success=True, images=images, text=text_response, duration_ms=duration_ms)
 
         except Exception as e:
             logger.error("Gemini image generation failed: %s", e)
             return GeminiImageResult(
-                success=False,
-                error=str(e),
-                error_code="GEMINI_IMAGE_ERROR",
+                success=False, error=str(e), error_code="GEMINI_IMAGE_ERROR",
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
     def _extract_response(self, response: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
         """Extract images and optional text from Gemini response."""
-        images = []
-        text_parts = []
-
+        images, text_parts = [], []
         for candidate in response.get("candidates", []):
-            content = candidate.get("content", {})
-            parts = content.get("parts", [])
-
-            for i, part in enumerate(parts):
-                # Text part
+            for i, part in enumerate(candidate.get("content", {}).get("parts", [])):
                 if "text" in part:
                     text_parts.append(part["text"])
-
-                # Image part
                 inline_data = part.get("inlineData") or part.get("inline_data")
                 if inline_data:
-                    mime_type = (
-                        inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
-                    )
+                    mime = inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
                     data = inline_data.get("data", "")
                     if data:
                         try:
@@ -254,12 +223,20 @@ class GeminiImageGenerator:
                         images.append({
                             "filename": f"gemini_image_{i + 1}.png",
                             "content_base64": data,
-                            "mime_type": mime_type,
+                            "mime_type": mime,
                             "size_bytes": size_bytes,
                         })
+        return images, "\n".join(text_parts) if text_parts else None
 
-        text_response = "\n".join(text_parts) if text_parts else None
-        return images, text_response
+    @staticmethod
+    def _parse_data_url(data_url: str, default_mime: str = "image/png") -> tuple[str, str]:
+        """Parse a data URL or raw base64 into (base64_data, mime_type)."""
+        if data_url.startswith("data:"):
+            comma = data_url.index(",")
+            header = data_url[:comma]
+            mime = header.split(";")[0].split(":")[1] if "image/" in header else default_mime
+            return data_url[comma + 1:], mime
+        return data_url, default_mime
 
     async def close(self):
         if self._client:
@@ -267,7 +244,6 @@ class GeminiImageGenerator:
             self._client = None
 
 
-# Global instance
 _gemini_generator: GeminiImageGenerator | None = None
 
 
