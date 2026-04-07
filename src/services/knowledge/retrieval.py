@@ -23,7 +23,9 @@ from .common import (  # noqa: E402
 )
 
 # Keep local aliases for backward compatibility within this module
-_RE_ARABIC_RUN = RE_ARABIC_CHARS
+_RE_ARABIC_RUN = re.compile(
+    r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]+"
+)
 _RE_ARABIC_DIACRITICS = RE_ARABIC_DIACRITICS
 
 # Arabic stopwords (common words to filter out for better BM25)
@@ -367,6 +369,56 @@ def bm25_scores(
             score += idf * (f * (k1 + 1.0)) / max(denom, 1e-9)
         scores.append(float(score))
     return scores
+
+
+def _token_hash(token: str) -> int:
+    """Deterministic hash for a token string → sparse vector index (FNV-1a 32-bit)."""
+    h = 0x811C9DC5
+    for b in token.encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def text_to_sparse_vector(
+    text: str,
+    remove_stopwords: bool = True,
+) -> tuple[list[int], list[float]]:
+    """Convert text to a sparse vector for Qdrant BM25 search.
+
+    Returns (indices, values) — hashed token IDs and term frequencies.
+    """
+    tokens = tokenize(text, remove_stopwords=remove_stopwords)
+    if not tokens:
+        return [], []
+
+    tf: dict[int, float] = {}
+    for token in tokens:
+        idx = _token_hash(token)
+        tf[idx] = tf.get(idx, 0.0) + 1.0
+
+    indices = sorted(tf.keys())
+    values = [tf[i] for i in indices]
+    return indices, values
+
+
+def query_to_sparse_vector(
+    query: str,
+    remove_stopwords: bool = False,
+) -> tuple[list[int], list[float]]:
+    """Convert a search query to a sparse vector (uniform weights for IDF modifier)."""
+    tokens = tokenize(query, remove_stopwords=remove_stopwords)
+    if not tokens:
+        return [], []
+
+    seen: dict[int, float] = {}
+    for token in tokens:
+        idx = _token_hash(token)
+        seen[idx] = 1.0
+
+    indices = sorted(seen.keys())
+    values = [seen[i] for i in indices]
+    return indices, values
 
 
 def compute_text_match_score(

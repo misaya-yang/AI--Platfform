@@ -23,6 +23,7 @@ from .chunking import (
     process_document,
 )
 from .embedding import create_embedding
+from .retrieval import text_to_sparse_vector
 from .section_extractor import SectionExtractor
 from .vector_store import VectorStore
 
@@ -503,10 +504,24 @@ class IngestionService:
                         )
                         if meta.get(key) is not None
                     }
+                    # P2a: Generate BM25 sparse vector for native Qdrant search
+                    from qdrant_client.http import models as qmodels
+
+                    sparse_indices, sparse_values = text_to_sparse_vector(seg["text"])
+                    vector: dict | list = (
+                        {
+                            "": embeddings[j],
+                            "bm25": qmodels.SparseVector(
+                                indices=sparse_indices, values=sparse_values,
+                            ),
+                        }
+                        if sparse_indices
+                        else embeddings[j]
+                    )
                     points.append(
                         {
                             "id": seg["segment_id"],
-                            "vector": embeddings[j],
+                            "vector": vector,
                             "payload": {
                                 "document_id": document_id,
                                 "dataset_id": dataset_id,

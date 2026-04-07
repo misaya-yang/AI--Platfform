@@ -177,13 +177,18 @@ class VectorStore:
             lambda: self._client.create_collection(
                 collection_name=actual,
                 vectors_config=qmodels.VectorParams(size=int(dimension), distance=dist),
+                sparse_vectors_config={
+                    "bm25": qmodels.SparseVectorParams(
+                        modifier=qmodels.Modifier.IDF,
+                    ),
+                },
                 hnsw_config=qmodels.HnswConfigDiff(
-                    m=16,                # Connection degree (balanced recall vs memory)
-                    ef_construct=200,    # Build-time accuracy
-                    full_scan_threshold=10000,  # Use HNSW for collections > 10K points
+                    m=16,
+                    ef_construct=200,
+                    full_scan_threshold=10000,
                 ),
                 optimizers_config=qmodels.OptimizersConfigDiff(
-                    indexing_threshold=20000,  # Build index after 20K points
+                    indexing_threshold=20000,
                 ),
             )
         )
@@ -213,6 +218,89 @@ class VectorStore:
                 )
 
         return actual
+
+    async def ensure_sparse_vectors(self, collection_name: str) -> bool:
+        """Add BM25 sparse vector config to an existing collection (migration)."""
+        try:
+            info = await self._call(lambda: self._client.get_collection(collection_name))
+            sparse_cfg = getattr(info.config.params, "sparse_vectors", None) or {}
+            if "bm25" in sparse_cfg:
+                return False
+            await self._call(
+                lambda: self._client.update_collection(
+                    collection_name=collection_name,
+                    sparse_vectors_config={
+                        "bm25": qmodels.SparseVectorParams(
+                            modifier=qmodels.Modifier.IDF,
+                        ),
+                    },
+                )
+            )
+            logger.info("Added BM25 sparse vector config to collection %s", collection_name)
+            return True
+        except Exception as e:
+            logger.warning("Failed to add sparse vector config to %s: %s", collection_name, e)
+            return False
+
+    async def hybrid_search_native(
+        self,
+        collection_name: str,
+        query_vector: list[float],
+        sparse_indices: list[int],
+        sparse_values: list[float],
+        top_k: int = 10,
+        dense_limit: int = 100,
+        sparse_limit: int = 100,
+        tenant_id: str | None = None,
+        document_id: str | None = None,
+        with_payload: bool = True,
+    ) -> list[VectorSearchHit]:
+        """Native Qdrant hybrid search: Prefetch(dense+BM25) → RRF fusion."""
+        conditions = []
+        if tenant_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="tenant_id", match=qmodels.MatchValue(value=tenant_id),
+                )
+            )
+        if document_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="document_id", match=qmodels.MatchValue(value=document_id),
+                )
+            )
+        flt = qmodels.Filter(must=conditions) if conditions else None
+
+        prefetch = [
+            qmodels.Prefetch(query=query_vector, limit=dense_limit, filter=flt),
+        ]
+        if sparse_indices:
+            prefetch.append(
+                qmodels.Prefetch(
+                    query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
+                    using="bm25",
+                    limit=sparse_limit,
+                    filter=flt,
+                ),
+            )
+
+        resp = await self._call(
+            lambda: self._client.query_points(
+                collection_name=collection_name,
+                prefetch=prefetch,
+                query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
+                limit=int(top_k),
+                with_payload=with_payload,
+            )
+        )
+
+        hits = list(getattr(resp, "points", None) or [])
+        return [
+            VectorSearchHit(
+                point_id=str(p.id), score=float(p.score), payload=dict(p.payload or {}),
+            )
+            for p in hits
+        ]
 
     async def upsert(self, collection_name: str, points: Sequence[qmodels.PointStruct]) -> None:
         if not points:

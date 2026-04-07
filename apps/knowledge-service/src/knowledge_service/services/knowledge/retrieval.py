@@ -418,6 +418,72 @@ def bm25_scores(
     return scores
 
 
+def _token_hash(token: str) -> int:
+    """Deterministic hash for a token string → sparse vector index.
+
+    Uses FNV-1a 32-bit for speed and good distribution. The index space
+    is large enough (~4B) that collisions are negligible for typical
+    document sizes.
+    """
+    h = 0x811C9DC5  # FNV offset basis
+    for b in token.encode("utf-8"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF  # FNV prime, keep 32-bit
+    return h
+
+
+def text_to_sparse_vector(
+    text: str,
+    remove_stopwords: bool = True,
+) -> tuple[list[int], list[float]]:
+    """Convert text to a sparse vector for Qdrant BM25 search.
+
+    Tokenizes the text, computes term frequencies, and maps each token
+    to a deterministic integer index via hashing.
+
+    Returns:
+        (indices, values) — suitable for ``qdrant_client.models.SparseVector``.
+        Indices are hashed token IDs; values are term frequencies.
+    """
+    tokens = tokenize(text, remove_stopwords=remove_stopwords)
+    if not tokens:
+        return [], []
+
+    tf: dict[int, float] = {}
+    for token in tokens:
+        idx = _token_hash(token)
+        tf[idx] = tf.get(idx, 0.0) + 1.0
+
+    indices = sorted(tf.keys())  # Qdrant requires sorted indices
+    values = [tf[i] for i in indices]
+    return indices, values
+
+
+def query_to_sparse_vector(
+    query: str,
+    remove_stopwords: bool = False,
+) -> tuple[list[int], list[float]]:
+    """Convert a search query to a sparse vector.
+
+    Similar to ``text_to_sparse_vector`` but keeps stopwords by default
+    (queries are short) and uses uniform weights so Qdrant's IDF modifier
+    handles the scoring.
+    """
+    tokens = tokenize(query, remove_stopwords=remove_stopwords)
+    if not tokens:
+        return [], []
+
+    # Deduplicate: each query term gets weight 1.0
+    seen: dict[int, float] = {}
+    for token in tokens:
+        idx = _token_hash(token)
+        seen[idx] = 1.0  # Uniform weight — IDF modifier handles ranking
+
+    indices = sorted(seen.keys())
+    values = [seen[i] for i in indices]
+    return indices, values
+
+
 def compute_text_match_score(
     query: str,
     text: str,

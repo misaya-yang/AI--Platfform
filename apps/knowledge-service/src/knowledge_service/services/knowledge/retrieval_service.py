@@ -691,96 +691,79 @@ class RetrievalService:
         filters: dict[str, Any] | None,
         tenant_id: str | None = None,
     ) -> list[RetrieveResult]:
-        """Hybrid retrieval with parallel dense + sparse + optional rerank.
+        """Hybrid retrieval using Qdrant native Prefetch + RRF fusion.
 
-        Components executed in parallel for minimal latency:
-        1. Dense retrieval (vector search)
-        2. Sparse retrieval (BM25)
-        3. Query expansion (if enabled)
+        Single Qdrant call: Dense + BM25 (sparse) → server-side RRF.
+        Falls back to legacy parallel retrieval if sparse vectors unavailable.
 
-        Then: RRF fusion -> Optional Rerank -> Optional MMR
-
-        Args:
-            dataset_id: Dataset ID to search in.
-            query: Search query string.
-            config: Retrieval configuration.
-            filters: Additional filters to apply.
-            tenant_id: Tenant ID for multi-tenant isolation in vector search.
+        Then: Optional Rerank → Optional MMR
         """
         import time
 
         start_time = time.time()
 
-        # Run dense and sparse in parallel
-        dense_task = asyncio.create_task(
-            self._dense_retrieval(
-                dataset_id,
-                query,
-                RetrievalConfig(mode="dense", top_k=config.top_k * 3, use_mmr=False),
-                filters,
-                tenant_id,
-            )
-        )
-        sparse_task = asyncio.create_task(
-            self._sparse_retrieval(
-                dataset_id,
-                query,
-                RetrievalConfig(mode="sparse", top_k=config.top_k * 3, use_mmr=False),
-                filters,
-            )
-        )
+        # Build query embedding + sparse vector
+        from .retrieval import query_to_sparse_vector
 
-        # Wait for both with timeout to ensure we don't hang
+        embedder = await get_cached_embedder(self.settings)
+        query_embedding = await embedder.embed_query(query)
+        sparse_indices, sparse_values = query_to_sparse_vector(query)
+
+        candidate_count = config.top_k * 3
+
         try:
-            dense_results, sparse_results = await asyncio.wait_for(
-                asyncio.gather(dense_task, sparse_task, return_exceptions=True),
-                timeout=5.0,  # 5 second timeout for retrieval
+            # Single Qdrant call: dense + BM25 → RRF
+            hits = await self.vector_store.hybrid_search_native(
+                collection_name=dataset_id,
+                query_vector=query_embedding,
+                sparse_indices=sparse_indices,
+                sparse_values=sparse_values,
+                top_k=candidate_count,
+                dense_limit=candidate_count,
+                sparse_limit=candidate_count,
+                tenant_id=tenant_id,
+                document_id=filters.get("document_id") if filters else None,
             )
-        except asyncio.TimeoutError:
-            logger.error("[Retrieval] Dense/Sparse retrieval timeout")
-            for task in (dense_task, sparse_task):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
+        except Exception as e:
+            logger.warning(f"[Retrieval] Native hybrid failed ({e}), falling back to dense-only")
+            hits = await self.vector_store.search(
+                collection_name=dataset_id,
+                query_vector=query_embedding,
+                top_k=candidate_count,
+                tenant_id=tenant_id,
+            )
 
-            dense_results = []
-            if dense_task.done() and not dense_task.cancelled():
-                exc = dense_task.exception()
-                if exc is None:
-                    dense_results = dense_task.result()
+        # Convert to RetrieveResult
+        fused = []
+        for i, hit in enumerate(hits):
+            payload = hit.payload or {}
+            meta = payload.get("metadata", {})
+            # Normalize RRF scores to [0, 1]
+            fused.append(
+                RetrieveResult(
+                    segment_id=hit.point_id,
+                    document_id=payload.get("document_id", ""),
+                    score=float(hit.score),
+                    text=payload.get("text", ""),
+                    metadata=meta,
+                    content_type=meta.get("content_type", "text"),
+                    image_url=meta.get("image_url"),
+                    vlm_description=meta.get("vlm_description"),
+                )
+            )
 
-            sparse_results = []
-            if sparse_task.done() and not sparse_task.cancelled():
-                exc = sparse_task.exception()
-                if exc is None:
-                    sparse_results = sparse_task.result()
-
-        # Handle exceptions
-        if isinstance(dense_results, Exception):
-            logger.error(f"[Retrieval] Dense retrieval failed: {dense_results}")
-            dense_results = []
-        if isinstance(sparse_results, Exception):
-            logger.error(f"[Retrieval] Sparse retrieval failed: {sparse_results}")
-            sparse_results = []
-
-        # Log retrieval stats
         logger.info(
-            f"[Retrieval] Dense: {len(dense_results)} results, "
-            f"Sparse: {len(sparse_results)} results"
+            f"[Retrieval] Native hybrid: {len(fused)} candidates "
+            f"(dense+BM25→RRF, {(time.time() - start_time) * 1000:.0f}ms)"
         )
 
-        # RRF Fusion
-        fusion_start = time.time()
-        fused = self._fuse_results(dense_results, sparse_results, config.top_k * 2)
-        logger.debug(f"[Retrieval] RRF fusion took {(time.time() - fusion_start) * 1000:.1f}ms")
-
-        # Rerank if enabled - CRITICAL FIX: actually call reranker
+        # Rerank if enabled
         if config.rerank and config.rerank.enabled:
             rerank_start = time.time()
             fused = await self._apply_reranking(fused, query, config.rerank)
             logger.info(f"[Retrieval] Rerank took {(time.time() - rerank_start) * 1000:.1f}ms")
 
-        # MMR if enabled - CRITICAL FIX: actually apply MMR
+        # MMR if enabled
         if config.use_mmr and len(fused) > config.top_k:
             mmr_start = time.time()
             fused = await self._apply_mmr_async(fused, query, config.mmr_diversity)
