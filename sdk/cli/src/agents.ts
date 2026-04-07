@@ -5,7 +5,7 @@
  * ---
  * name: code-reviewer
  * description: Review code for bugs
- * model: qwen3.5-plus
+ * model: qwen3.6-plus
  * tools: [read_file, glob, grep]
  * maxTurns: 10
  * ---

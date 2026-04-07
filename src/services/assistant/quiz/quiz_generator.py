@@ -18,7 +18,7 @@ from ..models.model_registry import ChatMessage, ModelRegistry
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_QUIZ_MODEL = "qwen3.5-plus"
+DEFAULT_QUIZ_MODEL = "qwen3.6-plus"
 
 # Base prompt — question type rules are injected dynamically
 _PROMPT_HEADER = """\

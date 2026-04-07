@@ -119,7 +119,7 @@ export function ExamDetailPage() {
     setAnalyzing(true);
     try {
       const result = await analyzeExam(examId);
-      setActiveReport({ report_id: result.report_id, content: result.content, model_id: "qwen3.5-plus", generated_at: new Date().toISOString() });
+      setActiveReport({ report_id: result.report_id, content: result.content, model_id: "qwen3.6-plus", generated_at: new Date().toISOString() });
       load(); // refresh reports list
     } catch (e: any) {
       alert(e?.response?.data?.detail || "Analysis failed");

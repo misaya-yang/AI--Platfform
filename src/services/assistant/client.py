@@ -29,7 +29,7 @@ class ChatRequest:
     """Unified chat request for both in-process and remote."""
     message: str
     session_id: str
-    model_id: str = "qwen3.5-plus"
+    model_id: str = "qwen3.6-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
     kb_dataset_ids: list[str] | None = None
@@ -229,7 +229,7 @@ class RemoteAssistantClient:
         payload: dict[str, Any] = {
             "message": message,
             "session_id": session_id,
-            "model_id": getattr(config, "model_id", "qwen3.5-plus"),
+            "model_id": getattr(config, "model_id", "qwen3.6-plus"),
             "temperature": getattr(config, "temperature", 0.7),
             "max_tokens": getattr(config, "max_tokens", None),
             "kb_dataset_ids": getattr(config, "kb_dataset_ids", None),

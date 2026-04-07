@@ -65,6 +65,7 @@ DEFAULT_TOKEN_PRICING_PER_1K_USD: dict[str, dict[str, Any]] = {
     "qwen-max": {"input": _d("0.0012"), "output": _d("0.006"), "provider": "dashscope"},
     "qwen-vl-max": {"input": _d("0.00023"), "output": _d("0.000574"), "provider": "dashscope"},
     "qwen-vl-plus": {"input": _d("0.008"), "output": _d("0.008"), "provider": "dashscope"},
+    "qwen3.6-plus": {"input": _d("0"), "output": _d("0"), "provider": "dashscope"},
     # Google Gemini
     "gemini-3-pro-preview": {
         "input": _d("0.002"),

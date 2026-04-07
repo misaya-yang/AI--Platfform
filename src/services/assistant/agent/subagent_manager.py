@@ -185,7 +185,7 @@ class SubAgentManager:
         """Select model by agent type — explore prefers fast models, others prefer strongest."""
         models = list(self.model_registry._models.values())
         if not models:
-            return "qwen3.5-plus"
+            return "qwen3.6-plus"
         if config.agent_type == SubAgentType.EXPLORE:
             for m in models:
                 if "flash" in m.id.lower() or "turbo" in m.id.lower():

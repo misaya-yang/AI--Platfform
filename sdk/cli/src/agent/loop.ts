@@ -72,7 +72,7 @@ export async function runAgentLoop(
     const body: Record<string, any> = {
       message: currentMessage,
       stream: true,
-      model_id: chatOpts.modelId ?? "qwen3.5-plus",
+      model_id: chatOpts.modelId ?? "qwen3.6-plus",
       temperature: chatOpts.temperature ?? 0.7,
       os_agent_enabled: true,
       os_tools: osToolSchemas,

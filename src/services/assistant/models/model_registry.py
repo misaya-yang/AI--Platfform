@@ -277,6 +277,16 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             input_price_per_1k=0.00023,
             output_price_per_1k=0.000574,
         ),
+        ModelInfo(
+            id="qwen3.6-plus",
+            name="Qwen 3.6 Plus",
+            provider=ModelProvider.DASHSCOPE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=False,
+            input_price_per_1k=0.0,
+            output_price_per_1k=0.0,
+        ),
     ],
     ModelProvider.GOOGLE: [
         # Gemini 3.0 系列 (2025年1月发布) - 高端模型，仅限管理员

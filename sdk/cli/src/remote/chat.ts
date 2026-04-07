@@ -36,7 +36,7 @@ function buildBody(message: string, stream: boolean, opts: ChatOptions): ChatReq
   const body: ChatRequestBody = {
     message,
     stream,
-    model_id: opts.modelId ?? "qwen3.5-plus",
+    model_id: opts.modelId ?? "qwen3.6-plus",
     temperature: opts.temperature ?? 0.7,
   };
 

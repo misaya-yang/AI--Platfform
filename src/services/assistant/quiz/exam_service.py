@@ -446,7 +446,7 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
         from ..models.model_registry import ChatMessage as ModelChatMessage
 
         content, _usage = await model_registry.chat(
-            model_id="qwen3.5-plus",
+            model_id="qwen3.6-plus",
             messages=[ModelChatMessage(role="user", content=prompt)],
             temperature=0.3,
             max_tokens=4096,
@@ -461,7 +461,7 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
             """,
             uuid.UUID(report_id), uuid.UUID(exam_id),
             json.dumps({"markdown": content, "input": analysis_input}, ensure_ascii=False),
-            "qwen3.5-plus",
+            "qwen3.6-plus",
             datetime.now(timezone.utc),
         )
 
