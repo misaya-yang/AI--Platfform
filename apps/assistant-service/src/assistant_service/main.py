@@ -1,0 +1,224 @@
+"""
+Assistant Service — independent FastAPI microservice.
+
+Runs on port 8093. Provides AI chat, streaming, tools, RAG, memory, agents.
+Trusts gateway-forwarded X-User-* headers for authentication.
+
+Start: uvicorn assistant_service.main:app --host 0.0.0.0 --port 8093
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# ── Compatibility shim: make gateway `src` importable ──
+# This allows reusing the existing AssistantService, tools, RAG, etc.
+# without duplicating thousands of lines of code.
+# The proper long-term fix is to extract a shared `ai-gateway-core` package.
+_gateway_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if os.path.isdir(os.path.join(_gateway_root, "src")):
+    sys.path.insert(0, _gateway_root)
+
+from .config import get_settings
+
+logger = logging.getLogger("assistant-service")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle."""
+    logger.info("Assistant Service starting...")
+    app.state.settings = settings
+
+    # ── Database ──
+    database = None
+    db_dsn = os.getenv("DATABASE_URL", settings.database.dsn)
+    try:
+        from src.persistence.database import DatabaseStorage
+        database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
+        await database.connect()
+        app.state.database = database
+        logger.info("Database connected")
+    except Exception as e:
+        logger.warning(f"Database init failed: {e}")
+
+    # ── Redis ──
+    redis_client = None
+    redis_url = os.getenv("REDIS_URL", settings.redis.url)
+    if redis_url and settings.redis.enabled:
+        try:
+            import redis.asyncio as aioredis
+            redis_client = aioredis.from_url(redis_url, decode_responses=True)
+            await redis_client.ping()
+            app.state.redis = redis_client
+            logger.info("Redis connected")
+        except Exception as e:
+            logger.warning(f"Redis init failed: {e}")
+
+    # ── Model Registry ──
+    from src.services.assistant.models.model_registry import ModelRegistry, ModelProvider
+    model_registry = ModelRegistry()
+
+    providers_config = {
+        "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", "https://api.openai.com"),
+        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+        "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "dashscope": ("DASHSCOPE_API_KEY", None, "https://dashscope.aliyuncs.com/compatible-mode"),
+        "google": ("GEMINI_API_KEY", None, "https://generativelanguage.googleapis.com"),
+    }
+    for pid, (env_key, env_url, default_url) in providers_config.items():
+        api_key = os.environ.get(env_key, "")
+        if pid == "google" and not api_key:
+            api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if api_key:
+            try:
+                base_url = os.environ.get(env_url) if env_url else None
+                model_registry.configure_provider(
+                    ModelProvider(pid), api_key=api_key, base_url=base_url or default_url,
+                )
+                logger.info(f"Provider {pid} configured")
+            except Exception as e:
+                logger.warning(f"Provider {pid} failed: {e}")
+
+    # Load models from database
+    if database and getattr(database, "_pool", None):
+        try:
+            from src.services.assistant.models.model_registry import ModelInfo
+            async with database._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT model_id, display_name, provider_id, context_window, max_output_tokens "
+                    "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true", "default",
+                )
+                if rows:
+                    model_registry._models.clear()
+                    for r in rows:
+                        try:
+                            model_registry._models[r["model_id"]] = ModelInfo(
+                                id=r["model_id"], provider=ModelProvider(r["provider_id"]),
+                                name=r["display_name"] or r["model_id"],
+                                context_window=r["context_window"] or 32000,
+                                max_output_tokens=r["max_output_tokens"] or 4096,
+                            )
+                        except ValueError:
+                            pass
+                    logger.info(f"Loaded {len(rows)} models from DB")
+        except Exception as e:
+            logger.warning(f"DB model load failed: {e}")
+
+    app.state.model_registry = model_registry
+
+    # ── KB Proxy ──
+    kb_proxy = None
+    kb_url = os.getenv("KB_SERVICE_URL", settings.kb.url)
+    try:
+        from src.services.knowledge.kb_proxy_client import KBProxyClient
+        kb_proxy = KBProxyClient(base_url=kb_url)
+        logger.info(f"KB proxy → {kb_url}")
+    except Exception as e:
+        logger.warning(f"KB proxy init failed: {e}")
+
+    # ── Memory Service ──
+    memory_service = None
+    if database:
+        try:
+            from src.services.assistant.memory_service import MemoryService
+            memory_service = MemoryService(database)
+        except Exception as e:
+            logger.warning(f"Memory service init failed: {e}")
+
+    # ── Session Manager ──
+    session_manager = None
+    if database:
+        try:
+            from src.services.session.database_session_manager import DatabaseSessionManager
+            session_manager = DatabaseSessionManager(database)
+        except Exception as e:
+            logger.warning(f"Session manager init failed: {e}")
+
+    # ── Tool Registry ──
+    from src.services.assistant.tools import (
+        TavilySearchTool, get_tool_registry, register_builtin_tools,
+        register_document_generation_tool, register_pptx_generation_tool,
+    )
+    from src.services.assistant.tools.image_generator_tool import register_image_generation_tool
+
+    tavily_key = os.environ.get("TAVILY_API_KEY", "")
+    tavily_tool = TavilySearchTool(api_key=tavily_key or None)
+
+    register_builtin_tools(
+        kb_service=kb_proxy, tavily_tool=tavily_tool,
+        memory_service=memory_service, database=database,
+    )
+    register_document_generation_tool()
+    try:
+        register_pptx_generation_tool()
+    except Exception:
+        pass
+    register_image_generation_tool()
+
+    # ── AssistantService ──
+    from src.services.assistant import AssistantService
+    assistant_service = AssistantService(
+        model_registry=model_registry,
+        kb_service=None,
+        kb_proxy=kb_proxy,
+        tavily_api_key=tavily_key or None,
+        session_manager=session_manager,
+        redis_client=redis_client,
+        memory_service=memory_service,
+        db=database,
+    )
+    app.state.assistant_service = assistant_service
+    app.state.session_manager = session_manager
+    app.state.kb_proxy = kb_proxy
+    app.state.memory_service = memory_service
+    app.state._ready = True
+    logger.info("Assistant Service ready ✓")
+
+    yield  # ── Running ──
+
+    # ── Shutdown ──
+    if database:
+        await database.close()
+    if redis_client:
+        await redis_client.close()
+    logger.info("Assistant Service shut down")
+
+
+# ── Create App ──
+
+app = FastAPI(
+    title="AI Assistant Service",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health")
+async def health():
+    ready = getattr(app.state, "_ready", False)
+    return {"status": "ok" if ready else "starting", "service": "assistant", "version": "0.1.0"}
+
+
+# ── Register API routes ──
+from .api.router import router as api_router
+app.include_router(api_router, prefix="/api/v1/assistant")

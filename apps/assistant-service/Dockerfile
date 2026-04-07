@@ -1,0 +1,53 @@
+# Assistant Service — independent microservice
+# Shares gateway's src/ for core AssistantService logic (compatibility shim)
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install gateway deps first (for AssistantService compatibility)
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir ".[all]" 2>/dev/null || pip install --no-cache-dir "." && \
+    find /opt/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
+
+# Install assistant-service deps
+COPY apps/assistant-service/pyproject.toml /build/assistant-service/
+RUN cd /build/assistant-service && pip install --no-cache-dir "." 2>/dev/null; true
+
+# --- Runtime ---
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy gateway src (compatibility shim)
+COPY src/ ./src/
+
+# Copy assistant service
+COPY apps/assistant-service/src/ ./apps/assistant-service/src/
+
+RUN useradd -m appuser && mkdir -p /app/logs /app/uploads && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8093
+
+# Set PYTHONPATH so both gateway src and assistant_service are importable
+ENV PYTHONPATH="/app:/app/apps/assistant-service/src"
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=20s \
+    CMD curl -f http://localhost:8093/health || exit 1
+
+CMD ["uvicorn", "assistant_service.main:app", "--host", "0.0.0.0", "--port", "8093", "--workers", "1", "--timeout-keep-alive", "120"]

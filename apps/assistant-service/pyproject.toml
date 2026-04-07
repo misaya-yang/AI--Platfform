@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "assistant-service"
+version = "0.1.0"
+description = "AI Assistant Microservice — chat, streaming, tools, RAG, memory, agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Hejaz Engineering" }]
+dependencies = [
+    # Web framework
+    "fastapi>=0.124.0",
+    "uvicorn>=0.38.0",
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.12.0",
+    "python-multipart>=0.0.20",
+    "sse-starlette>=3.3.0",
+    # HTTP client
+    "httpx>=0.28.0",
+    # Database
+    "asyncpg>=0.31.0",
+    # Cache
+    "redis>=7.0",
+    "cachetools>=5.5.0",
+    # LLM providers
+    "openai>=1.50.0",
+    "google-genai>=1.0.0",
+    # Tools & document processing
+    "tavily-python>=0.5.0",
+    "pymupdf>=1.25.0",
+    "pypdf>=5.0.0",
+    "python-docx>=1.1.0",
+    "python-pptx>=1.0.0",
+    "markdownify>=0.14.0",
+    # Storage
+    "boto3>=1.38.0",
+    "aioboto3>=13.0.0",
+    # Utilities
+    "structlog>=25.1.0",
+    "orjson>=3.11.0",
+    "python-dotenv>=1.2.0",
+    "tiktoken>=0.8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/assistant_service"]

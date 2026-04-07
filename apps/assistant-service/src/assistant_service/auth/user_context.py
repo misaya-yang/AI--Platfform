@@ -1,0 +1,70 @@
+"""Lightweight auth that trusts headers forwarded by the API Gateway.
+
+The Gateway authenticates users and forwards identity as X-User-* headers.
+This module extracts those headers into a UserContext dataclass.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from fastapi import HTTPException, Request
+
+
+@dataclass(frozen=True)
+class UserContext:
+    """Resolved identity from gateway-forwarded headers."""
+
+    user_id: str
+    tenant_id: str
+    user_tier: str = "normal"
+    user_type: str = "user"
+    roles: list = field(default_factory=lambda: ["admin"])
+    ip: str = ""
+    is_authenticated: bool = True
+
+    @property
+    def tier(self) -> str:
+        return self.user_tier
+
+    @property
+    def role(self) -> str:
+        return self.roles[0] if self.roles else "user"
+
+    @property
+    def is_anonymous(self) -> bool:
+        return self.user_id == "anonymous"
+
+
+ANONYMOUS_CONTEXT = UserContext(
+    user_id="anonymous",
+    tenant_id="default",
+    user_tier="anonymous",
+    user_type="anonymous",
+)
+
+
+async def get_user_context(request: Request) -> UserContext:
+    """FastAPI dependency: resolve user from gateway-forwarded headers."""
+    user_id = request.headers.get("X-User-Id", "").strip()
+    tenant_id = request.headers.get("X-Tenant-Id", "").strip()
+    user_tier = request.headers.get("X-User-Tier", "normal").strip()
+    user_type = request.headers.get("X-User-Type", "user").strip()
+
+    if user_id and tenant_id:
+        return UserContext(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            user_tier=user_tier,
+            user_type=user_type,
+        )
+
+    # Allow anonymous in dev/internal calls
+    settings = request.app.state.settings
+    if settings.app.allow_anonymous:
+        return ANONYMOUS_CONTEXT
+
+    raise HTTPException(
+        status_code=401,
+        detail="Missing identity headers (X-User-Id, X-Tenant-Id). Route through Gateway.",
+    )
