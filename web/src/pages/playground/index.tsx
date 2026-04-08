@@ -27,6 +27,7 @@ import { MessageSquarePlus, Trash2, ArrowDown, PanelLeft, X } from "lucide-react
 import { useAppStore } from "@/store/useAppStore";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { formatDateTime } from "@/utils/intl";
+import { WahdaRecommendations } from "./WahdaRecommendations";
 
 import { usePlaygroundSessions } from "./hooks/usePlaygroundSessions";
 import { usePlaygroundStream } from "./hooks/usePlaygroundStream";
@@ -424,31 +425,19 @@ export function PlaygroundPage() {
             {t("playground.loadingHistory", "Loading chat history...")}
           </div>
         ) : messages.length === 0 ? (
+          /* Empty state: show Wahda recommendations if no special restore state */
+          historyRestoreState === "loading" || historyRestoreState === "failed" ? (
           <div className="flex h-full items-center justify-center p-8">
             <div className="max-w-md rounded-3xl border border-transparent dark:border-transparent bg-card/70 px-6 py-5 text-sm shadow-sm">
               <div className="font-medium text-foreground">
                 {historyRestoreState === "loading" && activeSessionId
                   ? t("playground.restoringSessionTitle", "Restoring selected conversation")
-                  : historyRestoreState === "failed" && activeSessionId
-                    ? t("playground.restoreFailedTitle", "Couldn't restore the selected conversation")
-                  : !playgroundSidebarOpen && sessions.length > 0
-                  ? t("playground.historyHiddenTitle", "History is hidden")
-                  : activeSessionId
-                    ? t("playground.selectedSessionEmptyTitle", "Selected conversation has no restored messages")
-                    : sessionEnabled
-                      ? t("playground.selectOrStartChat", "Select a chat on the left or start a new one.")
-                      : t("playground.typeToStart", "Type a message to start.")}
+                  : t("playground.restoreFailedTitle", "Couldn't restore the selected conversation")}
               </div>
               <div className="mt-2 text-muted-foreground">
                 {historyRestoreState === "loading" && activeSessionId
                   ? t("playground.restoringSessionDescription", "We are loading the latest messages and tool activity for this conversation.")
-                  : historyRestoreState === "failed" && activeSessionId
-                    ? t("playground.restoreFailedDescription", "The conversation still exists, but the last restore attempt did not finish. Retry it or start a fresh chat.")
-                  : !playgroundSidebarOpen && sessions.length > 0
-                  ? t("playground.historyHiddenDescription", "Your earlier chats are still available in the history panel.")
-                  : activeSessionId
-                    ? t("playground.selectedSessionEmptyDescription", "This conversation is empty or the last restore did not complete.")
-                    : t("playground.emptyStateHint", "Conversation history and draft state will stay in sync after refresh.")}
+                  : t("playground.restoreFailedDescription", "The conversation still exists, but the last restore attempt did not finish. Retry it or start a fresh chat.")}
               </div>
               {historyRestoreState === "failed" && activeSessionId && (
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -475,19 +464,12 @@ export function PlaygroundPage() {
                   {historyRestoreError}
                 </div>
               )}
-              {!playgroundSidebarOpen && sessions.length > 0 && historyRestoreState !== "failed" && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="mt-4"
-                  onClick={() => setPlaygroundSidebarOpen(true)}
-                >
-                  {t("playground.showHistory", "Show history")}
-                </Button>
-              )}
             </div>
           </div>
+          ) : (
+          /* Normal empty state: show Wahda recommendation cards */
+          <WahdaRecommendations onSelectQuestion={(q) => handleSend(q)} />
+          )
         ) : (
           <ChatWindow
             messages={messages}
