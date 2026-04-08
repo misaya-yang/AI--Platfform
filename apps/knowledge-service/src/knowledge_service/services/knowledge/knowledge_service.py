@@ -3981,13 +3981,12 @@ class KnowledgeService:
                             text = str(payload.get("text") or "").strip()
                             if not text:
                                 continue
-                            seg_metadata = _ensure_dict(payload.get("metadata"))
                             hits.append(
                                 {
                                     "segment_id": str(h.id),
                                     "document_id": str(payload.get("document_id") or ""),
                                     "text": text,
-                                    "metadata": seg_metadata,
+                                    "metadata": payload,
                                     "bm25_score": float(h.score),
                                 }
                             )
