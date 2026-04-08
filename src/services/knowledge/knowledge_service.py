@@ -3808,19 +3808,12 @@ class KnowledgeService:
                 score = float(h.score)
                 if score <= 0.0:
                     continue
-                seg_metadata = _ensure_dict(payload.get("metadata"))
-                for key in ("content_type", "parent_segment_id", "image_url",
-                            "vlm_description", "image_filename"):
-                    if payload.get(key):
-                        seg_metadata[key] = payload[key]
-                if payload.get("level") is not None:
-                    seg_metadata["level"] = payload["level"]
                 hits.append(
                     {
                         "segment_id": seg_id,
                         "document_id": str(payload.get("document_id") or ""),
                         "text": text,
-                        "metadata": seg_metadata,
+                        "metadata": payload,
                         "bm25_score": score,
                     }
                 )
