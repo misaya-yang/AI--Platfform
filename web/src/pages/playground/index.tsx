@@ -468,7 +468,7 @@ export function PlaygroundPage() {
           </div>
           ) : (
           /* Normal empty state: show Wahda recommendation cards */
-          <WahdaRecommendations onSelectQuestion={(q) => handleSend(q)} />
+          <WahdaRecommendations onSelectQuestion={(q) => handleSend([{ type: "text", data: q }])} />
           )
         ) : (
           <ChatWindow
