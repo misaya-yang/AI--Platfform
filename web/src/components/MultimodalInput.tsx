@@ -36,6 +36,7 @@ interface UploadedFile {
 export function MultimodalInput({
   onSend,
   onStop,
+  onTextChange,
   isStreaming = false,
   composerId,
   disabled,
@@ -43,6 +44,7 @@ export function MultimodalInput({
 }: {
   onSend: (inputs: ContentItem[], filePaths?: string[]) => void;
   onStop?: () => void;
+  onTextChange?: (text: string) => void;
   isStreaming?: boolean;
   composerId?: string;
   disabled?: boolean;
@@ -369,7 +371,7 @@ export function MultimodalInput({
           }
           aria-label={t("playground.composerAriaLabel", "Playground message composer")}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => { setText(e.target.value); onTextChange?.(e.target.value); }}
           rows={1}
           disabled={disabled}
           className="min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-base placeholder:text-muted-foreground/60"

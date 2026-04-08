@@ -28,6 +28,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { formatDateTime } from "@/utils/intl";
 import { WahdaRecommendations } from "./WahdaRecommendations";
+import { useTypeahead } from "./useTypeahead";
 
 import { usePlaygroundSessions } from "./hooks/usePlaygroundSessions";
 import { usePlaygroundStream } from "./hooks/usePlaygroundStream";
@@ -135,6 +136,10 @@ export function PlaygroundPage() {
     resolvedToolCallsDefaultOpen,
     showThinkingIndicator,
   } = streamHook;
+
+  // Type-ahead suggestions — only for Imam agent
+  const isImamAgent = activeService?.name?.toLowerCase().includes("imam") ?? false;
+  const typeahead = useTypeahead();
 
   const effectiveShowToolCalls =
     resolvedToolCallsMode !== "hidden" && (showToolCalls || forceVisibleToolCalls);
@@ -467,8 +472,17 @@ export function PlaygroundPage() {
             </div>
           </div>
           ) : (
-          /* Normal empty state: show Wahda recommendation cards */
+          /* Normal empty state: show Wahda recommendations for Imam, generic for others */
+          isImamAgent ? (
           <WahdaRecommendations onSelectQuestion={(q) => handleSend([{ type: "text", data: q }])} />
+          ) : (
+          <div className="flex h-full flex-col items-center justify-center p-8 text-center">
+            <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
+            </div>
+            <h2 className="text-xl font-semibold tracking-tight">{t("playground.typeToStart", "Type a message to start.")}</h2>
+          </div>
+          )
           )
         ) : (
           <ChatWindow
@@ -548,10 +562,28 @@ export function PlaygroundPage() {
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
         <div className="mx-auto w-full max-w-4xl">
+          {/* Type-ahead suggestions (Imam only) */}
+          {isImamAgent && typeahead.visible && typeahead.suggestions.length > 0 && (
+            <div className="mb-2 rounded-xl border bg-card/95 backdrop-blur-sm shadow-lg overflow-hidden">
+              {typeahead.suggestions.map((s, i) => (
+                <button
+                  key={i}
+                  onClick={() => {
+                    typeahead.dismiss();
+                    handleSend([{ type: "text", data: s }]);
+                  }}
+                  className="w-full px-4 py-2.5 text-left text-sm hover:bg-accent/50 transition-colors border-b last:border-b-0 border-border/50"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="rounded-2xl border border-transparent dark:border-transparent bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ">
             <MultimodalInput
-              onSend={handleSend}
+              onSend={(inputs, filePaths) => { typeahead.dismiss(); handleSend(inputs, filePaths); }}
               onStop={handleStopStreaming}
+              onTextChange={isImamAgent ? typeahead.check : undefined}
               isStreaming={uiStreamingActive}
               composerId={PLAYGROUND_COMPOSER_ID}
               disabled={!serviceId || uiStreamingActive}

@@ -222,51 +222,6 @@ export function WahdaRecommendations({ onSelectQuestion }: Props) {
         </div>
       )}
 
-      {/* Type-ahead Search */}
-      <div className="w-full">
-        <div className="flex items-center gap-2 mb-2.5 px-1">
-          <Search className="h-3.5 w-3.5 text-blue-500" />
-          <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            {t("playground.wahda.explore", "Explore Topics")}
-          </span>
-        </div>
-        <div className="relative">
-          <input
-            type="text"
-            value={typeaheadInput}
-            onChange={(e) => handleTypeahead(e.target.value)}
-            placeholder={t("playground.wahda.typeaheadPlaceholder", "Try: how, what, when, why...")}
-            className={cn(
-              "w-full rounded-xl border bg-muted/30 px-4 py-2.5",
-              "text-sm placeholder:text-muted-foreground/50",
-              "focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30",
-              "transition-all duration-200"
-            )}
-          />
-          {suggestions.length > 0 && (
-            <div className="mt-1.5 space-y-1">
-              {suggestions.map((s, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    onSelectQuestion(s);
-                    setTypeaheadInput("");
-                    setSuggestions([]);
-                  }}
-                  className={cn(
-                    "w-full rounded-lg bg-blue-500/5 border border-blue-500/10 px-3.5 py-2",
-                    "text-left text-sm",
-                    "hover:bg-blue-500/10 hover:border-blue-500/20",
-                    "transition-all duration-150 cursor-pointer"
-                  )}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
