@@ -300,9 +300,11 @@ function isRtlText(text: string): boolean {
     .replace(/[#*_~>\-|]/g, "");
   // Count RTL characters (Arabic, Hebrew, Persian/Urdu extended)
   const rtlChars = (plain.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u0590-\u05FF]/g) || []).length;
-  const latinChars = (plain.match(/[a-zA-Z]/g) || []).length;
-  // If RTL chars outnumber Latin chars, it's an RTL response
-  return rtlChars > 0 && rtlChars > latinChars;
+  // Count ALL LTR script characters: Latin + CJK + Cyrillic + others
+  const ltrChars = (plain.match(/[a-zA-Z\u4E00-\u9FFF\u3400-\u4DBF\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u0400-\u04FF]/g) || []).length;
+  // Only RTL when RTL chars are dominant (>60% of script chars)
+  const total = rtlChars + ltrChars;
+  return total > 0 && (rtlChars / total) > 0.6;
 }
 
 /**

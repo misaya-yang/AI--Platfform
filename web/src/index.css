@@ -120,10 +120,9 @@
     font-family: var(--font-mono);
   }
 
-  /* Arabic text class — right-to-left aware */
+  /* Arabic text — font only, never force direction via CSS */
   .font-arabic {
     font-family: var(--font-arabic);
-    direction: rtl;
     font-size: 1rem;
     line-height: 1.8;
   }
