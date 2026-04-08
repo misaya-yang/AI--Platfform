@@ -1004,7 +1004,20 @@ async def transparent_proxy_handler(
         request.state.effective_model = effective_model
     t_policy = time.perf_counter()
 
-    # 10. 检查是否期望流式响应
+    # 10. Inject user identity into LangGraph run config for memory isolation
+    if user.user_id and body and path in ("runs/stream", "runs", "runs/wait"):
+        try:
+            payload = json.loads(body) if isinstance(body, bytes) else body
+            if isinstance(payload, dict):
+                cfg = payload.setdefault("config", {})
+                cfgable = cfg.setdefault("configurable", {})
+                cfgable.setdefault("user_id", user.user_id)
+                cfgable.setdefault("tenant_id", user.tenant_id)
+                body = json.dumps(payload).encode("utf-8")
+        except Exception:
+            pass
+
+    # 10b. 检查是否期望流式响应
     wants_stream = _wants_streaming(request, path)
 
     # 11. 构建代理请求

@@ -56,6 +56,7 @@ from .retrieval import (
     cosine_similarity,
     detect_language,
     mmr_select,
+    query_to_sparse_vector,
     reciprocal_rank_fusion,
     tokenize,
 )
@@ -3769,59 +3770,58 @@ class KnowledgeService:
                 return [], 0
 
         async def _bm25_search(query_text: str) -> tuple[list, int]:
-            """BM25 (keyword) retrieval task for a single query."""
+            """BM25 (keyword) retrieval via Qdrant native sparse vectors."""
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
-            q_lang = detect_language(query_text)
-            query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
-            max_terms = 20 if q_lang in ("ar", "mixed") else 12
-            terms = list(dict.fromkeys(query_tokens))[:max_terms]
-            if not terms:
-                terms = [query_text.strip()]
-            if query_text.strip().lower() not in [t.lower() for t in terms]:
-                terms.append(query_text.strip().lower())
+            if not collection:
+                return [], 0
 
-            rows = await self.db.search_segments_like_any(
-                dataset_id=dataset_id,
-                terms=terms,
-                document_id=document_id,
-                source_type=source_type_filter,
-                language=language_filter,
-                limit=keyword_pool_k,
-            )
-            raw_count = len(rows)
-            valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
-            doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
-            scores = bm25_scores(query_tokens, doc_tokens)
+            sparse_indices, sparse_values = query_to_sparse_vector(query_text)
+            if not sparse_indices:
+                return [], 0
 
+            try:
+                raw_hits = await self.vector_store.sparse_search(
+                    collection_name=collection,
+                    sparse_indices=sparse_indices,
+                    sparse_values=sparse_values,
+                    top_k=keyword_k,
+                    document_id=document_id,
+                    source_type=source_type_filter,
+                    language=language_filter,
+                    with_payload=True,
+                )
+            except Exception as sparse_err:
+                logger.warning(f"Sparse BM25 search failed: {sparse_err}")
+                return [], 0
+
+            raw_count = len(raw_hits)
             hits = []
-            for row, score in zip(valid_rows, scores, strict=False):
-                seg_id = str(row.get("segment_id") or "")
+            for h in raw_hits:
+                payload = dict(h.payload or {})
+                seg_id = str(payload.get("segment_id") or h.point_id or "")
                 if not seg_id:
                     continue
-                text = str(row.get("text") or "").strip()
-                if not text or score <= 0.0:
+                text = str(payload.get("text") or "").strip()
+                if not text:
                     continue
-                seg_metadata = _ensure_dict(row.get("metadata"))
-                if row.get("content_type"):
-                    seg_metadata["content_type"] = row.get("content_type")
-                if row.get("parent_segment_id"):
-                    seg_metadata["parent_segment_id"] = row.get("parent_segment_id")
-                if row.get("level") is not None:
-                    seg_metadata["level"] = row.get("level")
-                if row.get("image_url"):
-                    seg_metadata["image_url"] = row.get("image_url")
-                if row.get("vlm_description"):
-                    seg_metadata["vlm_description"] = row.get("vlm_description")
-                if row.get("image_filename"):
-                    seg_metadata["image_filename"] = row.get("image_filename")
+                score = float(h.score)
+                if score <= 0.0:
+                    continue
+                seg_metadata = _ensure_dict(payload.get("metadata"))
+                for key in ("content_type", "parent_segment_id", "image_url",
+                            "vlm_description", "image_filename"):
+                    if payload.get(key):
+                        seg_metadata[key] = payload[key]
+                if payload.get("level") is not None:
+                    seg_metadata["level"] = payload["level"]
                 hits.append(
                     {
                         "segment_id": seg_id,
-                        "document_id": str(row.get("document_id") or ""),
+                        "document_id": str(payload.get("document_id") or ""),
                         "text": text,
                         "metadata": seg_metadata,
-                        "bm25_score": float(score),
+                        "bm25_score": score,
                     }
                 )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
