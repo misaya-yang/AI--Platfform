@@ -3750,13 +3750,15 @@ class KnowledgeService:
         candidate_k = min(candidate_k, 2000)
 
         # Keyword candidate pool for BM25 scoring.
+        # Qdrant sparse retrieves candidates, Python BM25 re-scores them.
+        # Cap at 80 to keep tokenization overhead under ~200ms.
         keyword_pool_k = int(
             keyword_candidate_k
             if keyword_candidate_k is not None
-            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 10, 200)
+            else retrieval_defaults.get("keyword_candidate_k") or max(keyword_k * 3, 50)
         )
         keyword_pool_k = max(keyword_pool_k, keyword_k)
-        keyword_pool_k = min(keyword_pool_k, 5000)
+        keyword_pool_k = min(keyword_pool_k, 500)
 
         # RRF params
         rrf_k_value = int(fusion_config["rrf_k"])
@@ -3943,122 +3945,76 @@ class KnowledgeService:
                 return [], 0
 
         async def _bm25_search(query_text: str) -> tuple[list, int]:
-            """BM25 (keyword) retrieval task for a single query.
+            """BM25 retrieval: Qdrant sparse for candidates → Python BM25 re-scoring.
 
-            Tries Qdrant native BM25 (sparse vectors) first for speed.
-            Falls back to PostgreSQL FTS + client-side BM25 if sparse
-            vectors are not available in the collection.
+            Uses Qdrant native sparse vectors for fast candidate retrieval,
+            then re-scores with proper BM25 (k1/b document-length normalization)
+            for accurate ranking differentiation.
             """
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
+            if not collection:
+                return [], 0
 
-            # --- Try Qdrant native BM25 via sparse vectors ---
-            _bm25_collection = collection
+            from .retrieval import query_to_sparse_vector
+
+            sparse_indices, sparse_values = query_to_sparse_vector(query_text)
+            if not sparse_indices:
+                return [], 0
+
+            # Step 1: Qdrant sparse retrieval for candidates (fast)
+            bm25_pool = min(keyword_pool_k, 80)
             try:
-                from .retrieval import query_to_sparse_vector
+                from qdrant_client.http import models as qm
 
-                sparse_indices, sparse_values = query_to_sparse_vector(query_text)
-                if sparse_indices and _bm25_collection:
-                    from qdrant_client.http import models as qm
-
-                    sparse_query = qm.SparseVector(
-                        indices=sparse_indices, values=sparse_values,
-                    )
-                    resp = await self.vector_store._call(
-                        lambda: self.vector_store._client.query_points(
-                            collection_name=_bm25_collection,
-                            query=sparse_query,
-                            using="bm25",
-                            limit=keyword_pool_k,
-                            with_payload=True,
-                        )
-                    )
-                    qdrant_hits = list(getattr(resp, "points", None) or [])
-                    if qdrant_hits:
-                        hits = []
-                        for h in qdrant_hits:
-                            payload = dict(h.payload or {})
-                            text = str(payload.get("text") or "").strip()
-                            if not text:
-                                continue
-                            hits.append(
-                                {
-                                    "segment_id": str(h.id),
-                                    "document_id": str(payload.get("document_id") or ""),
-                                    "text": text,
-                                    "metadata": payload,
-                                    "bm25_score": float(h.score),
-                                }
-                            )
-                        hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-                        logger.info(
-                            f"[BM25] Qdrant native sparse: {len(hits)} hits "
-                            f"(collection={collection})"
-                        )
-                        return hits[:keyword_k], len(qdrant_hits)
-            except Exception as sparse_err:
-                # Sparse vectors not available — fall back to PostgreSQL FTS
-                import traceback
-                logger.warning(
-                    f"[BM25] Sparse fallback to PostgreSQL FTS: {type(sparse_err).__name__}: {sparse_err}\n"
-                    f"{traceback.format_exc()}"
+                sparse_query = qm.SparseVector(
+                    indices=sparse_indices, values=sparse_values,
                 )
+                resp = await self.vector_store._call(
+                    lambda: self.vector_store._client.query_points(
+                        collection_name=collection,
+                        query=sparse_query,
+                        using="bm25",
+                        limit=bm25_pool,
+                        with_payload=True,
+                    )
+                )
+                qdrant_hits = list(getattr(resp, "points", None) or [])
+            except Exception as sparse_err:
+                logger.warning(f"[BM25] Sparse search failed: {sparse_err}")
+                return [], 0
 
-            # --- Fallback: PostgreSQL FTS + client-side BM25 ---
-            q_lang = detect_language(query_text)
+            if not qdrant_hits:
+                return [], 0
+
+            # Step 2: Python BM25 re-scoring (accurate doc-length normalization)
             query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
-            max_terms = 20 if q_lang in ("ar", "mixed") else 12
-            terms = list(dict.fromkeys(query_tokens))[:max_terms]
-            if not terms:
-                terms = [query_text.strip()]
-            if query_text.strip().lower() not in [t.lower() for t in terms]:
-                terms.append(query_text.strip().lower())
+            valid = []
+            for h in qdrant_hits:
+                payload = dict(h.payload or {})
+                text = str(payload.get("text") or "").strip()
+                if text:
+                    valid.append((h, payload, text))
 
-            rows = await self.db.search_segments_like_any(
-                dataset_id=dataset_id,
-                terms=terms,
-                document_id=document_id,
-                source_type=source_type_filter,
-                language=language_filter,
-                limit=keyword_pool_k,
-            )
-            raw_count = len(rows)
-            valid_rows = [r for r in rows if str(r.get("text") or "").strip()]
-            doc_tokens = [tokenize(str(r.get("text") or "")) for r in valid_rows]
+            doc_tokens = [tokenize(text) for _, _, text in valid]
             scores = bm25_scores(query_tokens, doc_tokens)
 
             hits = []
-            for row, score in zip(valid_rows, scores, strict=False):
-                seg_id = str(row.get("segment_id") or "")
-                if not seg_id:
+            for (h, payload, text), score in zip(valid, scores, strict=False):
+                seg_id = str(payload.get("segment_id") or h.id or "")
+                if not seg_id or score <= 0.0:
                     continue
-                text = str(row.get("text") or "").strip()
-                if not text or score <= 0.0:
-                    continue
-                seg_metadata = _ensure_dict(row.get("metadata"))
-                if row.get("content_type"):
-                    seg_metadata["content_type"] = row.get("content_type")
-                if row.get("parent_segment_id"):
-                    seg_metadata["parent_segment_id"] = row.get("parent_segment_id")
-                if row.get("level") is not None:
-                    seg_metadata["level"] = row.get("level")
-                if row.get("image_url"):
-                    seg_metadata["image_url"] = row.get("image_url")
-                if row.get("vlm_description"):
-                    seg_metadata["vlm_description"] = row.get("vlm_description")
-                if row.get("image_filename"):
-                    seg_metadata["image_filename"] = row.get("image_filename")
                 hits.append(
                     {
                         "segment_id": seg_id,
-                        "document_id": str(row.get("document_id") or ""),
+                        "document_id": str(payload.get("document_id") or ""),
                         "text": text,
-                        "metadata": seg_metadata,
+                        "metadata": payload,
                         "bm25_score": float(score),
                     }
                 )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return hits[:keyword_k], raw_count
+            return hits[:keyword_k], len(qdrant_hits)
 
         def _merge_dense_results(
             results: list[tuple[list, int]],

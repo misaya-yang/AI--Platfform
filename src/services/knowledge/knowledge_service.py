@@ -3770,7 +3770,12 @@ class KnowledgeService:
                 return [], 0
 
         async def _bm25_search(query_text: str) -> tuple[list, int]:
-            """BM25 (keyword) retrieval via Qdrant native sparse vectors."""
+            """BM25 retrieval: Qdrant sparse for candidates → Python BM25 re-scoring.
+
+            Uses Qdrant native sparse vectors for fast candidate retrieval,
+            then re-scores with proper BM25 (k1/b document-length normalization)
+            for accurate ranking differentiation.
+            """
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
             if not collection:
@@ -3780,12 +3785,14 @@ class KnowledgeService:
             if not sparse_indices:
                 return [], 0
 
+            # Step 1: Qdrant sparse retrieval for candidates (fast)
+            bm25_pool = min(keyword_pool_k, 80)
             try:
                 raw_hits = await self.vector_store.sparse_search(
                     collection_name=collection,
                     sparse_indices=sparse_indices,
                     sparse_values=sparse_values,
-                    top_k=keyword_k,
+                    top_k=bm25_pool,
                     document_id=document_id,
                     source_type=source_type_filter,
                     language=language_filter,
@@ -3795,18 +3802,25 @@ class KnowledgeService:
                 logger.warning(f"Sparse BM25 search failed: {sparse_err}")
                 return [], 0
 
-            raw_count = len(raw_hits)
-            hits = []
+            if not raw_hits:
+                return [], 0
+
+            # Step 2: Python BM25 re-scoring (accurate doc-length normalization)
+            query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
+            valid = []
             for h in raw_hits:
                 payload = dict(h.payload or {})
-                seg_id = str(payload.get("segment_id") or h.point_id or "")
-                if not seg_id:
-                    continue
                 text = str(payload.get("text") or "").strip()
-                if not text:
-                    continue
-                score = float(h.score)
-                if score <= 0.0:
+                if text:
+                    valid.append((h, payload, text))
+
+            doc_tokens = [tokenize(text) for _, _, text in valid]
+            scores = bm25_scores(query_tokens, doc_tokens)
+
+            hits = []
+            for (h, payload, text), score in zip(valid, scores, strict=False):
+                seg_id = str(payload.get("segment_id") or h.point_id or "")
+                if not seg_id or score <= 0.0:
                     continue
                 hits.append(
                     {
@@ -3814,11 +3828,11 @@ class KnowledgeService:
                         "document_id": str(payload.get("document_id") or ""),
                         "text": text,
                         "metadata": payload,
-                        "bm25_score": score,
+                        "bm25_score": float(score),
                     }
                 )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return hits[:keyword_k], raw_count
+            return hits[:keyword_k], len(raw_hits)
 
         def _merge_dense_results(
             results: list[tuple[list, int]],
