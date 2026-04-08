@@ -4,11 +4,10 @@
  * Displayed in the Playground empty state when service is selected
  * but no messages exist yet.
  */
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getRecommendations,
-  getTypeahead,
   getTrending,
   type RecommendationResponse,
   type TrendingResponse,
@@ -17,7 +16,6 @@ import { cn } from "@/lib/utils";
 import {
   Sparkles,
   TrendingUp,
-  Search,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -32,12 +30,9 @@ export function WahdaRecommendations({ onSelectQuestion }: Props) {
   const { t } = useTranslation();
   const [recommendations, setRecommendations] = useState<RecommendationResponse | null>(null);
   const [trending, setTrending] = useState<TrendingResponse | null>(null);
-  const [typeaheadInput, setTypeaheadInput] = useState("");
-  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
   // Load recommendations + trending on mount
   useEffect(() => {
@@ -58,24 +53,6 @@ export function WahdaRecommendations({ onSelectQuestion }: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
-
-  // Type-ahead debounced
-  const handleTypeahead = useCallback((value: string) => {
-    setTypeaheadInput(value);
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (value.length < 2) {
-      setSuggestions([]);
-      return;
-    }
-    debounceRef.current = setTimeout(async () => {
-      try {
-        const results = await getTypeahead(value);
-        setSuggestions(results);
-      } catch {
-        setSuggestions([]);
-      }
-    }, 300);
   }, []);
 
   // Horizontal scroll
@@ -104,7 +81,7 @@ export function WahdaRecommendations({ onSelectQuestion }: Props) {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <div className="animate-pulse text-sm text-muted-foreground">Loading recommendations...</div>
+        <div className="animate-pulse text-sm text-muted-foreground">{t("playground.wahda.loading", "Loading recommendations...")}</div>
       </div>
     );
   }

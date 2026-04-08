@@ -2,7 +2,7 @@
  * Type-ahead hook for Playground input — fetches Wahda suggestions
  * based on the first word of the input (how, what, when, who, why, where).
  */
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { getTypeahead } from "@/api/wahda";
 
 const TRIGGER_WORDS = ["how", "what", "when", "who", "why", "where", "is", "can", "does"];
@@ -50,6 +50,13 @@ export function useTypeahead() {
   const dismiss = useCallback(() => {
     setSuggestions([]);
     setVisible(false);
+  }, []);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
   }, []);
 
   return { suggestions, visible, check, dismiss };
