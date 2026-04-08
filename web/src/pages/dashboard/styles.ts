@@ -1,10 +1,10 @@
-// Dashboard Design Tokens — shadcn/ui zinc alignment
+// Dashboard Design Tokens — Hejaz green/gold alignment
 
 export const SPACING = {
   xs: 4, sm: 8, md: 12, lg: 16, xl: 20, '2xl': 24, '3xl': 32, '4xl': 40,
 } as const;
 
-export const RADIUS = { sm: 6, md: 8, lg: 12, xl: 16 } as const;
+export const RADIUS = { sm: 6, md: 8, lg: 12 } as const;
 
 export const TYPOGRAPHY = {
   pageTitle:    { fontSize: 22, fontWeight: 600 },
@@ -17,18 +17,18 @@ export const TYPOGRAPHY = {
 } as const;
 
 export const TRANSITION = {
-  fast:   'all 150ms ease',
-  normal: 'all 200ms ease',
-  slow:   'all 300ms ease',
+  fast:   'all 150ms cubic-bezier(0.16, 1, 0.3, 1)',
+  normal: 'all 200ms cubic-bezier(0.16, 1, 0.3, 1)',
+  slow:   'all 300ms cubic-bezier(0.16, 1, 0.3, 1)',
 } as const;
 
 export const REDUCED_MOTION_CSS = `@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0.01ms!important;transition-duration:0.01ms!important}}`;
 
 export const ELEVATION = (dark: boolean) => ({
   none: 'none',
-  sm: dark ? 'none' : '0 1px 2px rgba(0,0,0,0.05)',
-  md: dark ? 'none' : '0 2px 6px rgba(0,0,0,0.06)',
-  lg: dark ? 'none' : '0 4px 16px rgba(0,0,0,0.08)',
+  sm: dark ? 'none' : '0 1px 2px rgba(0,0,0,0.04)',
+  md: dark ? 'none' : '0 2px 6px rgba(0,0,0,0.05)',
+  lg: dark ? 'none' : '0 4px 16px rgba(0,0,0,0.06)',
 });
 
 export const LAYOUT = {
@@ -47,40 +47,40 @@ export const LAYOUT = {
   BREAKPOINTS: { sm: 640, md: 768, lg: 1024, xl: 1280 },
 } as const;
 
-// ── shadcn zinc palette ────────────────────────────────────────────────
+// ── Hejaz green/gold palette ──────────────────────────────────────────
 export const getColors = (darkMode: boolean) => ({
-  pageBg:    darkMode ? '#09090b' : '#f5f5f5',
-  cardBg:    darkMode ? '#18181b' : '#ffffff',
-  cardHover: darkMode ? '#1e1e22' : '#fafafa',
-  innerBg:   darkMode ? '#0f0f12' : '#f5f5f5',
+  pageBg:    darkMode ? '#0c100d' : '#f0f2f0',
+  cardBg:    darkMode ? '#1a211c' : '#ffffff',
+  cardHover: darkMode ? '#212923' : '#f7f8f7',
+  innerBg:   darkMode ? '#141a16' : '#f0f2f0',
 
-  border:      darkMode ? '#27272a' : '#e5e5e5',
-  borderHover: darkMode ? '#3f3f46' : '#d4d4d4',
+  border:      darkMode ? '#2e3830' : '#dde1de',
+  borderHover: darkMode ? '#3a443c' : '#c4cac6',
 
-  textPrimary:   darkMode ? '#fafafa' : '#09090b',
-  textSecondary: darkMode ? '#a3a3a3' : '#525252',
-  textMuted:     darkMode ? '#737373' : '#a3a3a3',
+  textPrimary:   darkMode ? '#eef0ef' : '#161b17',
+  textSecondary: darkMode ? '#98a29b' : '#4d574f',
+  textMuted:     darkMode ? '#6d786f' : '#98a29b',
 
-  accent:  darkMode ? '#a78bfa' : '#7c3aed',
+  accent:  darkMode ? '#3daa73' : '#1a4731',
   success: darkMode ? '#4ade80' : '#22c55e',
-  warning: darkMode ? '#fbbf24' : '#f59e0b',
-  error:   darkMode ? '#f87171' : '#ef4444',
-  purple:  darkMode ? '#c4b5fd' : '#8b5cf6',
+  warning: darkMode ? '#e5c472' : '#d9ab44',
+  error:   darkMode ? '#f87171' : '#dc3545',
+  gold:    darkMode ? '#e5c472' : '#c9a84c',
 
-  successBg: darkMode ? 'rgba(74,222,128,0.08)' : 'rgba(34,197,94,0.08)',
-  warningBg: darkMode ? 'rgba(251,191,36,0.08)' : 'rgba(245,158,11,0.08)',
-  errorBg:   darkMode ? 'rgba(248,113,113,0.08)' : 'rgba(239,68,68,0.08)',
-  accentBg:  darkMode ? 'rgba(167,139,250,0.08)' : 'rgba(124,58,237,0.06)',
+  successBg: darkMode ? 'rgba(74,222,128,0.08)' : 'rgba(34,197,94,0.06)',
+  warningBg: darkMode ? 'rgba(229,196,114,0.08)' : 'rgba(217,171,68,0.06)',
+  errorBg:   darkMode ? 'rgba(248,113,113,0.08)' : 'rgba(220,53,69,0.06)',
+  accentBg:  darkMode ? 'rgba(61,170,115,0.08)' : 'rgba(26,71,49,0.06)',
 
-  shadowSm: darkMode ? 'none' : '0 1px 2px rgba(0,0,0,0.05)',
-  shadowMd: darkMode ? 'none' : '0 2px 6px rgba(0,0,0,0.06)',
-  shadowLg: darkMode ? 'none' : '0 4px 16px rgba(0,0,0,0.08)',
+  shadowSm: darkMode ? 'none' : '0 1px 2px rgba(0,0,0,0.04)',
+  shadowMd: darkMode ? 'none' : '0 2px 6px rgba(0,0,0,0.05)',
+  shadowLg: darkMode ? 'none' : '0 4px 16px rgba(0,0,0,0.06)',
 
-  accentGradient:  darkMode ? 'linear-gradient(135deg,#a78bfa,#7c3aed)' : 'linear-gradient(135deg,#7c3aed,#6d28d9)',
+  accentGradient:  darkMode ? 'linear-gradient(135deg,#3daa73,#1a4731)' : 'linear-gradient(135deg,#1a4731,#123322)',
   successGradient: darkMode ? 'linear-gradient(135deg,#4ade80,#22c55e)' : 'linear-gradient(135deg,#22c55e,#16a34a)',
-  warningGradient: darkMode ? 'linear-gradient(135deg,#fbbf24,#f59e0b)' : 'linear-gradient(135deg,#f59e0b,#d97706)',
-  errorGradient:   darkMode ? 'linear-gradient(135deg,#f87171,#ef4444)' : 'linear-gradient(135deg,#ef4444,#dc2626)',
-  purpleGradient:  darkMode ? 'linear-gradient(135deg,#c4b5fd,#8b5cf6)' : 'linear-gradient(135deg,#8b5cf6,#7c3aed)',
+  warningGradient: darkMode ? 'linear-gradient(135deg,#e5c472,#d9ab44)' : 'linear-gradient(135deg,#d9ab44,#b08f3a)',
+  errorGradient:   darkMode ? 'linear-gradient(135deg,#f87171,#dc3545)' : 'linear-gradient(135deg,#dc3545,#b02a37)',
+  purpleGradient:  darkMode ? 'linear-gradient(135deg,#6cc899,#3daa73)' : 'linear-gradient(135deg,#3daa73,#1a4731)',
 });
 
 export const commonStyles = { transition: TRANSITION.normal, cardHeaderHeight: 44 };

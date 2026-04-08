@@ -436,10 +436,19 @@ class IngestionService:
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i : i + batch_size]
 
-            # Generate embeddings
-            texts = [c[0] for c in batch]
+            # Generate embeddings — with contextual prefix for better retrieval
+            from .contextual_retrieval import ContextualRetrieval
+            ctx_gen = ContextualRetrieval()
+
+            embed_texts = []
+            for text, _tc, _ch, meta in batch:
+                prefix = await ctx_gen.generate_context_prefix(
+                    chunk_text=text, document_text="", chunk_metadata=meta,
+                )
+                embed_texts.append(f"{prefix}{text}" if prefix else text)
+
             try:
-                embeddings = await embedder.embed_documents(texts)
+                embeddings = await embedder.embed_documents(embed_texts)
             except Exception as embed_err:
                 logger.error(f"Embedding failed for batch {i // batch_size + 1}: {embed_err}")
                 # Mark document as partially failed

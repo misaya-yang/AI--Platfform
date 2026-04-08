@@ -14,8 +14,8 @@ export function Logo({ collapsed }: { collapsed: boolean }) {
 
             {!collapsed && (
                 <div className="flex flex-col justify-center animate-in fade-in slide-in-from-left-2 duration-300 ml-2">
-                    <span className="text-[19px] font-bold tracking-tight text-foreground/90 leading-none font-sans">
-                        AI Platform
+                    <span className="text-[17px] font-semibold tracking-tight text-foreground/90 leading-none">
+                        Hejaz AI
                     </span>
                 </div>
             )}

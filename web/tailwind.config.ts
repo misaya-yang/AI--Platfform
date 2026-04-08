@@ -14,19 +14,26 @@ export default {
     },
     extend: {
       fontFamily: {
-        assistant: [
-          "\"IBM Plex Sans\"",
+        sans: [
+          "\"Geist Sans\"",
+          "\"Geist\"",
           "\"Noto Sans SC\"",
           "\"PingFang SC\"",
           "\"Microsoft YaHei\"",
           "system-ui",
           "sans-serif",
         ],
-        sans: [
-          "\"IBM Plex Sans\"",
+        arabic: [
+          "\"Noto Naskh Arabic\"",
+          "\"Traditional Arabic\"",
+          "serif",
+        ],
+        assistant: [
+          "\"Geist Sans\"",
+          "\"Geist\"",
+          "\"Noto Sans SC\"",
           "\"PingFang SC\"",
           "\"Microsoft YaHei\"",
-          "\"Noto Sans SC\"",
           "system-ui",
           "sans-serif",
         ],
@@ -64,6 +71,14 @@ export default {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
+        success: {
+          DEFAULT: "hsl(var(--success))",
+          foreground: "hsl(var(--success-foreground))",
+        },
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          foreground: "hsl(var(--warning-foreground))",
+        },
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
@@ -74,11 +89,9 @@ export default {
         },
       },
       borderRadius: {
-        xl: "1rem",     // 16px - modals, large containers
-        lg: "0.75rem",  // 12px - cards
-        md: "0.5rem",   // 8px - buttons, inputs
-        sm: "0.375rem", // 6px - badges, tags, small components
-        xs: "0.25rem",  // 4px - minimal
+        lg: "var(--radius-lg)",
+        md: "var(--radius-md)",
+        sm: "var(--radius-sm)",
       },
       keyframes: {
         "accordion-down": {

@@ -127,7 +127,7 @@ export function PerformancePanel() {
             title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>LLM</span>}
             value={latestData?.llm || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#8b5cf6" } }}
+            styles={{ content: { fontSize: 14, color: "#c9a84c" } }}
           />
         </Col>
         <Col span={8}>

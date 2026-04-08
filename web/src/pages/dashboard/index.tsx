@@ -151,12 +151,12 @@ function DashboardContent() {
       </div>
 
       <style>{`
-        .dash-tabs { display: flex; gap: 0; border-bottom: 1px solid ${darkMode ? '#27272a' : '#e5e5e5'}; width: 100%; }
-        .dash-tab { padding: 8px 16px; border: none; background: transparent; color: ${darkMode ? '#737373' : '#a3a3a3'}; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-        .dash-tab:hover { color: ${darkMode ? '#fafafa' : '#09090b'}; }
-        .dash-tab.active { color: ${darkMode ? '#fafafa' : '#09090b'}; border-bottom-color: ${darkMode ? '#a78bfa' : '#7c3aed'}; font-weight: 600; }
-        .dash-icon-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid ${darkMode ? '#27272a' : '#e5e5e5'}; background: transparent; color: ${darkMode ? '#737373' : '#a3a3a3'}; cursor: pointer; transition: all 0.15s; font-size: 13px; }
-        .dash-icon-btn:hover { background: ${darkMode ? '#18181b' : '#f5f5f5'}; color: ${darkMode ? '#fafafa' : '#09090b'}; }
+        .dash-tabs { display: flex; gap: 0; border-bottom: 1px solid ${darkMode ? '#2e3830' : '#dde1de'}; width: 100%; }
+        .dash-tab { padding: 8px 16px; border: none; background: transparent; color: ${darkMode ? '#6d786f' : '#98a29b'}; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+        .dash-tab:hover { color: ${darkMode ? '#eef0ef' : '#161b17'}; }
+        .dash-tab.active { color: ${darkMode ? '#eef0ef' : '#161b17'}; border-bottom-color: ${darkMode ? '#3daa73' : '#1a4731'}; font-weight: 600; }
+        .dash-icon-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid ${darkMode ? '#2e3830' : '#dde1de'}; background: transparent; color: ${darkMode ? '#6d786f' : '#98a29b'}; cursor: pointer; transition: all 0.15s; font-size: 13px; }
+        .dash-icon-btn:hover { background: ${darkMode ? '#1a211c' : '#eef0ef'}; color: ${darkMode ? '#eef0ef' : '#161b17'}; }
       `}</style>
     </div>
   );

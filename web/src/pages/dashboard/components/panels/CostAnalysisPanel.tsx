@@ -144,8 +144,8 @@ export function CostAnalysisPanel() {
     cost: point.cost_usd,
   }));
 
-  const pieColors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444"];
-  const providerPieColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
+  const pieColors = ["#1a4731", "#3daa73", "#c9a84c", "#d9ab44", "#dc3545"];
+  const providerPieColors = ["#1a4731", "#3daa73", "#6cc899", "#c9a84c", "#d9ab44"];
   const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
 
   return (

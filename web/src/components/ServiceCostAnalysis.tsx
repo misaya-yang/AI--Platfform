@@ -34,8 +34,8 @@ const SERVICE_CONFIG: Record<string, { icon: React.ReactNode; color: string; gra
   },
   langgraph: {
     icon: <ThunderboltOutlined />,
-    color: "#8b5cf6",
-    gradient: "linear-gradient(135deg, #8b5cf6 0%, #a78bfa 100%)",
+    color: "#c9a84c",
+    gradient: "linear-gradient(135deg, #c9a84c 0%, #e5c472 100%)",
   },
   proxy: {
     icon: <CloudServerOutlined />,

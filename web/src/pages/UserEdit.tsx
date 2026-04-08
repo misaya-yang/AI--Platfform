@@ -44,7 +44,7 @@ const buildDepartmentOptions = (t: (key: string, options?: Record<string, unknow
   { value: "cs", label: t("user.departments.cs"), color: "#10b981" },
   { value: "sales", label: t("user.departments.sales"), color: "#f59e0b" },
   { value: "tech", label: t("user.departments.tech"), color: "#3b82f6" },
-  { value: "admin", label: t("user.departments.admin"), color: "#8b5cf6" },
+  { value: "admin", label: t("user.departments.admin"), color: "#c9a84c" },
 ];
 
 const buildStatusOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
@@ -65,7 +65,7 @@ const buildCategoryMeta = (
   conversation: { icon: "💬", color: "#10b981", label: t("users.permissions.categories.conversation") },
   service: { icon: "🧭", color: "#6366f1", label: "服务" },
   knowledge: { icon: "📚", color: "#f59e0b", label: t("users.permissions.categories.knowledge") },
-  user: { icon: "👤", color: "#8b5cf6", label: t("users.permissions.categories.user") },
+  user: { icon: "👤", color: "#c9a84c", label: t("users.permissions.categories.user") },
   role: { icon: "🔐", color: "#ec4899", label: t("users.permissions.categories.role") },
   admin: { icon: "⚙️", color: "#ef4444", label: t("users.permissions.categories.admin") },
 });

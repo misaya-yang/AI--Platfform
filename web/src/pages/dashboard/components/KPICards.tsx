@@ -330,12 +330,14 @@ export function KPICards() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${LAYOUT.KPI_COLUMNS}, 1fr)`,
+        gridTemplateColumns: `repeat(auto-fit, minmax(180px, 1fr))`,
         gap: LAYOUT.CARD_GAP,
       }}
     >
-      {kpiData.map((kpi) => (
-        <KPICard key={kpi.id} {...kpi} loading={isLoading} />
+      {kpiData.map((kpi, i) => (
+        <div key={kpi.id} className="stagger-item" style={{ "--stagger-i": i } as React.CSSProperties}>
+          <KPICard {...kpi} loading={isLoading} />
+        </div>
       ))}
     </div>
   );

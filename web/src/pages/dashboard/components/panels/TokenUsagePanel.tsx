@@ -113,7 +113,7 @@ export function TokenUsagePanel() {
   }));
 
   const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
-  const modelColors = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ef4444"];
+  const modelColors = ["#1a4731", "#3daa73", "#6cc899", "#c9a84c", "#d9ab44"];
 
   return (
     <PanelWrapper
@@ -160,7 +160,7 @@ export function TokenUsagePanel() {
             percent={100}
             success={{ percent: inputPercent }}
             showInfo={false}
-            strokeColor="#8b5cf6"
+            strokeColor="#1a4731"
             railColor={darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}
           />
         </div>
@@ -273,7 +273,7 @@ export function TokenUsagePanel() {
           <Line
             type="monotone"
             dataKey="tokens"
-            stroke="#8b5cf6"
+            stroke="#1a4731"
             strokeWidth={2}
             dot={false}
           />

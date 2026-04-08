@@ -111,7 +111,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>LLM</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#8b5cf6" }}>{formatDuration(trace.llm_inference_duration_ms || 0)}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "#c9a84c" }}>{formatDuration(trace.llm_inference_duration_ms || 0)}</div>
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>Retrieval</div>

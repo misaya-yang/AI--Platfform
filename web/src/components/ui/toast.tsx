@@ -14,7 +14,7 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={ref}
     className={cn(
-      "fixed top-0 z-[100] flex max-h-screen w-full flex-col-reverse p-4 sm:bottom-0 sm:right-0 sm:top-auto sm:flex-col md:max-w-[420px]",
+      "fixed top-4 right-4 z-[100] flex max-h-screen flex-col gap-2 w-full max-w-[420px]",
       className
     )}
     {...props}
@@ -23,15 +23,15 @@ const ToastViewport = React.forwardRef<
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName
 
 const toastVariants = cva(
-  "group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-lg border p-4 pr-8 shadow-lg transition-all data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[swipe=end]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-right-full data-[state=open]:slide-in-from-top-full data-[state=open]:sm:slide-in-from-bottom-full",
+  "group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-lg border p-4 pr-8 shadow-lg backdrop-blur-md transition-all data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[swipe=end]:animate-out data-[state=closed]:fade-out-80 data-[state=closed]:slide-out-to-right-full data-[state=open]:slide-in-from-right-full",
   {
     variants: {
       variant: {
-        default: "border-border bg-background text-foreground",
-        success: "border-green-500/50 bg-green-50 text-green-900 dark:bg-green-950 dark:text-green-100",
-        destructive: "border-destructive/50 bg-destructive/10 text-destructive dark:border-destructive dark:bg-destructive/20",
-        warning: "border-yellow-500/50 bg-yellow-50 text-yellow-900 dark:bg-yellow-950 dark:text-yellow-100",
-        info: "border-blue-500/50 bg-blue-50 text-blue-900 dark:bg-blue-950 dark:text-blue-100",
+        default: "border-border bg-background/90 text-foreground",
+        success: "border-success/30 bg-background/90 text-foreground",
+        destructive: "border-destructive/30 bg-background/90 text-foreground",
+        warning: "border-warning/30 bg-background/90 text-foreground",
+        info: "border-primary/30 bg-background/90 text-foreground",
       },
     },
     defaultVariants: {
@@ -118,13 +118,13 @@ const ToastIcon = ({ variant }: { variant?: "default" | "success" | "destructive
 
   switch (variant) {
     case "success":
-      return <CheckCircle2 className={cn(iconClass, "text-green-600 dark:text-green-400")} />
+      return <CheckCircle2 className={cn(iconClass, "text-success")} />
     case "destructive":
       return <AlertCircle className={cn(iconClass, "text-destructive")} />
     case "warning":
-      return <AlertTriangle className={cn(iconClass, "text-yellow-600 dark:text-yellow-400")} />
+      return <AlertTriangle className={cn(iconClass, "text-warning")} />
     case "info":
-      return <Info className={cn(iconClass, "text-blue-600 dark:text-blue-400")} />
+      return <Info className={cn(iconClass, "text-primary")} />
     default:
       return null
   }

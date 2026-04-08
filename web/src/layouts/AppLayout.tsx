@@ -132,9 +132,9 @@ export function AppLayout() {
         width={230} collapsedWidth={isMobile ? 0 : 64}
         style={{
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
-          borderRight: darkMode ? '1px solid #27272a' : '1px solid #e5e5e5',
-          background: darkMode ? '#0f0f12' : '#ffffff',
-          transition: 'all 0.2s ease',
+          borderRight: darkMode ? '1px solid #2e3830' : '1px solid #dde1de',
+          background: darkMode ? '#0c100d' : '#ffffff',
+          transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
         theme={resolvedTheme}
       >
@@ -182,7 +182,7 @@ export function AppLayout() {
           </nav>
 
           {/* Footer */}
-          <div className={`border-t px-3 py-2 space-y-1 ${darkMode ? 'border-[#27272a]' : 'border-[#e5e5e5]'}`}>
+          <div className={`border-t px-3 py-2 space-y-1 ${darkMode ? 'border-[#2e3830]' : 'border-[#dde1de]'}`}>
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
@@ -207,11 +207,11 @@ export function AppLayout() {
         </div>
       </Sider>
 
-      <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.2s ease', background: 'transparent', minHeight: '100vh' }}>
+      <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100vh' }}>
         {/* Header */}
         <Header style={{
           padding: '0 20px', background: 'transparent',
-          borderBottom: darkMode ? '1px solid #27272a' : '1px solid #e5e5e5',
+          borderBottom: darkMode ? '1px solid #2e3830' : '1px solid #dde1de',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           position: 'relative', zIndex: 50, height: 48,
         }}>
