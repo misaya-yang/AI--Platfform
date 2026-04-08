@@ -4168,10 +4168,12 @@ class KnowledgeService:
         rrf_scores = None
         rrf_max = 1.0
         if effective_mode == "hybrid" and effective_fusion_method == "rrf":
+            # RRF uses equal weights to properly interleave ranked lists.
+            # Unequal weights cause one source to dominate all positions.
             rrf_scores = reciprocal_rank_fusion(
                 {"dense": dense_ranked_ids, "bm25": bm25_ranked_ids},
                 k=rrf_k_value,
-                weights={"dense": effective_dense_weight, "bm25": effective_bm25_weight},
+                weights={"dense": 1.0, "bm25": 1.0},
             )
             rrf_max = max(rrf_scores.values()) if rrf_scores else 1.0
 
