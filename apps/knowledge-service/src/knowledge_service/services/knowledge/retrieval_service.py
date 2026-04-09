@@ -1904,6 +1904,8 @@ class RetrievalService:
             meta["multimodal_rerank"] = False
             meta["multimodal_rerank_message"] = "VLM service not configured"
 
+        # Truncate to original top_k (effective_top_k was expanded for filtering headroom)
+        enhanced_results = enhanced_results[:top_k]
         return enhanced_results, meta
 
     # ========================================================================
