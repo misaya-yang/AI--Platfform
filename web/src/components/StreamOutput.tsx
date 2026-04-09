@@ -281,6 +281,23 @@ function filterToolJsonOutput(text: string): string {
     // Only remove specific "Here is the JSON" phrases, not general "Here is" which may be valid content
     .replace(/^Here(?:'s| is) the JSON[^\n]*\n?/gim, '');
 
+  // ── Computational Sensor: Citation line-break normalization ──
+  // LLMs output Sources inline ("Citation [1] Citation [2]...").
+  // Markdown treats single \n as space. This sensor ensures each
+  // citation renders on its own line by converting to paragraph breaks.
+  // Handles: "Sources:", "المصادر:", "来源:" + [N] patterns.
+  filtered = filtered.replace(
+    /((?:\*{2})?(?:Sources?|المصادر|来源)(?:\*{2})?\s*:?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
+    (_match, prefix, citations) => {
+      // Split before each [N] that follows text (not at start)
+      const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);
+      if (parts.length >= 2) {
+        return prefix.trim() + '\n\n' + parts.map((p: string) => p.trim()).filter(Boolean).join('\n\n');
+      }
+      return _match;
+    }
+  );
+
   // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
 
