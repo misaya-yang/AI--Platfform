@@ -2353,11 +2353,6 @@ class AgentLoop:
                             tool_metadata = result.metadata or {}
                             tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
                             tool_output_files = result.output_files or []
-                            if tool_name == "execute_python_code":
-                                logger.info(
-                                    "[AgentLoop] execute_python_code: success=%s, output_files=%d, artifact_storage=%s",
-                                    tool_success, len(tool_output_files), type(self.artifact_storage).__name__,
-                                )
 
                             # ADR-003: Sub-agent execution
                             if (
