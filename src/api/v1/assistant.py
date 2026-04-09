@@ -1547,6 +1547,7 @@ async def _run_image_generation_task(
     body: AsyncImageGenerationRequest,
     model_registry: ModelRegistry,
     user: UserContext,
+    session_manager=None,
 ) -> None:
     """Background coroutine that runs image generation and saves artifacts."""
     import time
@@ -1565,8 +1566,6 @@ async def _run_image_generation_task(
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
         prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
-
-        router = get_smart_image_generator()
 
         # Map style
         style_map = {
@@ -1599,14 +1598,75 @@ async def _run_image_generation_task(
         task["progress"] = 30
         task["provider"] = "google" if prefer_gemini else "dashscope"
 
-        res = await router.generate(
-            prompt=body.prompt,
-            n=body.n,
-            size=body.size or "1024*1024",
-            style=style,
-            aspect_ratio=aspect_ratio,
-            prefer_gemini=prefer_gemini,
-        )
+        # ------------------------------------------------------------------
+        # Multi-turn mode: session_id + Gemini → use chat history
+        # ------------------------------------------------------------------
+        res = None
+        if body.session_id and session_manager and prefer_gemini:
+            from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
+
+            gemini = get_gemini_image_generator()
+            if gemini.is_configured:
+                session = await session_manager.get(body.session_id)
+                image_history: list[dict] = []
+                if session and session.metadata:
+                    image_history = session.metadata.get("image_chat_history", [])
+
+                # Build Gemini contents from history
+                contents: list[dict] = []
+                for turn in image_history:
+                    role = turn.get("role", "user")
+                    parts = []
+                    if turn.get("text"):
+                        parts.append({"text": turn["text"]})
+                    if turn.get("image_base64"):
+                        mime = turn.get("mime_type", "image/jpeg")
+                        parts.append({"inlineData": {"mimeType": mime, "data": turn["image_base64"]}})
+                    if parts:
+                        contents.append({"role": role, "parts": parts})
+
+                contents.append({"role": "user", "parts": [{"text": body.prompt}]})
+
+                logger.info(
+                    "Async image multi-turn: session=%s, turns=%d, prompt=%s...",
+                    body.session_id, len(contents), body.prompt[:50],
+                )
+
+                res = await gemini.generate_chat(
+                    contents=contents, n=body.n, aspect_ratio=aspect_ratio,
+                )
+
+                # Persist updated history
+                new_user_turn = {"role": "user", "text": body.prompt}
+                image_history.append(new_user_turn)
+
+                if res.success and res.images:
+                    model_turn: dict = {"role": "model"}
+                    if res.text:
+                        model_turn["text"] = res.text
+                    img = res.images[0]
+                    model_turn["image_base64"] = img["content_base64"]
+                    model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
+                    image_history.append(model_turn)
+
+                if session_manager and session:
+                    meta = dict(session.metadata or {})
+                    meta["image_chat_history"] = image_history
+                    await session_manager.update_metadata(body.session_id, meta)
+
+        # ------------------------------------------------------------------
+        # Single-turn fallback
+        # ------------------------------------------------------------------
+        if res is None:
+            router = get_smart_image_generator()
+            res = await router.generate(
+                prompt=body.prompt,
+                n=body.n,
+                size=body.size or "1024*1024",
+                style=style,
+                aspect_ratio=aspect_ratio,
+                prefer_gemini=prefer_gemini,
+            )
 
         duration_ms = (time.time() - start_time) * 1000
         task["duration_ms"] = duration_ms
@@ -1735,8 +1795,9 @@ async def submit_image_generation(
     }
 
     # Launch background task
+    session_mgr = getattr(request.app.state, "session_manager", None)
     asyncio.create_task(
-        _run_image_generation_task(task_id, body, model_registry, user)
+        _run_image_generation_task(task_id, body, model_registry, user, session_manager=session_mgr)
     )
 
     return AsyncImageTaskSubmitResponse(
