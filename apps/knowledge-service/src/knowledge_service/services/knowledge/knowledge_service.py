@@ -4009,7 +4009,7 @@ class KnowledgeService:
                     }
                 )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return hits[:keyword_k], len(qdrant_hits)
+            return hits[:keyword_k], len(raw_hits)
 
         def _merge_dense_results(
             results: list[tuple[list, int]],
