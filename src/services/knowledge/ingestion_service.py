@@ -768,14 +768,14 @@ class IngestionService:
                     if failed_batches > 0:
                         logger.warning(f"Skipped {failed_batches} chunks due to embedding failures")
 
-                        embedded += len(batch)
-                        progress = 35 + (embedded / max(total, 1)) * 55
-                        await self.db.update_document_status(
-                            document_id, status="embedding", progress=min(progress, 95)
-                        )
-                        logger.debug(
-                            f"Batch {batch_idx + 1}/{len(batches)} embedded ({embedded}/{total} chunks)"
-                        )
+                    embedded += len(batch)
+                    progress = 35 + (embedded / max(total, 1)) * 55
+                    await self.db.update_document_status(
+                        document_id, status="embedding", progress=min(progress, 95)
+                    )
+                    logger.debug(
+                        f"Batch {batch_idx + 1}/{len(batches)} embedded ({embedded}/{total} chunks)"
+                    )
 
                     # Upsert new/changed vectors and segments with adaptive batching
                     # Use smaller batches for large documents to avoid Qdrant timeout
