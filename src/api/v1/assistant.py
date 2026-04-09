@@ -1608,6 +1608,14 @@ async def _run_image_generation_task(
             gemini = get_gemini_image_generator()
             if gemini.is_configured:
                 session = await session_manager.get(body.session_id)
+                # Auto-create session if it doesn't exist
+                if not session:
+                    session = await session_manager.create(
+                        user_id=user.user_id,
+                        tenant_id=user.tenant_id,
+                        session_id=body.session_id,
+                        metadata={"image_chat_history": []},
+                    )
                 image_history: list[dict] = []
                 if session and session.metadata:
                     image_history = session.metadata.get("image_chat_history", [])
