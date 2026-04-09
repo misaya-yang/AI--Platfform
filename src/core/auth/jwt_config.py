@@ -6,36 +6,54 @@ between token signing (auth.py) and verification (deps.py).
 """
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
-# Default fallback values
-DEFAULT_JWT_SECRET = "default-secret-change-me"
 DEFAULT_JWT_ALGORITHM = "HS256"
 
-_warned_default_secret = False
+_INSECURE_SECRETS = frozenset({
+    "",
+    "default-secret-change-me",
+    "your-jwt-secret-key",
+    "secret",
+    "changeme",
+})
+
+_warned_insecure = False
 
 
 def get_jwt_secret(configured_secret: str | None) -> str:
     """
-    Get JWT secret with fallback and warning for default value.
+    Get JWT secret. Raises in production if not properly configured.
 
     Args:
         configured_secret: The secret from settings.authentication.jwt.secret
 
     Returns:
         The actual secret to use for JWT operations
+
+    Raises:
+        RuntimeError: If no secret configured and not in dev mode
     """
-    global _warned_default_secret
+    global _warned_insecure
 
-    secret = configured_secret or DEFAULT_JWT_SECRET
+    secret = configured_secret or os.environ.get("JWT_SECRET", "")
 
-    if secret == DEFAULT_JWT_SECRET and not _warned_default_secret:
-        logger.warning(
-            "Using default JWT secret! This is insecure for production. "
-            "Please set GATEWAY_AUTHENTICATION__JWT__SECRET in your environment."
+    if not secret or secret in _INSECURE_SECRETS:
+        # Allow insecure secret only in explicit dev mode
+        if os.environ.get("GATEWAY_DEV_MODE", "").lower() in ("1", "true"):
+            if not _warned_insecure:
+                logger.warning(
+                    "Using insecure JWT secret in dev mode! "
+                    "Set GATEWAY_AUTHENTICATION__JWT__SECRET for production."
+                )
+                _warned_insecure = True
+            return secret or "dev-only-insecure-secret"
+        raise RuntimeError(
+            "JWT secret not configured. Set GATEWAY_AUTHENTICATION__JWT__SECRET "
+            "or JWT_SECRET environment variable."
         )
-        _warned_default_secret = True
 
     return secret
 

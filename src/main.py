@@ -201,6 +201,17 @@ def create_app() -> FastAPI:
         allow_origin_regex=cors.allow_origin_regex if cors else None,
     )
 
+    # Security response headers
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
     # 追踪中间件 - 纯 ASGI
     tracing_config = StreamingTracingConfig(
         service_name="gateway",

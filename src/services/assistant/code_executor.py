@@ -509,7 +509,7 @@ class CodeExecutorService:
             container = client.containers.run(**container_config)
 
             # Wait for container with timeout
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             wait_result = await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: container.wait(timeout=config.timeout_seconds)),
                 timeout=config.timeout_seconds + 5,  # Extra buffer

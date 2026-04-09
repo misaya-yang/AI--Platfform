@@ -249,11 +249,11 @@ class ConfluenceScheduler:
             logger.debug(f"Active page syncs: {active_pages}")
 
             # 等待活动同步完成，定期检查
-            start_time = asyncio.get_event_loop().time()
+            start_time = asyncio.get_running_loop().time()
             poll_interval = 0.5  # 每 0.5 秒检查一次
 
             while True:
-                elapsed = asyncio.get_event_loop().time() - start_time
+                elapsed = asyncio.get_running_loop().time() - start_time
                 current_count = len(self._active_syncs) + len(self._active_page_syncs)
 
                 if current_count == 0:

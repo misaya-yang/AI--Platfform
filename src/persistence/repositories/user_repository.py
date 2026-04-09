@@ -271,7 +271,8 @@ class DatabaseUserRepository(UserRepository, BaseRepository):
             param_idx += 1
 
         params.append(user_id)
-        query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${param_idx}"
+        from ..database import _build_safe_set_clause
+        query = f"UPDATE users SET {_build_safe_set_clause(set_clauses)} WHERE user_id = ${param_idx}"
 
         await self.execute(query, *params)
 

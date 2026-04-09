@@ -6,6 +6,7 @@ Provides secure password handling for the account management system.
 
 from __future__ import annotations
 
+import os
 import re
 import uuid
 from datetime import datetime, timedelta
@@ -33,7 +34,7 @@ from ..exceptions import AuthError
 # Configuration Constants
 # ============================================================
 ALLOWED_EMAIL_DOMAIN = "hejazfs.com.au"
-DEFAULT_PASSWORD = "111111"
+DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "111111")
 MIN_PASSWORD_LENGTH = 8
 BCRYPT_COST_FACTOR = 12
 MAX_LOGIN_ATTEMPTS = 5

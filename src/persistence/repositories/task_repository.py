@@ -240,7 +240,8 @@ class DatabaseTaskRepository(TaskRepository, BaseRepository):
             param_idx += 1
 
         params.append(task_id)
-        query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+        from ..database import _build_safe_set_clause
+        query = f"UPDATE tasks SET {_build_safe_set_clause(updates)} WHERE task_id = ${param_idx}"
 
         await self.execute(query, *params)
 

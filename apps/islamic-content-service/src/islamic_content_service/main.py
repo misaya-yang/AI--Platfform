@@ -191,6 +191,25 @@ def create_app(settings: Settings | None = None, *, enable_runtime: bool = True)
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
     )
+
+    from starlette.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:8081", "http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
     app.include_router(api_router)
     app.state.settings = resolved_settings
     return app

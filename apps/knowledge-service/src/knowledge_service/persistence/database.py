@@ -26,6 +26,23 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+import re as _re
+
+_SAFE_COLUMN_RE = _re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def _validate_column_name(name: str) -> str:
+    if not _SAFE_COLUMN_RE.match(name):
+        raise ValueError(f"Unsafe SQL column name: {name!r}")
+    return name
+
+
+def _build_safe_set_clause(updates: list[str]) -> str:
+    for fragment in updates:
+        col_name = fragment.split("=", 1)[0].strip()
+        _validate_column_name(col_name)
+    return ", ".join(updates)
+
 
 def build_service_query(
     status: str | None = None,
@@ -1567,7 +1584,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(task_id)
-        query = f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+        query = f"UPDATE tasks SET {_build_safe_set_clause(updates)} WHERE task_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -2040,7 +2057,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(document_id)
-        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+        query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -2098,7 +2115,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(document_id)
-        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+        query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -2564,7 +2581,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(segment_id)
-        query = f"UPDATE segments SET {', '.join(updates)} WHERE segment_id = ${param_idx}"
+        query = f"UPDATE segments SET {_build_safe_set_clause(updates)} WHERE segment_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -2607,7 +2624,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(segment_id)
-        query = f"UPDATE segments SET {', '.join(updates)} WHERE segment_id = ${param_idx}"
+        query = f"UPDATE segments SET {_build_safe_set_clause(updates)} WHERE segment_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -4177,7 +4194,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(connection_id)
-        query = f"UPDATE confluence_connections SET {', '.join(updates)} WHERE connection_id = ${param_idx}"
+        query = f"UPDATE confluence_connections SET {_build_safe_set_clause(updates)} WHERE connection_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -4407,7 +4424,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(binding_id)
-        query = f"UPDATE confluence_space_bindings SET {', '.join(updates)} WHERE binding_id = ${param_idx}"
+        query = f"UPDATE confluence_space_bindings SET {_build_safe_set_clause(updates)} WHERE binding_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -4752,7 +4769,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(id)
-        query = f"UPDATE confluence_pages SET {', '.join(updates)} WHERE id = ${param_idx}"
+        query = f"UPDATE confluence_pages SET {_build_safe_set_clause(updates)} WHERE id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -5207,7 +5224,7 @@ class DatabaseStorage:
 
         params.append(task_id)
         query = (
-            f"UPDATE confluence_sync_tasks SET {', '.join(updates)} WHERE task_id = ${param_idx}"
+            f"UPDATE confluence_sync_tasks SET {_build_safe_set_clause(updates)} WHERE task_id = ${param_idx}"
         )
 
         async with self._pool.acquire() as conn:
@@ -5349,7 +5366,7 @@ class DatabaseStorage:
             return
 
         params.append(document_id)
-        query = f"UPDATE documents SET {', '.join(updates)} WHERE document_id = ${param_idx}"
+        query = f"UPDATE documents SET {_build_safe_set_clause(updates)} WHERE document_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
