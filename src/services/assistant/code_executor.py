@@ -417,8 +417,13 @@ class CodeExecutorService:
                 kb_docs/        - Knowledge base documents
                 main.py         - User code with matplotlib setup
         """
-        # Create temp directory
-        workspace_dir = Path(tempfile.mkdtemp(prefix="code_exec_"))
+        # Create temp directory in shared workspace (accessible by both
+        # the gateway container and sibling sandbox containers via Docker socket).
+        # Without this, Docker-in-Docker volume mounts fail because the host
+        # daemon can't see files inside the gateway container's /tmp.
+        shared_base = os.environ.get("SANDBOX_WORKSPACE", "/opt/deploy/sandbox-workspace")
+        os.makedirs(shared_base, exist_ok=True)
+        workspace_dir = Path(tempfile.mkdtemp(prefix="code_exec_", dir=shared_base))
 
         # Create subdirectories
         input_dir = workspace_dir / "input"
