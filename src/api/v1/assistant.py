@@ -1670,11 +1670,11 @@ async def _run_image_generation_task(
 
         duration_ms = (time.time() - start_time) * 1000
         task["duration_ms"] = duration_ms
-        task["provider"] = res.provider
+        task["provider"] = getattr(res, "provider", task.get("provider", "google"))
 
         if not res.success:
             err = res.error or "Image generation failed"
-            if res.blocked and res.block_reason:
+            if getattr(res, "blocked", False) and getattr(res, "block_reason", None):
                 err = f"{err} (blocked: {res.block_reason})"
             task["status"] = "failed"
             task["error"] = err
