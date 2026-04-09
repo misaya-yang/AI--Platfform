@@ -529,6 +529,7 @@ class ImageGenerationRequest(BaseModel):
         default=None,
         description="Image chat session ID. Enables multi-turn editing with full conversation history.",
     )
+    add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
 
 
 class GeneratedImage(BaseModel):
@@ -563,6 +564,8 @@ class AsyncImageGenerationRequest(BaseModel):
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
     session_id: str | None = Field(default=None, description="Session ID for artifact storage")
+    add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+    callback_url: str | None = Field(default=None, description="URL to POST results when generation completes")
 
 
 class AsyncImageTaskSubmitResponse(BaseModel):

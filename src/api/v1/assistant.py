@@ -1435,7 +1435,17 @@ async def generate_image(
 
             images = []
             for img in res.images:
-                data_url = f"data:{img.get('mime_type', 'image/png')};base64,{img['content_base64']}"
+                cb64 = img["content_base64"]
+                mt = img.get("mime_type", "image/png")
+                if body.add_watermark and cb64:
+                    try:
+                        import base64 as b64
+                        from ...services.assistant.tools.image_watermark import apply_watermark
+                        cb64 = b64.b64encode(apply_watermark(b64.b64decode(cb64))).decode("utf-8")
+                        mt = "image/png"
+                    except Exception as e:
+                        logger.warning("Watermark failed: %s", e)
+                data_url = f"data:{mt};base64,{cb64}"
                 images.append(GeneratedImage(url=data_url, width=width, height=height))
 
             return ImageGenerationResponse(
@@ -1476,7 +1486,17 @@ async def generate_image(
 
         images = []
         for img in res.images:
-            data_url = f"data:{img.get('mime_type', 'image/png')};base64,{img['content_base64']}"
+            cb64 = img.get("content_base64", "")
+            mt = img.get("mime_type", "image/png")
+            if body.add_watermark and cb64:
+                try:
+                    import base64 as b64
+                    from ...services.assistant.tools.image_watermark import apply_watermark
+                    cb64 = b64.b64encode(apply_watermark(b64.b64decode(cb64))).decode("utf-8")
+                    mt = "image/png"
+                except Exception as e:
+                    logger.warning("Watermark failed: %s", e)
+            data_url = f"data:{mt};base64,{cb64}"
             images.append(GeneratedImage(url=data_url, width=width, height=height))
 
         return ImageGenerationResponse(
@@ -1612,6 +1632,21 @@ async def _run_image_generation_task(
         for i, img in enumerate(res.images):
             mime_type = img.get("mime_type", "image/png")
             content_base64 = img.get("content_base64", "")
+
+            # Apply watermark if requested
+            if body.add_watermark and content_base64:
+                try:
+                    import base64 as b64
+
+                    from ...services.assistant.tools.image_watermark import apply_watermark
+
+                    raw = b64.b64decode(content_base64)
+                    watermarked = apply_watermark(raw)
+                    content_base64 = b64.b64encode(watermarked).decode("utf-8")
+                    mime_type = "image/png"
+                except Exception as e:
+                    logger.warning("Watermark failed for image %d: %s", i, e)
+
             data_url = f"data:{mime_type};base64,{content_base64}"
 
             image_entry: dict = {"url": data_url, "width": width, "height": height}
@@ -1656,6 +1691,15 @@ async def _run_image_generation_task(
         task["progress"] = 100
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Send callback if URL provided (runs for both success and failure)
+    if body.callback_url:
+        try:
+            from ...services.assistant.tools.image_callback import send_image_callback
+
+            await send_image_callback(body.callback_url, task)
+        except Exception as e:
+            logger.warning("Callback to %s failed: %s", body.callback_url, e)
 
 
 @router.post("/generate-image-async", response_model=AsyncImageTaskSubmitResponse)
