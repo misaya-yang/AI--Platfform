@@ -59,8 +59,27 @@ class DoubaoImageGenerator:
 
         start = time.time()
 
-        # Normalize size format: "1024*1024" → "1024x1024"
-        normalized_size = size.replace("*", "x") if size else "1024x1024"
+        # Normalize size: Doubao requires at least 3686400 pixels (~1920x1920)
+        # Map common sizes to Doubao-supported equivalents
+        size_map = {
+            "1024*1024": "2048x2048",
+            "1024x1024": "2048x2048",
+            "720*1280": "1440x2560",
+            "720x1280": "1440x2560",
+            "1280*720": "2560x1440",
+            "1280x720": "2560x1440",
+        }
+        normalized_size = size_map.get(size or "", None)
+        if not normalized_size:
+            normalized_size = size.replace("*", "x") if size else "2048x2048"
+            # Check pixel count, upscale if too small
+            try:
+                w, h = [int(x) for x in normalized_size.split("x")]
+                if w * h < 3686400:
+                    scale = (3686400 / (w * h)) ** 0.5
+                    normalized_size = f"{int(w * scale)}x{int(h * scale)}"
+            except Exception:
+                normalized_size = "2048x2048"
 
         try:
             client = await self._get_client()
