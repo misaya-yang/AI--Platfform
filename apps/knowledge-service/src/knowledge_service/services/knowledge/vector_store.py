@@ -292,7 +292,7 @@ class VectorStore:
             qmodels.Prefetch(
                 query=query_vector,
                 limit=dense_limit,
-                filter=flt,
+                query_filter=flt,
             ),
         ]
 
@@ -306,7 +306,7 @@ class VectorStore:
                     ),
                     using="bm25",
                     limit=sparse_limit,
-                    filter=flt,
+                    query_filter=flt,
                 ),
             )
 
@@ -381,7 +381,7 @@ class VectorStore:
                 query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
                 using="bm25",
                 limit=int(top_k),
-                filter=flt,
+                query_filter=flt,
                 with_payload=with_payload,
             )
         )
