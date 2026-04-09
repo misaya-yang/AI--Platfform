@@ -3965,32 +3965,27 @@ class KnowledgeService:
             # Step 1: Qdrant sparse retrieval for candidates (fast)
             bm25_pool = min(keyword_pool_k, 80)
             try:
-                from qdrant_client.http import models as qm
-
-                sparse_query = qm.SparseVector(
-                    indices=sparse_indices, values=sparse_values,
+                raw_hits = await self.vector_store.sparse_search(
+                    collection_name=collection,
+                    sparse_indices=sparse_indices,
+                    sparse_values=sparse_values,
+                    top_k=bm25_pool,
+                    document_id=document_id,
+                    source_type=source_type_filter,
+                    language=language_filter,
+                    with_payload=True,
                 )
-                resp = await self.vector_store._call(
-                    lambda: self.vector_store._client.query_points(
-                        collection_name=collection,
-                        query=sparse_query,
-                        using="bm25",
-                        limit=bm25_pool,
-                        with_payload=True,
-                    )
-                )
-                qdrant_hits = list(getattr(resp, "points", None) or [])
             except Exception as sparse_err:
                 logger.warning(f"[BM25] Sparse search failed: {sparse_err}")
                 return [], 0
 
-            if not qdrant_hits:
+            if not raw_hits:
                 return [], 0
 
             # Step 2: Python BM25 re-scoring (accurate doc-length normalization)
             query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
             valid = []
-            for h in qdrant_hits:
+            for h in raw_hits:
                 payload = dict(h.payload or {})
                 text = str(payload.get("text") or "").strip()
                 if text:
@@ -4001,7 +3996,7 @@ class KnowledgeService:
 
             hits = []
             for (h, payload, text), score in zip(valid, scores, strict=False):
-                seg_id = str(payload.get("segment_id") or h.id or "")
+                seg_id = str(payload.get("segment_id") or h.point_id or "")
                 if not seg_id or score <= 0.0:
                     continue
                 hits.append(

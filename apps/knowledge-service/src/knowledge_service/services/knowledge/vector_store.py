@@ -332,6 +332,68 @@ class VectorStore:
             )
         return results
 
+    async def sparse_search(
+        self,
+        collection_name: str,
+        sparse_indices: list[int],
+        sparse_values: list[float],
+        top_k: int = 20,
+        tenant_id: str | None = None,
+        document_id: str | None = None,
+        source_type: str | None = None,
+        language: str | None = None,
+        with_payload: bool = True,
+    ) -> list[VectorSearchHit]:
+        """Sparse-only (BM25) search via Qdrant native sparse vectors."""
+        if not sparse_indices:
+            return []
+
+        conditions = []
+        if tenant_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="tenant_id", match=qmodels.MatchValue(value=tenant_id),
+                )
+            )
+        if document_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="document_id", match=qmodels.MatchValue(value=document_id),
+                )
+            )
+        if source_type:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="source_type", match=qmodels.MatchValue(value=source_type),
+                )
+            )
+        if language:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="language", match=qmodels.MatchValue(value=language),
+                )
+            )
+        flt = qmodels.Filter(must=conditions) if conditions else None
+
+        resp = await self._call(
+            lambda: self._client.query_points(
+                collection_name=collection_name,
+                query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
+                using="bm25",
+                limit=int(top_k),
+                filter=flt,
+                with_payload=with_payload,
+            )
+        )
+
+        hits = list(getattr(resp, "points", None) or [])
+        return [
+            VectorSearchHit(
+                point_id=str(p.id), score=float(p.score), payload=dict(p.payload or {}),
+            )
+            for p in hits
+        ]
+
     async def upsert(self, collection_name: str, points: Sequence[qmodels.PointStruct]) -> None:
         if not points:
             return

@@ -1013,7 +1013,7 @@ async def transparent_proxy_handler(
                 cfgable = cfg.setdefault("configurable", {})
                 cfgable.setdefault("user_id", user.user_id)
                 cfgable.setdefault("tenant_id", user.tenant_id)
-                body = json.dumps(payload).encode("utf-8")
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         except Exception:
             pass
 

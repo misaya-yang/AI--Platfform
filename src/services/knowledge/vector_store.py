@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -308,6 +311,7 @@ class VectorStore:
         sparse_indices: list[int],
         sparse_values: list[float],
         top_k: int = 20,
+        tenant_id: str | None = None,
         document_id: str | None = None,
         source_type: str | None = None,
         language: str | None = None,
@@ -318,6 +322,12 @@ class VectorStore:
             return []
 
         conditions = []
+        if tenant_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="tenant_id", match=qmodels.MatchValue(value=tenant_id),
+                )
+            )
         if document_id:
             conditions.append(
                 qmodels.FieldCondition(
