@@ -281,29 +281,6 @@ function filterToolJsonOutput(text: string): string {
     // Only remove specific "Here is the JSON" phrases, not general "Here is" which may be valid content
     .replace(/^Here(?:'s| is) the JSON[^\n]*\n?/gim, '');
 
-  // Format Sources citations: split inline "[N] Citation" onto separate lines
-  // LLM outputs: "Sources: Citation1 [1] Citation2 [2] ..."
-  // We want each citation on its own line for readability
-  filtered = filtered.replace(
-    /(\*{0,2}Sources?\*{0,2}\s*:?\s*)((?:.*?\[\d+\][\s,;]*){2,})/gi,
-    (_match, prefix, citations) => {
-      const parts = citations.split(/(?=\[?\d+\]?\s*[A-Z\u0600-\u06FF])/);
-      if (parts.length >= 2) {
-        return prefix + '\n' + parts.map(p => p.trim()).filter(Boolean).join('\n\n');
-      }
-      return _match;
-    }
-  );
-
-  // Also handle: "[1] Citation [2] Citation" format (number first)
-  filtered = filtered.replace(
-    /(\*{0,2}Sources?\*{0,2}\s*:?\s*)\n?\s*(\[\d+\][\s\S]*?\[\d+\][\s\S]*?)(?=\n\n|$)/gi,
-    (_match, prefix, citations) => {
-      const formatted = citations.replace(/\s*(\[\d+\])/g, '\n\n$1');
-      return prefix + formatted;
-    }
-  );
-
   // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
 
