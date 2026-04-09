@@ -287,7 +287,7 @@ function filterToolJsonOutput(text: string): string {
   // citation renders on its own line by converting to paragraph breaks.
   // Handles: "Sources:", "المصادر:", "来源:" + [N] patterns.
   filtered = filtered.replace(
-    /((?:\*{2})?(?:Sources?|المصادر|来源)(?:\*{2})?\s*:?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
+    /((?:\*{2})?(?:Sources?|المصادر|来源)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
     (_match, prefix, citations) => {
       // Split before each [N] that follows text (not at start)
       const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);

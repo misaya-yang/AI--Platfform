@@ -85,6 +85,7 @@ class VectorStore:
         self.prefer_grpc = prefer_grpc
         self.max_retries = max(1, int(max_retries or 1))
         self.retry_base_delay = float(retry_base_delay or 0.5)
+        self._collection_dims: dict[str, int] = {}  # Cache: collection_name → dimension
         self._client = AsyncQdrantClient(
             url=url,
             api_key=api_key,
@@ -139,6 +140,7 @@ class VectorStore:
     async def delete_collection(self, collection_name: str) -> None:
         if not collection_name:
             return
+        self._collection_dims.pop(collection_name, None)
         await self._call(lambda: self._client.delete_collection(collection_name=collection_name))
 
     async def ensure_collection(
@@ -283,7 +285,7 @@ class VectorStore:
                     query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
                     using="bm25",
                     limit=sparse_limit,
-                    query_filter=flt,
+                    filter=flt,
                 ),
             )
 
@@ -382,18 +384,27 @@ class VectorStore:
             vec_dim = None
 
         if vec_dim is not None:
-            try:
-                info = await self._call(lambda: self._client.get_collection(collection_name))
-                col_dim = int(info.config.params.vectors.size)
-                if vec_dim != col_dim:
+            cached_dim = self._collection_dims.get(collection_name)
+            if cached_dim is not None:
+                if vec_dim != cached_dim:
                     raise VectorStoreError(
                         f"Dimension mismatch: vectors are {vec_dim}D but collection "
-                        f"'{collection_name}' expects {col_dim}D"
+                        f"'{collection_name}' expects {cached_dim}D"
                     )
-            except VectorStoreError:
-                raise
-            except Exception:
-                pass  # Skip check if collection info unavailable
+            else:
+                try:
+                    info = await self._call(lambda: self._client.get_collection(collection_name))
+                    col_dim = int(info.config.params.vectors.size)
+                    self._collection_dims[collection_name] = col_dim
+                    if vec_dim != col_dim:
+                        raise VectorStoreError(
+                            f"Dimension mismatch: vectors are {vec_dim}D but collection "
+                            f"'{collection_name}' expects {col_dim}D"
+                        )
+                except VectorStoreError:
+                    raise
+                except Exception:
+                    pass
 
         await self._call(
             lambda: self._client.upsert(collection_name=collection_name, points=list(points))

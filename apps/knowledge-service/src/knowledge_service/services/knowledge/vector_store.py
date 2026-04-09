@@ -85,6 +85,7 @@ class VectorStore:
         self.prefer_grpc = prefer_grpc
         self.max_retries = max(1, int(max_retries or 1))
         self.retry_base_delay = float(retry_base_delay or 0.5)
+        self._collection_dims: dict[str, int] = {}  # Cache: collection_name → dimension
         self._client = AsyncQdrantClient(
             url=url,
             api_key=api_key,
@@ -139,6 +140,7 @@ class VectorStore:
     async def delete_collection(self, collection_name: str) -> None:
         if not collection_name:
             return
+        self._collection_dims.pop(collection_name, None)
         await self._call(lambda: self._client.delete_collection(collection_name=collection_name))
 
     async def ensure_collection(
@@ -185,6 +187,14 @@ class VectorStore:
                         modifier=qmodels.Modifier.IDF,
                     ),
                 },
+                hnsw_config=qmodels.HnswConfigDiff(
+                    m=16,
+                    ef_construct=200,
+                    full_scan_threshold=10000,
+                ),
+                optimizers_config=qmodels.OptimizersConfigDiff(
+                    indexing_threshold=20000,
+                ),
             )
         )
 
@@ -203,7 +213,7 @@ class VectorStore:
             ("metadata.keywords", qmodels.PayloadSchemaType.KEYWORD),
         )
         for field_name, field_schema in payload_indexes:
-            try:
+            with contextlib.suppress(Exception):
                 await self._call(
                     lambda fn=field_name, fs=field_schema: self._client.create_payload_index(
                         collection_name=actual,
@@ -211,30 +221,16 @@ class VectorStore:
                         field_schema=fs,
                     )
                 )
-            except Exception as idx_err:
-                err_msg = str(idx_err).lower()
-                if "already exists" in err_msg or "already indexed" in err_msg:
-                    pass  # Expected — index already exists
-                else:
-                    logger.warning(
-                        "Failed to create payload index %s on %s: %s",
-                        field_name, actual, idx_err,
-                    )
 
         return actual
 
     async def ensure_sparse_vectors(self, collection_name: str) -> bool:
-        """Add BM25 sparse vector config to an existing collection (migration).
-
-        Returns True if the config was added, False if it already exists.
-        Safe to call multiple times.
-        """
+        """Add BM25 sparse vector config to an existing collection (migration)."""
         try:
             info = await self._call(lambda: self._client.get_collection(collection_name))
             sparse_cfg = getattr(info.config.params, "sparse_vectors", None) or {}
             if "bm25" in sparse_cfg:
-                return False  # Already configured
-
+                return False
             await self._call(
                 lambda: self._client.update_collection(
                     collection_name=collection_name,
@@ -264,49 +260,32 @@ class VectorStore:
         document_id: str | None = None,
         with_payload: bool = True,
     ) -> list[VectorSearchHit]:
-        """Native Qdrant hybrid search using Prefetch + RRF fusion.
-
-        Executes dense + sparse (BM25) search in a single Qdrant call with
-        server-side RRF fusion. Eliminates PostgreSQL FTS dependency.
-        """
-        # Build filter
+        """Native Qdrant hybrid search: Prefetch(dense+BM25) → RRF fusion."""
         conditions = []
         if tenant_id:
             conditions.append(
                 qmodels.FieldCondition(
-                    key="tenant_id",
-                    match=qmodels.MatchValue(value=tenant_id),
+                    key="tenant_id", match=qmodels.MatchValue(value=tenant_id),
                 )
             )
         if document_id:
             conditions.append(
                 qmodels.FieldCondition(
-                    key="document_id",
-                    match=qmodels.MatchValue(value=document_id),
+                    key="document_id", match=qmodels.MatchValue(value=document_id),
                 )
             )
         flt = qmodels.Filter(must=conditions) if conditions else None
 
         prefetch = [
-            # Dense retrieval (unnamed default vector)
-            qmodels.Prefetch(
-                query=query_vector,
-                limit=dense_limit,
-                query_filter=flt,
-            ),
+            qmodels.Prefetch(query=query_vector, limit=dense_limit, filter=flt),
         ]
-
-        # Only add sparse prefetch if we have sparse vector data
         if sparse_indices:
             prefetch.append(
                 qmodels.Prefetch(
-                    query=qmodels.SparseVector(
-                        indices=sparse_indices,
-                        values=sparse_values,
-                    ),
+                    query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
                     using="bm25",
                     limit=sparse_limit,
-                    query_filter=flt,
+                    filter=flt,
                 ),
             )
 
@@ -321,16 +300,12 @@ class VectorStore:
         )
 
         hits = list(getattr(resp, "points", None) or [])
-        results: list[VectorSearchHit] = []
-        for p in hits:
-            results.append(
-                VectorSearchHit(
-                    point_id=str(p.id),
-                    score=float(p.score),
-                    payload=dict(p.payload or {}),
-                )
+        return [
+            VectorSearchHit(
+                point_id=str(p.id), score=float(p.score), payload=dict(p.payload or {}),
             )
-        return results
+            for p in hits
+        ]
 
     async def sparse_search(
         self,
@@ -409,18 +384,27 @@ class VectorStore:
             vec_dim = None
 
         if vec_dim is not None:
-            try:
-                info = await self._call(lambda: self._client.get_collection(collection_name))
-                col_dim = int(info.config.params.vectors.size)
-                if vec_dim != col_dim:
+            cached_dim = self._collection_dims.get(collection_name)
+            if cached_dim is not None:
+                if vec_dim != cached_dim:
                     raise VectorStoreError(
                         f"Dimension mismatch: vectors are {vec_dim}D but collection "
-                        f"'{collection_name}' expects {col_dim}D"
+                        f"'{collection_name}' expects {cached_dim}D"
                     )
-            except VectorStoreError:
-                raise
-            except Exception:
-                pass  # Skip check if collection info unavailable
+            else:
+                try:
+                    info = await self._call(lambda: self._client.get_collection(collection_name))
+                    col_dim = int(info.config.params.vectors.size)
+                    self._collection_dims[collection_name] = col_dim
+                    if vec_dim != col_dim:
+                        raise VectorStoreError(
+                            f"Dimension mismatch: vectors are {vec_dim}D but collection "
+                            f"'{collection_name}' expects {col_dim}D"
+                        )
+                except VectorStoreError:
+                    raise
+                except Exception:
+                    pass
 
         await self._call(
             lambda: self._client.upsert(collection_name=collection_name, points=list(points))
@@ -432,27 +416,19 @@ class VectorStore:
         point_ids: Sequence[str],
         tenant_id: str | None = None,
     ) -> None:
-        """Delete points from collection with tenant isolation.
+        """Delete points from collection, optionally verifying tenant ownership.
 
         Args:
             collection_name: Name of the collection.
             point_ids: Sequence of point IDs to delete.
-            tenant_id: Tenant ID for isolation. If omitted, deletion still
-                proceeds (for backward compat) but a warning is logged.
+            tenant_id: If provided, only delete points belonging to this tenant.
         """
         ids = [pid for pid in point_ids if pid]
         if not ids:
             return
 
-        if not tenant_id:
-            logger.warning(
-                "delete_points called without tenant_id — no tenant isolation applied "
-                "(collection=%s, points=%d)",
-                collection_name, len(ids),
-            )
-
-        # Always use filter-based deletion when tenant_id is available
         if tenant_id:
+            # Use filter-based deletion to ensure tenant isolation
             await self._call(
                 lambda: self._client.delete(
                     collection_name=collection_name,

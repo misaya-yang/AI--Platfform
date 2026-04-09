@@ -69,30 +69,6 @@ from .common import ensure_dict as _ensure_dict  # noqa: E402
 from .common import permission_rank as _permission_rank  # noqa: E402
 
 
-def _resolve_mime_type(filename: str, mime_type: str | None, document_type: str | None) -> str:
-    """Resolve a safe MIME type without overwriting with non-MIME document type labels."""
-    if mime_type:
-        return mime_type
-
-    doc_type = (document_type or "").lower()
-    mapping = {
-        "pdf": "application/pdf",
-        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "html": "text/html",
-    }
-    if doc_type in mapping:
-        return mapping[doc_type]
-
-    guessed, _ = mimetypes.guess_type(filename or "")
-    return guessed or "application/octet-stream"
-
-
-
-def _require_not_guest(user: UserContext) -> None:
-    if not user.is_authenticated or "guest" in (user.roles or []):
-        raise PermissionDeniedError("Authentication required")
-
-
 class KnowledgeService:
     """Main knowledge base service - coordinates specialized sub-services.
 
