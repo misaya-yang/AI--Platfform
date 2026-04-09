@@ -44,7 +44,7 @@ export default defineConfig({
     {
       command: `${stackScript} backend`,
       url: `${apiURL}/health`,
-      reuseExistingServer: false,
+      reuseExistingServer: !!(process.env.E2E_REUSE_SERVER),
       timeout: 180_000,
       stdout: "pipe",
       stderr: "pipe",
@@ -52,7 +52,7 @@ export default defineConfig({
     {
       command: `${stackScript} frontend`,
       url: baseURL,
-      reuseExistingServer: false,
+      reuseExistingServer: !!(process.env.E2E_REUSE_SERVER),
       timeout: 180_000,
       stdout: "pipe",
       stderr: "pipe",

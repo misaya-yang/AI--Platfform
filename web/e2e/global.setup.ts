@@ -56,7 +56,10 @@ async function detectDefaultPassword(): Promise<string> {
     path.join(repoRoot(), "src/core/auth/password.py"),
     "utf-8"
   );
-  const match = passwordModule.match(/DEFAULT_PASSWORD\s*=\s*["']([^"']+)["']/);
+  // Match literal: DEFAULT_PASSWORD = "xxx"
+  // or environ: DEFAULT_PASSWORD = os.environ.get("...", "xxx")
+  const match = passwordModule.match(/DEFAULT_PASSWORD\s*=\s*["']([^"']+)["']/)
+    || passwordModule.match(/DEFAULT_PASSWORD\s*=\s*os\.environ\.get\(\s*["'][^"']*["']\s*,\s*["']([^"']+)["']\s*\)/);
   if (!match) {
     throw new Error("Unable to detect DEFAULT_PASSWORD from src/core/auth/password.py");
   }
