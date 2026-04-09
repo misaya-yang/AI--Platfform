@@ -220,12 +220,17 @@ class GeminiImageGenerator:
                             size_bytes = len(base64.b64decode(data))
                         except Exception:
                             size_bytes = len(data) * 3 // 4
-                        images.append({
+                        img_entry: dict[str, Any] = {
                             "filename": f"gemini_image_{i + 1}.png",
                             "content_base64": data,
                             "mime_type": mime,
                             "size_bytes": size_bytes,
-                        })
+                        }
+                        # Preserve thought_signature for multi-turn (required by Gemini 3.x)
+                        thought_sig = part.get("thoughtSignature") or part.get("thought_signature")
+                        if thought_sig:
+                            img_entry["thought_signature"] = thought_sig
+                        images.append(img_entry)
         return images, "\n".join(text_parts) if text_parts else None
 
     @staticmethod

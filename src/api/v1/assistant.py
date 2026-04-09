@@ -1389,7 +1389,10 @@ async def generate_image(
                     parts.append({"text": turn["text"]})
                 if turn.get("image_base64"):
                     mime = turn.get("mime_type", "image/jpeg")
-                    parts.append({"inlineData": {"mimeType": mime, "data": turn["image_base64"]}})
+                    img_part: dict = {"inlineData": {"mimeType": mime, "data": turn["image_base64"]}}
+                    if turn.get("thought_signature"):
+                        img_part["thoughtSignature"] = turn["thought_signature"]
+                    parts.append(img_part)
                 if parts:
                     contents.append({"role": role, "parts": parts})
 
@@ -1418,6 +1421,8 @@ async def generate_image(
                 img = res.images[0]
                 model_turn["image_base64"] = img["content_base64"]
                 model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
+                if img.get("thought_signature"):
+                    model_turn["thought_signature"] = img["thought_signature"]
                 image_history.append(model_turn)
 
             # Save back to session metadata
@@ -1629,7 +1634,10 @@ async def _run_image_generation_task(
                         parts.append({"text": turn["text"]})
                     if turn.get("image_base64"):
                         mime = turn.get("mime_type", "image/jpeg")
-                        parts.append({"inlineData": {"mimeType": mime, "data": turn["image_base64"]}})
+                        img_part: dict = {"inlineData": {"mimeType": mime, "data": turn["image_base64"]}}
+                        if turn.get("thought_signature"):
+                            img_part["thoughtSignature"] = turn["thought_signature"]
+                        parts.append(img_part)
                     if parts:
                         contents.append({"role": role, "parts": parts})
 
@@ -1655,6 +1663,8 @@ async def _run_image_generation_task(
                     img = res.images[0]
                     model_turn["image_base64"] = img["content_base64"]
                     model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
+                    if img.get("thought_signature"):
+                        model_turn["thought_signature"] = img["thought_signature"]
                     image_history.append(model_turn)
 
                 if session_manager and session:
