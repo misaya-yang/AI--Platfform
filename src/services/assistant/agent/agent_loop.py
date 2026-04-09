@@ -2353,6 +2353,11 @@ class AgentLoop:
                             tool_metadata = result.metadata or {}
                             tool_duration_ms = float(getattr(result, "duration_ms", 0.0) or 0.0)
                             tool_output_files = result.output_files or []
+                            if tool_name == "execute_python_code":
+                                logger.info(
+                                    "[AgentLoop] execute_python_code: success=%s, output_files=%d, artifact_storage=%s",
+                                    tool_success, len(tool_output_files), type(self.artifact_storage).__name__,
+                                )
 
                             # ADR-003: Sub-agent execution
                             if (
@@ -2549,6 +2554,11 @@ class AgentLoop:
 
                         # Persist output files into ArtifactStorage (if available)
                         persisted_output_files: list[dict[str, Any]] = tool_output_files
+                        if tool_output_files and not self.artifact_storage:
+                            logger.warning(
+                                "[AgentLoop] %d output files from %s but artifact_storage is None — files will NOT be persisted",
+                                len(tool_output_files), tool_name,
+                            )
                         if tool_output_files and self.artifact_storage:
                             from ..artifacts import persist_output_files
 
