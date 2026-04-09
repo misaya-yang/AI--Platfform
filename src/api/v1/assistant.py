@@ -1346,6 +1346,12 @@ async def generate_image(
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
         prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
+        prefer_doubao = "doubao" in body.model_id.lower() or "seedream" in body.model_id.lower()
+        # Detect Qwen-Image models → override DashScope model name
+        dashscope_model = None
+        mid_lower = body.model_id.lower()
+        if "qwen-image" in mid_lower or "qwen_image" in mid_lower:
+            dashscope_model = body.model_id  # pass as-is, e.g. "qwen-image-2.0"
 
         # Parse size → aspect ratio
         width, height = 1024, 1024
@@ -1477,12 +1483,14 @@ async def generate_image(
 
         res = await router.generate(
             prompt=body.prompt, n=body.n, size=body.size or "1024*1024",
-            style=style, aspect_ratio=aspect_ratio, prefer_gemini=prefer_gemini,
+            style=style, aspect_ratio=aspect_ratio,
+            prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
+            dashscope_model=dashscope_model,
         )
 
         if not res.success:
             err = res.error or "Image generation failed"
-            if res.blocked and res.block_reason:
+            if getattr(res, "blocked", False) and getattr(res, "block_reason", None):
                 err = f"{err} (blocked: {res.block_reason})"
             return ImageGenerationResponse(
                 success=False, images=[], provider=res.provider,
@@ -1571,6 +1579,11 @@ async def _run_image_generation_task(
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
         prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
+        prefer_doubao = "doubao" in body.model_id.lower() or "seedream" in body.model_id.lower()
+        dashscope_model = None
+        mid_lower = body.model_id.lower()
+        if "qwen-image" in mid_lower or "qwen_image" in mid_lower:
+            dashscope_model = body.model_id
 
         # Map style
         style_map = {
@@ -1684,6 +1697,8 @@ async def _run_image_generation_task(
                 style=style,
                 aspect_ratio=aspect_ratio,
                 prefer_gemini=prefer_gemini,
+                prefer_doubao=prefer_doubao,
+                dashscope_model=dashscope_model,
             )
 
         duration_ms = (time.time() - start_time) * 1000

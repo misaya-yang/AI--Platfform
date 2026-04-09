@@ -1236,10 +1236,16 @@ class RetrievalService:
                         c["_final_score"] = score  # Rerank score becomes final score
                         reranked.append(c)
 
-                # Sort by rerank score
+                # Sort by rerank score, preserving non-reranked candidates as fallback
                 if reranked:
+                    reranked_ids = {id(c) for c in reranked}
+                    for c in ranked:
+                        if id(c) not in reranked_ids:
+                            reranked.append(c)  # Keep original _final_score
                     ranked = sorted(
-                        reranked, key=lambda c: float(c.get("_rerank_score") or 0.0), reverse=True
+                        reranked,
+                        key=lambda c: float(c.get("_rerank_score") or c.get("_final_score") or 0.0),
+                        reverse=True,
                     )
                     meta["pipeline_stages"].append(
                         f"Rerank ({applied_rerank_provider}/{applied_rerank_model}): {len(reranked)} results"

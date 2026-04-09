@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ....core.observability.logging import get_logger
+from .doubao_image_tool import get_doubao_image_generator
 from .gemini_image_tool import get_gemini_image_generator
 from .image_generator_tool import get_image_generator
 
@@ -52,6 +53,8 @@ class SmartImageGenerator:
         negative_prompt: str = "",
         aspect_ratio: str = "1:1",
         prefer_gemini: bool = True,
+        prefer_doubao: bool = False,
+        dashscope_model: str | None = None,
     ) -> SmartImageGenerationResult:
         """Single-turn image generation with provider routing.
 
@@ -62,6 +65,36 @@ class SmartImageGenerator:
 
         gemini = get_gemini_image_generator()
         dash = get_image_generator()
+        doubao = get_doubao_image_generator()
+
+        # Doubao/Volcengine first (when explicitly preferred)
+        if prefer_doubao and doubao.is_configured:
+            doubao_res = await doubao.generate(prompt=prompt, n=n, size=size)
+            if doubao_res.success:
+                return SmartImageGenerationResult(
+                    success=True, provider="doubao",
+                    images=doubao_res.images, duration_ms=doubao_res.duration_ms,
+                )
+            # Doubao failed: fallback to Gemini → DashScope
+            logger.warning("Doubao image generation failed, trying fallback. err=%s", doubao_res.error)
+            if gemini.is_configured:
+                gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
+                if gemini_res.success:
+                    return SmartImageGenerationResult(
+                        success=True, provider="google", images=gemini_res.images,
+                        text=gemini_res.text, duration_ms=gemini_res.duration_ms, used_fallback=True,
+                    )
+            if dash.is_configured:
+                dash_res = await dash.generate(prompt=prompt, negative_prompt=negative_prompt, size=size, style=style, n=n, model_override=dashscope_model)
+                return SmartImageGenerationResult(
+                    success=dash_res.success, provider="dashscope",
+                    images=dash_res.images if dash_res.success else [],
+                    error=dash_res.error, duration_ms=dash_res.duration_ms, used_fallback=True,
+                )
+            return SmartImageGenerationResult(
+                success=False, provider="doubao", images=[],
+                error=doubao_res.error, duration_ms=doubao_res.duration_ms,
+            )
 
         # Gemini first (if preferred + configured)
         if prefer_gemini and gemini.is_configured:
@@ -100,6 +133,7 @@ class SmartImageGenerator:
                     size=size,
                     style=style,
                     n=n,
+                    model_override=dashscope_model,
                 )
                 return SmartImageGenerationResult(
                     success=dash_res.success,

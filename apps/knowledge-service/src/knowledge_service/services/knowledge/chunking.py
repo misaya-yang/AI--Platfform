@@ -1492,7 +1492,7 @@ class ParagraphChunker(BaseChunker):
         if self.config.use_token_count:
             token_counter = get_token_counter()
             token_limit = self.config.token_limit
-            overlap_tokens = max(int(token_limit * 0.15), 30)
+            overlap_tokens = max(int(token_limit * 0.15), 10)
 
             current_tokens = 0
             for para in paragraphs:
@@ -1577,7 +1577,7 @@ class PageChunker(BaseChunker):
                     chunks.append(self._create_chunk(page, i, {"page": i + 1}))
                 else:
                     # Split large pages by tokens
-                    overlap_tokens = max(int(token_limit * 0.15), 30)
+                    overlap_tokens = max(int(token_limit * 0.15), 10)
                     sub_chunks = self._split_by_tokens(
                         page, token_limit=token_limit, overlap_tokens=overlap_tokens
                     )
@@ -1651,7 +1651,7 @@ class HeadingChunker(BaseChunker):
         if self.config.use_token_count:
             token_counter = get_token_counter()
             token_limit = self.config.token_limit
-            overlap_tokens = max(int(token_limit * 0.15), 30)
+            overlap_tokens = max(int(token_limit * 0.15), 10)
 
             for _i, section in enumerate(sections):
                 section_text = section["content"].strip()
@@ -1735,7 +1735,7 @@ class RegexChunker(BaseChunker):
         if self.config.use_token_count:
             token_counter = get_token_counter()
             token_limit = self.config.token_limit
-            overlap_tokens = max(int(token_limit * 0.15), 30)
+            overlap_tokens = max(int(token_limit * 0.15), 10)
 
             for _i, part in enumerate(parts):
                 part = part.strip()
@@ -1794,7 +1794,7 @@ class SeparatorChunker(BaseChunker):
         if self.config.use_token_count:
             token_counter = get_token_counter()
             token_limit = self.config.token_limit
-            overlap_tokens = max(int(token_limit * 0.15), 30)
+            overlap_tokens = max(int(token_limit * 0.15), 10)
 
             for part in parts:
                 part = part.strip()

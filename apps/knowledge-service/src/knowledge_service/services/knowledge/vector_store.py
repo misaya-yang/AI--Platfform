@@ -397,6 +397,31 @@ class VectorStore:
     async def upsert(self, collection_name: str, points: Sequence[qmodels.PointStruct]) -> None:
         if not points:
             return
+        # Validate vector dimensions match collection
+        first_vec = points[0].vector
+        if isinstance(first_vec, list):
+            vec_dim = len(first_vec)
+        elif isinstance(first_vec, dict):
+            # Named vectors -- check the default dense vector
+            default_vec = first_vec.get("", first_vec.get("dense"))
+            vec_dim = len(default_vec) if isinstance(default_vec, list) else None
+        else:
+            vec_dim = None
+
+        if vec_dim is not None:
+            try:
+                info = await self._call(lambda: self._client.get_collection(collection_name))
+                col_dim = int(info.config.params.vectors.size)
+                if vec_dim != col_dim:
+                    raise VectorStoreError(
+                        f"Dimension mismatch: vectors are {vec_dim}D but collection "
+                        f"'{collection_name}' expects {col_dim}D"
+                    )
+            except VectorStoreError:
+                raise
+            except Exception:
+                pass  # Skip check if collection info unavailable
+
         await self._call(
             lambda: self._client.upsert(collection_name=collection_name, points=list(points))
         )

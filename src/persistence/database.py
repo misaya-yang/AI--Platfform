@@ -2492,8 +2492,8 @@ class DatabaseStorage:
             )
             if result is not None:
                 return result
-        except asyncpg.PostgresError:
-            pass  # Fall through to ILIKE
+        except asyncpg.PostgresError as exc:
+            logger.warning("FTS query failed (%s), falling back to ILIKE for dataset=%s", exc, dataset_id)
 
         return await self._search_segments_ilike(
             dataset_id, cleaned, document_id, source_type, language, limit
@@ -2591,6 +2591,7 @@ class DatabaseStorage:
             err_str = str(e).lower()
             if "text_search" in err_str or "column" in err_str:
                 # Column doesn't exist yet — signal caller to use ILIKE fallback
+                logger.warning("text_search column missing, falling back to ILIKE for dataset=%s", dataset_id)
                 return None
             logger.exception("FTS search error")
             return None

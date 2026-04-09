@@ -144,8 +144,9 @@ class DashScopeImageGenerator:
     SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
     TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        self.model = model or os.getenv("DASHSCOPE_IMAGE_MODEL", "wanx-v1")
         self._client: httpx.AsyncClient | None = None
 
     @property
@@ -164,12 +165,14 @@ class DashScopeImageGenerator:
         size: str = "1024*1024",
         style: str = "<auto>",
         n: int = 1,
+        model_override: str | None = None,
     ) -> ImageGenerationResult:
         """Generate images from text prompt."""
         if not self.is_configured:
             return ImageGenerationResult(success=False, error="DashScope API key not configured")
 
         start_time = time.time()
+        use_model = model_override or self.model
 
         try:
             client = await self._get_client()
@@ -182,7 +185,7 @@ class DashScopeImageGenerator:
             }
 
             payload = {
-                "model": "wanx-v1",
+                "model": use_model,
                 "input": {
                     "prompt": prompt,
                 },
@@ -415,6 +418,8 @@ class ImageGeneratorExecutor(ToolExecutor):
             if not prefer_gemini and ("gemini" in model_id.lower()):
                 prefer_gemini = True
 
+        prefer_doubao = "doubao" in (model_id or "").lower() or "seedream" in (model_id or "").lower()
+
         router = get_smart_image_generator()
         res = await router.generate(
             prompt=prompt,
@@ -424,6 +429,7 @@ class ImageGeneratorExecutor(ToolExecutor):
             negative_prompt=negative_prompt,
             aspect_ratio=aspect_ratio,
             prefer_gemini=prefer_gemini,
+            prefer_doubao=prefer_doubao,
         )
 
         if not res.success:
