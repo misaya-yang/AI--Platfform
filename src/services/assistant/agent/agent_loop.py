@@ -295,6 +295,9 @@ class AgentLoopConfig:
     react_thinking_visible: bool = True  # Show thinking process to user
     react_auto_retry: bool = True  # Auto retry on tool failures
 
+    # Thinking display (Phase: Thinking/Workflow)
+    thinking_level: str | None = None  # "enabled" for Qwen3, "high"/"medium" for Gemini
+
     # Error Recovery parameters (Phase 3)
     enable_error_recovery: bool = True  # Enable intelligent error recovery
     error_max_retries: int = 3  # Maximum retry attempts per operation
@@ -1979,6 +1982,9 @@ class AgentLoop:
             max_iterations = ctx.config.max_tool_iterations
             iteration = 0
             accumulated_content = ""
+            accumulated_thinking = ""
+            thinking_started = False
+            thinking_ended = False
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_query_fingerprints_seen: set[str] = set()
@@ -2027,15 +2033,44 @@ class AgentLoop:
                 tool_call_order: list[str] = []
                 anonymous_tool_counter = 0
                 call_usage: dict[str, int] = {}
+                # Reset thinking state per iteration
+                thinking_started = False
+                thinking_ended = False
+                accumulated_thinking = ""
                 async for delta in self.model_registry.chat_stream(
                     model_id=ctx.config.model_id,
                     messages=messages,
                     temperature=ctx.config.temperature,
                     max_tokens=ctx.config.max_tokens,
                     tools=tools_for_call,
+                    thinking_level=ctx.config.thinking_level,
                 ):
+                    # Emit thinking content (Qwen reasoning_content / Gemini thought parts)
+                    if delta.thinking_content:
+                        if not thinking_started:
+                            thinking_started = True
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="thinking_start",
+                                data={"model_id": ctx.config.model_id},
+                            )
+                        accumulated_thinking += delta.thinking_content
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="thinking_delta",
+                            data=delta.thinking_content,
+                        )
+
                     # Emit text content immediately (streaming-first!)
                     if delta.content:
+                        # Close thinking block before content starts
+                        if thinking_started and not thinking_ended:
+                            thinking_ended = True
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="thinking_end",
+                                data={"content": accumulated_thinking},
+                            )
                         for text_chunk in _split_text_for_stream(delta.content):
                             accumulated_content += text_chunk
                             ctx.generated_content += text_chunk
@@ -2083,6 +2118,15 @@ class AgentLoop:
                     # Keep latest model-call usage for UI consistency (legacy behavior).
                     ctx.usage[key] = int(value)
 
+                # Close any open thinking block after stream ends
+                if thinking_started and not thinking_ended:
+                    thinking_ended = True
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="thinking_end",
+                        data={"content": accumulated_thinking},
+                    )
+
                 tool_calls_batch = [tool_calls_accumulated[k] for k in tool_call_order]
 
                 # If no tool calls, we're done
@@ -2091,11 +2135,6 @@ class AgentLoop:
 
                 # Step 4: Execute tool calls
                 logger.info(f"[STREAMING-FIRST] Executing {len(tool_calls_batch)} tool calls")
-
-                # Note: thinking_end is NOT emitted for non-thinking models.
-                # For thinking models (Claude extended thinking, Gemini thinking),
-                # thinking tokens will be streamed via the native thinking_delta event.
-                # Normal pre-tool text is just regular text_delta — no special handling.
 
                 # Add assistant message with tool calls to history
                 assistant_msg = {

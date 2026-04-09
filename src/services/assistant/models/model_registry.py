@@ -90,6 +90,7 @@ class StreamDelta:
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
     thought_signature: str | None = None  # Gemini 3 thought signature
+    thinking_content: str | None = None  # Qwen reasoning_content / Gemini thought parts
 
 
 @dataclass
@@ -558,7 +559,8 @@ class ModelRegistry:
             )
         else:
             return self._build_openai_body(
-                model_id, messages, temperature, max_tokens, tools, stream
+                model_id, messages, temperature, max_tokens, tools, stream,
+                thinking_level=thinking_level,
             )
 
     def _build_openai_body(
@@ -569,6 +571,7 @@ class ModelRegistry:
         max_tokens: int | None,
         tools: list[dict[str, Any]] | None,
         stream: bool,
+        thinking_level: str | None = None,
     ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
         formatted_messages = []
@@ -611,6 +614,11 @@ class ModelRegistry:
             body["tools"] = tools
         if stream:
             body["stream_options"] = {"include_usage": True}
+        # DashScope Qwen 3.x thinking mode
+        if thinking_level and "qwen3" in model_id.lower():
+            body["extra_body"] = {"enable_thinking": True}
+            if not body.get("max_tokens") or body["max_tokens"] < 16384:
+                body["max_tokens"] = 16384
         return body
 
     def _build_anthropic_body(
@@ -1002,6 +1010,10 @@ class ModelRegistry:
         body: dict[str, Any],
     ) -> AsyncIterator[StreamDelta]:
         """Stream from OpenAI-compatible API."""
+        # Stateful <think> tag parser for models that embed thinking in content
+        in_think_block = False
+        think_buf = ""
+
         async with client.stream("POST", endpoint, json=body) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
@@ -1033,12 +1045,48 @@ class ModelRegistry:
                 delta = choice.get("delta", {})
                 finish_reason = choice.get("finish_reason")
 
-                # Yield delta with all available info (content, tool_calls, finish_reason, usage)
+                content = delta.get("content", "") or ""
+                reasoning = delta.get("reasoning_content")
+                thinking = None
+
+                # If provider gives reasoning_content natively, use it directly
+                if reasoning:
+                    thinking = reasoning
+                elif content:
+                    # Fallback: parse <think> tags from content stream
+                    # Tags may be split across chunks, so track state
+                    if in_think_block:
+                        end_idx = content.find("</think>")
+                        if end_idx != -1:
+                            # Only yield the NEW portion from this chunk
+                            thinking = content[:end_idx] if end_idx > 0 else None
+                            think_buf = ""
+                            in_think_block = False
+                            content = content[end_idx + 8:]  # skip </think>
+                        else:
+                            thinking = content
+                            think_buf += content
+                            content = ""
+                    elif "<think>" in content:
+                        start_idx = content.find("<think>")
+                        pre_content = content[:start_idx]
+                        rest = content[start_idx + 7:]  # skip <think>
+                        end_idx = rest.find("</think>")
+                        if end_idx != -1:
+                            thinking = rest[:end_idx]
+                            content = pre_content + rest[end_idx + 8:]
+                        else:
+                            thinking = rest
+                            think_buf = rest
+                            in_think_block = True
+                            content = pre_content
+
                 yield StreamDelta(
-                    content=delta.get("content", ""),
+                    content=content,
                     tool_calls=delta.get("tool_calls"),
                     finish_reason=finish_reason,
                     usage=usage_data,
+                    thinking_content=thinking,
                 )
 
     async def _stream_anthropic(
@@ -1149,7 +1197,10 @@ class ModelRegistry:
 
                     tool_calls_batch = []
                     for part in parts:
-                        if "text" in part:
+                        if part.get("thought") and "text" in part:
+                            # Gemini 3 thinking content (thought parts)
+                            yield StreamDelta(thinking_content=part["text"])
+                        elif "text" in part:
                             yield StreamDelta(content=part["text"])
                         elif "functionCall" in part:
                             # Gemini 3 function call with optional thoughtSignature

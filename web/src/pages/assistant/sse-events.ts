@@ -8,6 +8,7 @@ export const SSEEventType = {
   STARTED: "started",
   STATUS: "status",
   TEXT_DELTA: "text_delta",
+  THINKING_START: "thinking_start",
   THINKING_DELTA: "thinking_delta",
   THINKING_END: "thinking_end",
   USAGE: "usage",

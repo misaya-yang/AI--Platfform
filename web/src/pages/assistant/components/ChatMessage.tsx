@@ -47,6 +47,7 @@ import { CitationDisplay } from "./CitationDisplay";
 import { DocumentPreview } from "./DocumentPreview";
 import type { ChatMessage as ChatMessageType, SearchStatusItem, AgentPhaseStatus } from "../types";
 import { ProcessSummaryBar } from "./ProcessSummaryBar";
+import { ThinkingPanel } from "./ThinkingPanel";
 import { QuizCard } from "./Quiz";
 
 interface ChatMessageProps {
@@ -825,61 +826,38 @@ export function ChatMessage({ message }: ChatMessageProps) {
             <ProcessSummaryBar summary={message.processSummary} />
           ) : hasToolCalls ? (
             <ToolCallsDisplay toolCalls={message.toolCalls} isStreaming={!!message.isStreaming} />
-          ) : isThinking ? (
-            ASSISTANT_UI_V2 ? (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex items-center gap-2.5 py-2"
-              >
-                <div className="flex gap-1">
-                  {[0, 1, 2].map((i) => (
-                    <motion.div
-                      key={i}
-                      className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--assistant-accent))]"
-                      animate={{ opacity: [0.3, 1, 0.3] }}
-                      transition={{
-                        duration: 1.4,
-                        repeat: Infinity,
-                        delay: i * 0.2,
-                        ease: "easeInOut",
-                      }}
-                    />
-                  ))}
-                </div>
-              </motion.div>
-            ) : (
-              <motion.div
-                initial={{ opacity: 0, y: -4 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center gap-3 py-3 px-4 rounded-xl bg-violet-50/80 dark:bg-violet-900/20 border border-violet-200/50 dark:border-violet-700/30"
-              >
-                <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-violet-100 dark:bg-violet-800/40">
-                  <div className="flex gap-1">
-                    {[0, 1, 2].map((i) => (
-                      <motion.div
-                        key={i}
-                        className="w-2 h-2 rounded-full bg-violet-500"
-                        animate={{
-                          scale: [1, 1.4, 1],
-                          opacity: [0.5, 1, 0.5]
-                        }}
-                        transition={{
-                          duration: 1.2,
-                          repeat: Infinity,
-                          delay: i * 0.15,
-                          ease: "easeInOut"
-                        }}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <span className="text-sm font-medium text-violet-700 dark:text-violet-300">
-                  {t("assistant.thinking")}
-                </span>
-              </motion.div>
-            )
+          ) : isThinking && !message.isThinkingStreaming && !message.streamingThinkingContent ? (
+            /* Fallback: 3-dot animation for non-thinking models or before thinking_start arrives */
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex items-center gap-2.5 py-2"
+            >
+              <div className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <motion.div
+                    key={i}
+                    className="w-1.5 h-1.5 rounded-full bg-[hsl(var(--assistant-accent))]"
+                    animate={{ opacity: [0.3, 1, 0.3] }}
+                    transition={{
+                      duration: 1.4,
+                      repeat: Infinity,
+                      delay: i * 0.2,
+                      ease: "easeInOut",
+                    }}
+                  />
+                ))}
+              </div>
+            </motion.div>
           ) : null}
+
+          {/* Thinking Panel — real-time thinking display */}
+          {(message.isThinkingStreaming || message.streamingThinkingContent) && (
+            <ThinkingPanel
+              streamingContent={message.streamingThinkingContent}
+              isStreaming={!!message.isThinkingStreaming}
+            />
+          )}
 
           {/* Search status display */}
           {shouldShowSearchStatus && message.searchStatus && (
@@ -905,17 +883,12 @@ export function ChatMessage({ message }: ChatMessageProps) {
             </div>
           )}
 
-          {/* Thought Process (pre-tool thinking from iteration 1) */}
-          {message.thinkingContent && (
-            <details className="mb-3 group" open={!message.content}>
-              <summary className="cursor-pointer text-xs font-medium text-muted-foreground flex items-center gap-1.5 select-none py-1">
-                <svg className="w-3.5 h-3.5 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-                {t("assistant.thoughtProcess", "Thought process")}
-              </summary>
-              <div className="mt-1.5 pl-5 text-sm text-muted-foreground/80 leading-relaxed border-l-2 border-muted-foreground/20">
-                {message.thinkingContent}
-              </div>
-            </details>
+          {/* Thought Process — finalized thinking content (after thinking_end) */}
+          {message.thinkingContent && !message.isThinkingStreaming && !message.streamingThinkingContent && (
+            <ThinkingPanel
+              finalContent={message.thinkingContent}
+              isStreaming={false}
+            />
           )}
 
           {/* Message content */}

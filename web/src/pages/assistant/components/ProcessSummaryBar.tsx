@@ -9,6 +9,7 @@ import {
   Wrench,
   Clock3,
   ListTodo,
+  Brain,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ProcessSummaryState, ToolTimelineItem } from "../types";
@@ -63,7 +64,8 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const toolRunning = summary.tools.filter((s) => s.status === "running").length;
   const hasContextBudget = Boolean(summary.contextBudget);
   const hasContextCompacted = Boolean(summary.contextCompacted?.compacted);
-  const canExpand = stepTotal > 0 || toolTotal > 0 || hasContextBudget || hasContextCompacted;
+  const hasThinkingPhase = Boolean(summary.thinkingDurationMs);
+  const canExpand = stepTotal > 0 || toolTotal > 0 || hasContextBudget || hasContextCompacted || hasThinkingPhase;
   // Only show error if the overall run has finished AND no step/tool succeeded.
   // During streaming, don't flash "执行失败" for intermediate tool failures — the model may retry.
   const isRunFinished = summary.status === "succeeded" || summary.status === "failed";
@@ -166,6 +168,20 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
             className="overflow-hidden"
           >
             <div className="ml-6 pl-3 pb-2.5 border-l-2 border-[hsl(var(--assistant-border-soft))] space-y-2">
+              {hasThinkingPhase && (
+                <div className="flex items-center gap-2 text-xs">
+                  <Brain className="h-3 w-3 text-violet-500" />
+                  <span className="text-[hsl(var(--assistant-text-primary))]">
+                    {t("assistant.processSummary.thinking", "Thinking")}
+                  </span>
+                  {summary.thinkingDurationMs != null && (
+                    <span className="ml-auto text-[11px] text-[hsl(var(--assistant-text-secondary))] tabular-nums">
+                      {(summary.thinkingDurationMs / 1000).toFixed(1)}s
+                    </span>
+                  )}
+                </div>
+              )}
+
               {stepTotal > 0 && (
                 <div>
                   <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-[hsl(var(--assistant-text-secondary))] mb-1.5">

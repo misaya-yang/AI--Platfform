@@ -3018,6 +3018,12 @@ Please use this web search context to inform your response when relevant."""
             context_detail=config.context_detail,
             skills_enabled=config.skills_enabled,
             memory_profile=config.memory_profile,
+            # Thinking display: enable for thinking-capable models
+            thinking_level=(
+                "enabled" if "qwen3" in (config.model_id or "").lower()
+                else "high" if "gemini-3" in (config.model_id or "")
+                else None
+            ),
         )
 
         logger.info(

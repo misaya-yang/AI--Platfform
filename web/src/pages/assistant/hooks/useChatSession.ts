@@ -901,20 +901,55 @@ export function useChatSession() {
           case "text_delta":
             break;
 
+          case SSEEventType.THINKING_START:
+          case "thinking_start": {
+            const thinkStartMs = Date.now();
+            updateAssistantMessage(m => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, thinkStartMs);
+              return {
+                ...m,
+                isThinkingStreaming: true,
+                streamingThinkingContent: "",
+                processSummary: { ...prev, thinkingStartedAt: thinkStartMs },
+              };
+            });
+            break;
+          }
+
+          case SSEEventType.THINKING_DELTA:
+          case "thinking_delta": {
+            const thinkingDelta = typeof event.data === "string"
+              ? event.data
+              : (event.data as { content?: string })?.content || "";
+            if (thinkingDelta) {
+              updateAssistantMessage(m => ({
+                ...m,
+                streamingThinkingContent: (m.streamingThinkingContent || "") + thinkingDelta,
+              }));
+            }
+            break;
+          }
+
           case SSEEventType.THINKING_END:
           case "thinking_end": {
-            // Only for thinking models (Claude extended thinking, Gemini thinking).
-            // Non-thinking models don't emit this event — their pre-tool text
-            // is normal text_delta and stays in message.content as-is.
             const thinkingData = event.data as { content?: string } | undefined;
             const thinkingText = thinkingData?.content || "";
-            if (thinkingText.trim()) {
-              setMessages(prev => prev.map(m =>
-                m.id === assistantMessage.id
-                  ? { ...m, thinkingContent: thinkingText.trim() }
-                  : m
-              ));
-            }
+            const thinkEndMs = Date.now();
+            updateAssistantMessage(m => {
+              const prev = m.processSummary;
+              const thinkingDuration = prev?.thinkingStartedAt
+                ? thinkEndMs - prev.thinkingStartedAt
+                : undefined;
+              return {
+                ...m,
+                isThinkingStreaming: false,
+                thinkingContent: thinkingText.trim() || m.streamingThinkingContent?.trim() || "",
+                streamingThinkingContent: undefined,
+                ...(prev && thinkingDuration
+                  ? { processSummary: { ...prev, thinkingDurationMs: thinkingDuration } }
+                  : {}),
+              };
+            });
             break;
           }
 
@@ -1995,6 +2030,8 @@ export function useChatSession() {
         durationMs,
         firstTokenMs,
         isStreaming: false,
+        isThinkingStreaming: false,
+        streamingThinkingContent: undefined,
         status:
           streamTurnState.status === "failed" || streamTurnState.status === "cancelled"
             ? streamTurnState.status

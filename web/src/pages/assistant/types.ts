@@ -74,6 +74,9 @@ export interface ProcessSummaryState {
   isErrorExpanded?: boolean;
   steps: ProcessStepItem[];
   tools: ToolTimelineItem[];
+  // Thinking phase timing
+  thinkingStartedAt?: number;
+  thinkingDurationMs?: number;
   contextBudget?: {
     used_tokens?: number;
     model_context_window?: number;
@@ -267,6 +270,9 @@ export interface ChatMessage {
 
   // Pre-tool thinking content (displayed as collapsible "Thought Process")
   thinkingContent?: string;
+  // Streaming thinking state (real-time thinking display)
+  streamingThinkingContent?: string;
+  isThinkingStreaming?: boolean;
 
   // Internal: artifact IDs from session metadata (used by hydrateMessageArtifacts)
   _artifactIds?: string[];
