@@ -121,10 +121,6 @@ async def enforce_rate_limit(
     limiter: MultiDimensionRateLimiter | None = getattr(
         request.app.state, "multi_rate_limiter", None
     )
-    import logging as _logging
-    _logging.getLogger(__name__).info(
-        f"[RATELIMIT] op={operation} limiter={'set' if limiter else 'None'} user={'set' if user else 'None'}"
-    )
     if limiter is None:
         return
 
