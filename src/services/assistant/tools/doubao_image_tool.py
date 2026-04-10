@@ -7,7 +7,6 @@ Model: doubao-seedream-5-0-260128
 from __future__ import annotations
 
 import base64
-import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -15,7 +14,9 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from ....core.observability.logging import get_logger
+
+logger = get_logger(__name__)
 
 _ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 _DEFAULT_MODEL = "doubao-seedream-5-0-260128"
@@ -118,11 +119,14 @@ class DoubaoImageGenerator:
             for i, item in enumerate(result.get("data", [])):
                 b64_data = item.get("b64_json", "")
                 if not b64_data:
-                    # If URL response format
+                    # URL response format — use a throwaway client with no ARK
+                    # credentials, otherwise the Authorization header leaks to
+                    # whichever CDN serves the image.
                     url = item.get("url")
                     if url:
                         try:
-                            dl = await client.get(url)
+                            async with httpx.AsyncClient(timeout=60.0) as dl_client:
+                                dl = await dl_client.get(url)
                             if dl.status_code == 200:
                                 b64_data = base64.b64encode(dl.content).decode("utf-8")
                         except Exception as e:
@@ -130,10 +134,9 @@ class DoubaoImageGenerator:
                             continue
 
                 if b64_data:
-                    try:
-                        size_bytes = len(base64.b64decode(b64_data))
-                    except Exception:
-                        size_bytes = len(b64_data) * 3 // 4
+                    # Base64 → byte count: (len * 3) // 4 minus padding chars.
+                    padding = b64_data.count("=", -2)
+                    size_bytes = (len(b64_data) * 3) // 4 - padding
                     images.append({
                         "filename": f"doubao_image_{i + 1}.png",
                         "content_base64": b64_data,

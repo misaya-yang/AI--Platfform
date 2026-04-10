@@ -7,14 +7,32 @@ Level 3 adaptive watermarking:
 - Adds a subtle outline in the opposite color for cross-background readability
 """
 
+import base64
 import io
-import logging
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageFilter
 
-logger = logging.getLogger(__name__)
+from ....core.observability.logging import get_logger
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Tunable constants
+# ---------------------------------------------------------------------------
+_WATERMARK_SCALE = 0.22              # watermark width as fraction of image
+_WATERMARK_MARGIN_PX = 24            # edge margin in pixels
+_WATERMARK_FILL_OPACITY = 0.75       # main watermark ink opacity
+_WATERMARK_OUTLINE_OPACITY = 0.85    # outline opacity
+_WATERMARK_DILATION_SIZE = 5         # MaxFilter kernel — 2px on each side
+_WATERMARK_BLUR_SIGMA = 0.8          # Gaussian blur for outline smoothing
+_DARK_BG_THRESHOLD = 140             # mean grayscale threshold (0-255)
+_DARK_INK_RGB = (20, 20, 20)         # near-black fill for light backgrounds
+_LIGHT_INK_RGB = (255, 255, 255)     # white fill for dark backgrounds
+_CORNER_ANALYSIS_PAD_PX = 6          # extra context for corner analysis
+_FALLBACK_BRIGHTNESS = 128.0         # if corner analysis fails
+_PNG_COMPRESS_LEVEL = 1              # 0-9; 1 = fast encode (PIL default 6)
 
 _WATERMARK_PATH = Path(__file__).resolve().parents[3] / "assets" / "watermark.png"
 _watermark_cache: Image.Image | None = None
@@ -28,8 +46,10 @@ def _load_watermark() -> Image.Image | None:
         logger.warning("[Watermark] watermark.png not found at %s", _WATERMARK_PATH)
         return None
     try:
-        _watermark_cache = Image.open(_WATERMARK_PATH).convert("RGBA")
-        logger.info("[Watermark] Loaded watermark: %dx%d", _watermark_cache.width, _watermark_cache.height)
+        img = Image.open(_WATERMARK_PATH).convert("RGBA")
+        img.load()  # Force full decode so concurrent reads are safe
+        _watermark_cache = img
+        logger.info("[Watermark] Loaded watermark: %dx%d", img.width, img.height)
         return _watermark_cache
     except Exception as e:
         logger.error("[Watermark] Failed to load: %s", e)
@@ -38,7 +58,7 @@ def _load_watermark() -> Image.Image | None:
 
 def _tint(img: Image.Image, rgb: tuple[int, int, int]) -> Image.Image:
     """Fill the RGB channels with a solid color, keep alpha."""
-    r, g, b, a = img.split()
+    _, _, _, a = img.split()
     rr = Image.new("L", img.size, rgb[0])
     gg = Image.new("L", img.size, rgb[1])
     bb = Image.new("L", img.size, rgb[2])
@@ -48,23 +68,17 @@ def _tint(img: Image.Image, rgb: tuple[int, int, int]) -> Image.Image:
 def _analyze_region(base: Image.Image, box: tuple[int, int, int, int]) -> tuple[float, float]:
     """Analyze a region: return (mean_brightness, variance).
 
-    brightness in 0-255, variance is stddev of grayscale values.
     Lower variance = smoother region = better for watermark.
     """
     region = base.crop(box).convert("L")
     arr = np.asarray(region, dtype=np.float32)
-    mean = float(arr.mean())
-    std = float(arr.std())
-    return mean, std
+    return float(arr.mean()), float(arr.std())
 
 
 def _pick_best_corner(base: Image.Image, wm_w: int, wm_h: int, margin: int) -> tuple[int, int, float]:
-    """Evaluate 4 corners, return (x, y, mean_brightness) of best one.
-
-    Best corner = lowest texture variance (smoothest region).
-    """
+    """Evaluate 4 corners, return (x, y, mean_brightness) of the smoothest one."""
     W, H = base.width, base.height
-    pad = 6  # analyze a slightly larger box than the watermark for more context
+    pad = _CORNER_ANALYSIS_PAD_PX
 
     corners = {
         "bl": (margin - pad, H - wm_h - margin - pad, margin + wm_w + pad, H - margin + pad),
@@ -75,25 +89,18 @@ def _pick_best_corner(base: Image.Image, wm_w: int, wm_h: int, margin: int) -> t
 
     results = {}
     for name, box in corners.items():
-        # Clamp box to image bounds
-        x0 = max(0, box[0])
-        y0 = max(0, box[1])
-        x1 = min(W, box[2])
-        y1 = min(H, box[3])
+        x0, y0 = max(0, box[0]), max(0, box[1])
+        x1, y1 = min(W, box[2]), min(H, box[3])
         if x1 <= x0 or y1 <= y0:
             continue
-        mean, std = _analyze_region(base, (x0, y0, x1, y1))
-        results[name] = (mean, std)
+        results[name] = _analyze_region(base, (x0, y0, x1, y1))
 
     if not results:
-        # Fallback: bottom-right with default brightness
-        return W - wm_w - margin, H - wm_h - margin, 128.0
+        return W - wm_w - margin, H - wm_h - margin, _FALLBACK_BRIGHTNESS
 
-    # Pick corner with lowest variance (smoothest)
     best_name = min(results, key=lambda k: results[k][1])
     best_mean, best_std = results[best_name]
 
-    # Compute top-left anchor (x, y) for the watermark at this corner
     positions = {
         "bl": (margin, H - wm_h - margin),
         "br": (W - wm_w - margin, H - wm_h - margin),
@@ -101,23 +108,18 @@ def _pick_best_corner(base: Image.Image, wm_w: int, wm_h: int, margin: int) -> t
         "tr": (W - wm_w - margin, margin),
     }
     x, y = positions[best_name]
-    logger.info(
+    logger.debug(
         "[Watermark] Best corner: %s (brightness=%.0f, variance=%.1f)",
         best_name, best_mean, best_std,
     )
     return x, y, best_mean
 
 
-def apply_watermark(image_bytes: bytes, opacity: float = 0.75, margin: int = 24) -> bytes:
-    """Apply adaptive watermark to image bytes.
+def apply_watermark(image_bytes: bytes) -> bytes:
+    """Apply adaptive watermark to image bytes. Returns PNG bytes.
 
-    Args:
-        image_bytes: Raw image file bytes.
-        opacity: Watermark fill opacity (0.0-1.0).
-        margin: Pixel margin from image edges.
-
-    Returns:
-        Watermarked image as PNG bytes.
+    CPU-bound; callers running inside an async event loop should wrap this
+    in ``asyncio.to_thread(apply_watermark, image_bytes)`` to avoid blocking.
     """
     wm = _load_watermark()
     if wm is None:
@@ -129,49 +131,39 @@ def apply_watermark(image_bytes: bytes, opacity: float = 0.75, margin: int = 24)
         logger.warning("[Watermark] Cannot open image: %s", e)
         return image_bytes
 
-    # Scale watermark to ~22% of image width
-    target_width = int(base.width * 0.22)
+    target_width = int(base.width * _WATERMARK_SCALE)
     scale = target_width / wm.width
     wm_w = max(1, int(wm.width * scale))
     wm_h = max(1, int(wm.height * scale))
     wm_scaled = wm.resize((wm_w, wm_h), Image.LANCZOS)
 
-    # Pick the best corner based on smoothness
-    x, y, brightness = _pick_best_corner(base, wm_w, wm_h, margin)
+    x, y, brightness = _pick_best_corner(base, wm_w, wm_h, _WATERMARK_MARGIN_PX)
 
-    # Choose colors based on background brightness
-    # brightness > 140 → dark watermark on light bg
-    # brightness ≤ 140 → white watermark on dark bg
-    if brightness > 140:
-        fill_color = (20, 20, 20)      # near-black fill
-        outline_color = (255, 255, 255)  # white outline
+    if brightness > _DARK_BG_THRESHOLD:
+        fill_color = _DARK_INK_RGB
+        outline_color = _LIGHT_INK_RGB
     else:
-        fill_color = (255, 255, 255)   # white fill
-        outline_color = (0, 0, 0)       # black outline
+        fill_color = _LIGHT_INK_RGB
+        outline_color = (0, 0, 0)
 
-    # Build fill layer (colored version of the watermark shape)
     wm_fill = _tint(wm_scaled, fill_color)
-    fill_alpha = wm_fill.getchannel("A").point(lambda p: int(p * opacity))
+    fill_alpha = wm_fill.getchannel("A").point(lambda p: int(p * _WATERMARK_FILL_OPACITY))
     wm_fill.putalpha(fill_alpha)
 
-    # Build outline layer: dilate the alpha channel to create a ring
+    # Outline: dilate alpha channel to form a ring around the text
     alpha = wm_scaled.getchannel("A")
-    # Grow the alpha mask to create outline
-    dilated = alpha.filter(ImageFilter.MaxFilter(5))  # 2px dilation on each side
-    # Blur slightly for smooth edges
-    dilated = dilated.filter(ImageFilter.GaussianBlur(0.8))
-    # Subtract the original alpha to get just the outline ring
-    import numpy as np
+    dilated = alpha.filter(ImageFilter.MaxFilter(_WATERMARK_DILATION_SIZE))
+    dilated = dilated.filter(ImageFilter.GaussianBlur(_WATERMARK_BLUR_SIGMA))
+
     dilated_arr = np.asarray(dilated, dtype=np.int16)
     orig_arr = np.asarray(alpha, dtype=np.int16)
     ring_arr = np.clip(dilated_arr - orig_arr // 2, 0, 255).astype(np.uint8)
     ring_alpha = Image.fromarray(ring_arr, mode="L")
-    ring_alpha = ring_alpha.point(lambda p: int(p * 0.85))  # outline opacity
+    ring_alpha = ring_alpha.point(lambda p: int(p * _WATERMARK_OUTLINE_OPACITY))
 
     outline_rgb = Image.new("RGBA", wm_scaled.size, (*outline_color, 0))
     outline_rgb.putalpha(ring_alpha)
 
-    # Composite: outline first (wider), then fill on top
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     overlay.paste(outline_rgb, (x, y), outline_rgb)
     overlay.paste(wm_fill, (x, y), wm_fill)
@@ -179,5 +171,19 @@ def apply_watermark(image_bytes: bytes, opacity: float = 0.75, margin: int = 24)
     result = Image.alpha_composite(base, overlay)
 
     buf = io.BytesIO()
-    result.convert("RGB").save(buf, format="PNG", quality=95)
+    result.convert("RGB").save(buf, format="PNG", compress_level=_PNG_COMPRESS_LEVEL)
     return buf.getvalue()
+
+
+def apply_watermark_b64(b64_data: str) -> tuple[str, str]:
+    """Apply watermark to a base64-encoded image. Returns (new_b64, 'image/png').
+
+    On any failure, returns the original (b64, 'image/png') unchanged.
+    """
+    try:
+        raw = base64.b64decode(b64_data)
+        watermarked = apply_watermark(raw)
+        return base64.b64encode(watermarked).decode("utf-8"), "image/png"
+    except Exception as e:
+        logger.warning("[Watermark] apply_watermark_b64 failed: %s", e)
+        return b64_data, "image/png"

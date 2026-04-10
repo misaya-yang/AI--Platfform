@@ -2,37 +2,56 @@
 
 Sends completed image generation results to an external callback URL.
 Used by downstream services (e.g. Wahda app) that prefer push over polling.
+
+Features a module-level HTTP client (connection pooling) and exponential
+backoff retry for transient 5xx / network errors.
 """
 
-import logging
+import asyncio
+import os
 from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from ....core.observability.logging import get_logger
 
-_CALLBACK_TIMEOUT = 10  # seconds
+logger = get_logger(__name__)
+
+_CALLBACK_TIMEOUT = float(os.getenv("IMAGE_CALLBACK_TIMEOUT", "10"))
+_CALLBACK_MAX_RETRIES = int(os.getenv("IMAGE_CALLBACK_RETRIES", "3"))
+_CALLBACK_BACKOFF_BASE = float(os.getenv("IMAGE_CALLBACK_BACKOFF_BASE", "0.5"))
+
+_client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = httpx.AsyncClient(timeout=_CALLBACK_TIMEOUT)
+    return _client
 
 
 async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
-    """POST completed task data to the callback URL.
+    """POST completed task data to the callback URL with retry.
 
-    Args:
-        callback_url: The external endpoint to notify.
-        task: The task dict from _image_tasks.
+    Retries on 5xx or transport errors with exponential backoff. Stops
+    immediately on 4xx (client error — retrying won't help).
 
-    Returns:
-        True if callback succeeded (code=0), False otherwise.
+    Returns True only when the receiver returned ``{"code": 0}`` (Wahda contract).
     """
-    images = []
-    for img in task.get("images", []):
-        images.append({
+    images = [
+        {
             "artifact_id": img.get("artifact_id"),
             "download_url": img.get("download_url"),
             "url": img.get("url", ""),
             "width": img.get("width"),
             "height": img.get("height"),
-        })
+        }
+        for img in task.get("images", [])
+    ]
 
     payload = {
         "task_id": task.get("task_id"),
@@ -48,20 +67,54 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
         "completed_at": task.get("completed_at"),
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=_CALLBACK_TIMEOUT) as client:
+    client = await _get_client()
+    task_id = task.get("task_id")
+
+    for attempt in range(_CALLBACK_MAX_RETRIES):
+        try:
             resp = await client.post(callback_url, json=payload)
             if resp.status_code == 200:
-                body = resp.json()
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = {}
                 if body.get("code") == 0:
-                    logger.info("[ImageCallback] Success → %s (task=%s)", callback_url, task.get("task_id"))
+                    logger.info(
+                        "[ImageCallback] Success → %s (task=%s, attempt=%d)",
+                        callback_url, task_id, attempt + 1,
+                    )
                     return True
-                else:
-                    logger.warning("[ImageCallback] Non-zero code from %s: %s", callback_url, body)
-                    return False
-            else:
-                logger.warning("[ImageCallback] HTTP %d from %s", resp.status_code, callback_url)
+                logger.warning(
+                    "[ImageCallback] Non-zero code from %s: %s",
+                    callback_url, body,
+                )
+                return False  # Application-level failure — don't retry
+
+            if 400 <= resp.status_code < 500:
+                logger.warning(
+                    "[ImageCallback] HTTP %d from %s — not retrying",
+                    resp.status_code, callback_url,
+                )
                 return False
-    except Exception as e:
-        logger.error("[ImageCallback] Failed to send to %s: %s", callback_url, e)
-        return False
+
+            logger.warning(
+                "[ImageCallback] HTTP %d from %s (attempt %d/%d)",
+                resp.status_code, callback_url, attempt + 1, _CALLBACK_MAX_RETRIES,
+            )
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+            logger.warning(
+                "[ImageCallback] Transport error to %s (attempt %d/%d): %s",
+                callback_url, attempt + 1, _CALLBACK_MAX_RETRIES, e,
+            )
+        except Exception as e:
+            logger.error("[ImageCallback] Unexpected error to %s: %s", callback_url, e)
+            return False
+
+        if attempt < _CALLBACK_MAX_RETRIES - 1:
+            await asyncio.sleep(_CALLBACK_BACKOFF_BASE * (2 ** attempt))
+
+    logger.error(
+        "[ImageCallback] All %d attempts failed for task=%s",
+        _CALLBACK_MAX_RETRIES, task_id,
+    )
+    return False

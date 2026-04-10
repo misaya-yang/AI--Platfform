@@ -398,27 +398,22 @@ class ImageGeneratorExecutor(ToolExecutor):
         aspect_ratio = self._size_to_aspect_ratio(size)
 
         # Determine provider preference from metadata (model_id → provider)
-        prefer_gemini = False  # Default to DashScope (cheaper)
+        from .image_helpers import resolve_image_routing
+
         model_id = request.metadata.get("model_id", "")
-        if model_id:
-            from ..models.model_registry import ModelProvider
-
-            # Check if model belongs to Google provider
+        selected_provider = None
+        registry = request.metadata.get("model_registry")
+        if model_id and registry is not None:
             try:
-                from ..models.model_registry import ModelRegistry
-
-                registry: ModelRegistry | None = request.metadata.get("model_registry")
-                if registry:
-                    info = registry.get_model(model_id)
-                    if info and info.provider == ModelProvider.GOOGLE:
-                        prefer_gemini = True
+                info = registry.get_model(model_id)
+                if info:
+                    selected_provider = info.provider.value
             except Exception:
-                pass
-            # Fallback: infer from model_id prefix
-            if not prefer_gemini and ("gemini" in model_id.lower()):
-                prefer_gemini = True
+                selected_provider = None
 
-        prefer_doubao = "doubao" in (model_id or "").lower() or "seedream" in (model_id or "").lower()
+        prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
+            model_id, selected_provider,
+        )
 
         router = get_smart_image_generator()
         res = await router.generate(
@@ -430,6 +425,7 @@ class ImageGeneratorExecutor(ToolExecutor):
             aspect_ratio=aspect_ratio,
             prefer_gemini=prefer_gemini,
             prefer_doubao=prefer_doubao,
+            dashscope_model=dashscope_model,
         )
 
         if not res.success:

@@ -243,7 +243,7 @@ class SmartImageGenerator:
 _smart_image_generator: SmartImageGenerator | None = None
 
 
-def get_smart_image_generator(prefer_gemini: bool = True) -> SmartImageGenerator:
+def get_smart_image_generator() -> SmartImageGenerator:
     global _smart_image_generator
     if _smart_image_generator is None:
         _smart_image_generator = SmartImageGenerator()

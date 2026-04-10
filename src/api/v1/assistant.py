@@ -20,11 +20,13 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
+import base64 as _b64
 import json
 import logging
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -34,6 +36,17 @@ from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import PermissionDeniedError
 from ...services.assistant import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
 from ...services.assistant.assistant_service import RAGMode
+from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
+from ...services.assistant.tools.image_callback import send_image_callback
+from ...services.assistant.tools.image_helpers import (
+    append_image_turns,
+    build_gemini_contents_from_history,
+    parse_image_size,
+    resolve_image_routing,
+    resolve_style,
+)
+from ...services.assistant.tools.image_watermark import apply_watermark_b64
+from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
 from ...services.knowledge.embedding import is_multimodal_embedding_model
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
@@ -1340,41 +1353,27 @@ async def generate_image(
     from ..deps import enforce_rate_limit
     await enforce_rate_limit(request, user, operation="image_generate")
 
-    import json as _json
-    import time
-
-    from ...services.assistant.models.model_registry import ModelProvider
-    from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
-    from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
-
     start_time = time.time()
 
     try:
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
-        prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
-        prefer_doubao = "doubao" in body.model_id.lower() or "seedream" in body.model_id.lower()
-        # Detect Qwen-Image models → override DashScope model name
-        dashscope_model = None
-        mid_lower = body.model_id.lower()
-        if "qwen-image" in mid_lower or "qwen_image" in mid_lower:
-            dashscope_model = body.model_id  # pass as-is, e.g. "qwen-image-2.0"
+        prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
+            body.model_id, selected_provider,
+        )
 
-        # Parse size → aspect ratio
-        width, height = 1024, 1024
-        if body.size:
-            try:
-                p = body.size.split("*")
-                if len(p) == 2:
-                    width, height = int(p[0]), int(p[1])
-            except ValueError:
-                pass
-        ratio = float(width) / float(height) if height else 1.0
-        ar_map = {"1:1": 1.0, "16:9": 16/9, "9:16": 9/16, "4:3": 4/3, "3:4": 3/4}
-        aspect_ratio = min(ar_map, key=lambda k: abs(ratio - ar_map[k]))
+        width, height, aspect_ratio = parse_image_size(body.size)
+
+        async def _build_data_url(img: dict) -> str:
+            """Encode one generated image to a data URL (watermark off-thread)."""
+            cb64 = img.get("content_base64", "")
+            mt = img.get("mime_type", "image/png")
+            if body.add_watermark and cb64:
+                cb64, mt = await asyncio.to_thread(apply_watermark_b64, cb64)
+            return f"data:{mt};base64,{cb64}"
 
         # ------------------------------------------------------------------
-        # Multi-turn mode: build contents from image_chat_history in session
+        # Multi-turn mode: rebuild Gemini contents from session history
         # ------------------------------------------------------------------
         session_mgr = getattr(request.app.state, "session_manager", None)
 
@@ -1387,86 +1386,41 @@ async def generate_image(
                     error="Gemini API key not configured for multi-turn image chat",
                 )
 
-            # Load existing image chat history from session metadata
             session = await session_mgr.get(body.session_id)
             image_history: list[dict] = []
             if session and session.metadata:
                 image_history = session.metadata.get("image_chat_history", [])
 
-            # Build Gemini contents array from history
-            contents: list[dict] = []
-            for turn in image_history:
-                role = turn.get("role", "user")
-                parts = []
-                if turn.get("text"):
-                    parts.append({"text": turn["text"]})
-                if turn.get("image_base64"):
-                    mime = turn.get("mime_type", "image/jpeg")
-                    img_part: dict = {"inlineData": {"mimeType": mime, "data": turn["image_base64"]}}
-                    if turn.get("thought_signature"):
-                        img_part["thoughtSignature"] = turn["thought_signature"]
-                    parts.append(img_part)
-                if parts:
-                    contents.append({"role": role, "parts": parts})
+            contents = build_gemini_contents_from_history(image_history, body.prompt)
 
-            # Append current user message
-            contents.append({"role": "user", "parts": [{"text": body.prompt}]})
-
-            turn_count = len(contents)
             logger.info(
                 "Image multi-turn: session=%s, turns=%d, prompt=%s...",
-                body.session_id, turn_count, body.prompt[:50],
+                body.session_id, len(contents), body.prompt[:50],
             )
 
             res = await gemini.generate_chat(
                 contents=contents, n=body.n, aspect_ratio=aspect_ratio,
             )
 
-            # Persist updated history — append user turn + model response
-            new_user_turn = {"role": "user", "text": body.prompt}
-            image_history.append(new_user_turn)
-
+            # Only persist the turn pair on success — skipping on failure avoids
+            # dangling unanswered user prompts that would poison the next request.
             if res.success and res.images:
-                model_turn: dict = {"role": "model"}
-                if res.text:
-                    model_turn["text"] = res.text
-                # Store first image in history for future context
-                img = res.images[0]
-                model_turn["image_base64"] = img["content_base64"]
-                model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
-                if img.get("thought_signature"):
-                    model_turn["thought_signature"] = img["thought_signature"]
-                image_history.append(model_turn)
-
-            # Save back to session metadata — but strip base64 to prevent JSONB bloat
-            # (multi-turn context is maintained in-memory during the request via `contents`;
-            #  between requests we only need text + thought_signature for continuity)
-            if session_mgr and session:
-                meta = dict(session.metadata or {})
-                meta["image_chat_history"] = _slim_image_history(image_history)
-                await session_mgr.update_metadata(body.session_id, meta)
-
-            if not res.success:
+                append_image_turns(
+                    image_history, body.prompt, res.images[0], res.text,
+                )
+                if session_mgr and session:
+                    meta = dict(session.metadata or {})
+                    meta["image_chat_history"] = _slim_image_history(image_history)
+                    await session_mgr.update_metadata(body.session_id, meta)
+            else:
                 return ImageGenerationResponse(
                     success=False, images=[], provider="google",
                     duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
                     error=res.error or "Image generation failed",
                 )
 
-            images = []
-            for img in res.images:
-                cb64 = img["content_base64"]
-                mt = img.get("mime_type", "image/png")
-                if body.add_watermark and cb64:
-                    try:
-                        import base64 as b64
-                        from ...services.assistant.tools.image_watermark import apply_watermark
-                        cb64 = b64.b64encode(apply_watermark(b64.b64decode(cb64))).decode("utf-8")
-                        mt = "image/png"
-                    except Exception as e:
-                        logger.warning("Watermark failed: %s", e)
-                data_url = f"data:{mt};base64,{cb64}"
-                images.append(GeneratedImage(url=data_url, width=width, height=height))
+            urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
+            images = [GeneratedImage(url=u, width=width, height=height) for u in urls]
 
             return ImageGenerationResponse(
                 success=True, images=images, provider="google",
@@ -1474,17 +1428,11 @@ async def generate_image(
             )
 
         # ------------------------------------------------------------------
-        # Single-turn mode (no session or DashScope): simple prompt → image
+        # Single-turn mode (no session, non-Gemini, or Gemini single-shot)
         # ------------------------------------------------------------------
-        style_map = {
-            "default": "<auto>", "auto": "<auto>", "photography": "<photography>",
-            "portrait": "<portrait>", "3d": "<3d cartoon>", "anime": "<anime>",
-            "oil": "<oil painting>", "watercolor": "<watercolor>",
-            "sketch": "<sketch>", "flat": "<flat illustration>",
-        }
-        style = style_map.get(body.style or "default", "<auto>")
+        style = resolve_style(body.style)
 
-        router = get_smart_image_generator(prefer_gemini=prefer_gemini)
+        router = get_smart_image_generator()
         logger.info(
             "Image single-turn: model_id=%s, prompt=%s..., size=%s",
             body.model_id, body.prompt[:50], body.size,
@@ -1499,27 +1447,15 @@ async def generate_image(
 
         if not res.success:
             err = res.error or "Image generation failed"
-            if getattr(res, "blocked", False) and getattr(res, "block_reason", None):
+            if res.blocked and res.block_reason:
                 err = f"{err} (blocked: {res.block_reason})"
             return ImageGenerationResponse(
                 success=False, images=[], provider=res.provider,
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000, error=err,
             )
 
-        images = []
-        for img in res.images:
-            cb64 = img.get("content_base64", "")
-            mt = img.get("mime_type", "image/png")
-            if body.add_watermark and cb64:
-                try:
-                    import base64 as b64
-                    from ...services.assistant.tools.image_watermark import apply_watermark
-                    cb64 = b64.b64encode(apply_watermark(b64.b64decode(cb64))).decode("utf-8")
-                    mt = "image/png"
-                except Exception as e:
-                    logger.warning("Watermark failed: %s", e)
-            data_url = f"data:{mt};base64,{cb64}"
-            images.append(GeneratedImage(url=data_url, width=width, height=height))
+        urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
+        images = [GeneratedImage(url=u, width=width, height=height) for u in urls]
 
         return ImageGenerationResponse(
             success=True, images=images, provider=res.provider,
@@ -1537,10 +1473,6 @@ async def generate_image(
 # =========================================================================
 # Async Image Generation (background task with polling)
 # =========================================================================
-
-import asyncio
-import uuid
-from datetime import datetime, timezone
 
 # In-memory task store for async image generation
 # Key: task_id, Value: dict with task state
@@ -1564,6 +1496,58 @@ def _cleanup_old_tasks() -> None:
         _image_tasks.pop(tid, None)
 
 
+async def _process_image_result(
+    img: dict,
+    *,
+    task_id: str,
+    prompt: str,
+    width: int,
+    height: int,
+    add_watermark: bool,
+    session_id: str | None,
+    user: UserContext,
+    index: int,
+    artifact_storage,
+) -> dict:
+    """Watermark + save artifact for one generated image. Runs concurrently per image."""
+    content_base64 = img.get("content_base64", "")
+    mime_type = img.get("mime_type", "image/png")
+
+    if add_watermark and content_base64:
+        try:
+            content_base64, mime_type = await asyncio.to_thread(
+                apply_watermark_b64, content_base64,
+            )
+        except Exception as e:
+            logger.warning("Watermark failed for image %d: %s", index, e)
+
+    data_url = f"data:{mime_type};base64,{content_base64}"
+    entry: dict = {"url": data_url, "width": width, "height": height}
+
+    if artifact_storage and session_id and content_base64:
+        try:
+            content = _b64.b64decode(content_base64)
+            ext = mime_type.split("/")[-1] or "png"
+            filename = f"generated_image_{task_id[:8]}_{index + 1}.{ext}"
+            artifact = await artifact_storage.create_artifact(
+                session_id=session_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                type="image",
+                format=ext,
+                title=f"Generated: {prompt[:40]}...",
+                filename=filename,
+                content=content,
+                source="image_generation",
+            )
+            entry["artifact_id"] = artifact.artifact_id
+            entry["download_url"] = await artifact_storage.get_presigned_download_url(artifact)
+        except Exception as e:
+            logger.warning("Failed to save async image artifact: %s", e)
+
+    return entry
+
+
 async def _run_image_generation_task(
     task_id: str,
     body: AsyncImageGenerationRequest,
@@ -1572,11 +1556,6 @@ async def _run_image_generation_task(
     session_manager=None,
 ) -> None:
     """Background coroutine that runs image generation and saves artifacts."""
-    import time
-
-    from ...services.assistant.models.model_registry import ModelProvider
-    from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
-
     task = _image_tasks[task_id]
     task["status"] = "running"
     task["progress"] = 10
@@ -1584,58 +1563,24 @@ async def _run_image_generation_task(
     start_time = time.time()
 
     try:
-        # Determine provider preference
         model_info = model_registry.get_model(body.model_id)
         selected_provider = model_info.provider.value if model_info else None
-        prefer_gemini = selected_provider == ModelProvider.GOOGLE.value
-        prefer_doubao = "doubao" in body.model_id.lower() or "seedream" in body.model_id.lower()
-        dashscope_model = None
-        mid_lower = body.model_id.lower()
-        if "qwen-image" in mid_lower or "qwen_image" in mid_lower:
-            dashscope_model = body.model_id
-
-        # Map style
-        style_map = {
-            "default": "<auto>", "auto": "<auto>",
-            "photography": "<photography>", "portrait": "<portrait>",
-            "3d": "<3d cartoon>", "anime": "<anime>",
-            "oil": "<oil painting>", "watercolor": "<watercolor>",
-            "sketch": "<sketch>", "flat": "<flat illustration>",
-        }
-        style = style_map.get(body.style or "default", "<auto>")
-
-        # Parse size
-        width, height = 1024, 1024
-        if body.size:
-            try:
-                parts = body.size.split("*")
-                if len(parts) == 2:
-                    width, height = int(parts[0]), int(parts[1])
-            except ValueError:
-                pass
-
-        # Aspect ratio
-        try:
-            ratio = float(width) / float(height) if height else 1.0
-        except Exception:
-            ratio = 1.0
-        candidates = {"1:1": 1.0, "16:9": 16 / 9, "9:16": 9 / 16, "4:3": 4 / 3, "3:4": 3 / 4}
-        aspect_ratio = min(candidates.keys(), key=lambda k: abs(ratio - candidates[k]))
+        prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
+            body.model_id, selected_provider,
+        )
+        style = resolve_style(body.style)
+        width, height, aspect_ratio = parse_image_size(body.size)
 
         task["progress"] = 30
-        task["provider"] = "google" if prefer_gemini else "dashscope"
 
         # ------------------------------------------------------------------
         # Multi-turn mode: session_id + Gemini → use chat history
         # ------------------------------------------------------------------
         res = None
         if body.session_id and session_manager and prefer_gemini:
-            from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
-
             gemini = get_gemini_image_generator()
             if gemini.is_configured:
                 session = await session_manager.get(body.session_id)
-                # Auto-create session if it doesn't exist
                 if not session:
                     session = await session_manager.create(
                         user_id=user.user_id,
@@ -1647,23 +1592,7 @@ async def _run_image_generation_task(
                 if session and session.metadata:
                     image_history = session.metadata.get("image_chat_history", [])
 
-                # Build Gemini contents from history
-                contents: list[dict] = []
-                for turn in image_history:
-                    role = turn.get("role", "user")
-                    parts = []
-                    if turn.get("text"):
-                        parts.append({"text": turn["text"]})
-                    if turn.get("image_base64"):
-                        mime = turn.get("mime_type", "image/jpeg")
-                        img_part: dict = {"inlineData": {"mimeType": mime, "data": turn["image_base64"]}}
-                        if turn.get("thought_signature"):
-                            img_part["thoughtSignature"] = turn["thought_signature"]
-                        parts.append(img_part)
-                    if parts:
-                        contents.append({"role": role, "parts": parts})
-
-                contents.append({"role": "user", "parts": [{"text": body.prompt}]})
+                contents = build_gemini_contents_from_history(image_history, body.prompt)
 
                 logger.info(
                     "Async image multi-turn: session=%s, turns=%d, prompt=%s...",
@@ -1674,28 +1603,18 @@ async def _run_image_generation_task(
                     contents=contents, n=body.n, aspect_ratio=aspect_ratio,
                 )
 
-                # Persist updated history
-                new_user_turn = {"role": "user", "text": body.prompt}
-                image_history.append(new_user_turn)
-
+                # Skip history update on failure to avoid dangling user turn
                 if res.success and res.images:
-                    model_turn: dict = {"role": "model"}
-                    if res.text:
-                        model_turn["text"] = res.text
-                    img = res.images[0]
-                    model_turn["image_base64"] = img["content_base64"]
-                    model_turn["mime_type"] = img.get("mime_type", "image/jpeg")
-                    if img.get("thought_signature"):
-                        model_turn["thought_signature"] = img["thought_signature"]
-                    image_history.append(model_turn)
-
-                if session_manager and session:
-                    meta = dict(session.metadata or {})
-                    meta["image_chat_history"] = _slim_image_history(image_history)
-                    await session_manager.update_metadata(body.session_id, meta)
+                    append_image_turns(
+                        image_history, body.prompt, res.images[0], res.text,
+                    )
+                    if session_manager and session:
+                        meta = dict(session.metadata or {})
+                        meta["image_chat_history"] = _slim_image_history(image_history)
+                        await session_manager.update_metadata(body.session_id, meta)
 
         # ------------------------------------------------------------------
-        # Single-turn fallback
+        # Single-turn fallback (no session, non-Gemini, or Gemini not configured)
         # ------------------------------------------------------------------
         if res is None:
             router = get_smart_image_generator()
@@ -1712,11 +1631,11 @@ async def _run_image_generation_task(
 
         duration_ms = (time.time() - start_time) * 1000
         task["duration_ms"] = duration_ms
-        task["provider"] = getattr(res, "provider", task.get("provider", "google"))
+        task["provider"] = res.provider
 
         if not res.success:
             err = res.error or "Image generation failed"
-            if getattr(res, "blocked", False) and getattr(res, "block_reason", None):
+            if res.blocked and res.block_reason:
                 err = f"{err} (blocked: {res.block_reason})"
             task["status"] = "failed"
             task["error"] = err
@@ -1726,60 +1645,26 @@ async def _run_image_generation_task(
 
         task["progress"] = 70
 
-        # Build image results and save to artifacts
-        images: list[dict] = []
+        # Process all images concurrently — watermark off the event loop,
+        # artifact uploads in parallel.
         artifact_storage = get_artifact_storage()
-        session_id = body.session_id
-
-        for i, img in enumerate(res.images):
-            mime_type = img.get("mime_type", "image/png")
-            content_base64 = img.get("content_base64", "")
-
-            # Apply watermark if requested
-            if body.add_watermark and content_base64:
-                try:
-                    import base64 as b64
-
-                    from ...services.assistant.tools.image_watermark import apply_watermark
-
-                    raw = b64.b64decode(content_base64)
-                    watermarked = apply_watermark(raw)
-                    content_base64 = b64.b64encode(watermarked).decode("utf-8")
-                    mime_type = "image/png"
-                except Exception as e:
-                    logger.warning("Watermark failed for image %d: %s", i, e)
-
-            data_url = f"data:{mime_type};base64,{content_base64}"
-
-            image_entry: dict = {"url": data_url, "width": width, "height": height}
-
-            # Save to artifact storage if session_id provided
-            if artifact_storage and session_id and content_base64:
-                try:
-                    import base64 as b64
-
-                    content = b64.b64decode(content_base64)
-                    ext = mime_type.split("/")[-1] or "png"
-                    filename = f"generated_image_{task_id[:8]}_{i + 1}.{ext}"
-
-                    artifact = await artifact_storage.create_artifact(
-                        session_id=session_id,
-                        tenant_id=user.tenant_id,
-                        user_id=user.user_id,
-                        type="image",
-                        format=ext,
-                        title=f"Generated: {body.prompt[:40]}...",
-                        filename=filename,
-                        content=content,
-                        source="image_generation",
-                    )
-                    download_url = await artifact_storage.get_presigned_download_url(artifact)
-                    image_entry["artifact_id"] = artifact.artifact_id
-                    image_entry["download_url"] = download_url
-                except Exception as e:
-                    logger.warning("Failed to save async image artifact: %s", e)
-
-            images.append(image_entry)
+        images = await asyncio.gather(
+            *[
+                _process_image_result(
+                    img,
+                    task_id=task_id,
+                    prompt=body.prompt,
+                    width=width,
+                    height=height,
+                    add_watermark=body.add_watermark,
+                    session_id=body.session_id,
+                    user=user,
+                    index=i,
+                    artifact_storage=artifact_storage,
+                )
+                for i, img in enumerate(res.images)
+            ]
+        )
 
         task["images"] = images
         task["status"] = "completed"
@@ -1794,11 +1679,8 @@ async def _run_image_generation_task(
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Send callback if URL provided (runs for both success and failure)
     if body.callback_url:
         try:
-            from ...services.assistant.tools.image_callback import send_image_callback
-
             await send_image_callback(body.callback_url, task)
         except Exception as e:
             logger.warning("Callback to %s failed: %s", body.callback_url, e)
