@@ -282,6 +282,21 @@ class DatabaseSessionManager:
         if not session:
             return False
 
+        # Safety net: reject metadata > 1MB to prevent JSONB bloat
+        # (2026-04-10: image_chat_history was writing 15MB of base64)
+        import json as _json
+        try:
+            serialized = _json.dumps(metadata)
+            if len(serialized) > 1_048_576:  # 1 MB
+                import logging
+                logging.getLogger(__name__).error(
+                    f"[SESSION] Refusing metadata write for {session_id}: "
+                    f"{len(serialized)} bytes > 1MB limit. Keys: {list(metadata.keys())}"
+                )
+                return False
+        except (TypeError, ValueError):
+            pass  # Non-serializable — let the DB error handler catch it
+
         # 原子更新 metadata，避免 save_session 覆盖 history
         result = await self.database.update_session_metadata(session_id, metadata)
         if not result:

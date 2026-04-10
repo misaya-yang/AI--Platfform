@@ -129,6 +129,35 @@ def get_model_registry(request: Request) -> ModelRegistry:
     return registry
 
 
+def _slim_image_history(history: list[dict]) -> list[dict]:
+    """
+    Cap image_chat_history size to prevent JSONB bloat.
+
+    Keep base64 for the last 2 model turns only (enough for Gemini multi-turn
+    continuity); older image turns keep their text but drop base64.
+    Without this, long image-edit sessions can push metadata to 15+ MB.
+    """
+    if not history:
+        return history
+
+    # Walk backwards, keep base64 for last 2 model turns with images
+    keep_base64_count = 0
+    max_keep = 2
+    result: list[dict] = []
+    for turn in reversed(history):
+        turn = dict(turn)  # shallow copy
+        if turn.get("role") == "model" and turn.get("image_base64"):
+            if keep_base64_count < max_keep:
+                keep_base64_count += 1
+            else:
+                # Strip base64 from older model turns
+                turn.pop("image_base64", None)
+                turn.pop("mime_type", None)
+        result.append(turn)
+    result.reverse()
+    return result
+
+
 def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     """
     Check if a user can access a model based on access level.
@@ -677,38 +706,15 @@ def get_session_manager(request: Request):
     return manager
 
 
-async def _list_assistant_sessions(session_manager, user: UserContext, limit: int):
-    """List assistant sessions with legacy service_id compatibility."""
-    primary = await session_manager.list_sessions(
+async def _list_assistant_session_summaries(session_manager, user: UserContext, limit: int):
+    """List assistant session summaries (lightweight, no history)."""
+    return await session_manager.list_session_summaries(
         user_id=user.user_id,
         tenant_id=user.tenant_id,
-        service_id="__builtin_assistant__",
+        service_ids=["__builtin_assistant__", "assistant"],
+        include_null_service_id=True,
         limit=limit,
     )
-    legacy = await session_manager.list_sessions(
-        user_id=user.user_id,
-        tenant_id=user.tenant_id,
-        service_id="assistant",
-        limit=limit,
-    )
-
-    merged = {}
-    for session in list(primary) + list(legacy):
-        existing = merged.get(session.session_id)
-        if existing is None:
-            merged[session.session_id] = session
-            continue
-        existing_ts = existing.updated_at or existing.created_at or datetime.min
-        candidate_ts = session.updated_at or session.created_at or datetime.min
-        if candidate_ts > existing_ts:
-            merged[session.session_id] = session
-
-    sessions = list(merged.values())
-    sessions.sort(
-        key=lambda s: s.updated_at or s.created_at or datetime.min,
-        reverse=True,
-    )
-    return sessions[:limit]
 
 
 @router.post("/sessions", response_model=SessionResponse)
@@ -763,23 +769,23 @@ async def list_sessions(
     session_manager = get_session_manager(request)
 
     try:
-        sessions = await _list_assistant_sessions(session_manager, user, limit)
+        summaries = await _list_assistant_session_summaries(session_manager, user, limit)
 
         return SessionListResponse(
             sessions=[
                 SessionResponse(
-                    session_id=s.session_id,
-                    user_id=s.user_id,
-                    tenant_id=s.tenant_id,
-                    service_id=s.service_id,
-                    created_at=s.created_at.isoformat() if s.created_at else None,
-                    updated_at=s.updated_at.isoformat() if s.updated_at else None,
-                    metadata=s.metadata,
-                    message_count=len(s.history) if s.history else 0,
+                    session_id=s.get("session_id"),
+                    user_id=s.get("user_id"),
+                    tenant_id=s.get("tenant_id"),
+                    service_id=s.get("service_id"),
+                    created_at=s.get("created_at"),
+                    updated_at=s.get("updated_at"),
+                    metadata=s.get("metadata"),
+                    message_count=0,  # not computed in summary path; use /history if needed
                 )
-                for s in sessions
+                for s in summaries
             ],
-            total=len(sessions),
+            total=len(summaries),
         )
     except Exception as e:
         logger.error(f"Failed to list sessions: {e}")
@@ -1423,10 +1429,12 @@ async def generate_image(
                     model_turn["thought_signature"] = img["thought_signature"]
                 image_history.append(model_turn)
 
-            # Save back to session metadata
+            # Save back to session metadata — but strip base64 to prevent JSONB bloat
+            # (multi-turn context is maintained in-memory during the request via `contents`;
+            #  between requests we only need text + thought_signature for continuity)
             if session_mgr and session:
                 meta = dict(session.metadata or {})
-                meta["image_chat_history"] = image_history
+                meta["image_chat_history"] = _slim_image_history(image_history)
                 await session_mgr.update_metadata(body.session_id, meta)
 
             if not res.success:
@@ -1674,7 +1682,7 @@ async def _run_image_generation_task(
 
                 if session_manager and session:
                     meta = dict(session.metadata or {})
-                    meta["image_chat_history"] = image_history
+                    meta["image_chat_history"] = _slim_image_history(image_history)
                     await session_manager.update_metadata(body.session_id, meta)
 
         # ------------------------------------------------------------------
