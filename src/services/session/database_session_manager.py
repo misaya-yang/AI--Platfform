@@ -167,6 +167,23 @@ class DatabaseSessionManager:
             sessions.append(s)
         return sessions
 
+    async def list_session_summaries(
+        self,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_ids: list[str] | None = None,
+        status: str = "active",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Lightweight session list for sidebar — skips history/state, no Session object construction."""
+        return await self.database.list_session_summaries(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            service_ids=service_ids,
+            status=status,
+            limit=limit,
+        )
+
     async def delete(self, session_id: str) -> bool:
         """删除会话"""
         result = await self.database.delete_session(session_id)

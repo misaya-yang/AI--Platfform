@@ -1475,6 +1475,53 @@ class DatabaseStorage:
             rows = await conn.fetch(query, *params)
             return [self._row_to_dict(row) for row in rows]
 
+    async def list_session_summaries(
+        self,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_ids: list[str] | None = None,
+        status: str = "active",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Lightweight session list — excludes history/state columns."""
+        if not self._pool:
+            return []
+
+        cols = "session_id, service_id, user_id, tenant_id, metadata, config, status, expires_at, created_at, updated_at"
+        query = f"SELECT {cols} FROM sessions WHERE 1=1"
+        params: list[Any] = []
+        param_idx = 1
+
+        if user_id:
+            query += f" AND user_id = ${param_idx}"
+            params.append(user_id)
+            param_idx += 1
+
+        if tenant_id:
+            query += f" AND tenant_id = ${param_idx}"
+            params.append(tenant_id)
+            param_idx += 1
+
+        if service_ids is not None:
+            query += f" AND (service_id = ANY(${param_idx}) OR service_id IS NULL)"
+            params.append(service_ids)
+            param_idx += 1
+
+        if status:
+            query += f" AND status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+
+        if status == "active":
+            query += " AND (expires_at IS NULL OR expires_at > NOW())"
+
+        query += f" ORDER BY updated_at DESC LIMIT ${param_idx}"
+        params.append(limit)
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_dict(row) for row in rows]
+
     async def update_session_history(self, session_id: str, history: list[dict[str, Any]]) -> None:
         """更新会话历史"""
         if not self._pool:

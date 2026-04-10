@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -37,58 +36,42 @@ async def list_sessions(
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
 ):
-    sessions = await _list_assistant_sessions_for_service_id(
-        session_manager=session_manager,
-        user=user,
-        limit=limit,
-        service_id=service_id,
-    )
-    return [
-        {
-            "session_id": s.session_id,
-            "user_id": s.user_id,
-            "tenant_id": s.tenant_id,
-            "service_id": getattr(s, "service_id", None),
-            "created_at": s.created_at,
-            "updated_at": s.updated_at,
-            "metadata": s.metadata,
-            "config": getattr(s, "config", None),
-        }
-        for s in sessions
-    ]
-
-
-async def _list_assistant_sessions_for_service_id(
-    session_manager: SessionManager,
-    user: UserContext,
-    limit: int,
-    service_id: str | None,
-):
-    """List sessions with backward compatibility for assistant service IDs."""
-    if service_id != "__builtin_assistant__":
-        return await session_manager.list_sessions(
+    # Use lightweight summary query — skips history/state JSONB columns
+    if service_id == "__builtin_assistant__":
+        # Filter to assistant-compatible service_ids in SQL
+        allowed = ["", "__builtin_assistant__", "assistant"]
+        summaries = await session_manager.list_session_summaries(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
-            service_id=service_id,
+            service_ids=allowed,
             limit=limit,
         )
-
-    # Fetch broader set then filter to assistant-compatible service_ids.
-    fetch_limit = min(max(limit * 5, limit), 500)
-    sessions = await session_manager.list_sessions(
-        user_id=user.user_id,
-        tenant_id=user.tenant_id,
-        service_id=None,
-        limit=fetch_limit,
-    )
-
-    allowed_service_ids = {None, "", "__builtin_assistant__", "assistant"}
-    filtered = [s for s in sessions if getattr(s, "service_id", None) in allowed_service_ids]
-    filtered.sort(
-        key=lambda s: s.updated_at or s.created_at or datetime.min,
-        reverse=True,
-    )
-    return filtered[:limit]
+    elif service_id:
+        summaries = await session_manager.list_session_summaries(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            service_ids=[service_id],
+            limit=limit,
+        )
+    else:
+        summaries = await session_manager.list_session_summaries(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            limit=limit,
+        )
+    return [
+        {
+            "session_id": s.get("session_id"),
+            "user_id": s.get("user_id"),
+            "tenant_id": s.get("tenant_id"),
+            "service_id": s.get("service_id"),
+            "created_at": s.get("created_at"),
+            "updated_at": s.get("updated_at"),
+            "metadata": s.get("metadata"),
+            "config": s.get("config"),
+        }
+        for s in summaries
+    ]
 
 
 @router.post("/sessions")
