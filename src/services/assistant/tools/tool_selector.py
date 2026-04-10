@@ -67,6 +67,26 @@ _TOOL_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
+# Confluence connector tools — shared keyword pool
+_CONFLUENCE_KEYWORDS = [
+    "confluence", "wiki", "atlassian", "page", "space",
+    "公司文档", "内部文档", "文档库", "知识库页面",
+]
+_TOOL_KEYWORDS["search_confluence"] = _CONFLUENCE_KEYWORDS + ["search", "find", "搜索", "查找"]
+_TOOL_KEYWORDS["read_confluence_page"] = _CONFLUENCE_KEYWORDS + ["read", "content", "内容", "详情"]
+_TOOL_KEYWORDS["create_confluence_page"] = _CONFLUENCE_KEYWORDS + [
+    "create", "new", "draft", "publish", "add page", "创建", "新建", "发布",
+]
+_TOOL_KEYWORDS["update_confluence_page"] = _CONFLUENCE_KEYWORDS + [
+    "update", "edit", "modify", "rewrite", "更新", "编辑", "修改",
+]
+_TOOL_KEYWORDS["add_confluence_comment"] = _CONFLUENCE_KEYWORDS + [
+    "comment", "feedback", "annotate", "评论", "反馈", "注释",
+]
+_TOOL_KEYWORDS["delete_confluence_page"] = _CONFLUENCE_KEYWORDS + [
+    "delete", "remove", "trash", "archive", "删除", "移除", "归档",
+]
+
 # MCP server name → keywords that trigger inclusion
 _MCP_SERVER_KEYWORDS: dict[str, list[str]] = {
     "wahda": ["wahda", "post", "message", "social", "社交", "帖子", "消息"],
