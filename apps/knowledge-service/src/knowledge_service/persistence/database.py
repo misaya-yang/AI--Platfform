@@ -1804,18 +1804,15 @@ class DatabaseStorage:
             return {}
 
         async with self._pool.acquire() as conn:
-            # Use a single query with LEFT JOINs and GROUP BY for efficiency
+            # Two lightweight sub-selects instead of double LEFT JOIN (avoids cartesian on 52K segments)
             query = """
                 SELECT
                     d.dataset_id,
-                    COUNT(DISTINCT doc.document_id) as document_count,
-                    COUNT(DISTINCT seg.segment_id) as segment_count
+                    COALESCE((SELECT COUNT(*) FROM documents doc WHERE doc.dataset_id = d.dataset_id), 0) as document_count,
+                    COALESCE((SELECT COUNT(*) FROM segments seg WHERE seg.dataset_id = d.dataset_id), 0) as segment_count
                 FROM datasets d
-                LEFT JOIN documents doc ON d.dataset_id = doc.dataset_id
-                LEFT JOIN segments seg ON d.dataset_id = seg.dataset_id
                 WHERE d.dataset_id = ANY($1)
                   AND d.is_deleted = FALSE
-                GROUP BY d.dataset_id
             """
             rows = await conn.fetch(query, dataset_ids)
 
