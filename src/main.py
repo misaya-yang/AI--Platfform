@@ -246,8 +246,6 @@ def create_app() -> FastAPI:
                 title=f"{app.title} — API Reference",
                 layout=Layout.MODERN,
                 dark_mode=True,
-                hide_download_button=False,
-                search_hot_key="k",
             )
     except ImportError:
         pass  # scalar-fastapi optional
