@@ -36,21 +36,23 @@ async def list_sessions(
     session_manager: SessionManager = Depends(get_session_manager),
     user: UserContext = Depends(get_user_context),
 ):
-    # Use lightweight summary query — skips history/state JSONB columns
+    # Use lightweight summary query — skips history/state JSONB, slims metadata
     if service_id == "__builtin_assistant__":
-        # Filter to assistant-compatible service_ids in SQL
-        allowed = ["", "__builtin_assistant__", "assistant"]
+        # Assistant historically had sessions with NULL/"" service_id; include them
         summaries = await session_manager.list_session_summaries(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
-            service_ids=allowed,
+            service_ids=["__builtin_assistant__", "assistant"],
+            include_null_service_id=True,
             limit=limit,
         )
     elif service_id:
+        # Strict match — do NOT include NULL service_id sessions (avoids pollution from other services)
         summaries = await session_manager.list_session_summaries(
             user_id=user.user_id,
             tenant_id=user.tenant_id,
             service_ids=[service_id],
+            include_null_service_id=False,
             limit=limit,
         )
     else:

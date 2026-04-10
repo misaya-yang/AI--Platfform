@@ -1480,14 +1480,26 @@ class DatabaseStorage:
         user_id: str | None = None,
         tenant_id: str | None = None,
         service_ids: list[str] | None = None,
+        include_null_service_id: bool = False,
         status: str = "active",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Lightweight session list — excludes history/state columns."""
+        """Lightweight session list — excludes history/state, slims metadata to sidebar-only fields."""
         if not self._pool:
             return []
 
-        cols = "session_id, service_id, user_id, tenant_id, metadata, config, status, expires_at, created_at, updated_at"
+        # Project only sidebar-needed metadata keys; ignore polluted large fields
+        # (some sessions have 4-7MB metadata from tool results / images)
+        cols = (
+            "session_id, service_id, user_id, tenant_id, "
+            "jsonb_build_object("
+            "  'title', metadata->'title', "
+            "  'langgraph_thread_id', metadata->'langgraph_thread_id', "
+            "  'folder', metadata->'folder', "
+            "  'pinned', metadata->'pinned'"
+            ") as metadata, "
+            "status, expires_at, created_at, updated_at"
+        )
         query = f"SELECT {cols} FROM sessions WHERE 1=1"
         params: list[Any] = []
         param_idx = 1
@@ -1503,7 +1515,10 @@ class DatabaseStorage:
             param_idx += 1
 
         if service_ids is not None:
-            query += f" AND (service_id = ANY(${param_idx}::text[]) OR service_id IS NULL)"
+            if include_null_service_id:
+                query += f" AND (service_id = ANY(${param_idx}::text[]) OR service_id IS NULL OR service_id = '')"
+            else:
+                query += f" AND service_id = ANY(${param_idx}::text[])"
             params.append(service_ids)
             param_idx += 1
 

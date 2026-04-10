@@ -176,6 +176,7 @@ class SessionManager:
         user_id: str | None = None,
         tenant_id: str | None = None,
         service_ids: list[str] | None = None,
+        include_null_service_id: bool = False,
         status: str = "active",
         limit: int = 100,
     ) -> list[dict]:

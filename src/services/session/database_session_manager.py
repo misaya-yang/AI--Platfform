@@ -172,6 +172,7 @@ class DatabaseSessionManager:
         user_id: str | None = None,
         tenant_id: str | None = None,
         service_ids: list[str] | None = None,
+        include_null_service_id: bool = False,
         status: str = "active",
         limit: int = 100,
     ) -> list[dict]:
@@ -180,6 +181,7 @@ class DatabaseSessionManager:
             user_id=user_id,
             tenant_id=tenant_id,
             service_ids=service_ids,
+            include_null_service_id=include_null_service_id,
             status=status,
             limit=limit,
         )
