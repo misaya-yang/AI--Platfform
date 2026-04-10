@@ -95,6 +95,56 @@ def get_rate_limiter(request: Request) -> MultiDimensionRateLimiter | None:
     return getattr(request.app.state, "multi_rate_limiter", None)
 
 
+async def enforce_rate_limit(
+    request: Request,
+    user=None,
+    operation: str | None = None,
+) -> None:
+    """Helper to apply multi-dimension rate limiting to any endpoint.
+
+    Call at the top of a heavy endpoint. Raises HTTPException 429 if the
+    current request exceeds any configured dimension (ip/user/tenant/
+    operation). Silently no-ops if the limiter is not configured.
+
+    Args:
+        request: FastAPI Request (used to locate the limiter from app state
+                 and to pull client IP when user.ip is unset)
+        user: optional UserContext for tier/user/tenant dimensions. If None
+              (anonymous public endpoint), limiting falls back to IP-only.
+        operation: optional operation name that maps to
+                   config.operation_limits (e.g. "quiz_generate",
+                   "file_upload", "code_execute", "image_generate")
+    """
+    from fastapi import HTTPException
+    from ..core.gateway.multi_dimension_rate_limiter import RateLimitContext
+
+    limiter: MultiDimensionRateLimiter | None = getattr(
+        request.app.state, "multi_rate_limiter", None
+    )
+    if limiter is None:
+        return
+
+    # Build context. Anonymous endpoints have no user → IP-only limiting.
+    if user is not None:
+        ctx = RateLimitContext.from_user_context(user, operation=operation)
+    else:
+        ctx = RateLimitContext(ip="", operation=operation)
+    if not ctx.ip:
+        ctx.ip = _get_client_ip(request)
+
+    result = await limiter.check(ctx)
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded ({operation or 'request'})",
+            headers={
+                "X-RateLimit-Limit": str(result.limit),
+                "X-RateLimit-Remaining": str(result.remaining),
+                "Retry-After": str(result.retry_after),
+            },
+        )
+
+
 def get_islamic_content_service(request: Request):
     """Deprecated: Islamic Content is now proxied to the microservice at :8091.
     Kept as stub for backward compatibility if any code still references it."""

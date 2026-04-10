@@ -303,6 +303,8 @@ async def upload_file(
     user: UserContext = Depends(get_user_context),
 ) -> FileUploadResponse:
     """Handle file upload with streaming size validation."""
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="file_upload")
 
     # Validate file
     if not file.filename:

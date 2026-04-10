@@ -168,6 +168,16 @@ class QuizGeneratorExecutor(ToolExecutor):
                 error="No questions provided. Generate questions from KB/file content and pass them as the 'questions' parameter.",
             )
 
+        # Hard cap on questions per call — abuse guard (DB bloat, storage)
+        _MAX_QUESTIONS_PER_QUIZ = 50
+        if len(questions) > _MAX_QUESTIONS_PER_QUIZ:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Too many questions ({len(questions)}). Maximum is {_MAX_QUESTIONS_PER_QUIZ} per quiz.",
+            )
+
         if not self.database:
             return ToolCallResult(
                 call_id=request.call_id,

@@ -490,6 +490,9 @@ async def chat(
     Sends a message and receives the complete response at once.
     Suitable for simple integrations that don't need streaming.
     """
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="assistant_chat")
+
     # Check model permission
     model_registry = getattr(request.app.state, "model_registry", None)
     if model_registry:
@@ -589,6 +592,9 @@ async def chat_stream(
     - done: Stream completion
     - error: Error occurred
     """
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="assistant_chat")
+
     # Check model permission
     model_registry = getattr(request.app.state, "model_registry", None)
     if model_registry:
@@ -1331,6 +1337,9 @@ async def generate_image(
     Routing: Google models → Gemini first → DashScope fallback.
     DashScope has no multi-turn support, so sessions with history always route to Gemini.
     """
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="image_generate")
+
     import json as _json
     import time
 

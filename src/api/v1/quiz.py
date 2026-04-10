@@ -441,6 +441,10 @@ async def submit_shared_quiz(
     request: Request,
 ):
     """Submit answers for a shared quiz (no auth required)."""
+    from ..deps import enforce_rate_limit
+    # Anonymous endpoint: IP-only rate limit to prevent submission spam
+    await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
+
     mgr = _get_share_manager(request)
     # P2: Track client IP
     client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or request.client.host if request.client else None

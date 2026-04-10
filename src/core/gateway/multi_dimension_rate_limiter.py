@@ -116,6 +116,13 @@ class MultiDimensionRateLimitConfig:
             "run_create": TierLimit(requests=100, window=60),
             "thread_create": TierLimit(requests=50, window=60),
             "store_write": TierLimit(requests=200, window=60),
+            # Assistant heavy operations (per-user, sliding window)
+            "assistant_chat": TierLimit(requests=60, window=60),      # 60 chats/min/user
+            "quiz_generate": TierLimit(requests=10, window=60),       # 10 quizzes/min/user (DB writes)
+            "image_generate": TierLimit(requests=20, window=60),      # 20 images/min/user (GPU/VLM cost)
+            "file_upload": TierLimit(requests=30, window=60),         # 30 uploads/min/user
+            "code_execute": TierLimit(requests=30, window=60),        # 30 sandbox runs/min/user
+            "quiz_submit_public": TierLimit(requests=10, window=60),  # 10 public quiz submits/min/IP
         }
     )
 
