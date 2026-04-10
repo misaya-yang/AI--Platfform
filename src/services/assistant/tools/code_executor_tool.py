@@ -12,6 +12,7 @@ Features:
 
 from __future__ import annotations
 
+import ast
 from typing import TYPE_CHECKING, Any
 
 from ....core.observability.logging import get_logger
@@ -31,6 +32,73 @@ if TYPE_CHECKING:
     from ..code_executor import CodeExecutorService
 
 logger = get_logger(__name__)
+
+
+# AST-level denylist: modules that suggest sandbox-escape intent.
+# Docker + gVisor are the primary defense; this is defense-in-depth to
+# reject obvious escape attempts BEFORE they reach the sandbox.
+_DENIED_IMPORTS = frozenset({
+    "ctypes",           # direct memory / syscalls
+    "ctypes.util",
+    "mmap",             # memory mapping
+    "resource",         # ulimit manipulation
+    "pty",              # terminal allocation
+    "fcntl",            # file descriptor control
+    "termios",
+    "tty",
+    "multiprocessing",  # process spawning
+    "subprocess",       # shell out
+    "sh",
+    "pexpect",
+    "os.exec",
+    # Networking — code executor has no network by design; any import is suspicious
+    "socket",
+    "_socket",
+    "ssl",
+    "urllib.request",
+    "urllib2",
+    "http.client",
+    "httplib",
+    # Low-level process/signal
+    "signal",
+    "syslog",
+})
+
+
+def _scan_code_for_denied_imports(code: str) -> str | None:
+    """Return a human-readable reason if the code imports a denied module,
+    otherwise None. Uses Python's AST so it's robust to whitespace/comments
+    and cannot be bypassed by `exec`-style string concatenation of literal
+    imports; if the code constructs import names dynamically we fall back
+    to Docker/gVisor.
+
+    Returns None on parse error — syntax errors will be surfaced by the
+    sandbox execution itself with proper error messages.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = (alias.name or "").split(".")[0]
+                if alias.name in _DENIED_IMPORTS or root in _DENIED_IMPORTS:
+                    return f"import of '{alias.name}' is not allowed in the sandbox"
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").split(".")[0]
+            if (node.module or "") in _DENIED_IMPORTS or mod in _DENIED_IMPORTS:
+                return f"from-import of '{node.module}' is not allowed in the sandbox"
+        # Block __import__ calls with literal denied module
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "__import__" and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    root = first.value.split(".")[0]
+                    if first.value in _DENIED_IMPORTS or root in _DENIED_IMPORTS:
+                        return f"__import__('{first.value}') is not allowed in the sandbox"
+    return None
 
 
 # =============================================================================
@@ -227,6 +295,26 @@ class CodeExecutorToolExecutor(ToolExecutor):
                 tool_name=request.tool_name,
                 success=False,
                 error="Code cannot be empty",
+            )
+
+        # Defense-in-depth: AST-level denylist for sandbox-escape imports.
+        # Primary isolation is Docker + gVisor; this rejects obvious
+        # attempts (socket, ctypes, subprocess...) before the sandbox runs.
+        denied_reason = _scan_code_for_denied_imports(code)
+        if denied_reason:
+            logger.warning(
+                f"[Security] code_executor rejected code "
+                f"(call_id={request.call_id}): {denied_reason}"
+            )
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=(
+                    f"Code rejected by static analysis: {denied_reason}. "
+                    f"The sandbox does not have network or shell access; "
+                    f"use pandas/numpy/matplotlib for data work instead."
+                ),
             )
 
         # Check if Docker is available

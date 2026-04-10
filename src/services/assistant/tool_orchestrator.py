@@ -219,6 +219,11 @@ class ToolOrchestrator:
 
         # Tool result cache for idempotent tools (search, retrieval)
         self._result_cache: dict[str, ToolExecutionResult] = {}
+        # In-flight dedup: concurrent identical calls share the same Future
+        # instead of all re-executing. Prevents N-way duplicate expensive
+        # KB/web calls when multiple tasks hit the same cache_key before the
+        # first result is stored.
+        self._inflight: dict[str, asyncio.Future[ToolExecutionResult]] = {}
         self._cacheable_tools = frozenset({
             "search_knowledge_base", "search_web", "search_documents",
             "list_datasets", "get_dataset_info",
@@ -439,6 +444,7 @@ class ToolOrchestrator:
         start_time = time.time()
 
         # Cache lookup for idempotent tools
+        cache_key: str | None = None
         if task.tool in self._cacheable_tools:
             import hashlib, json as _json
             cache_key = hashlib.md5(
@@ -452,8 +458,27 @@ class ToolOrchestrator:
                     success=cached.success, result=cached.result,
                     error=cached.error, duration_ms=0.1,
                 )
+            # In-flight dedup: if another coroutine is already computing the
+            # same cache_key, wait for its result instead of duplicating work.
+            inflight = self._inflight.get(cache_key)
+            if inflight is not None:
+                logger.debug(f"Tool in-flight JOIN: {task.tool} (task {task.id})")
+                try:
+                    shared = await inflight
+                    # Re-tag with this task's id, keep other fields
+                    return ToolExecutionResult(
+                        task_id=task.id, tool=task.tool,
+                        success=shared.success, result=shared.result,
+                        error=shared.error, duration_ms=0.1,
+                    )
+                except Exception:
+                    # Upstream failed; fall through and execute ourselves
+                    pass
+            # Become the in-flight owner for this cache_key
+            owner_future: asyncio.Future[ToolExecutionResult] = asyncio.get_running_loop().create_future()
+            self._inflight[cache_key] = owner_future
         else:
-            cache_key = None
+            owner_future = None  # type: ignore[assignment]
 
         async with self.semaphore:
             try:
@@ -500,11 +525,19 @@ class ToolOrchestrator:
                 if cache_key and result.success:
                     self._result_cache[cache_key] = result
 
+                # Signal any waiting in-flight joiners
+                if cache_key and owner_future is not None and not owner_future.done():
+                    owner_future.set_result(result)
+
                 return result
 
             except Exception as e:
                 duration_ms = (time.time() - start_time) * 1000
                 logger.error(f"Task {task.id} failed with exception: {e}")
+
+                # Fail in-flight waiters so they fall through to their own execution
+                if cache_key and owner_future is not None and not owner_future.done():
+                    owner_future.set_exception(e)
 
                 return ToolExecutionResult(
                     task_id=task.id,
@@ -513,6 +546,10 @@ class ToolOrchestrator:
                     error=str(e),
                     duration_ms=duration_ms,
                 )
+            finally:
+                # Remove our in-flight entry whether success or failure
+                if cache_key is not None and self._inflight.get(cache_key) is owner_future:
+                    self._inflight.pop(cache_key, None)
 
     def _resolve_params(
         self,

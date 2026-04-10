@@ -15,6 +15,7 @@ but avoids subprocess management complexity in a Docker environment.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ....core.observability.logging import get_logger
@@ -111,12 +112,18 @@ class ConnectorMCPService:
         self._tool_names.clear()
 
 
-# Singleton
+# Singleton with double-checked locking
 _connector_mcp_service: ConnectorMCPService | None = None
+_connector_mcp_lock = threading.Lock()
 
 
 def get_connector_mcp_service() -> ConnectorMCPService:
     global _connector_mcp_service
-    if _connector_mcp_service is None:
-        _connector_mcp_service = ConnectorMCPService()
+    # Fast path — already initialized
+    if _connector_mcp_service is not None:
+        return _connector_mcp_service
+    # Slow path — acquire lock and re-check
+    with _connector_mcp_lock:
+        if _connector_mcp_service is None:
+            _connector_mcp_service = ConnectorMCPService()
     return _connector_mcp_service
