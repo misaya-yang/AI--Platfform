@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -298,19 +299,24 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
         self._executors: dict[str, ToolExecutor] = {}
-        self._lock = asyncio.Lock()  # H02: protect concurrent registration
+        # Reentrant threading lock — register() is sync and may be called from
+        # both sync startup code and async tool-activation paths; a threading
+        # lock works in both contexts (asyncio.Lock would force all callers to
+        # be async). RLock allows the same "thread" to re-enter safely.
+        self._lock = threading.RLock()
 
     def register(
         self,
         definition: ToolDefinition,
         executor: ToolExecutor,
     ) -> None:
-        """Register a tool with its executor."""
-        if definition.name in self._tools:
-            logger.warning(f"Overwriting existing tool: {definition.name}")
+        """Register a tool with its executor (thread-safe)."""
+        with self._lock:
+            if definition.name in self._tools:
+                logger.warning(f"Overwriting existing tool: {definition.name}")
 
-        self._tools[definition.name] = definition
-        self._executors[definition.name] = executor
+            self._tools[definition.name] = definition
+            self._executors[definition.name] = executor
 
         logger.info(
             f"Registered tool: {definition.name} "
@@ -318,17 +324,19 @@ class ToolRegistry:
         )
 
     def unregister(self, name: str) -> bool:
-        """Unregister a tool."""
-        if name in self._tools:
-            del self._tools[name]
-            del self._executors[name]
-            logger.info(f"Unregistered tool: {name}")
-            return True
-        return False
+        """Unregister a tool (thread-safe)."""
+        with self._lock:
+            if name in self._tools:
+                del self._tools[name]
+                del self._executors[name]
+                logger.info(f"Unregistered tool: {name}")
+                return True
+            return False
 
     def get_tool(self, name: str) -> ToolDefinition | None:
         """Get tool definition by name."""
-        return self._tools.get(name)
+        with self._lock:
+            return self._tools.get(name)
 
     def list_tools(
         self,
@@ -336,7 +344,8 @@ class ToolRegistry:
         user: UserContext | None = None,
     ) -> list[ToolDefinition]:
         """List available tools, optionally filtered by category and user permissions."""
-        tools = list(self._tools.values())
+        with self._lock:
+            tools = list(self._tools.values())
 
         if category:
             tools = [t for t in tools if t.category == category]
@@ -420,8 +429,9 @@ class ToolRegistry:
                 error=f"Unknown tool: {request.tool_name}",
             )
 
-        # Get executor
-        executor = self._executors.get(request.tool_name)
+        # Get executor (thread-safe snapshot)
+        with self._lock:
+            executor = self._executors.get(request.tool_name)
         if not executor:
             return ToolCallResult(
                 call_id=request.call_id,

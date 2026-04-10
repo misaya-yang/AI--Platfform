@@ -80,45 +80,107 @@ class MCPClient:
         self._server_info: dict = {}
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
 
+    # SSRF-sensitive IP ranges that MUST be blocked even in allow-private mode.
+    # These would leak cloud IAM credentials or internal infrastructure.
+    _BLOCKED_CIDRS = (
+        "169.254.0.0/16",   # Link-local (AWS/GCP/Azure metadata, 169.254.169.254)
+        "100.64.0.0/10",    # Carrier-grade NAT
+        "::1/128",          # IPv6 loopback (still blocked when HTTP, see below)
+        "fe80::/10",        # IPv6 link-local
+        "fc00::/7",         # IPv6 ULA
+    )
+
     @staticmethod
-    def _validate_url(url: str) -> None:
-        """Block private/loopback IPs and non-HTTPS URLs (except localhost for dev)."""
+    def _is_local_hostname(hostname: str) -> bool:
+        """True for localhost/loopback/docker-internal names that are safe in dev."""
+        return (
+            hostname in ("localhost", "127.0.0.1", "::1")
+            or hostname.endswith(".internal")
+            or hostname.endswith(".local")
+        )
+
+    @classmethod
+    def _validate_url(cls, url: str) -> None:
+        """Validate MCP URL against SSRF and cleartext-credential risks.
+
+        Rules:
+        - scheme must be http or https
+        - localhost / docker-internal names are always allowed
+        - 169.254.0.0/16 (cloud metadata) is ALWAYS blocked, even in allow-private mode
+        - Other private IPs allowed only if DOCKER_NETWORK_ALLOW_PRIVATE=true (production)
+        - Non-HTTPS to non-local hosts is rejected (prevents cleartext credential leak)
+        """
         import ipaddress
+        import os
         import socket
         import urllib.parse
 
         parsed = urllib.parse.urlparse(url)
+        scheme = (parsed.scheme or "").lower()
         hostname = parsed.hostname or ""
 
-        # Allow localhost and Docker-internal networks for dev/deployment
-        if hostname in ("localhost", "127.0.0.1") or hostname.endswith(".internal"):
+        if scheme not in ("http", "https"):
+            raise ValueError(f"MCP URL must use http:// or https://, got {scheme!r}")
+        if not hostname:
+            raise ValueError("MCP URL missing hostname")
+
+        is_local = cls._is_local_hostname(hostname)
+
+        # Non-HTTPS to non-local hosts is always refused — protects Bearer token
+        # from cleartext transmission.
+        if scheme == "http" and not is_local:
+            raise ValueError(
+                f"MCP server '{hostname}' uses http:// — refusing to send "
+                f"credentials over cleartext. Use https:// or a localhost/.internal name."
+            )
+
+        # Local/docker-internal: trusted, skip further checks
+        if is_local:
             return
 
-        # Allow Docker Compose service names (resolve to 172.x private IPs)
-        # In production, MCP servers run as Docker containers on the same network
-        import os
-        if os.environ.get("DOCKER_NETWORK_ALLOW_PRIVATE", "true").lower() == "true":
-            return
-
-        # Resolve hostname and block private IPs
+        # Resolve hostname to IP for CIDR matching
         try:
-            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                raise ValueError(f"MCP URL resolves to private IP: {ip}")
-        except socket.gaierror:
-            pass  # DNS may not resolve in all environments
+            ip_str = socket.gethostbyname(hostname)
+            ip = ipaddress.ip_address(ip_str)
+        except (socket.gaierror, ValueError):
+            # DNS may not resolve in dev; allow but the network layer will fail safely
+            return
 
-        # Warn if not HTTPS for non-local URLs
-        if parsed.scheme != "https" and not hostname.startswith("localhost"):
-            logger.warning(f"MCP server '{hostname}' uses HTTP — credentials may be transmitted in cleartext")
+        # ALWAYS block dangerous ranges regardless of allow-private flag
+        for cidr in cls._BLOCKED_CIDRS:
+            if ip in ipaddress.ip_network(cidr):
+                raise ValueError(
+                    f"MCP URL resolves to blocked IP range {cidr}: {ip}. "
+                    f"This range is blocked to prevent cloud metadata / SSRF attacks."
+                )
+
+        # Other private IPs: allow only if explicitly enabled (production Docker networks)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            if os.environ.get("DOCKER_NETWORK_ALLOW_PRIVATE", "false").lower() != "true":
+                raise ValueError(
+                    f"MCP URL resolves to private IP {ip} and "
+                    f"DOCKER_NETWORK_ALLOW_PRIVATE is not enabled."
+                )
 
     async def initialize(self) -> dict:
         """MCP handshake: initialize → notifications/initialized."""
         self._validate_url(self.config.url)
 
+        # Defense in depth: even if url validation was bypassed, refuse to send
+        # Authorization over plain HTTP to non-localhost.
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.config.url)
+        is_local = self._is_local_hostname(parsed.hostname or "")
+        use_auth = bool(self.config.api_key) and (parsed.scheme == "https" or is_local)
+
         headers = {}
-        if self.config.api_key:
+        if use_auth:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
+        elif self.config.api_key and not is_local:
+            logger.error(
+                f"MCP client {self.config.name}: api_key set but URL is http:// "
+                f"— dropping Authorization header to avoid cleartext transmission."
+            )
 
         self._http = httpx.AsyncClient(
             base_url=self.config.url,

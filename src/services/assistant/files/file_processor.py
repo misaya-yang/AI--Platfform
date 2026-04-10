@@ -538,6 +538,12 @@ The description should be detailed enough for someone who hasn't seen the image 
         """
         file_path = file_path.strip()
 
+        # Reject obviously dangerous inputs early
+        if not file_path:
+            raise FileProcessError("Empty file path", file_path=file_path)
+        if "\x00" in file_path:
+            raise FileProcessError("Invalid file path: null byte", file_path=file_path)
+
         # Handle paths that start with /uploads/
         if file_path.startswith("/uploads/"):
             relative_path = file_path[1:]  # Remove leading /
@@ -545,11 +551,36 @@ The description should be detailed enough for someone who hasn't seen the image 
         elif file_path.startswith("uploads/"):
             actual_path = self.storage_base_path / file_path
         else:
-            actual_path = Path(file_path)
-            if not actual_path.is_absolute():
-                actual_path = self.storage_base_path / file_path
+            candidate = Path(file_path)
+            if candidate.is_absolute():
+                # Reject absolute paths from untrusted input — they bypass
+                # storage_base_path confinement and can read host files.
+                raise FileProcessError(
+                    "Absolute file paths are not permitted",
+                    file_path=file_path,
+                )
+            actual_path = self.storage_base_path / file_path
 
-        actual_path = actual_path.resolve()
+        # Canonicalize, then verify containment within storage_base_path.
+        # Without this check, ".." components can escape storage_base_path
+        # (CVE-class path traversal).
+        try:
+            actual_path = actual_path.resolve()
+            base_resolved = self.storage_base_path.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise FileProcessError(
+                f"Failed to resolve file path: {exc}",
+                file_path=file_path,
+            ) from exc
+
+        try:
+            actual_path.relative_to(base_resolved)
+        except ValueError:
+            logger.warning(f"[Security] Path traversal attempt: {file_path}")
+            raise FileProcessError(
+                "File path escapes storage directory",
+                file_path=file_path,
+            )
 
         logger.debug(
             f"[FileProcessor] Resolving path: api_path={file_path}, "

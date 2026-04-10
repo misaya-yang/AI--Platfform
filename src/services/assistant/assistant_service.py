@@ -3021,7 +3021,7 @@ Please use this web search context to inform your response when relevant."""
             # Thinking display: enable for thinking-capable models
             thinking_level=(
                 "enabled" if "qwen3" in (config.model_id or "").lower()
-                else "high" if "gemini-3" in (config.model_id or "")
+                else "high" if "gemini-3" in (config.model_id or "").lower()
                 else None
             ),
         )
