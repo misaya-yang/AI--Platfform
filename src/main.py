@@ -235,6 +235,23 @@ def create_app() -> FastAPI:
 
     app.include_router(knowledge_router, prefix="/v1")
 
+    # ========== Scalar API 文档（现代化 UI + 可调用）==========
+    try:
+        from scalar_fastapi import Layout, get_scalar_api_reference
+
+        @app.get("/scalar", include_in_schema=False)
+        async def scalar_html():
+            return get_scalar_api_reference(
+                openapi_url=app.openapi_url,
+                title=f"{app.title} — API Reference",
+                layout=Layout.MODERN,
+                dark_mode=True,
+                hide_download_button=False,
+                search_hot_key="k",
+            )
+    except ImportError:
+        pass  # scalar-fastapi optional
+
     # ========== 健康检查和指标端点 ==========
 
     @app.get("/health", tags=["Health"])

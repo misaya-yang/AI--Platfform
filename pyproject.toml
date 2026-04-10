@@ -32,6 +32,7 @@ dependencies = [
     "fastapi>=0.124.0",
     "uvicorn>=0.38.0",
     "starlette>=0.50.0",
+    "scalar-fastapi>=1.8.2",
 
     # Data Validation & Settings
     "pydantic>=2.12.0",
