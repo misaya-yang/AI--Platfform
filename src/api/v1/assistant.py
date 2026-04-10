@@ -225,18 +225,10 @@ async def list_datasets(
             chunk_count = 0
             embedding_model = ds.get("embedding_model", "")
 
-            # Fetch statistics for each dataset (local service only — skip for proxy to avoid N+1 HTTP calls)
-            if kb_service:
-                try:
-                    stats = await kb_service.get_dataset_statistics(user, dataset_id)
-                    document_count = stats.get("document_count", 0)
-                    chunk_count = stats.get("segment_count", 0)
-                except Exception:
-                    pass
-            else:
-                # Proxy mode: use counts from list response if available
-                document_count = ds.get("document_count", 0)
-                chunk_count = ds.get("segment_count", ds.get("chunk_count", 0))
+            # Use counts from list response — statistics sub-dict or top-level
+            stats = ds.get("statistics", {})
+            document_count = stats.get("document_count", ds.get("document_count", 0))
+            chunk_count = stats.get("segment_count", ds.get("segment_count", ds.get("chunk_count", 0)))
 
             # Determine if multimodal based on embedding model
             # Uses centralized model registry from services/knowledge/embedding.py
