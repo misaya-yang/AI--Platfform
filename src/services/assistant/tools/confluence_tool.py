@@ -239,8 +239,11 @@ class ConfluenceSearchExecutor(ToolExecutor):
 
             if not results:
                 return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
                     success=True,
                     result=f"No Confluence pages found for: {query}",
+                    duration_ms=duration,
                 )
 
             formatted = []
@@ -252,13 +255,23 @@ class ConfluenceSearchExecutor(ToolExecutor):
                 )
 
             return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
                 success=True,
                 result=f"Found {len(results)} Confluence pages:\n\n" + "\n---\n".join(formatted),
-                metadata={"count": len(results), "duration_ms": round(duration)},
+                duration_ms=duration,
+                metadata={"count": len(results)},
             )
         except Exception as e:
             logger.error(f"Confluence search failed: {e}")
-            return ToolCallResult(success=False, result=None, error=f"Confluence search failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                result=None,
+                error=f"Confluence search failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
 
 
 class ConfluenceReadExecutor(ToolExecutor):
@@ -274,19 +287,28 @@ class ConfluenceReadExecutor(ToolExecutor):
 
         if not page_id and not title:
             return ToolCallResult(
-                success=False, result=None,
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                result=None,
                 error="Either page_id or title is required.",
             )
 
         try:
             page = await self.client.read_page(page_id=page_id, title=title)
+            duration = (time.time() - start) * 1000
             if not page:
                 return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
                     success=True,
                     result=f"Page not found: {page_id or title}",
+                    duration_ms=duration,
                 )
 
             return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
                 success=True,
                 result=(
                     f"# {page['title']}\n"
@@ -295,11 +317,19 @@ class ConfluenceReadExecutor(ToolExecutor):
                     f"URL: {page['url']}\n\n"
                     f"{page['content']}"
                 ),
-                metadata={"page_id": page["id"], "duration_ms": round((time.time() - start) * 1000)},
+                duration_ms=duration,
+                metadata={"page_id": page["id"]},
             )
         except Exception as e:
             logger.error(f"Confluence read failed: {e}")
-            return ToolCallResult(success=False, result=None, error=f"Confluence read failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                result=None,
+                error=f"Confluence read failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
 
 
 # ─── Registration ─────────────────────────────────────────────────────
