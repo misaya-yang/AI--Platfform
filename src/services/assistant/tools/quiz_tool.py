@@ -37,7 +37,9 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
         "MUST USE this tool when user asks for a quiz, test, or practice questions. "
         "You generate the quiz content yourself based on KB search results or uploaded file content, "
         "then pass the complete questions array to this tool for interactive rendering. "
-        "Do NOT output quiz questions as plain text — always use this tool to create an interactive quiz card."
+        "CRITICAL: Do NOT write quiz questions, options, or answers as chat text — they will be "
+        "rendered by an interactive card from this tool's output. Your chat reply should be a brief "
+        "one-sentence confirmation only (e.g. '已为您生成5道测试题，请在下方卡片中作答')."
     ),
     parameters=[
         ToolParameter(
@@ -64,14 +66,34 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
             name="questions",
             type="array",
             description=(
-                "Array of question objects. Each object needs these fields: "
-                "question_num (integer starting from 1), "
-                "question_type (always use mc_single), "
-                "question_text (the question string), "
-                "options (array of 4 objects, each with two keys: the first key is the letter A/B/C/D, the second key is the option text — "
-                'for example: [{"A":"Earth"},{"B":"Mars"},{"C":"Venus"},{"D":"Jupiter"}]), '
-                "correct_answer (array with one letter, e.g. [\"C\"]), "
-                "explanation (one sentence why the answer is correct)"
+                "Array of question objects. Each question MUST be a JSON object with these exact fields:\n"
+                '- question_num: integer (1, 2, 3, ...)\n'
+                '- question_type: "mc_single"\n'
+                '- question_text: the question itself (string)\n'
+                '- options: array of EXACTLY 4 objects, each with:\n'
+                '    - "label": one letter "A", "B", "C", or "D"\n'
+                '    - "text": the ACTUAL answer text (NEVER the letter itself)\n'
+                '- correct_answer: array with one letter, e.g. ["B"]\n'
+                '- explanation: one sentence on why that answer is correct\n\n'
+                'CORRECT example of ONE question object:\n'
+                '{\n'
+                '  "question_num": 1,\n'
+                '  "question_type": "mc_single",\n'
+                '  "question_text": "What is the standard Zakat rate on wealth?",\n'
+                '  "options": [\n'
+                '    {"label": "A", "text": "1%"},\n'
+                '    {"label": "B", "text": "2.5%"},\n'
+                '    {"label": "C", "text": "5%"},\n'
+                '    {"label": "D", "text": "10%"}\n'
+                '  ],\n'
+                '  "correct_answer": ["B"],\n'
+                '  "explanation": "The standard rate is 2.5% of qualifying wealth held for one lunar year."\n'
+                '}\n\n'
+                'WRONG examples — DO NOT do any of these:\n'
+                '  ✗ {"label": "A", "text": "A"}  ← text is the letter, not the answer\n'
+                '  ✗ {"A": "Earth"}                ← missing "label"/"text" keys\n'
+                '  ✗ ["A) Earth", "B) Mars"]       ← strings instead of objects\n'
+                '  ✗ [{"label": "A"}]              ← missing "text" key'
             ),
             required=True,
             items={"type": "object"},
@@ -185,7 +207,7 @@ class QuizGeneratorExecutor(ToolExecutor):
                 for opt in q.get("options", []):
                     if isinstance(opt, dict):
                         if "label" in opt and "text" in opt:
-                            normalized_opts.append(opt)
+                            normalized_opts.append({"label": str(opt["label"]), "text": str(opt["text"])})
                         else:
                             # Handle {"A": "text"} format
                             for k, v in opt.items():
@@ -201,6 +223,26 @@ class QuizGeneratorExecutor(ToolExecutor):
                         else:
                             normalized_opts.append({"label": chr(65 + len(normalized_opts)), "text": opt})
                 q["options"] = normalized_opts
+
+                # Validate: reject the specific bug signature where text == label
+                # (the LLM filled both fields with "A"/"B"/"C"/"D" instead of actual answer text)
+                bad_options = [
+                    o for o in normalized_opts
+                    if o["text"].strip().upper() == o["label"].strip().upper()
+                    and len(o["text"].strip()) <= 2  # single-letter text matching label
+                ]
+                if bad_options and len(bad_options) == len(normalized_opts):
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=(
+                            f"Question {i + 1} has invalid options: each option's 'text' field "
+                            f"must contain the actual answer text, not the letter label. "
+                            f"Got all options where text equals label (e.g. {{'label':'A','text':'A'}}). "
+                            f"Retry with proper option text."
+                        ),
+                    )
 
                 # Normalize correct_answer: convert text values to labels
                 # LLM may return ["2.5%"] instead of ["C"] — map text back to label

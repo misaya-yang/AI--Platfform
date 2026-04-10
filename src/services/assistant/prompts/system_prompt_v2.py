@@ -1196,25 +1196,30 @@ You can call these tools when needed: {", ".join(sorted(set(available_tools)))}.
 """
         if "generate_quiz" in available_tools:
             has_kb = bool(available_datasets)
-            if has_kb:
-                tools_hint += """
+            kb_step = (
+                "1. First use `search_knowledge_base` to get relevant content, then generate questions from it.\n"
+                if has_kb
+                else "1. Generate questions from your own knowledge or from uploaded file content (do NOT call search_knowledge_base — no KB bound).\n"
+            )
+            tools_hint += f"""
 ## Quiz Generation (generate_quiz tool)
-When user asks for a quiz/test/练习/测验/出题/考考:
-1. First use `search_knowledge_base` to get relevant content
-2. Then call `generate_quiz` with the FULL questions array you create from that content
-3. You must provide: title, questions (with question_text, options, correct_answer, explanation)
-4. For uploaded files: generate questions directly from the file content in the conversation
-5. NEVER output quiz questions as plain text — always use the generate_quiz tool
-"""
-            else:
-                tools_hint += """
-## Quiz Generation (generate_quiz tool)
-When user asks for a quiz/test/练习/测验/出题/考考:
-1. Do NOT call search_knowledge_base — no knowledge base is bound to this session
-2. Generate questions from your own knowledge or from uploaded file content
-3. Call `generate_quiz` with the FULL questions array
-4. You must provide: title, questions (with question_text, options, correct_answer, explanation)
-5. NEVER output quiz questions as plain text — always use the generate_quiz tool
+When the user asks for a quiz/test/练习/测验/出题/考考:
+{kb_step}2. Call `generate_quiz` with a complete `questions` array.
+
+### Option format (VERY IMPORTANT)
+Each option MUST be `{{"label": "A", "text": "<actual answer content>"}}`.
+The `text` field is the REAL answer content, NEVER the letter "A"/"B"/"C"/"D".
+
+✅ CORRECT: `{{"label": "A", "text": "2.5%"}}`
+❌ WRONG:  `{{"label": "A", "text": "A"}}`  ← text is the letter, not content
+❌ WRONG:  `{{"A": "2.5%"}}`                 ← missing "label"/"text" keys
+
+### Chat reply rules (CRITICAL)
+After calling `generate_quiz`, the quiz is rendered by an interactive card in the UI.
+Your chat text reply MUST be:
+- ONE short sentence confirming generation, like "已为您生成 5 道题目，请在下方卡片中作答。"
+- Nothing else. No 测试题概览, no 题目列表, no 参考答案, no A/B/C/D options.
+- Do NOT repeat the questions, options, or answer key as markdown/text — it will appear twice and spoil the quiz for the user.
 """
 
     # Generate web search guidance based on user preference
