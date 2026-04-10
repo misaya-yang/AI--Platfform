@@ -369,10 +369,11 @@ async def activate_connector_mcp(
             email=row["email"],
             api_token=row["api_token"],
         )
+        # start_confluence returns list[dict[str, str]] — not ToolDefinition objects
         return {
             "status": "activated",
             "provider": provider,
-            "tools": [{"name": t.name, "description": t.description} for t in tools],
+            "tools": tools,
             "tool_count": len(tools),
         }
     except RuntimeError as e:
@@ -391,10 +392,11 @@ async def connector_mcp_status(
     connected = mcp.is_connected(user.tenant_id, provider)
     tools = mcp.get_tools(user.tenant_id, provider) if connected else []
 
+    # get_tools returns list[dict[str, str]] — not ToolDefinition objects
     return {
         "provider": provider,
         "mcp_active": connected,
-        "tools": [{"name": t.name, "description": t.description} for t in tools],
+        "tools": tools,
         "tool_count": len(tools),
     }
 
