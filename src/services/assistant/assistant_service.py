@@ -534,6 +534,12 @@ Please use this web search context to inform your response when relevant."""
         self.redis = redis_client
         self.memory_service = memory_service
 
+        # Background task registry — keeps fire-and-forget tasks alive.
+        # Python 3.11+ will GC tasks that have no strong reference, so any
+        # task we launch via asyncio.create_task without awaiting MUST be
+        # stored here. Tasks remove themselves via done_callback.
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Task planning and orchestration (Phase 2.4)
         # These are created on demand if not provided
         self._task_planner = task_planner
@@ -1050,7 +1056,13 @@ Please use this web search context to inform your response when relevant."""
                         )
 
                 _task = asyncio.create_task(_persist_user_message())
-                _task.add_done_callback(lambda t: logger.error(f"User message persist failed: {t.exception()}") if not t.cancelled() and t.exception() else None)
+                # Keep a strong ref so Python 3.11+ doesn't GC it mid-flight
+                self._background_tasks.add(_task)
+                def _done(t: asyncio.Task) -> None:
+                    self._background_tasks.discard(t)
+                    if not t.cancelled() and t.exception() is not None:
+                        logger.error(f"User message persist failed: {t.exception()}")
+                _task.add_done_callback(_done)
             except Exception as e:
                 logger.warning(f"Failed to persist user message: {e}")
 

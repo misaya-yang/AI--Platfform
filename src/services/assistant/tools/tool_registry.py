@@ -510,15 +510,53 @@ class ToolRegistry:
 
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
-            logger.error(f"Tool {request.tool_name} failed: {e}")
+            # Log full exception (with stack) for ops, but return a sanitized
+            # message to the LLM/client to avoid leaking internal details like
+            # connection strings, hostnames, or stack traces.
+            logger.error(
+                f"Tool {request.tool_name} failed (call_id={request.call_id}): {type(e).__name__}: {e}",
+                exc_info=True,
+            )
 
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=str(e),
+                error=_safe_error_message(e, tool_name=request.tool_name),
                 duration_ms=duration_ms,
             )
+
+
+def _safe_error_message(exc: BaseException, *, tool_name: str = "tool") -> str:
+    """Return a client-safe error message that doesn't leak internal details.
+
+    Full exception + stack is logged separately for ops. This function is
+    called only for the value returned to the LLM/client, never for logging.
+
+    - Known safe exception types: pass a truncated message through
+    - Database/network/filesystem errors: return a generic "internal error"
+      since their str() typically contains connection strings, hostnames, or paths
+    - Any other exception: return a short class-name-only message
+    """
+    import re
+
+    # Exception types whose str() often contains sensitive internal details
+    sensitive_type_names = {
+        "PostgresError", "InterfaceError", "OperationalError", "ConnectionError",
+        "ConnectionRefusedError", "ConnectionResetError", "HTTPStatusError",
+        "ConnectError", "ReadError", "WriteError", "PoolTimeout",
+        "FileNotFoundError", "PermissionError", "OSError", "RuntimeError",
+    }
+    type_name = type(exc).__name__
+    if type_name in sensitive_type_names or "asyncpg" in type(exc).__module__:
+        return f"{tool_name} failed due to an internal error. Please retry; if the issue persists, contact support."
+
+    # Generic exception: return type name + short message, with any
+    # URL/hostname/path-like tokens redacted
+    msg = str(exc)[:200]
+    msg = re.sub(r"https?://[^\s'\"]+", "[url]", msg)
+    msg = re.sub(r"(?i)(host|server|user|password|token|key)\s*=\s*\S+", r"\1=[redacted]", msg)
+    return f"{type_name}: {msg}"
 
 
 # Global registry instance

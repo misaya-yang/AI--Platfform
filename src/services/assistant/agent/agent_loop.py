@@ -478,6 +478,10 @@ class AgentLoop:
         self.kb_service = kb_service
         self.memory_service = memory_service
 
+        # Background task registry — keeps fire-and-forget tasks alive so
+        # Python 3.11+ doesn't GC them before they finish.
+        self._background_tasks: set[asyncio.Task] = set()
+
         # Initialize components
         self.scenario_analyzer = scenario_analyzer or self._create_scenario_analyzer()
         self.scenario_retriever = scenario_retriever  # Created lazily when kb_service available
@@ -1618,8 +1622,14 @@ class AgentLoop:
                             )
 
                     _task = asyncio.create_task(_persist_user_message())
-                    _task.add_done_callback(lambda t: logger.error(f"User message persist failed: {t.exception()}") if not t.cancelled() and t.exception() else None)
-                except (RuntimeError, TypeError) as e:
+                    # Keep strong ref so Python 3.11+ doesn't GC mid-flight
+                    self._background_tasks.add(_task)
+                    def _done(t: asyncio.Task) -> None:
+                        self._background_tasks.discard(t)
+                        if not t.cancelled() and t.exception() is not None:
+                            logger.error(f"User message persist failed: {t.exception()}")
+                    _task.add_done_callback(_done)
+                except (RuntimeError, TypeError):
                     logger.exception("Failed to schedule user message persistence")
 
             # Process uploaded files (if any) so the model can see them.
