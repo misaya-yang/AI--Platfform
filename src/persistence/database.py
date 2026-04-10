@@ -1503,7 +1503,7 @@ class DatabaseStorage:
             param_idx += 1
 
         if service_ids is not None:
-            query += f" AND (service_id = ANY(${param_idx}) OR service_id IS NULL)"
+            query += f" AND (service_id = ANY(${param_idx}::text[]) OR service_id IS NULL)"
             params.append(service_ids)
             param_idx += 1
 

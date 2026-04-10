@@ -171,6 +171,34 @@ class SessionManager:
         sessions.sort(key=lambda s: s.updated_at or s.created_at, reverse=True)
         return sessions[:limit]
 
+    async def list_session_summaries(
+        self,
+        user_id: str | None = None,
+        tenant_id: str | None = None,
+        service_ids: list[str] | None = None,
+        status: str = "active",
+        limit: int = 100,
+    ) -> list[dict]:
+        """Lightweight session list for sidebar. In-memory fallback delegates to list_sessions."""
+        service_id = service_ids[0] if service_ids and len(service_ids) == 1 else None
+        sessions = await self.list_sessions(
+            user_id=user_id, tenant_id=tenant_id, service_id=service_id, limit=limit,
+        )
+        if service_ids and len(service_ids) > 1:
+            allowed = set(service_ids) | {None}
+            sessions = [s for s in sessions if s.service_id in allowed]
+        return [
+            {
+                "session_id": s.session_id, "service_id": s.service_id,
+                "user_id": s.user_id, "tenant_id": s.tenant_id,
+                "metadata": s.metadata, "config": getattr(s, "config", None),
+                "status": getattr(s, "status", "active"),
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            for s in sessions
+        ]
+
     async def delete(self, session_id: str) -> None:
         async with self._lock:
             self._sessions.pop(session_id, None)
