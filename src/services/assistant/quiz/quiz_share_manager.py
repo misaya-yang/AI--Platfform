@@ -201,7 +201,15 @@ class QuizShareManager:
         if not share:
             raise ValueError("Quiz share not found, expired, or max attempts reached")
 
-        # Prevent duplicate submissions by display_name OR client IP
+        # Enforce display_name when share was configured to require it
+        if share.get("require_name") and not display_name:
+            raise ValueError("This quiz requires a name before submitting.")
+
+        # Prevent duplicate submissions by display_name only.
+        # Do NOT dedup by client_ip — shared networks (office, school, public WiFi)
+        # route many users through the same IP, and IP dedup would block everyone
+        # after the first submission. Spam protection is provided by max_attempts
+        # (per-share total limit) configured on the share itself.
         share_uuid = uuid.UUID(share["share_id"])
         if display_name:
             dup = await self.db.fetchrow(
@@ -210,13 +218,6 @@ class QuizShareManager:
             )
             if dup:
                 raise ValueError(f"You have already submitted this quiz as '{html.unescape(display_name)}'.")
-        if client_ip:
-            ip_dup = await self.db.fetchrow(
-                "SELECT id FROM quiz_attempts WHERE share_id = $1 AND client_ip = $2 LIMIT 1",
-                share_uuid, client_ip,
-            )
-            if ip_dup:
-                raise ValueError("You have already submitted this quiz from this device.")
 
         quiz_id = share["quiz_id"]
 
