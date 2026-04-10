@@ -40,6 +40,10 @@ class AssistantPolicyEngine:
 
     MEDIUM_RISK_TOOLS = {
         "execute_python_code",
+        # Confluence write tools — require approval in safe profile (default)
+        "create_confluence_page",
+        "update_confluence_page",
+        "delete_confluence_page",
     }
 
     def __init__(

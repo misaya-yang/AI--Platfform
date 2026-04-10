@@ -126,6 +126,180 @@ READ_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
 )
 
 
+# ─── Write tool definitions ─────────────────────────────────────────
+
+CREATE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
+    name="create_confluence_page",
+    description=(
+        "Create a new Confluence page in the specified space. Returns the new page ID and URL. "
+        "Use this when the user explicitly asks to create, draft, or add a new page to Confluence. "
+        "Content is automatically converted from plain text/markdown to Confluence storage format."
+    ),
+    parameters=[
+        ToolParameter(
+            name="space_key",
+            type="string",
+            description="Confluence space key where the page will be created (e.g., 'DEV', 'HR', 'TEAM'). Required.",
+            required=True,
+        ),
+        ToolParameter(
+            name="title",
+            type="string",
+            description="Title of the new page. Must be unique within the space.",
+            required=True,
+        ),
+        ToolParameter(
+            name="content",
+            type="string",
+            description="Page content as plain text or markdown. Paragraphs separated by blank lines. HTML accepted for rich formatting.",
+            required=True,
+        ),
+        ToolParameter(
+            name="parent_id",
+            type="string",
+            description="Optional parent page ID to nest this page under. Omit for top-level.",
+            required=False,
+        ),
+    ],
+    category=ToolCategory.INTEGRATION,
+    risk_level=ToolRiskLevel.MEDIUM,
+    requires_confirmation=True,
+    when_to_use=(
+        "Use when the user explicitly asks to create, draft, publish, or add a new Confluence page. "
+        "Always confirm the space_key and title with the user if ambiguous."
+    ),
+    when_not_to_use=(
+        "Do not use for editing existing pages (use update_confluence_page). "
+        "Do not use without explicit user intent to write — never create pages speculatively."
+    ),
+    examples=[
+        ToolExample(
+            description="Create a new team meeting notes page",
+            input={"space_key": "TEAM", "title": "Weekly Sync 2026-04-10", "content": "# Agenda\n\n- Project updates\n- Blockers"},
+            expected_output="Returns new page ID and URL",
+        ),
+    ],
+    timeout_seconds=20,
+)
+
+UPDATE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
+    name="update_confluence_page",
+    description=(
+        "Update (overwrite) the content of an existing Confluence page. "
+        "Fetches the current version automatically and increments it. "
+        "The provided content REPLACES the entire page body — read the page first if you want to append."
+    ),
+    parameters=[
+        ToolParameter(
+            name="page_id",
+            type="string",
+            description="Confluence page ID (numeric) of the page to update.",
+            required=True,
+        ),
+        ToolParameter(
+            name="content",
+            type="string",
+            description="New page body content as plain text or markdown. REPLACES existing content entirely.",
+            required=True,
+        ),
+        ToolParameter(
+            name="title",
+            type="string",
+            description="Optional new title. If omitted, keeps the existing title.",
+            required=False,
+        ),
+    ],
+    category=ToolCategory.INTEGRATION,
+    risk_level=ToolRiskLevel.MEDIUM,
+    requires_confirmation=True,
+    when_to_use=(
+        "Use when the user explicitly asks to update, edit, or rewrite a Confluence page. "
+        "Typically preceded by read_confluence_page to get the existing content."
+    ),
+    when_not_to_use=(
+        "Do not use for creating new pages (use create_confluence_page). "
+        "Do not use without the user's explicit update intent — page_id alone is not enough."
+    ),
+    examples=[
+        ToolExample(
+            description="Update a meeting notes page with decisions",
+            input={"page_id": "12345678", "content": "Decisions: ..."},
+            expected_output="Returns updated version number",
+        ),
+    ],
+    timeout_seconds=20,
+)
+
+ADD_CONFLUENCE_COMMENT_DEFINITION = ToolDefinition(
+    name="add_confluence_comment",
+    description=(
+        "Add a comment to a Confluence page. Lightweight, reversible write. "
+        "Use this to leave feedback, suggestions, or notes on a page."
+    ),
+    parameters=[
+        ToolParameter(
+            name="page_id",
+            type="string",
+            description="Confluence page ID to comment on.",
+            required=True,
+        ),
+        ToolParameter(
+            name="comment",
+            type="string",
+            description="Comment text. Plain text or simple markdown.",
+            required=True,
+        ),
+    ],
+    category=ToolCategory.INTEGRATION,
+    risk_level=ToolRiskLevel.LOW,
+    when_to_use="Use when the user asks to comment on, leave feedback on, or annotate a Confluence page.",
+    when_not_to_use="Do not use for page edits (use update_confluence_page) — comments are separate entities.",
+    examples=[
+        ToolExample(
+            description="Leave feedback on a design doc",
+            input={"page_id": "12345678", "comment": "LGTM, one nit: consider adding a rollback plan."},
+            expected_output="Returns new comment ID",
+        ),
+    ],
+    timeout_seconds=15,
+)
+
+DELETE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
+    name="delete_confluence_page",
+    description=(
+        "Delete a Confluence page (moves it to trash — recoverable by admin). "
+        "This is destructive and requires explicit user confirmation."
+    ),
+    parameters=[
+        ToolParameter(
+            name="page_id",
+            type="string",
+            description="Confluence page ID to delete.",
+            required=True,
+        ),
+    ],
+    category=ToolCategory.INTEGRATION,
+    risk_level=ToolRiskLevel.MEDIUM,
+    requires_confirmation=True,
+    when_to_use=(
+        "Use ONLY when the user explicitly asks to delete, remove, or archive a specific Confluence page "
+        "AND has confirmed the page ID. Always confirm with the user before executing."
+    ),
+    when_not_to_use=(
+        "Never use speculatively. Never delete pages the user did not explicitly name. "
+        "If unsure, ask the user to confirm the page ID and title first."
+    ),
+    examples=[
+        ToolExample(
+            description="Delete an obsolete draft",
+            input={"page_id": "12345678"},
+            expected_output="Page moved to trash",
+        ),
+    ],
+    timeout_seconds=15,
+)
+
+
 # ─── Confluence API Client ───────────────────────────────────────────
 
 class ConfluenceAPIClient:
@@ -217,6 +391,162 @@ class ConfluenceAPIClient:
             "last_modified": page.get("version", {}).get("when", ""),
             "version": page.get("version", {}).get("number", 0),
         }
+
+    # ─── Write operations ───────────────────────────────────────────
+
+    async def create_page(
+        self,
+        space_key: str,
+        title: str,
+        content: str,
+        parent_id: str | None = None,
+    ) -> dict:
+        """Create a new Confluence page. Content is Markdown-ish plain text wrapped as storage format."""
+        body = {
+            "type": "page",
+            "title": title,
+            "space": {"key": space_key},
+            "body": {
+                "storage": {
+                    "value": self._to_storage_html(content),
+                    "representation": "storage",
+                },
+            },
+        }
+        if parent_id:
+            body["ancestors"] = [{"id": parent_id}]
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{self.base_url}/content",
+                json=body,
+                headers={
+                    "Authorization": self.auth_header,
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        base = data.get("_links", {}).get("base", "")
+        webui = data.get("_links", {}).get("webui", "")
+        return {
+            "id": data["id"],
+            "title": data["title"],
+            "url": f"{base}{webui}" if base else webui,
+            "version": data.get("version", {}).get("number", 1),
+        }
+
+    async def update_page(
+        self,
+        page_id: str,
+        content: str,
+        title: str | None = None,
+    ) -> dict:
+        """Update an existing Confluence page. Fetches current version + title first."""
+        # Fetch current page for version + existing title
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/content/{page_id}",
+                params={"expand": "version,space"},
+                headers={"Authorization": self.auth_header},
+            )
+            resp.raise_for_status()
+            current = resp.json()
+
+            new_version = current.get("version", {}).get("number", 1) + 1
+            use_title = title or current["title"]
+
+            body = {
+                "version": {"number": new_version},
+                "title": use_title,
+                "type": "page",
+                "body": {
+                    "storage": {
+                        "value": self._to_storage_html(content),
+                        "representation": "storage",
+                    },
+                },
+            }
+
+            resp = await client.put(
+                f"{self.base_url}/content/{page_id}",
+                json=body,
+                headers={
+                    "Authorization": self.auth_header,
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        base = data.get("_links", {}).get("base", "")
+        webui = data.get("_links", {}).get("webui", "")
+        return {
+            "id": data["id"],
+            "title": data["title"],
+            "url": f"{base}{webui}" if base else webui,
+            "version": data.get("version", {}).get("number", new_version),
+        }
+
+    async def add_comment(self, page_id: str, comment: str) -> dict:
+        """Add a comment to a Confluence page."""
+        body = {
+            "type": "comment",
+            "container": {"id": page_id, "type": "page"},
+            "body": {
+                "storage": {
+                    "value": self._to_storage_html(comment),
+                    "representation": "storage",
+                },
+            },
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{self.base_url}/content",
+                json=body,
+                headers={
+                    "Authorization": self.auth_header,
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        return {
+            "id": data["id"],
+            "page_id": page_id,
+            "created": data.get("version", {}).get("when", ""),
+        }
+
+    async def delete_page(self, page_id: str) -> dict:
+        """Delete (trash) a Confluence page. This is a soft-delete; page goes to trash."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.delete(
+                f"{self.base_url}/content/{page_id}",
+                headers={"Authorization": self.auth_header},
+            )
+            if resp.status_code not in (200, 204):
+                resp.raise_for_status()
+
+        return {"id": page_id, "status": "trashed"}
+
+    @staticmethod
+    def _to_storage_html(content: str) -> str:
+        """Convert plain text / simple markdown to Confluence storage format.
+
+        Minimal conversion: wraps lines in <p>, escapes HTML, preserves blank-line paragraphs.
+        Users can pass raw HTML if they want rich formatting.
+        """
+        import html as html_mod
+        # If it looks like HTML already, trust the caller
+        stripped = content.strip()
+        if stripped.startswith("<") and stripped.endswith(">"):
+            return content
+        # Otherwise escape + wrap paragraphs
+        paragraphs = content.split("\n\n")
+        escaped = [f"<p>{html_mod.escape(p).replace(chr(10), '<br/>')}</p>" for p in paragraphs if p.strip()]
+        return "".join(escaped) if escaped else "<p></p>"
 
 
 # ─── Tool Executors ──────────────────────────────────────────────────
@@ -332,6 +662,216 @@ class ConfluenceReadExecutor(ToolExecutor):
             )
 
 
+class ConfluenceCreatePageExecutor(ToolExecutor):
+    """Executor for create_confluence_page tool."""
+
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        start = time.time()
+        space_key = request.arguments.get("space_key", "")
+        title = request.arguments.get("title", "")
+        content = request.arguments.get("content", "")
+        parent_id = request.arguments.get("parent_id")
+
+        if not space_key or not title or not content:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="space_key, title, and content are all required.",
+            )
+
+        try:
+            page = await self.client.create_page(space_key, title, content, parent_id)
+            duration = (time.time() - start) * 1000
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=True,
+                result=(
+                    f"Created Confluence page:\n"
+                    f"**{page['title']}** (ID: {page['id']}, v{page['version']})\n"
+                    f"URL: {page['url']}"
+                ),
+                duration_ms=duration,
+                metadata={"page_id": page["id"], "version": page["version"]},
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Confluence create failed: {e.response.status_code} {e.response.text[:200]}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Create failed ({e.response.status_code}): {e.response.text[:200]}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+        except Exception as e:
+            logger.error(f"Confluence create failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Confluence create failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+
+
+class ConfluenceUpdatePageExecutor(ToolExecutor):
+    """Executor for update_confluence_page tool."""
+
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        start = time.time()
+        page_id = request.arguments.get("page_id", "")
+        content = request.arguments.get("content", "")
+        title = request.arguments.get("title")
+
+        if not page_id or not content:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="page_id and content are required.",
+            )
+
+        try:
+            page = await self.client.update_page(page_id, content, title)
+            duration = (time.time() - start) * 1000
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=True,
+                result=(
+                    f"Updated Confluence page:\n"
+                    f"**{page['title']}** (ID: {page['id']}, v{page['version']})\n"
+                    f"URL: {page['url']}"
+                ),
+                duration_ms=duration,
+                metadata={"page_id": page["id"], "version": page["version"]},
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Confluence update failed: {e.response.status_code} {e.response.text[:200]}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Update failed ({e.response.status_code}): {e.response.text[:200]}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+        except Exception as e:
+            logger.error(f"Confluence update failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Confluence update failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+
+
+class ConfluenceAddCommentExecutor(ToolExecutor):
+    """Executor for add_confluence_comment tool."""
+
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        start = time.time()
+        page_id = request.arguments.get("page_id", "")
+        comment = request.arguments.get("comment", "")
+
+        if not page_id or not comment:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="page_id and comment are required.",
+            )
+
+        try:
+            result = await self.client.add_comment(page_id, comment)
+            duration = (time.time() - start) * 1000
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=True,
+                result=f"Added comment (ID: {result['id']}) to page {page_id}",
+                duration_ms=duration,
+                metadata={"comment_id": result["id"], "page_id": page_id},
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Confluence comment failed: {e.response.status_code} {e.response.text[:200]}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Comment failed ({e.response.status_code}): {e.response.text[:200]}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+        except Exception as e:
+            logger.error(f"Confluence comment failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Confluence comment failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+
+
+class ConfluenceDeletePageExecutor(ToolExecutor):
+    """Executor for delete_confluence_page tool."""
+
+    def __init__(self, client: ConfluenceAPIClient):
+        self.client = client
+
+    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
+        start = time.time()
+        page_id = request.arguments.get("page_id", "")
+
+        if not page_id:
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error="page_id is required.",
+            )
+
+        try:
+            result = await self.client.delete_page(page_id)
+            duration = (time.time() - start) * 1000
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=True,
+                result=f"Deleted (trashed) Confluence page {page_id}. Recoverable from trash by admin.",
+                duration_ms=duration,
+                metadata={"page_id": page_id, "status": result["status"]},
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Confluence delete failed: {e.response.status_code} {e.response.text[:200]}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Delete failed ({e.response.status_code}): {e.response.text[:200]}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+        except Exception as e:
+            logger.error(f"Confluence delete failed: {e}")
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=f"Confluence delete failed: {e}",
+                duration_ms=(time.time() - start) * 1000,
+            )
+
+
 # ─── Registration ─────────────────────────────────────────────────────
 
 def register_confluence_tools(
@@ -348,6 +888,12 @@ def register_confluence_tools(
         logger.warning("Confluence tools registered without credentials — will fail on use")
         client = ConfluenceAPIClient("", "", "")
 
+    # Read tools
     register_tool(SEARCH_CONFLUENCE_DEFINITION, ConfluenceSearchExecutor(client))
     register_tool(READ_CONFLUENCE_PAGE_DEFINITION, ConfluenceReadExecutor(client))
-    logger.info(f"Registered Confluence tools for {domain or 'unconfigured'}")
+    # Write tools
+    register_tool(CREATE_CONFLUENCE_PAGE_DEFINITION, ConfluenceCreatePageExecutor(client))
+    register_tool(UPDATE_CONFLUENCE_PAGE_DEFINITION, ConfluenceUpdatePageExecutor(client))
+    register_tool(ADD_CONFLUENCE_COMMENT_DEFINITION, ConfluenceAddCommentExecutor(client))
+    register_tool(DELETE_CONFLUENCE_PAGE_DEFINITION, ConfluenceDeletePageExecutor(client))
+    logger.info(f"Registered 6 Confluence tools (2 read + 4 write) for {domain or 'unconfigured'}")

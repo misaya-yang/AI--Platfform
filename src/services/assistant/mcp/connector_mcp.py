@@ -62,11 +62,22 @@ class ConnectorMCPService:
             raise RuntimeError(f"Failed to activate Confluence tools: {exc}")
 
         self._active[key] = True
-        self._tool_names[key] = ["search_confluence", "read_confluence_page"]
+        self._tool_names[key] = [
+            "search_confluence",
+            "read_confluence_page",
+            "create_confluence_page",
+            "update_confluence_page",
+            "add_confluence_comment",
+            "delete_confluence_page",
+        ]
 
         tools = [
             {"name": "search_confluence", "description": "Search Confluence pages by keyword via CQL"},
             {"name": "read_confluence_page", "description": "Read full content of a Confluence page by ID or title"},
+            {"name": "create_confluence_page", "description": "Create a new Confluence page (requires approval)"},
+            {"name": "update_confluence_page", "description": "Update an existing Confluence page (requires approval)"},
+            {"name": "add_confluence_comment", "description": "Add a comment to a Confluence page"},
+            {"name": "delete_confluence_page", "description": "Delete (trash) a Confluence page (requires approval)"},
         ]
 
         logger.info(
