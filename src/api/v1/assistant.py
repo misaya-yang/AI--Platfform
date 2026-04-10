@@ -213,10 +213,12 @@ async def list_datasets(
 
     try:
         # Use local service or HTTP proxy
+        import time as _t; _ds_t0 = _t.time()
         if kb_service:
             datasets_raw = await kb_service.list_datasets(user=user)
         else:
             datasets_raw = await kb_proxy.list_datasets(user=user)
+        logger.info(f"[PERF] list_datasets returned {len(datasets_raw)} in {(_t.time()-_ds_t0)*1000:.0f}ms (kb_service={bool(kb_service)}, kb_proxy={bool(kb_proxy)})")
 
         datasets = []
         for ds in datasets_raw:
