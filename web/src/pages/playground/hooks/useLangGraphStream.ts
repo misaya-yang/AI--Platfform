@@ -403,6 +403,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
     assistantId,
     threadId,
     messagesKey: "messages",
+    streamMode: "messages-tuple",
     defaultHeaders: token ? { Authorization: `Bearer ${token}` } : undefined,
     onThreadId: handleThreadId,
     onFinish: handleFinish,
