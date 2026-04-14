@@ -29,6 +29,10 @@ class HadithRepository:
             raise ValueError("collection.name is required")
 
         async def _txn(connection) -> None:
+            # Serialize concurrent syncs for the same collection
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))", collection_name
+            )
             await connection.execute(
                 """
                 INSERT INTO hadith_collections (

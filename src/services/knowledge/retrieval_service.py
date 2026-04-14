@@ -1411,6 +1411,12 @@ class RetrievalService:
                         source_reference = seg.get("source_reference") or meta_from_db.get(
                             "source_reference"
                         )
+                        # Normalize JSON-string source_reference to dict
+                        if isinstance(source_reference, str) and source_reference.strip().startswith("{"):
+                            try:
+                                source_reference = json.loads(source_reference)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
                         if source_type and not item.get("source_type"):
                             item["source_type"] = source_type
                         if citation_text and not item.get("citation_text"):

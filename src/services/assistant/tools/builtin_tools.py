@@ -263,7 +263,7 @@ class KBSearchExecutor(ToolExecutor):
                         or r_meta.get("document_url")
                         or r_meta.get("file_url")
                     )
-                    citation_text = r_meta.get("citation_text") or (r.text[:200] if r.text else "")
+                    citation_text = r_meta.get("citation_text") or ""
                     item = {
                         "content": r.text,  # RetrieveResult uses 'text' not 'content'
                         "score": r.score,

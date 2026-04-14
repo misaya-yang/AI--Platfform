@@ -47,13 +47,11 @@ class ProxyQueueTimeoutError(RuntimeError):
     """Raised when a proxy request waits too long for a service slot."""
 
 
-# LangGraph 需要 assistant_id 的路径模式
-LANGGRAPH_ASSISTANT_PATHS = [
-    "/runs",  # POST /runs
-    "/runs/stream",  # POST /runs/stream
-    "/runs/wait",  # POST /runs/wait
-    "/threads/",  # POST /threads/{thread_id}/runs etc.
-]
+# LangGraph 需要 assistant_id 的路径模式（正则匹配）
+import re as _re
+_LANGGRAPH_RUN_RE = _re.compile(
+    r"/(runs|threads/[^/]+/runs)(/stream|/wait)?$", _re.IGNORECASE
+)
 
 # LangGraph API 操作类型映射（用于限流）
 LANGGRAPH_OPERATION_TYPES = {
@@ -681,7 +679,7 @@ class TransparentProxy:
 
         # 检查是否是需要注入的路径
         path_lower = self._normalize_path(path).lower()
-        needs_injection = any(pattern in path_lower for pattern in LANGGRAPH_ASSISTANT_PATHS)
+        needs_injection = bool(_LANGGRAPH_RUN_RE.search(path_lower))
 
         if not needs_injection:
             return body
