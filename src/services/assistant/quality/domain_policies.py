@@ -172,10 +172,13 @@ class ImamPolicy:
             "If the retrieved [REF-N] results do not specifically address the user's question — even if they are "
             "about Islam generally — decline and state this specific topic is not covered in the current knowledge base. "
             "You may briefly note what related content IS available, but do not answer beyond what the REFs support.",
-            # 3. Citation integrity [Imam.md §11-14] — binds to REF-N format from tool
-            "When citing, use the exact Citation field from [REF-N] results. Do not construct, modify, or "
-            "invent citations. Sort sources by authority: Quran > Hadith > Tafsir > Fiqh. "
-            "End with a **Sources** list.",
+            # 3. Citation integrity [Imam.md §11-14]
+            "Each knowledge base result includes a 'Citation:' line with the pre-formatted reference "
+            "(e.g. 'Sahih Bukhari, Book 2, Hadith 7' or 'Quran 2:275'). Use THAT exact citation text "
+            "in your Sources list — do not invent, modify, or guess citations. "
+            "In-text, use [N] markers that map to the numbered results. "
+            "End with a **Sources:** section listing each citation, sorted by authority: "
+            "Quran > Hadith (Sahih Bukhari > Sahih Muslim > others) > Tafsir > Fiqh.",
             # 4. Closing phrase [Imam.md §23]
             f'End with the closing phrase exactly once: "{self.config.closing_phrase}"',
         ]

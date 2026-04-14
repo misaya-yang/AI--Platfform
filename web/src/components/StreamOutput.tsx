@@ -299,6 +299,13 @@ function filterToolJsonOutput(text: string): string {
     }
   );
 
+  // ── Computational Sensor: Strip raw [REF-N] markers ──
+  // The KB search tool provides pre-formatted Citation strings (e.g.
+  // "Sahih Bukhari, Book 2, Hadith 7") which the LLM should use instead.
+  // If the LLM falls back to raw [REF-N] markers, strip them so users
+  // never see the internal reference format.
+  filtered = filtered.replace(/\[REF[-–]?\d+\]/gi, '');
+
   // ── Computational Sensor: Closing phrase line-break ──
   // LLMs sometimes concatenate the disclaimer directly after the last citation
   // marker: "[5]All information provided..." without any whitespace/newline.

@@ -415,9 +415,19 @@ class KBSearchExecutor(ToolExecutor):
 
         for i, r in enumerate(results, 1):
             source = r.get("source_url", "")
-            source_info = f" (Source: {source})" if source else ""
+            # Surface pre-formatted citation from KB metadata (Imam.md §12)
+            # so the LLM can cite "Sahih Bukhari, Book 2, Hadith 7" instead of "[REF-1]"
+            citation = r.get("citation_text", "")
+            meta = r.get("metadata") or {}
+            if not citation:
+                citation = meta.get("citation_text", "")
+            source_type = meta.get("source_type", "")
 
-            parts.append(f"\n[{i}] {r['dataset_name']} (score: {r['score']:.2f}){source_info}")
+            source_info = f" (Source: {source})" if source else ""
+            citation_line = f"\nCitation: {citation}" if citation else ""
+            type_info = f" [{source_type}]" if source_type and source_type != "unknown" else ""
+
+            parts.append(f"\n[{i}] {r['dataset_name']}{type_info} (score: {r['score']:.2f}){source_info}{citation_line}")
             parts.append(f"{r['content'][:500]}...")
 
         return "\n".join(parts)
