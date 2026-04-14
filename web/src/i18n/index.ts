@@ -51,7 +51,13 @@ i18n
       escapeValue: false,
     },
     detection: {
-      order: ["localStorage", "htmlTag", "navigator"],
+      // Do NOT include "navigator" — browser system language (often zh-CN
+      // for Chinese users) would override the en-US default on every fresh
+      // visit, even after clearing localStorage.  With this order:
+      // - First visit: no localStorage → fallback to en-US ✓
+      // - User switches language in UI → saved to localStorage ✓
+      // - Next visit: reads from localStorage ✓
+      order: ["localStorage", "htmlTag"],
       caches: ["localStorage"],
       lookupLocalStorage: "i18nextLng",
       convertDetectedLanguage: (lng) => resolveAppLocale(lng),
