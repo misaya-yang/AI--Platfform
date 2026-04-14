@@ -177,8 +177,14 @@ class ImamPolicy:
             "(e.g. 'Sahih Bukhari, Book 2, Hadith 7' or 'Quran 2:275'). Use THAT exact citation text "
             "in your Sources list — do not invent, modify, or guess citations. "
             "In-text, use [N] markers that map to the numbered results. "
-            "End with a **Sources:** section listing each citation, sorted by authority: "
-            "Quran > Hadith (Sahih Bukhari > Sahih Muslim > others) > Tafsir > Fiqh.",
+            "End with a Sources section using the SAME LANGUAGE as your response "
+            "(Chinese → **来源：**, Arabic → **المصادر:**, English → **Sources:**, etc.). "
+            "List each citation on its OWN LINE as a numbered list, sorted by authority: "
+            "Quran > Hadith (Sahih Bukhari > Sahih Muslim > others) > Tafsir > Fiqh. "
+            "Example format:\n"
+            "**来源：**\n"
+            "1. Sahih Bukhari, Book 2, Hadith 7\n"
+            "2. Quran 2:275\n",
             # 4. Closing phrase [Imam.md §23]
             f'End with the closing phrase exactly once: "{self.config.closing_phrase}"',
         ]
