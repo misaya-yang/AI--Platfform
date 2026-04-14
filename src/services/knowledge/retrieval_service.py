@@ -1378,54 +1378,6 @@ class RetrievalService:
             if metadata_filter:
                 meta["metadata_filter"] = dict(metadata_filter)
 
-        # Hydrate missing metadata (citation/source_reference) from DB for dense-only payloads
-        if final_sorted and (islamic_citation or islamic_authority_sort):
-            try:
-                missing_ids = []
-                for item in final_sorted:
-                    if item.get("citation_text") or item.get("source_reference"):
-                        continue
-                    seg_id = str(item.get("segment_id") or "")
-                    if seg_id:
-                        missing_ids.append(seg_id)
-
-                if missing_ids:
-                    seg_rows = await self.db.get_segments_by_ids(list(set(missing_ids)))
-                    seg_map = {str(seg.get("segment_id") or ""): seg for seg in seg_rows if seg}
-                    for item in final_sorted:
-                        if item.get("citation_text") or item.get("source_reference"):
-                            continue
-                        seg_id = str(item.get("segment_id") or "")
-                        if not seg_id:
-                            continue
-                        seg = seg_map.get(seg_id)
-                        if not seg:
-                            continue
-                        meta_from_db = _ensure_dict(seg.get("metadata"))
-                        merged = {**meta_from_db, **_ensure_dict(item.get("metadata"))}
-                        item["metadata"] = merged
-                        source_type = seg.get("source_type") or meta_from_db.get("source_type")
-                        citation_text = seg.get("citation_text") or meta_from_db.get(
-                            "citation_text"
-                        )
-                        source_reference = seg.get("source_reference") or meta_from_db.get(
-                            "source_reference"
-                        )
-                        # Normalize JSON-string source_reference to dict
-                        if isinstance(source_reference, str) and source_reference.strip().startswith("{"):
-                            try:
-                                source_reference = json.loads(source_reference)
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        if source_type and not item.get("source_type"):
-                            item["source_type"] = source_type
-                        if citation_text and not item.get("citation_text"):
-                            item["citation_text"] = citation_text
-                        if source_reference and not item.get("source_reference"):
-                            item["source_reference"] = source_reference
-            except Exception as hydrate_err:
-                logger.warning(f"Failed to hydrate segment metadata for citations: {hydrate_err}")
-
         # --- POST_RANKING Hook: Islamic citation formatting & authority sort ---
         if (islamic_citation or islamic_authority_sort) and final_sorted:
             try:
