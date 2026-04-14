@@ -27,7 +27,7 @@ HF_FILES: dict[str, str] = {
     "Sahih al-Bukhari.json": "bukhari",
     "Sahih Muslim.json": "muslim",
     "Sunan Abi Dawud.json": "abudawud",
-    "Jami' at-Tirmidhi.json": "tirmidhi",
+    "Jami` at-Tirmidhi.json": "tirmidhi",
     "Sunan an-Nasa'i.json": "nasai",
     "Sunan Ibn Majah.json": "ibnmajah",
 }

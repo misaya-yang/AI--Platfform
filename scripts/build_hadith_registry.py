@@ -80,7 +80,7 @@ HF_COLLECTIONS = {
     "Sahih al-Bukhari": "bukhari",
     "Sahih Muslim": "muslim",
     "Sunan Abi Dawud": "abudawud",
-    "Jami' at-Tirmidhi": "tirmidhi",
+    "Jami` at-Tirmidhi": "tirmidhi",
     "Sunan an-Nasa'i": "nasai",
     "Sunan Ibn Majah": "ibnmajah",
 }
