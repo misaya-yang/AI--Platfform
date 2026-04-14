@@ -1,6 +1,5 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
-import LanguageDetector from "i18next-browser-languagedetector";
 
 import zhCN from "./locales/zh-CN.json";
 import enUS from "./locales/en-US.json";
@@ -33,10 +32,20 @@ const resources = {
   },
 };
 
+// Deterministic language init — NO LanguageDetector.
+// LanguageDetector has too many implicit sources (navigator, htmlTag, querystring)
+// that override the intended default. Instead: read localStorage directly.
+const savedLng = typeof window !== "undefined"
+  ? localStorage.getItem("i18nextLng")
+  : null;
+const initialLng = savedLng && APP_LOCALE_SET.has(savedLng)
+  ? savedLng as AppLocale
+  : DEFAULT_LOCALE;
+
 i18n
-  .use(LanguageDetector)
   .use(initReactI18next)
   .init({
+    lng: initialLng,
     resources,
     fallbackLng: DEFAULT_LOCALE,
     supportedLngs: [...APP_LOCALES],
@@ -50,19 +59,15 @@ i18n
     interpolation: {
       escapeValue: false,
     },
-    detection: {
-      // Do NOT include "navigator" — browser system language (often zh-CN
-      // for Chinese users) would override the en-US default on every fresh
-      // visit, even after clearing localStorage.  With this order:
-      // - First visit: no localStorage → fallback to en-US ✓
-      // - User switches language in UI → saved to localStorage ✓
-      // - Next visit: reads from localStorage ✓
-      order: ["localStorage", "htmlTag"],
-      caches: ["localStorage"],
-      lookupLocalStorage: "i18nextLng",
-      convertDetectedLanguage: (lng) => resolveAppLocale(lng),
-    },
   });
+
+// When user switches language via UI, persist to localStorage so it sticks.
+i18n.on("languageChanged", (lng) => {
+  if (typeof window !== "undefined") {
+    localStorage.setItem("i18nextLng", lng);
+    document.documentElement.lang = lng;
+  }
+});
 
 export default i18n;
 
