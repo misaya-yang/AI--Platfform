@@ -24,6 +24,11 @@ def parse_args() -> argparse.Namespace:
     sync_subparsers.add_parser("hadith")
     sync_subparsers.add_parser("dua")
 
+    enrich_parser = subparsers.add_parser("enrich")
+    enrich_subparsers = enrich_parser.add_subparsers(dest="enrich_command", required=True)
+    grades_parser = enrich_subparsers.add_parser("grades")
+    grades_parser.add_argument("--dry-run", action="store_true")
+
     db_parser = subparsers.add_parser("db")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
     db_subparsers.add_parser("migrate")
@@ -51,6 +56,18 @@ async def _run() -> int:
                     print(json.dumps(await runtime.bootstrap_service.get_canonical_summary(), ensure_ascii=False, indent=2))
                 finally:
                     await runtime.close()
+            return 0
+        finally:
+            await db.close()
+
+    if args.command == "enrich":
+        db = Database(settings.database)
+        await db.connect()
+        try:
+            if args.enrich_command == "grades":
+                from .services.hadith_grade_enrichment import enrich_grades
+                result = await enrich_grades(db, dry_run=args.dry_run)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         finally:
             await db.close()
