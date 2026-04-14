@@ -411,17 +411,21 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   });
 
   // -------------------------------------------------------------------------
-  // Sync SDK messages -> our ChatMessage state
+  // Sync SDK messages -> our ChatMessage state (RAF-batched)
+  //
+  // Instead of calling setMessages on every token (~60/s → 60 re-renders/s),
+  // buffer the latest SDK snapshot in a ref and flush once per animation frame.
+  // This reduces re-renders to ~60 fps max while keeping the UI responsive.
   // -------------------------------------------------------------------------
 
   const prevSdkMessagesRef = useRef<Message[]>([]);
+  const pendingMessagesRef = useRef<ChatMessage[] | null>(null);
+  const rafIdRef = useRef<number | null>(null);
 
+  // On every SDK message change, compute ChatMessage[] but only store in ref
   useEffect(() => {
     const sdkMessages = stream.messages;
-    // Skip sync when SDK has no messages (initial/reset state) -- let
-    // session history keep driving the message list.
     if (sdkMessages.length === 0 && messages.length > 0) return;
-    // Avoid redundant updates when SDK messages haven't changed
     if (sdkMessages === prevSdkMessagesRef.current) return;
     prevSdkMessagesRef.current = sdkMessages;
 
@@ -430,9 +434,41 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
       stream.isLoading,
     );
     if (chatMessages.length > 0) {
-      setMessages(chatMessages);
+      pendingMessagesRef.current = chatMessages;
     }
-  }, [stream.messages, stream.isLoading, setMessages, messages.length]);
+  }, [stream.messages, stream.isLoading, messages.length]);
+
+  // RAF loop: flush pending messages to state at most once per frame
+  useEffect(() => {
+    if (!stream.isLoading) {
+      // Not streaming — flush immediately and stop RAF loop
+      if (pendingMessagesRef.current) {
+        setMessages(pendingMessagesRef.current);
+        pendingMessagesRef.current = null;
+      }
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      return;
+    }
+
+    const tick = () => {
+      if (pendingMessagesRef.current) {
+        setMessages(pendingMessagesRef.current);
+        pendingMessagesRef.current = null;
+      }
+      rafIdRef.current = requestAnimationFrame(tick);
+    };
+    rafIdRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+    };
+  }, [stream.isLoading, setMessages]);
 
   // Keep loading state in sync
   useEffect(() => {
