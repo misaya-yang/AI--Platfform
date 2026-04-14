@@ -773,7 +773,15 @@ export function useChatSession() {
       });
     };
 
-    const syncTurnStateToMessage = () => {
+    // RAF-batched sync: buffer turn state updates and flush once per frame
+    // to avoid ~60 setState calls/s during token streaming.
+    let pendingSyncTurnState = false;
+    let syncRafId: number | null = null;
+
+    const flushTurnStateToMessage = () => {
+      if (!pendingSyncTurnState) return;
+      pendingSyncTurnState = false;
+
       content = streamTurnState.content;
       firstTokenMs = streamTurnState.firstTokenMs ?? firstTokenMs;
       durationMs = streamTurnState.durationMs ?? durationMs;
@@ -802,6 +810,16 @@ export function useChatSession() {
             : m
         )
       );
+    };
+
+    const syncTurnStateToMessage = () => {
+      pendingSyncTurnState = true;
+      if (syncRafId === null) {
+        syncRafId = requestAnimationFrame(() => {
+          syncRafId = null;
+          flushTurnStateToMessage();
+        });
+      }
     };
 
     try {
@@ -2013,6 +2031,10 @@ export function useChatSession() {
         }
       }
 
+      // Cancel pending RAF and flush before final update
+      if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
+      flushTurnStateToMessage();
+
       // Final update
       const finishedAtMs = Date.now();
       streamTurnState = completeStreamTurn(streamTurnState, finishedAtMs);
@@ -2060,6 +2082,7 @@ export function useChatSession() {
       });
 
     } catch (error: any) {
+      if (syncRafId !== null) { cancelAnimationFrame(syncRafId); syncRafId = null; }
       if (error.name !== "AbortError") {
         const finishedAtMs = Date.now();
         streamTurnState = failStreamTurn(
