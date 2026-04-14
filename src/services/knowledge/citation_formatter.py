@@ -155,7 +155,7 @@ class CitationFormatter:
                         or source_ref.get("ayah")
                     )
                 if source_type == IslamicSourceType.HADITH:
-                    return not source_ref.get("hadith_number")
+                    return not (source_ref.get("hadith_number") or source_ref.get("book") or source_ref.get("book_number"))
                 if source_type == IslamicSourceType.FIQH:
                     return not source_ref.get("topic")
                 return False

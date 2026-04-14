@@ -77,6 +77,7 @@ async def _embed_store(db, vs, embedder, collection, segments, dry_run=False):
                     "segment_id": seg["segment_id"], "tenant_id": TENANT_ID,
                     "text": seg["text"][:1000], "source_type": "hadith",
                     "citation_text": seg.get("citation_text", ""),
+                    "source_reference": seg.get("source_reference", ""),
                     "language": "ar_en", "section_title": seg.get("section_header", ""),
                     "level": seg.get("level", 3),
                 },
@@ -192,7 +193,7 @@ async def run(args):
             l1_text += f"This is one of the most important collections in Islamic scholarship."
             segments.append(_make_seg(
                 l1_id, doc_id, 0, l1_text, 1, None,
-                title, {"collection": coll_name, "authority_rank": 2},
+                title, {"collection": title, "authority_rank": 2},
                 title,
             ))
 
@@ -214,7 +215,7 @@ async def run(args):
                 segments.append(_make_seg(
                     l2_id, doc_id, 1_000_000 + book_num, l2_text, 2, l1_id,
                     f"{title}, Book {book_num}",
-                    {"collection": coll_name, "book_number": book_num, "authority_rank": 2},
+                    {"collection": title, "book": book_num, "authority_rank": 2},
                     f"{title} - Book {book_num}",
                 ))
 
@@ -238,7 +239,7 @@ async def run(args):
                         _uuid(f"hadith-l3-{coll_name}-{hnum}"), doc_id, l3_pos, l3_text,
                         3, l2_id,
                         f"{title}, Book {book_num}, Hadith {hnum}",
-                        {"collection": coll_name, "book_number": book_num, "hadith_number": str(hnum), "authority_rank": 2},
+                        {"collection": title, "book": book_num, "hadith_number": str(hnum), "authority_rank": 2},
                         f"{title} - Book {book_num}",
                     ))
 

@@ -487,13 +487,17 @@ class IslamicMetadataExtractor:
 
         elif source_type == IslamicSourceType.HADITH:
             collection = reference.get("collection", "")
-            book = reference.get("book")
+            book = reference.get("book") or reference.get("book_number")
+            book_name = reference.get("book_name", "")
             hadith_num = reference.get("hadith_number")
             parts = []
             if collection:
                 parts.append(collection)
             if book and collection != "Bulugh Al-Maram":
-                parts.append(f"Book {book}")
+                if book_name:
+                    parts.append(f"Book {book} ({book_name})")
+                else:
+                    parts.append(f"Book {book}")
             if hadith_num:
                 parts.append(f"Hadith {hadith_num}")
             elif collection:
