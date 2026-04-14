@@ -363,7 +363,18 @@ export const StreamOutput = memo(function StreamOutput({
   if (!text) return null;
 
   return (
-    <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-slate-200/70 dark:prose-pre:border-slate-700/60 prose-pre:bg-slate-100/70 dark:prose-pre:bg-slate-900/60 prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-slate-300 dark:prose-blockquote:border-l-slate-600${rtl ? " text-right" : ""}`}>
+    <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-slate-200/70 dark:prose-pre:border-slate-700/60 prose-pre:bg-slate-100/70 dark:prose-pre:bg-slate-900/60 prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-slate-300 dark:prose-blockquote:border-l-slate-600${rtl ? " text-right" : ""}${isStreaming ? " streaming-fade-in" : ""}`}>
+      {isStreaming && (
+        <style>{`
+          .streaming-fade-in > * {
+            animation: stream-appear 0.3s ease-out both;
+          }
+          @keyframes stream-appear {
+            from { opacity: 0.4; }
+            to { opacity: 1; }
+          }
+        `}</style>
+      )}
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,

@@ -421,8 +421,12 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   const prevSdkMessagesRef = useRef<Message[]>([]);
   const pendingMessagesRef = useRef<ChatMessage[] | null>(null);
   const rafIdRef = useRef<number | null>(null);
+  // Cache completed messages so their object references stay stable (React.memo)
+  const stableHistoryRef = useRef<ChatMessage[]>([]);
 
-  // On every SDK message change, compute ChatMessage[] but only store in ref
+  // On every SDK message change, compute ChatMessage[] but only store in ref.
+  // Reuse cached references for completed (non-streaming) messages so that
+  // React.memo on ChatMessageItem can skip re-rendering the entire history.
   useEffect(() => {
     const sdkMessages = stream.messages;
     if (sdkMessages.length === 0 && messages.length > 0) return;
@@ -433,9 +437,28 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
       sdkMessages,
       stream.isLoading,
     );
-    if (chatMessages.length > 0) {
-      pendingMessagesRef.current = chatMessages;
+    if (chatMessages.length === 0) return;
+
+    // Stable-reference optimization: reuse previous ChatMessage objects for
+    // all completed messages. Only the last (streaming) message gets a new ref.
+    const history = stableHistoryRef.current;
+    const result: ChatMessage[] = [];
+    for (let i = 0; i < chatMessages.length; i++) {
+      const msg = chatMessages[i];
+      if (
+        i < history.length &&
+        history[i].id === msg.id &&
+        history[i].content === msg.content &&
+        history[i].status === msg.status
+      ) {
+        // Same message, same content — reuse old reference
+        result.push(history[i]);
+      } else {
+        result.push(msg);
+      }
     }
+    stableHistoryRef.current = result;
+    pendingMessagesRef.current = result;
   }, [stream.messages, stream.isLoading, messages.length]);
 
   // RAF loop: flush pending messages to state at most once per frame
