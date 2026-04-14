@@ -481,7 +481,12 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
         setMessages(pendingMessagesRef.current);
         pendingMessagesRef.current = null;
       }
-      rafIdRef.current = requestAnimationFrame(tick);
+      // Only re-schedule if still streaming; avoids idle CPU spin
+      if (stream.isLoading) {
+        rafIdRef.current = requestAnimationFrame(tick);
+      } else {
+        rafIdRef.current = null;
+      }
     };
     rafIdRef.current = requestAnimationFrame(tick);
 

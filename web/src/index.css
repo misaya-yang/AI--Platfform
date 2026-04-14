@@ -421,3 +421,12 @@
   font-style: italic;
   margin: 12px 0;
 }
+
+/* Streaming text fade-in animation */
+.streaming-fade-in > * {
+  animation: stream-appear 0.3s ease-out both;
+}
+@keyframes stream-appear {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}

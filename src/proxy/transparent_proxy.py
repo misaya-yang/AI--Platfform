@@ -48,9 +48,8 @@ class ProxyQueueTimeoutError(RuntimeError):
 
 
 # LangGraph 需要 assistant_id 的路径模式（正则匹配）
-import re as _re
-_LANGGRAPH_RUN_RE = _re.compile(
-    r"/(runs|threads/[^/]+/runs)(/stream|/wait)?$", _re.IGNORECASE
+_LANGGRAPH_RUN_RE = re.compile(
+    r"/(runs|threads/[^/]+/runs)(/stream|/wait)?$", re.IGNORECASE
 )
 
 # LangGraph API 操作类型映射（用于限流）
