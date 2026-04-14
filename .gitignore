@@ -147,3 +147,12 @@ docs/screenshots/
 # ======================== Generated / Temp ========================
 web/package-lock.json
 docs/reviews/
+# Generated data files
+data/hadith_registry.json
+
+# Old reports
+AI-*.md
+CLAUDE_CODE_OPTIMIZATION_PROMPT.md
+
+# Test output
+test-results/
