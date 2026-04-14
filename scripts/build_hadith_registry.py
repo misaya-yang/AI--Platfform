@@ -79,9 +79,9 @@ HF_BASE = "https://huggingface.co/datasets/meeAtif/hadith_datasets/resolve/main"
 HF_COLLECTIONS = {
     "Sahih al-Bukhari": "bukhari",
     "Sahih Muslim": "muslim",
-    "Sunan Abu Dawud": "abudawud",
-    "Jami at-Tirmidhi": "tirmidhi",
-    "Sunan an-Nasai": "nasai",
+    "Sunan Abi Dawud": "abudawud",
+    "Jami' at-Tirmidhi": "tirmidhi",
+    "Sunan an-Nasa'i": "nasai",
     "Sunan Ibn Majah": "ibnmajah",
 }
 
@@ -91,7 +91,7 @@ CDN_COLLECTIONS = ["bukhari", "muslim", "abudawud", "tirmidhi", "nasai", "ibnmaj
 
 
 def _get_client() -> httpx.Client:
-    return httpx.Client(timeout=120.0, transport=httpx.HTTPTransport(retries=3))
+    return httpx.Client(timeout=120.0, follow_redirects=True, transport=httpx.HTTPTransport(retries=3))
 
 
 # ---------------------------------------------------------------------------
