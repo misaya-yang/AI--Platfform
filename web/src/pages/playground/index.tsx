@@ -27,7 +27,7 @@ import { MessageSquarePlus, Trash2, ArrowDown, PanelLeft, X } from "lucide-react
 import { useAppStore } from "@/store/useAppStore";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { formatDateTime } from "@/utils/intl";
-import { WahdaRecommendations } from "./WahdaRecommendations";
+// WahdaRecommendations hidden from web — feature is for mobile app only
 import { useTypeahead } from "./useTypeahead";
 
 import { usePlaygroundSessions } from "./hooks/usePlaygroundSessions";
@@ -472,17 +472,13 @@ export function PlaygroundPage() {
             </div>
           </div>
           ) : (
-          /* Normal empty state: show Wahda recommendations for Imam, generic for others */
-          isImamAgent ? (
-          <WahdaRecommendations onSelectQuestion={(q) => handleSend([{ type: "text", data: q }])} />
-          ) : (
+          /* Normal empty state for all agents */
           <div className="flex h-full flex-col items-center justify-center p-8 text-center">
             <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <h2 className="text-xl font-semibold tracking-tight">{t("playground.typeToStart", "Type a message to start.")}</h2>
           </div>
-          )
           )
         ) : (
           <ChatWindow
