@@ -290,12 +290,22 @@ function filterToolJsonOutput(text: string): string {
     /((?:\*{2})?(?:Sources?|المصادر|来源)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
     (_match, prefix, citations) => {
       // Split before each [N] that follows text (not at start)
-      const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);
+      // Also handle zero-whitespace: [5]NextCitation or [5]All information...
+      const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s*(?=[^\[\s\d])/);
       if (parts.length >= 2) {
         return prefix.trim() + '\n\n' + parts.map((p: string) => p.trim()).filter(Boolean).join('\n\n');
       }
       return _match;
     }
+  );
+
+  // ── Computational Sensor: Closing phrase line-break ──
+  // LLMs sometimes concatenate the disclaimer directly after the last citation
+  // marker: "[5]All information provided..." without any whitespace/newline.
+  // Ensure the closing phrase always starts on its own paragraph.
+  filtered = filtered.replace(
+    /(\[\d+\])\s*(All information provided|جميع المعلومات المقدمة|所有信息均来源|Semua informasi|Semua maklumat)/g,
+    '$1\n\n$2'
   );
 
   // Clean up excessive newlines left behind
