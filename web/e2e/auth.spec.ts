@@ -29,6 +29,6 @@ test("login shows readable error for invalid credentials without crashing", asyn
   await passwordInput.fill("definitely-wrong-password");
   await page.getByRole("button", { name: loginButtonName }).click();
 
-  await expect(page.locator("body")).toContainText(/invalid credentials|用户名或密码错误|邮箱或密码错误/i);
+  await expect(page.locator("body")).toContainText(/invalid credentials|invalid email or password|用户名或密码错误|邮箱或密码错误/i);
   await expect(page).toHaveURL(/\/login/);
 });
