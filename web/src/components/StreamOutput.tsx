@@ -284,70 +284,30 @@ function filterToolJsonOutput(text: string): string {
   // ── Computational Sensor: Strip raw [REF-N] internal markers ──
   filtered = filtered.replace(/\[REF[-–]?\d+\]/gi, '');
 
-  // ── Computational Sensor: Citation line-break normalization ──
-  // LLMs output Sources/来源/المصادر inline on one line.
-  // Simple approach: insert \n\n before every [N] that has text before it.
-  // This turns "Sources: [1] Sahih ... [2] Quran ..." into separate lines.
+  // ── Computational Sensor: Closing phrase line-break ──
+  // Ensure closing disclaimer starts on its own paragraph even when
+  // concatenated after last citation: "[5]All information..." → "[5]\n\nAll..."
   filtered = filtered.replace(
-    /([^\n\[])(\s*\[(\d+)\]\s*)/g,
-    (match, before, bracketChunk, num) => {
-      // Only break if this [N] is preceded by citation-like content
-      // (not at start of line or after "Sources:" header)
-      if (/[.،。\d]\s*$/.test(before) || /\w\s*$/.test(before)) {
-        return before + '\n\n' + bracketChunk.trim() + ' ';
-      }
-      return match;
-    }
+    /(\[\d+\])\s*(All information provided|جميع المعلومات المقدمة|所有信息均来源)/g,
+    '$1\n\n$2'
   );
 
-  // ── Computational Sensor: Closing phrase line-break ──
-  // Ensure the closing disclaimer always starts on its own paragraph.
-  const closingPhrases = [
-    'All information provided',
-    'جميع المعلومات المقدمة',
-    '所有信息均来源',
-    'Semua informasi yang diberikan',
-    'Semua maklumat yang diberikan',
-    'فراہم کردہ تمام معلومات',
-    'प्रदान की गई सभी जानकारी',
-  ];
-  for (const phrase of closingPhrases) {
-    // Insert paragraph break before closing phrase if missing
-    const escapedPhrase = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    filtered = filtered.replace(
-      new RegExp(`(?<!\\n\\n)(${escapedPhrase})`, 'g'),
-      '\n\n$1'
-    );
-  }
-
-  // ── Computational Sensor: Sources label language alignment ──
-  // PRD requires Sources label to follow the response language.
-  // Detect dominant script in the response body, then replace
-  // English "Sources:" with the matching label.
-  const sourcesLabelMap: Record<string, string> = {
-    ar: '**المصادر:**',
-    zh: '**来源：**',
-    id: '**Sumber:**',
-    ms: '**Sumber:**',
-    ur: '**ذرائع:**',
-    hi: '**स्रोत:**',
-  };
-  // Count CJK / Arabic / Devanagari chars to detect dominant script
-  const cjkCount = (filtered.match(/[\u4e00-\u9fff]/g) || []).length;
-  const arabicCount = (filtered.match(/[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]/g) || []).length;
-  const devanagariCount = (filtered.match(/[\u0900-\u097f]/g) || []).length;
-  const totalChars = filtered.length;
-  let detectedLang = 'en';
-  if (cjkCount > totalChars * 0.1) detectedLang = 'zh';
-  else if (arabicCount > totalChars * 0.1) detectedLang = 'ar';
-  else if (devanagariCount > totalChars * 0.05) detectedLang = 'hi';
-  // Indonesian/Malay/Urdu: harder to detect by script alone, skip auto-detection
-
-  const localizedLabel = sourcesLabelMap[detectedLang];
-  if (localizedLabel) {
-    // Replace "**Sources:**" or "Sources:" with localized version
-    filtered = filtered.replace(/\*{0,2}Sources?\s*:?\s*\*{0,2}/gi, localizedLabel);
-  }
+  // ── Computational Sensor: Citation line-break normalization ──
+  // LLMs output Sources inline ("Citation [1] Citation [2]...").
+  // Markdown treats single \n as space. This sensor ensures each
+  // citation renders on its own line by converting to paragraph breaks.
+  // Handles: "Sources:", "المصادر:", "来源:" + [N] patterns.
+  filtered = filtered.replace(
+    /((?:\*{2})?(?:Sources?|المصادر|来源)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
+    (_match, prefix, citations) => {
+      // Split before each [N] that follows text (not at start)
+      const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);
+      if (parts.length >= 2) {
+        return prefix.trim() + '\n\n' + parts.map((p: string) => p.trim()).filter(Boolean).join('\n\n');
+      }
+      return _match;
+    }
+  );
 
   // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
