@@ -288,7 +288,7 @@ function filterToolJsonOutput(text: string): string {
   // Ensure closing disclaimer starts on its own paragraph even when
   // concatenated after last citation: "[5]All information..." → "[5]\n\nAll..."
   filtered = filtered.replace(
-    /(\[\d+\])\s*(All information provided|جميع المعلومات المقدمة|所有信息均来源)/g,
+    /(\[\d+\])\s*(All information provided|جميع المعلومات المقدمة|所有信息均来源|Semua informasi yang diberikan|Semua maklumat yang diberikan|فراہم کردہ تمام معلومات|प्रदान की गई सभी जानकारी)/g,
     '$1\n\n$2'
   );
 
@@ -298,7 +298,7 @@ function filterToolJsonOutput(text: string): string {
   // citation renders on its own line by converting to paragraph breaks.
   // Handles: "Sources:", "المصادر:", "来源:" + [N] patterns.
   filtered = filtered.replace(
-    /((?:\*{2})?(?:Sources?|المصادر|来源)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
+    /((?:\*{2})?(?:Sources?|المصادر|来源|Sumber|ذرائع|स्रोत)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
     (_match, prefix, citations) => {
       // Split before each [N] that follows text (not at start)
       const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);
