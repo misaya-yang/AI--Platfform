@@ -132,7 +132,7 @@ async def enrich_grades(db: Database, *, dry_run: bool = False) -> dict[str, Any
                     """INSERT INTO hadith_grades
                        (hadith_item_id, language, grade, graded_by, raw_payload, updated_at)
                        VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
-                       ON CONFLICT (hadith_item_id, language, graded_by) DO NOTHING""",
+                       ON CONFLICT (hadith_item_id, language, COALESCE(graded_by, '')) DO NOTHING""",
                     grade_rows,
                 )
                 inserted = len(grade_rows)
