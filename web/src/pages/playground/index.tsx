@@ -557,10 +557,21 @@ export function PlaygroundPage() {
 
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
-        <div className="mx-auto w-full max-w-4xl">
+        <div
+          className="mx-auto w-full max-w-4xl"
+          onBlurCapture={(e) => {
+            // Dismiss typeahead when focus leaves the input area entirely
+            if (isImamAgent && !e.currentTarget.contains(e.relatedTarget as Node)) {
+              typeahead.dismiss();
+            }
+          }}
+        >
           {/* Type-ahead suggestions (Imam only, hide during/after streaming) */}
           {isImamAgent && typeahead.visible && typeahead.suggestions.length > 0 && !uiStreamingActive && (
-            <div className="mb-2 rounded-xl border bg-card/95 backdrop-blur-sm shadow-lg overflow-hidden">
+            <div
+              className="mb-2 rounded-xl border bg-card/95 backdrop-blur-sm shadow-lg overflow-hidden"
+              onMouseDown={(e) => e.preventDefault() /* keep input focused so onBlur doesn't fire before click */}
+            >
               {typeahead.suggestions.map((s, i) => (
                 <button
                   key={i}
