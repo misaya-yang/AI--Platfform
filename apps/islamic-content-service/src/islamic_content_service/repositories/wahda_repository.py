@@ -91,16 +91,19 @@ class WahdaRepository:
         return [r["question"] for r in rows]
 
     async def search_questions(
-        self, query: str, category_prefix: str = "typeahead_", limit: int = 3,
+        self, full_input: str, category_prefix: str = "typeahead_", limit: int = 3,
     ) -> list[str]:
-        """Fuzzy-match questions by substring, scoped to typeahead categories."""
+        """Fuzzy-match questions by substring, prefix matches ranked first."""
         sql = """
-        SELECT question FROM islamic_content.question_pool
+        SELECT question,
+               CASE WHEN LOWER(question) LIKE $2 || '%' THEN 0 ELSE 1 END AS rank
+        FROM islamic_content.question_pool
         WHERE category LIKE $1 AND is_active = true
-          AND LOWER(question) LIKE '%' || $2 || '%'
-        ORDER BY RANDOM() LIMIT $3
+          AND LOWER(question) LIKE '%' || $3 || '%'
+        ORDER BY rank, RANDOM() LIMIT $4
         """
-        rows = await self._db.fetch(sql, f"{category_prefix}%", query.lower(), limit)
+        lowered = full_input.lower()
+        rows = await self._db.fetch(sql, f"{category_prefix}%", lowered, lowered, limit)
         return [r["question"] for r in rows]
 
     async def get_daily_questions(self, today: date, count: int = 5) -> list[str]:

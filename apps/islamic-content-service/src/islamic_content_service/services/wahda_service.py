@@ -74,11 +74,9 @@ class WahdaService:
         if word not in valid:
             return []
 
-        # Multi-word: fuzzy-match against question pool using all keywords
+        # Multi-word: fuzzy-match against question pool, prefix matches first
         if len(words) >= 2:
-            # Use the longest meaningful substring for matching
-            search_term = " ".join(words[1:])  # skip the question word
-            results = await self._repo.search_questions(search_term, limit=3)
+            results = await self._repo.search_questions(prefix, limit=3)
             if results:
                 return results
 
