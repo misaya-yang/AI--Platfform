@@ -90,6 +90,19 @@ class WahdaRepository:
         rows = await self._db.fetch(sql, category, limit)
         return [r["question"] for r in rows]
 
+    async def search_questions(
+        self, query: str, category_prefix: str = "typeahead_", limit: int = 3,
+    ) -> list[str]:
+        """Fuzzy-match questions by substring, scoped to typeahead categories."""
+        sql = """
+        SELECT question FROM islamic_content.question_pool
+        WHERE category LIKE $1 AND is_active = true
+          AND LOWER(question) LIKE '%' || $2 || '%'
+        ORDER BY RANDOM() LIMIT $3
+        """
+        rows = await self._db.fetch(sql, f"{category_prefix}%", query.lower(), limit)
+        return [r["question"] for r in rows]
+
     async def get_daily_questions(self, today: date, count: int = 5) -> list[str]:
         """Get deterministic daily rotation of questions (same set per day)."""
         seed = today.toordinal()

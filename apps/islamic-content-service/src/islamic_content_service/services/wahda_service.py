@@ -68,10 +68,21 @@ class WahdaService:
 
     async def get_typeahead(self, query_prefix: str) -> list[str]:
         prefix = query_prefix.strip().lower()
-        valid = {"how", "what", "when", "who", "why", "where"}
-        word = prefix.split()[0] if prefix else ""
+        valid = {"how", "what", "when", "who", "why", "where", "is", "can", "does"}
+        words = prefix.split()
+        word = words[0] if words else ""
         if word not in valid:
             return []
+
+        # Multi-word: fuzzy-match against question pool using all keywords
+        if len(words) >= 2:
+            # Use the longest meaningful substring for matching
+            search_term = " ".join(words[1:])  # skip the question word
+            results = await self._repo.search_questions(search_term, limit=3)
+            if results:
+                return results
+
+        # Single word or no fuzzy matches: fallback to category random
         category = f"typeahead_{word}"
         return await self._repo.get_questions_by_category(category, limit=3, random=True)
 
