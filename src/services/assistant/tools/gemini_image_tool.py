@@ -37,6 +37,7 @@ class GeminiImageResult:
     blocked: bool = False
     block_reason: str | None = None
     duration_ms: float = 0
+    provider: str = "google"
 
 
 class GeminiImageGenerator:
