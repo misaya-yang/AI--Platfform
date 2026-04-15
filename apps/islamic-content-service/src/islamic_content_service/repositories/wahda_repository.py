@@ -93,17 +93,21 @@ class WahdaRepository:
     async def search_questions(
         self, full_input: str, category_prefix: str = "typeahead_", limit: int = 3,
     ) -> list[str]:
-        """Fuzzy-match questions by substring, prefix matches ranked first."""
+        """Fuzzy-match questions by substring, prefix matches ranked first.
+
+        Used by /typeahead API (Flutter app). Web uses client-side pool filtering.
+        """
+        # Escape LIKE wildcards to prevent injection
+        escaped = full_input.lower().replace("%", r"\%").replace("_", r"\_")
         sql = """
         SELECT question,
-               CASE WHEN LOWER(question) LIKE $2 || '%' THEN 0 ELSE 1 END AS rank
+               CASE WHEN LOWER(question) LIKE $2 || '%' ESCAPE '\\' THEN 0 ELSE 1 END AS rank
         FROM islamic_content.question_pool
         WHERE category LIKE $1 AND is_active = true
-          AND LOWER(question) LIKE '%' || $3 || '%'
+          AND LOWER(question) LIKE '%' || $3 || '%' ESCAPE '\\'
         ORDER BY rank, RANDOM() LIMIT $4
         """
-        lowered = full_input.lower()
-        rows = await self._db.fetch(sql, f"{category_prefix}%", lowered, lowered, limit)
+        rows = await self._db.fetch(sql, f"{category_prefix}%", escaped, escaped, limit)
         return [r["question"] for r in rows]
 
     async def get_all_typeahead_questions(self) -> list[str]:

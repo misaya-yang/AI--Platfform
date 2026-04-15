@@ -59,9 +59,16 @@ async def get_typeahead(
 async def get_typeahead_pool(
     svc=Depends(get_wahda_service),
 ):
-    """Get all typeahead questions for client-side fuzzy matching."""
+    """Get all typeahead questions for client-side fuzzy matching.
+
+    Response is cacheable — question pool changes infrequently.
+    """
+    from fastapi.responses import JSONResponse
     pool = await svc.get_typeahead_pool()
-    return {"questions": pool}
+    return JSONResponse(
+        content={"questions": pool},
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/trending", response_model=TrendingResponse)
