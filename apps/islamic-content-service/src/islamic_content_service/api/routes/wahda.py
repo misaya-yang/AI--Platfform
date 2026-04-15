@@ -55,6 +55,15 @@ async def get_typeahead(
     return TypeaheadResponse(suggestions=suggestions)
 
 
+@router.get("/typeahead/pool")
+async def get_typeahead_pool(
+    svc=Depends(get_wahda_service),
+):
+    """Get all typeahead questions for client-side fuzzy matching."""
+    pool = await svc.get_typeahead_pool()
+    return {"questions": pool}
+
+
 @router.get("/trending", response_model=TrendingResponse)
 async def get_trending(
     svc=Depends(get_wahda_service),

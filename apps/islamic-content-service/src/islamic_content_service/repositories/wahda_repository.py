@@ -106,6 +106,16 @@ class WahdaRepository:
         rows = await self._db.fetch(sql, f"{category_prefix}%", lowered, lowered, limit)
         return [r["question"] for r in rows]
 
+    async def get_all_typeahead_questions(self) -> list[str]:
+        """Get all typeahead + daily questions for client-side pool."""
+        sql = """
+        SELECT DISTINCT question FROM islamic_content.question_pool
+        WHERE is_active = true
+        ORDER BY question
+        """
+        rows = await self._db.fetch(sql)
+        return [r["question"] for r in rows]
+
     async def get_daily_questions(self, today: date, count: int = 5) -> list[str]:
         """Get deterministic daily rotation of questions (same set per day)."""
         seed = today.toordinal()

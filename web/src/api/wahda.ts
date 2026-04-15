@@ -39,6 +39,14 @@ export async function getTypeahead(prefix: string): Promise<string[]> {
   return data.suggestions || [];
 }
 
+/** Get full question pool for client-side typeahead filtering */
+export async function getTypeaheadPool(): Promise<string[]> {
+  const { data } = await api.get<{ questions: string[] }>(
+    "/api/v1/islamic/wahda/typeahead/pool"
+  );
+  return data.questions || [];
+}
+
 /** Trending / frequently asked questions (past 7 days) */
 export async function getTrending(): Promise<TrendingResponse> {
   const { data } = await api.get<TrendingResponse>(

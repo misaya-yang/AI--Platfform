@@ -84,6 +84,10 @@ class WahdaService:
         category = f"typeahead_{word}"
         return await self._repo.get_questions_by_category(category, limit=3, random=True)
 
+    async def get_typeahead_pool(self) -> list[str]:
+        """Return all typeahead questions for client-side filtering."""
+        return await self._repo.get_all_typeahead_questions()
+
     # ------------------------------------------------------------------
     # Trending (§3.4)
     # ------------------------------------------------------------------
