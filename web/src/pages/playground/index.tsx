@@ -558,8 +558,8 @@ export function PlaygroundPage() {
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
         <div className="mx-auto w-full max-w-4xl">
-          {/* Type-ahead suggestions (Imam only) */}
-          {isImamAgent && typeahead.visible && typeahead.suggestions.length > 0 && (
+          {/* Type-ahead suggestions (Imam only, hide during/after streaming) */}
+          {isImamAgent && typeahead.visible && typeahead.suggestions.length > 0 && !uiStreamingActive && (
             <div className="mb-2 rounded-xl border bg-card/95 backdrop-blur-sm shadow-lg overflow-hidden">
               {typeahead.suggestions.map((s, i) => (
                 <button

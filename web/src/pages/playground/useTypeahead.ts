@@ -11,6 +11,8 @@ export function useTypeahead() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [visible, setVisible] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  // Suppress re-trigger after dismiss (e.g. input clear fires onTextChange(""))
+  const suppressedRef = useRef(false);
 
   const check = useCallback((text: string) => {
     const trimmed = text.trim().toLowerCase();
@@ -19,6 +21,12 @@ export function useTypeahead() {
     if (!trimmed || trimmed.length > 30 || trimmed.includes("\n")) {
       setSuggestions([]);
       setVisible(false);
+      return;
+    }
+
+    // If dismissed, don't re-trigger until user types a new word
+    if (suppressedRef.current) {
+      suppressedRef.current = false;
       return;
     }
 
@@ -50,6 +58,7 @@ export function useTypeahead() {
   const dismiss = useCallback(() => {
     setSuggestions([]);
     setVisible(false);
+    suppressedRef.current = true;
   }, []);
 
   // Cleanup timer on unmount
