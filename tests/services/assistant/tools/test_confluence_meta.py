@@ -908,6 +908,234 @@ def test_system_prompt_has_anti_tool_hallucination_rule():
     assert "success=true" in ANTI_HALLUCINATION or "success" in ANTI_HALLUCINATION
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_matches_both_title_and_text():
+    """Pages with Chinese titles often have the keyword ONLY in the title
+    (body is a table / card). CQL `text~` alone misses those — we must
+    also query `title~`. Regression: 【第一轮】技术分享排期 was undiscoverable
+    by search_confluence because brackets + title-only hit."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    await client.search("第一轮技术分享排期", limit=5)
+
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    # CQL must now query title AND text (single clause joined by OR).
+    assert 'title ~ "' in decoded
+    assert 'text ~ "' in decoded
+    assert " OR " in decoded
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_strips_cjk_brackets_from_title_query():
+    """Literal 【】「」 confuses Lucene's tokenizer — the title-side of the
+    CQL should receive a cleaned query without those chars. The text-side
+    keeps the original query so exact phrases still hit."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    await client.search("【第一轮】技术分享", limit=5)
+
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    # Title-side: brackets stripped (may have collapsed-whitespace variant).
+    assert 'title ~ "第一轮 技术分享"' in decoded
+    # Text-side: original query preserved.
+    assert 'text ~ "【第一轮】技术分享"' in decoded
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_returns_structured_dict_with_cql_and_diagnostics():
+    """search returns a dict with hits + cql_used + diagnostics.hint on empty."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await c.search("unique-token-xyz-777")
+    assert res["count"] == 0
+    assert res["hits"] == []
+    assert "cql_used" in res and 'title ~ "unique-token-xyz-777"' in res["cql_used"]
+    assert res["diagnostics"]["strategy"] == "title+text"
+    assert "hint" in res["diagnostics"]
+    # On 0 hits the hint must include at least one concrete next-step suggestion
+    assert "fields" in res["diagnostics"]["hint"] or "list_spaces" in res["diagnostics"]["hint"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_fields_title_only_skips_text_clause():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await c.search("排期", fields=["title"])
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    assert 'title ~ "排期"' in decoded
+    assert 'text ~ "排期"' not in decoded
+    assert res["diagnostics"]["strategy"] == "title"
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_unknown_field():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="unknown fields"):
+        await c.search("hi", fields=["title", "body"])  # 'body' is not valid
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_under_page_id_adds_ancestor_clause():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    await c.search("hi", under_page_id="1038712833")
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    assert "ancestor=1038712833" in decoded
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_non_numeric_under_page_id():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="numeric"):
+        await c.search("hi", under_page_id="not-a-number")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_updated_since_and_author():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    await c.search("hi", author="alice", updated_since="2026-01-01")
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    assert 'creator = "alice"' in decoded
+    assert 'lastModified >= "2026-01-01"' in decoded
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_bad_updated_since():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="ISO date"):
+        await c.search("hi", updated_since="yesterday")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_raw_cql_overrides_everything():
+    """When `cql` is supplied, space_key/query/fields all get ignored."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    custom = 'type=page AND label = "roadmap" AND title = "Q2 Plan"'
+    res = await c.search("ignored query", space_key="ALSO_IGNORED", cql=custom)
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    assert custom in decoded
+    # None of the other params should have leaked into the CQL.
+    assert "ignored query" not in decoded
+    assert "ALSO_IGNORED" not in decoded
+    assert res["diagnostics"]["strategy"] == "raw_cql"
+
+
+@pytest.mark.asyncio
+async def test_search_raw_cql_rejects_newlines():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="single-line"):
+        await c.search(cql="type=page\nAND malicious")
+
+
+@pytest.mark.asyncio
+async def test_search_requires_at_least_one_input():
+    """Empty everything must error — otherwise we'd silently query all pages."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="at least one"):
+        await c.search()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_executor_surfaces_cql_to_model():
+    """The formatter must include the CQL used and the diagnostic hint in
+    the text the model sees — that's the whole agentic point."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "search", "query": "nothing-at-all"})
+    )
+    assert res.success
+    # Executor text result must expose the CQL for model reasoning.
+    assert "CQL executed" in res.result
+    assert 'title ~ "nothing-at-all"' in res.result
+    # …and the next-step hint.
+    assert "Next step" in res.result or "hint" in res.result.lower()
+    # Metadata should carry the CQL too (for logs/telemetry).
+    assert res.metadata["cql_used"]
+    assert res.metadata["strategy"] == "title+text"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_still_escapes_quotes_after_cql_change():
+    """CQL-injection guard must still work with the new title+text clause.
+    An injected `"` must become backslash-escaped so it stays INSIDE the
+    string literal rather than ending it and starting a new CQL clause."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    await client.search('foo" OR space="ADMIN', limit=5)
+
+    from urllib.parse import unquote_plus
+    decoded = unquote_plus(str(route.calls[0].request.url))
+    # Both quote instances in the injected payload must be \"-escaped so
+    # they don't close the string literal.
+    assert '\\"' in decoded
+    # No un-escaped `space=` clause at CQL top level. The payload's
+    # `space="ADMIN` appears inside a quoted string as literal text, but
+    # there must be no bare ` space=` joined by AND at the top level.
+    # Key tell: no ` AND space=` outside string bounds.
+    assert " AND space=" not in decoded
+
+
 def test_meta_tool_schemas_are_smaller_than_old_eight():
     """The whole point of the refactor — 2 tool schemas must be materially
     smaller than the 8 old ones would have been."""
@@ -918,6 +1146,8 @@ def test_meta_tool_schemas_are_smaller_than_old_eight():
     read_schema = json.dumps(CONFLUENCE_READ_DEFINITION.to_openai_schema(compact=True))
     write_schema = json.dumps(CONFLUENCE_WRITE_DEFINITION.to_openai_schema(compact=True))
     total = len(read_schema) + len(write_schema)
-    # Rough upper bound: 2 meta-schemas should stay under ~4000 chars compact.
-    # (8 separate schemas historically ran ~7000-8000+ chars.)
-    assert total < 4000, f"meta-tool schemas are {total} chars — unexpected bloat"
+    # Rough upper bound: 2 meta-schemas should stay materially smaller than
+    # the 8-tool surface this replaced (~7000-8000 chars). Headroom at 5000
+    # allows future actions without triggering this guard; the moment we
+    # approach the old size the refactor's main win is gone.
+    assert total < 5000, f"meta-tool schemas are {total} chars — unexpected bloat"

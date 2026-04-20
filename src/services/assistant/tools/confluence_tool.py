@@ -364,12 +364,29 @@ CONFLUENCE_READ_DEFINITION = ToolDefinition(
         "pick what to do. This one tool covers search, full-page read, "
         "space listing, and page-tree navigation.\n\n"
         "ACTIONS (pick one, supply only the listed params):\n"
-        "  • \"search\" — find pages by keyword. Required: query. "
-        "Optional: space_key, limit (default 10, max 25). Returns title, "
-        "url, and an ~800-char structured excerpt per hit. The excerpt is "
-        "ALWAYS truncated — for list pages (schedules, rosters) the first "
-        "few items aren't the whole list. Escalate to read_page with "
-        "page_id when you need full content.\n"
+        "  • \"search\" — find pages. Several search dimensions are "
+        "available; you pick the strategy. Required: at least one of "
+        "`query`, `cql`, `author`, `updated_since`, `under_page_id`.\n"
+        "    Optional dimensions:\n"
+        "      - `fields`: which fields to match keywords against — any "
+        "subset of ['title','text']. DEFAULT ['title','text']. Pages with "
+        "Chinese titles often only match title (body is a table with no "
+        "prose) — if default returns 0, retry with fields=['title'] and a "
+        "shorter, 1-3-token query.\n"
+        "      - `space_key`: narrow to one space.\n"
+        "      - `author`: accountId or username. Filters by page creator.\n"
+        "      - `updated_since`: ISO date 'YYYY-MM-DD'. Only pages "
+        "modified on/after.\n"
+        "      - `under_page_id`: only pages under this page (subtree).\n"
+        "      - `cql`: raw Confluence CQL. OVERRIDES every other "
+        "parameter. Use for advanced ops: `title = \"exact match\"`, "
+        "`label = 'foo'`, `type = blogpost`, negative matches, etc.\n"
+        "      - `limit`: default 10, max 25.\n"
+        "    The tool RETURNS the CQL it executed + a diagnostic hint. "
+        "If hits=0, the hint tells you what to try next (e.g. "
+        "\"try fields=['title']\" or \"drop space_key\"). Read that hint "
+        "and pick ONE narrower/broader retry — don't blindly re-phrase.\n"
+        "    Excerpts are ~800 chars; for list pages escalate to read_page.\n"
         "  • \"read_page\" — fetch full content of one page (up to 20K "
         "chars, markdown-formatted). Required: ONE of page_id, title, or "
         "url. When a URL is given the tool extracts page_id automatically. "
@@ -458,6 +475,47 @@ CONFLUENCE_READ_DEFINITION = ToolDefinition(
             description="For list_spaces: filter spaces that have ALL these labels.",
             required=False,
             items={"type": "string"},
+        ),
+        # ── Search dimensions (agentic) ──
+        ToolParameter(
+            name="fields",
+            type="array",
+            description=(
+                "For search: which fields to match `query` against. Subset of "
+                "['title','text']. Default both. Use ['title'] to recover when "
+                "title-only pages (schedules, rosters) return 0 hits with default."
+            ),
+            required=False,
+            items={"type": "string", "enum": ["title", "text"]},
+        ),
+        ToolParameter(
+            name="author",
+            type="string",
+            description="For search: filter by creator (Atlassian accountId or username).",
+            required=False,
+        ),
+        ToolParameter(
+            name="updated_since",
+            type="string",
+            description="For search: ISO date 'YYYY-MM-DD' — only pages modified on/after.",
+            required=False,
+        ),
+        ToolParameter(
+            name="under_page_id",
+            type="string",
+            description="For search: restrict to descendants of this page (subtree scope).",
+            required=False,
+        ),
+        ToolParameter(
+            name="cql",
+            type="string",
+            description=(
+                "For search: raw Confluence CQL. OVERRIDES every other search "
+                "param. Use for advanced operators (exact title=, label=, "
+                "type=blogpost, negative matches). Caller is responsible for "
+                "correctness; we only reject control characters."
+            ),
+            required=False,
         ),
         ToolParameter(
             name="limit",
@@ -664,33 +722,146 @@ class ConfluenceAPIClient:
         self.v2_base_url = f"https://{domain}/wiki/api/v2"
         self.auth_header = "Basic " + b64encode(f"{email}:{api_token}".encode()).decode()
 
-    async def search(self, query: str, space_key: str | None = None, limit: int = 10) -> list[dict]:
-        """Search pages via CQL.
+    async def search(
+        self,
+        query: str = "",
+        *,
+        space_key: str | None = None,
+        fields: list[str] | None = None,
+        author: str | None = None,
+        updated_since: str | None = None,
+        under_page_id: str | None = None,
+        cql: str | None = None,
+        limit: int = 10,
+    ) -> dict:
+        """Agentic Confluence search. Returns a dict with hits + the
+        effective CQL + diagnostic hints so the caller can self-correct
+        when a query returns nothing.
 
-        `query` is injected into a CQL string literal. We escape backslashes
-        and double-quotes so a query like `foo" OR space="ADMIN` can't
-        inject extra CQL clauses and widen the search scope.
-        `space_key` is restricted to the character set Atlassian actually
-        allows for space keys (alphanumerics) to avoid injection there too.
+        Parameters (all optional but at least one of query/cql is required):
+          - query: natural-language keywords (we build CQL from it).
+          - fields: which fields to match on — any subset of
+              ["title", "text"]. Default ["title", "text"].
+          - space_key: restrict to a space (alnum; rejected otherwise).
+          - author: restrict to a user (Atlassian accountId or username).
+          - updated_since: ISO date, restricts to `lastModified >= date`.
+          - under_page_id: restrict to descendants of this page (CQL
+              `ancestor=<id>`).
+          - cql: raw CQL. When set, overrides EVERY other parameter except
+              `limit`. Use when you need operators this function doesn't
+              model (text!~, type=blogpost, label=, etc.). Still escaped
+              for safety: backslashes and quotes in the `cql` string are
+              not touched — the caller is responsible, but we do reject
+              obvious tampering like newlines.
+          - limit: 1-25. Clamped.
+
+        Returns:
+          {
+            "hits": [page_dict, ...],
+            "count": int,
+            "cql_used": "<actual CQL sent>",
+            "diagnostics": {
+              "strategy": "title+text" | "title" | "text" | "raw_cql",
+              "brackets_stripped": bool,
+              "hint": "<free-form next-step suggestion, only when 0 hits>",
+            },
+          }
         """
-        safe_query = query.replace("\\", "\\\\").replace('"', '\\"')
-        cql_parts = [f'type=page AND text~"{safe_query}"']
-        if space_key:
-            if not re.fullmatch(r"[A-Za-z0-9]{1,255}", space_key):
-                raise ValueError(f"invalid space_key: {space_key!r}")
-            cql_parts.insert(0, f"space={space_key}")
-        cql = " AND ".join(cql_parts)
+        # ---------- 1. Build CQL ----------
+        used_strategy: str
+        brackets_stripped = False
+        if cql:
+            # Reject obvious abuse; beyond that trust the caller.
+            if any(c in cql for c in ("\n", "\r", "\x00")):
+                raise ValueError("raw cql must be single-line, no control chars")
+            effective_cql = cql
+            used_strategy = "raw_cql"
+        else:
+            if not query and not author and not updated_since and not under_page_id:
+                raise ValueError(
+                    "search requires at least one of: query, author, "
+                    "updated_since, under_page_id, or cql"
+                )
+            parts: list[str] = ["type=page"]
 
+            # Keyword match via title/text (or either, depending on fields).
+            if query:
+                safe_query = query.replace("\\", "\\\\").replace('"', '\\"')
+                wanted_fields = set(
+                    f.lower().strip() for f in (fields or ["title", "text"])
+                )
+                # Validate field names up front.
+                unknown = wanted_fields - {"title", "text"}
+                if unknown:
+                    raise ValueError(
+                        f"unknown fields {unknown!r}; valid: title, text"
+                    )
+
+                # CJK bracket normalization for title-only side (Lucene
+                # tokenizer hates 【】). Text side keeps the raw query so
+                # exact phrases with brackets still hit when they're in
+                # the body.
+                title_query = re.sub(
+                    r"[【】「」『』\[\]()（）]", " ", safe_query
+                ).strip()
+                title_query = re.sub(r"\s{2,}", " ", title_query)
+                if not title_query:
+                    title_query = safe_query
+                brackets_stripped = title_query != safe_query
+
+                clauses: list[str] = []
+                if "title" in wanted_fields:
+                    clauses.append(f'title ~ "{title_query}"')
+                if "text" in wanted_fields:
+                    clauses.append(f'text ~ "{safe_query}"')
+                parts.append(
+                    f"({clauses[0]})" if len(clauses) == 1
+                    else "(" + " OR ".join(clauses) + ")"
+                )
+                used_strategy = (
+                    "title+text" if wanted_fields == {"title", "text"}
+                    else next(iter(wanted_fields))
+                )
+            else:
+                used_strategy = "filter_only"
+
+            if space_key:
+                if not re.fullmatch(r"[A-Za-z0-9]{1,255}", space_key):
+                    raise ValueError(f"invalid space_key: {space_key!r}")
+                parts.append(f"space={space_key}")
+
+            if under_page_id:
+                if not re.fullmatch(r"\d{1,20}", str(under_page_id)):
+                    raise ValueError(
+                        f"invalid under_page_id (must be numeric): {under_page_id!r}"
+                    )
+                parts.append(f"ancestor={under_page_id}")
+
+            if author:
+                # Atlassian CQL: `creator = "user"`. Escape quotes.
+                safe_author = str(author).replace("\\", "\\\\").replace('"', '\\"')
+                parts.append(f'creator = "{safe_author}"')
+
+            if updated_since:
+                # CQL date literal: "YYYY-MM-DD". Require ISO date.
+                if not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?", str(updated_since)
+                ):
+                    raise ValueError(
+                        f"updated_since must be ISO date (YYYY-MM-DD): {updated_since!r}"
+                    )
+                parts.append(f'lastModified >= "{updated_since}"')
+
+            effective_cql = " AND ".join(parts)
+
+        # ---------- 2. Execute ----------
+        limit = max(1, min(int(limit), 25))
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"{self.base_url}/content/search",
                 params={
-                    "cql": cql,
+                    "cql": effective_cql,
                     "limit": limit,
-                    # ancestors expansion is required so every hit carries
-                    # enough structure for the model to make placement
-                    # decisions (create-sibling, move-page) without a
-                    # second read_page round-trip per hit.
                     "expand": "body.view,space,version,ancestors",
                 },
                 headers={"Authorization": self.auth_header},
@@ -698,27 +869,24 @@ class ConfluenceAPIClient:
             resp.raise_for_status()
 
         data = resp.json()
-        results = []
+        hits: list[dict] = []
         for page in data.get("results", []):
             body_html = page.get("body", {}).get("view", {}).get("value", "")
             excerpt = _excerpt_from_html(body_html, max_chars=800)
-
-            base_url = data.get("_links", {}).get("base", f"https://{self.base_url.split('/wiki')[0].split('//')[1]}")
+            base_url = data.get("_links", {}).get(
+                "base",
+                f"https://{self.base_url.split('/wiki')[0].split('//')[1]}",
+            )
             web_link = page.get("_links", {}).get("webui", "")
-
             raw_ancestors = page.get("ancestors") or []
             ancestors = [
-                {
-                    "id": str(a.get("id", "")),
-                    "title": a.get("title", ""),
-                }
+                {"id": str(a.get("id", "")), "title": a.get("title", "")}
                 for a in raw_ancestors
                 if a.get("id")
             ]
             parent_id = ancestors[-1]["id"] if ancestors else ""
             parent_title = ancestors[-1]["title"] if ancestors else ""
-
-            results.append({
+            hits.append({
                 "id": page["id"],
                 "title": page["title"],
                 "space": page.get("space", {}).get("name", ""),
@@ -730,7 +898,56 @@ class ConfluenceAPIClient:
                 "parent_title": parent_title,
                 "ancestors": ancestors,
             })
-        return results
+
+        # ---------- 3. Diagnostics for self-correction ----------
+        diagnostics: dict[str, Any] = {
+            "strategy": used_strategy,
+            "brackets_stripped": brackets_stripped,
+        }
+        if not hits:
+            # Give the model specific, actionable next steps based on what
+            # it tried, not a generic "try again". This is the agentic
+            # part — expose the CQL and the decision tree.
+            hint_parts: list[str] = []
+            if used_strategy == "title+text":
+                hint_parts.append(
+                    "Tried title+text with this query and got 0. "
+                    "If the page definitely exists, try: (a) fields=['title'] "
+                    "with a shorter phrase (1-3 key tokens); (b) drop space_key "
+                    "to search all spaces; (c) use list_spaces → list_children "
+                    "if you know roughly where the page lives; (d) raw cql "
+                    "with exact title ='<exact title>'."
+                )
+            elif used_strategy == "title":
+                hint_parts.append(
+                    "Title-only search returned 0. The title may contain "
+                    "different exact characters (brackets, punctuation, "
+                    "language variant). Try fields=['text'] or a broader query."
+                )
+            elif used_strategy == "text":
+                hint_parts.append(
+                    "Body-only search returned 0. The page may be title-only "
+                    "(e.g. a schedule with a table and no prose). Try fields=['title']."
+                )
+            elif used_strategy == "raw_cql":
+                hint_parts.append(
+                    "Raw CQL returned 0. Re-check operator syntax and field "
+                    "names. Confluence CQL is documented at "
+                    "https://developer.atlassian.com/server/confluence/advanced-searching-using-cql/"
+                )
+            if space_key and used_strategy != "raw_cql":
+                hint_parts.append(
+                    f"Current space filter: space={space_key}. Removing it "
+                    "widens the search."
+                )
+            diagnostics["hint"] = " ".join(hint_parts) if hint_parts else "No results; try broadening the query."
+
+        return {
+            "hits": hits,
+            "count": len(hits),
+            "cql_used": effective_cql,
+            "diagnostics": diagnostics,
+        }
 
     # ─── Space operations (V2 API) ─────────────────────────────────────
 
@@ -1349,15 +1566,30 @@ def _classify_http_error(status_code: int, action: str | None = None) -> str:
     return msg + _ANTI_HALLUCINATION_NOTE
 
 
-def _format_search_results(results: list[dict], query: str) -> str:
-    if not results:
-        return f"No Confluence pages found for: {query!r}"
-    parts = [f"Found {len(results)} Confluence page(s):"]
-    for r in results:
+def _format_search_results(search_result: dict, query: str) -> str:
+    """Render the structured `search` return into a model-readable block.
+
+    Always prints the CQL that was executed so the model can reason about
+    what just happened. On empty results, the diagnostic hint is the
+    model's lifeline — we put it prominently at the top.
+    """
+    hits = search_result.get("hits") or []
+    cql_used = search_result.get("cql_used", "")
+    diag = search_result.get("diagnostics") or {}
+    strategy = diag.get("strategy", "?")
+
+    if not hits:
+        lines = [f"No pages matched. CQL executed: `{cql_used}`"]
+        if diag.get("hint"):
+            lines.append(f"\n**Next step suggestion:** {diag['hint']}")
+        return "\n".join(lines)
+
+    parts = [
+        f"Found {len(hits)} Confluence page(s) (strategy={strategy}, cql=`{cql_used}`):"
+    ]
+    for r in hits:
         parent_id = r.get("parent_id", "")
         parent_title = r.get("parent_title", "")
-        # Surface parent info so the model can use it for sibling creation
-        # or move_page without a second read_page round-trip.
         parent_line = (
             f"Parent: {parent_title} (id: {parent_id})"
             if parent_id
@@ -1425,18 +1657,50 @@ class ConfluenceReadExecutor(ToolExecutor):
         try:
             if action == "search":
                 query = str(args.get("query") or "").strip()
-                if not query:
-                    return _err(request, "`search` requires `query`", start)
+                cql_raw = args.get("cql") or None
+                if not query and not cql_raw and not (
+                    args.get("author") or args.get("updated_since") or args.get("under_page_id")
+                ):
+                    return _err(
+                        request,
+                        "`search` needs at least one of: query, cql, author, updated_since, or under_page_id",
+                        start,
+                    )
+                fields = args.get("fields")
+                if isinstance(fields, str):
+                    fields = [f.strip() for f in fields.split(",") if f.strip()]
                 space_key = args.get("space_key") or None
+                author = args.get("author") or None
+                updated_since = args.get("updated_since") or None
+                under_page_id = args.get("under_page_id") or None
                 limit = max(1, min(int(args.get("limit") or 10), 25))
-                results = await self.client.search(query, space_key, limit)
+                try:
+                    search_result = await self.client.search(
+                        query=query,
+                        space_key=space_key,
+                        fields=fields,
+                        author=author,
+                        updated_since=updated_since,
+                        under_page_id=under_page_id,
+                        cql=cql_raw,
+                        limit=limit,
+                    )
+                except ValueError as ve:
+                    # Validation errors — surface cleanly so the model can
+                    # see exactly which parameter was rejected and retry.
+                    return _err(request, str(ve), start)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
                     success=True,
-                    result=_format_search_results(results, query),
+                    result=_format_search_results(search_result, query),
                     duration_ms=(time.time() - start) * 1000,
-                    metadata={"count": len(results), "query": query},
+                    metadata={
+                        "count": search_result.get("count", 0),
+                        "query": query,
+                        "cql_used": search_result.get("cql_used", ""),
+                        "strategy": search_result.get("diagnostics", {}).get("strategy"),
+                    },
                 )
 
             if action == "read_page":
