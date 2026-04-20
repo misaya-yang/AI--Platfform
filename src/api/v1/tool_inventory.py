@@ -39,8 +39,15 @@ async def list_registered_tools(
     Operator sanity check: if `confluence_read` / `confluence_write` are
     missing here but the frontend shows Confluence 'connected', the
     startup auto-rehydration (apps/assistant-service/main.py lifespan)
-    failed — check logs for 'Auto-registered Confluence tools'.
+    failed — check logs for 'Confluence tools registered'.
+
+    Requires a real user (not anonymous). `get_user_context` returns
+    anonymous users for public endpoints; we reject those explicitly
+    here because tool names are tenant-level reconnaissance info.
     """
+    if not getattr(user, "is_authenticated", False):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=401, detail="authentication required")
     reg = get_tool_registry()
     tools = reg.list_tools()
 
