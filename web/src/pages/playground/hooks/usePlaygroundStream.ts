@@ -755,6 +755,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
               : `/api/v1/proxy/${serviceId}/runs/stream`;
             let lastCumulativeContent = "";
+            // Tracks the last content we applied for each message id, so
+            // we can tell post-middleware mutations apart from cross-turn
+            // leakage in 'updates' events. Same id + same content = skip.
+            // Same id + different content = post-middleware modification.
+            const lastContentById = new Map<string, string>();
             // Track message IDs already processed to prevent cross-turn
             // contamination in multi-turn threads.  LangGraph `updates`
             // events can include the full thread state (all historical
@@ -871,14 +876,41 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                             unknown
                           >;
 
-                        // Skip messages already processed
-                        // (prevents cross-turn leakage
-                        // from full thread state in updates)
+                        // De-dup vs cross-turn leakage, BUT allow
+                        // post-middleware modifications through.
+                        //
+                        // Backend agent middleware (SourcesFormat,
+                        // SourcesLabel, etc.) mutate the final AIMessage in
+                        // after_model, preserving its id so LangGraph's
+                        // add_messages reducer upserts. Those updates arrive
+                        // via 'updates' events with the SAME id as the
+                        // streamed chunks — if we skip purely on id, the UI
+                        // stays on the pre-middleware raw stream.
+                        //
+                        // Rule: skip when we've seen this id AND the content
+                        // is identical to what we already applied for that
+                        // specific id. Different content for the same id =
+                        // mutation; let it fall through to the AIMessage
+                        // accumulator below, which replaces content that
+                        // no longer continues lastCumulativeContent.
                         const msgId =
                           (message.id as string) || "";
-                        if (msgId && seenMessageIds.has(msgId))
-                          continue;
+                        const updatedContent =
+                          normalizeContentDelta(message);
+                        if (msgId && seenMessageIds.has(msgId)) {
+                          if (
+                            !updatedContent ||
+                            updatedContent ===
+                              lastContentById.get(msgId)
+                          ) {
+                            continue;
+                          }
+                          // Post-middleware mutation — fall through.
+                        }
                         if (msgId) seenMessageIds.add(msgId);
+                        if (msgId && updatedContent) {
+                          lastContentById.set(msgId, updatedContent);
+                        }
 
                         const usageMeta =
                           message.usage_metadata as
@@ -1087,10 +1119,19 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     continue;
                   const message =
                     msg as Record<string, unknown>;
-                  // Track ID so updates events skip it
+                  // Track ID AND content so 'updates' can distinguish
+                  // redundant echoes (skip) from post-middleware mutations
+                  // (apply, because content will differ).
                   const msgId =
                     (message.id as string) || "";
                   if (msgId) seenMessageIds.add(msgId);
+                  if (msgId) {
+                    const completeContent =
+                      normalizeContentDelta(message);
+                    if (completeContent) {
+                      lastContentById.set(msgId, completeContent);
+                    }
+                  }
                   const msgType = (
                     (message.type as string) || ""
                   ).toLowerCase();
@@ -1349,6 +1390,13 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     cumulativeContent &&
                     cumulativeContent.length > 0
                   ) {
+                    // Track per-id content so a later 'updates' event with
+                    // the same id + same content can skip, while one with
+                    // modified content (post-middleware mutation) falls
+                    // through to the AIMessage accumulator.
+                    if (msgId) {
+                      lastContentById.set(msgId, cumulativeContent);
+                    }
                     if (
                       cumulativeContent ===
                       lastCumulativeContent

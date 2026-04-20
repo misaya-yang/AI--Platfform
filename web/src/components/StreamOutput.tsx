@@ -25,10 +25,7 @@ function allowDataUrlTransform(url: string): string {
 
 interface StreamOutputProps {
   text: string;
-  /** Whether content is still streaming */
   isStreaming?: boolean;
-  /** Unique ID for keying memoized blocks (reserved for future use) */
-  id?: string;
 }
 
 /**
@@ -217,101 +214,48 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
  * This happens when models output JSON before calling a tool or when internal
  * classification/routing results leak into the response.
  */
+const JSON_LEAK_PATTERNS: RegExp[] = [
+  /```(?:json)?\s*\n?\s*\{[\s\S]*?"(?:slides|title|bullets|type|content)"[\s\S]*?\}\s*\n?```/gi,
+  /(?:^|\n)\s*\{\s*"(?:title|slides)"[\s\S]*?\}\s*(?=\n|$)/gi,
+  /\[\s*\{\s*"(?:type|title|bullets)"[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]/gi,
+  /\{"(?:relevance|topic)":[^}]*(?:"(?:relevance|topic|sensitive|ambiguous|political|interfaith_attack|interpretation)":[^,}]*,?\s*)*\}\??/gi,
+  /^\s*\{\s*"(?:tool_name|confidence|guidance|citations|queries|results_count|query_language|cross_language_enabled)"[\s\S]*?\}\s*(?:\n|$)/i,
+  /\brouter:\s*\w+\s*(?:\n|$)/gi,
+  /\{[^{}]*"(?:relevance|tool_name|confidence)":\s*"[^"]*"[^{}]*\}\s*\??/gi,
+  /(?:Here(?:'s| is) the JSON(?: requested)?|JSON output|Tool output|Generating response|Processing request)[:\s\n]*(?:```[\s\S]*?(?:```|$))?/gi,
+  /```(?:\w*)\s*\n?\s*```/gi,
+  /```(?:json)?\s*\n\s*\{[\s\S]*?\}\s*\n```/gi,
+  /^[^`]*```(?!\s*\n[\s\S]*?```)(?=\s*\n)/gm,
+  /^(?:Here(?:'s| is) the JSON[^`]*)\n?```\s*$/gm,
+  /^```\s*$/gm,
+  /^(CONFIDENCE|GUIDANCE):.*$/gim,
+  /^Here(?:'s| is) the JSON[^\n]*\n?/gim,
+];
+
 function filterToolJsonOutput(text: string): string {
-  // Pattern 1: Code block with JSON tool arguments (```json ... ```)
-  const jsonCodeBlockPattern = /```(?:json)?\s*\n?\s*\{[\s\S]*?"(?:slides|title|bullets|type|content)"[\s\S]*?\}\s*\n?```/gi;
+  // Fast path: most streamed tokens contain none of the leak signatures.
+  // Check cheap substrings before running the heavy regex bank.
+  const needsHeavyFilter = text.includes('```') || text.includes('{"') || /^(CONFIDENCE|GUIDANCE):/im.test(text);
 
-  // Pattern 2: Raw JSON object with tool-like structure (at start of text or after newlines)
-  const rawJsonPattern = /(?:^|\n)\s*\{\s*"(?:title|slides)"[\s\S]*?\}\s*(?=\n|$)/gi;
+  let filtered = text;
+  if (needsHeavyFilter) {
+    for (const pat of JSON_LEAK_PATTERNS) filtered = filtered.replace(pat, '');
+  }
 
-  // Pattern 3: JSON array of slides [ { "type": ... } ]
-  const slidesArrayPattern = /\[\s*\{\s*"(?:type|title|bullets)"[\s\S]*?\}\s*(?:,\s*\{[\s\S]*?\}\s*)*\]/gi;
+  // Defense-in-depth: strip internal [REF-N] markers that should never leak.
+  if (filtered.includes('[REF')) {
+    filtered = filtered.replace(/\[REF[-–]?\d+\]/gi, '');
+  }
 
-  // Pattern 4: Classification/routing JSON blobs leaking ANYWHERE
-  // Matches: {"relevance":"offtopic","topic":"xxx"...}? with optional trailing ?
-  // Uses non-greedy matching to capture the JSON object
-  const classificationJsonPattern = /\{"(?:relevance|topic)":[^}]*(?:"(?:relevance|topic|sensitive|ambiguous|political|interfaith_attack|interpretation)":[^,}]*,?\s*)*\}\??/gi;
-
-  // Pattern 5: Tool metadata JSON at start
-  const toolMetaJsonPattern = /^\s*\{\s*"(?:tool_name|confidence|guidance|citations|queries|results_count|query_language|cross_language_enabled)"[\s\S]*?\}\s*(?:\n|$)/i;
-
-  // Pattern 6: Router result JSON (router: xxx) or text before it
-  const routerResultPattern = /\brouter:\s*\w+\s*(?:\n|$)/gi;
-
-  // Pattern 7: Any standalone JSON object with known internal keys
-  const internalJsonPattern = /\{[^{}]*"(?:relevance|tool_name|confidence)":\s*"[^"]*"[^{}]*\}\s*\??/gi;
-
-  // Pattern 8: Internal prompt phrases that shouldn't be shown to users (with optional trailing content)
-  // Be careful not to filter too aggressively - only filter specific internal prompts
-  // NOTE: Do NOT filter "Let me" or "I'll" as these are common in normal responses
-  const internalPromptsPattern = /(?:Here(?:'s| is) the JSON(?: requested)?|JSON output|Tool output|Generating response|Processing request)[:\s\n]*(?:```[\s\S]*?(?:```|$))?/gi;
-
-  // Pattern 9: Empty code blocks (``` followed by ``` with only whitespace)
-  const emptyCodeBlockPattern = /```(?:\w*)\s*\n?\s*```/gi;
-
-  // Pattern 10: Code blocks with only JSON objects (tool arguments leaked as code)
-  const jsonOnlyCodeBlockPattern = /```(?:json)?\s*\n\s*\{[\s\S]*?\}\s*\n```/gi;
-
-  // Pattern 11: Incomplete/unclosed code blocks at the start (e.g., "Here is...\n```" without closing)
-  // This handles the case where LLM outputs code block start but content continues normally
-  const unclosedCodeBlockPattern = /^[^`]*```(?!\s*\n[\s\S]*?```)(?=\s*\n)/gm;
-  
-  // Pattern 12: Leading text with unclosed code fence (handles streaming partial output)
-  // Only match specific internal prompt patterns, not general text
-  const leadingUnclosedFencePattern = /^(?:Here(?:'s| is) the JSON[^`]*)\n?```\s*$/gm;
-
-  // Pattern 13: Standalone unclosed code fences (just ``` at start or end)
-  const standaloneCodeFence = /^```\s*$/gm;
-
-  let filtered = text
-    .replace(jsonCodeBlockPattern, '')
-    .replace(rawJsonPattern, '')
-    .replace(slidesArrayPattern, '')
-    .replace(classificationJsonPattern, '')
-    .replace(internalJsonPattern, '')
-    .replace(toolMetaJsonPattern, '')
-    .replace(routerResultPattern, '')
-    .replace(internalPromptsPattern, '')
-    .replace(emptyCodeBlockPattern, '')
-    .replace(jsonOnlyCodeBlockPattern, '')
-    .replace(unclosedCodeBlockPattern, '')
-    .replace(leadingUnclosedFencePattern, '')
-    .replace(standaloneCodeFence, '')
-    .replace(/^(CONFIDENCE|GUIDANCE):.*$/gim, '')
-    // Only remove specific "Here is the JSON" phrases, not general "Here is" which may be valid content
-    .replace(/^Here(?:'s| is) the JSON[^\n]*\n?/gim, '');
-
-  // ── Computational Sensor: Strip raw [REF-N] internal markers ──
-  filtered = filtered.replace(/\[REF[-–]?\d+\]/gi, '');
-
-  // ── Computational Sensor: Closing phrase line-break ──
-  // Ensure closing disclaimer starts on its own paragraph even when
-  // concatenated after last citation: "[5]All information..." → "[5]\n\nAll..."
+  // Safety net for the rare case where the model concatenates the last
+  // citation with the closing phrase ("[5]All information...") — backend
+  // prompt owns the normal-path formatting.
   filtered = filtered.replace(
     /(\[\d+\])\s*(All information provided|جميع المعلومات المقدمة|所有信息均来源|Semua informasi yang diberikan|Semua maklumat yang diberikan|فراہم کردہ تمام معلومات|प्रदान की गई सभी जानकारी)/g,
     '$1\n\n$2'
   );
 
-  // ── Computational Sensor: Citation line-break normalization ──
-  // LLMs output Sources inline ("Citation [1] Citation [2]...").
-  // Markdown treats single \n as space. This sensor ensures each
-  // citation renders on its own line by converting to paragraph breaks.
-  // Handles: "Sources:", "المصادر:", "来源:" + [N] patterns.
-  filtered = filtered.replace(
-    /((?:\*{2})?(?:Sources?|المصادر|来源|Sumber|ذرائع|स्रोत)\s*:?\s*(?:\*{2})?\s*)\n?\s*((?:[^\n]*?\[\d+\]\s*){2,})/gi,
-    (_match, prefix, citations) => {
-      // Split before each [N] that follows text (not at start)
-      const parts = citations.replace(/\s+(\[\d+\])/g, ' $1').split(/(?<=\[\d+\])\s+(?=[^\[\s])/);
-      if (parts.length >= 2) {
-        return prefix.trim() + '\n\n' + parts.map((p: string) => p.trim()).filter(Boolean).join('\n\n');
-      }
-      return _match;
-    }
-  );
-
-  // Clean up excessive newlines left behind
   filtered = filtered.replace(/\n{3,}/g, '\n\n').trim();
-
   return filtered;
 }
 
