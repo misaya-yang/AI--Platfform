@@ -301,31 +301,21 @@ class RealtimeMetricsService:
     async def record_token_usage(self, input_tokens: int, output_tokens: int) -> None:
         """Record token usage for real-time metrics.
 
-        This updates the daily token counters in Redis for real-time dashboard.
+        NOTE: Daily token counters (``metrics:tokens:input:{today}`` /
+        ``metrics:tokens:output:{today}``) are written exclusively by
+        :meth:`MetricsRecorder.record_tokens` (see
+        ``src/services/metrics/metrics_recorder.py`` around line 181). This
+        method is kept for backward-compatible call sites that lack
+        ``user_id``/``service_id`` context; it is now a Redis no-op to avoid
+        double-incrementing and inflating token counters by 2x. Postgres
+        ``usage_daily_aggregates`` remains the reconciliation source of truth.
 
         Args:
             input_tokens: Number of input/prompt tokens
             output_tokens: Number of output/completion tokens
         """
-        if not self.redis or not self.redis._client:
-            return
-
-        try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            pipe = self.redis._client.pipeline()
-
-            # Increment token counters
-            pipe.incrby(f"metrics:tokens:input:{today}", input_tokens)
-            pipe.incrby(f"metrics:tokens:output:{today}", output_tokens)
-
-            # Set TTL (24 hours + buffer)
-            pipe.expire(f"metrics:tokens:input:{today}", 90000)
-            pipe.expire(f"metrics:tokens:output:{today}", 90000)
-
-            await pipe.execute()
-
-        except Exception as e:
-            logger.debug(f"Failed to record token usage: {e}")
+        # Intentionally no-op: see docstring for single-writer rationale.
+        return
 
     # ========== Query Methods ==========
 

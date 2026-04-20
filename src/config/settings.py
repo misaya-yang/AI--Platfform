@@ -642,6 +642,19 @@ class IslamicContentSettings(BaseModel):
     duas_file_path: str = "./data/islamic_content/duas.json"
 
 
+class MetricsSettings(BaseModel):
+    """Metrics recorder runtime settings.
+
+    Controls the behavior of ``MetricsRecorder`` (Redis-backed dashboard
+    metrics). Access via env: ``GATEWAY_METRICS__LATENCY_SAMPLE_CAP=<int>``.
+    """
+
+    latency_sample_cap: int = Field(
+        default=10000,
+        description="Max entries retained in metrics:latency:samples ZSET",
+    )
+
+
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
@@ -700,6 +713,9 @@ class Settings(BaseSettings):
 
     # Islamic content aggregation APIs
     islamic_content: IslamicContentSettings = Field(default_factory=IslamicContentSettings)
+
+    # Observability / metrics recorder tuning
+    metrics: MetricsSettings = Field(default_factory=MetricsSettings)
 
     health_check_interval: int = 30
     task_worker_concurrency: int = 2

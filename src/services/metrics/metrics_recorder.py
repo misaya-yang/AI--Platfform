@@ -10,6 +10,7 @@ This service provides methods to record:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -33,12 +34,21 @@ TTL_7D = 604800  # 7 days
 class MetricsRecorder:
     """Central service for recording metrics to Redis"""
 
-    def __init__(self, redis: RedisStorage | None = None):
+    def __init__(
+        self,
+        redis: RedisStorage | None = None,
+        latency_sample_cap: int = 10000,
+    ):
         self.redis = redis
+        self.latency_sample_cap = latency_sample_cap
 
     def set_redis(self, redis: RedisStorage) -> None:
         """Set or update the Redis storage instance"""
         self.redis = redis
+
+    def set_latency_sample_cap(self, cap: int) -> None:
+        """Update the ZSET sample cap at runtime (e.g. from settings reload)."""
+        self.latency_sample_cap = max(1, int(cap))
 
     def _get_date_str(self) -> str:
         """Get current date as string (YYYY-MM-DD)"""
@@ -125,12 +135,20 @@ class MetricsRecorder:
                 pipe.incr(service_key)
                 pipe.expire(service_key, TTL_48H)
 
-            # Track latency samples for percentile calculation (sorted set)
+            # Track latency samples for percentile calculation (sorted set).
+            # Member format: f"{timestamp}:{uuid}:{duration_ms}".
+            # CRITICAL: latency (duration_ms) MUST remain the LAST ':'-delimited
+            # segment — the reader (get_latency_percentiles) parses it via
+            # sample.rsplit(':', 1). The uuid suffix eliminates member
+            # collisions when concurrent requests share timestamp + duration.
             latency_samples_key = "metrics:latency:samples"
             timestamp = datetime.now().timestamp()
-            pipe.zadd(latency_samples_key, {f"{timestamp}:{duration_ms}": timestamp})
-            # Keep only last 1000 samples
-            pipe.zremrangebyrank(latency_samples_key, 0, -1001)
+            unique_suffix = uuid.uuid4().hex[:12]
+            member = f"{timestamp}:{unique_suffix}:{duration_ms}"
+            pipe.zadd(latency_samples_key, {member: timestamp})
+            # Configurable sample window (default 10000, see MetricsSettings)
+            sample_cap = self.latency_sample_cap
+            pipe.zremrangebyrank(latency_samples_key, 0, -(sample_cap + 1))
 
             await pipe.execute()
 
@@ -458,11 +476,15 @@ def get_metrics_recorder() -> MetricsRecorder:
     return _metrics_recorder
 
 
-def init_metrics_recorder(redis: RedisStorage) -> MetricsRecorder:
-    """Initialize the global MetricsRecorder with Redis storage"""
+def init_metrics_recorder(
+    redis: RedisStorage,
+    latency_sample_cap: int = 10000,
+) -> MetricsRecorder:
+    """Initialize the global MetricsRecorder with Redis storage and config."""
     global _metrics_recorder
     if _metrics_recorder is None:
-        _metrics_recorder = MetricsRecorder(redis)
+        _metrics_recorder = MetricsRecorder(redis, latency_sample_cap=latency_sample_cap)
     else:
         _metrics_recorder.set_redis(redis)
+        _metrics_recorder.set_latency_sample_cap(latency_sample_cap)
     return _metrics_recorder

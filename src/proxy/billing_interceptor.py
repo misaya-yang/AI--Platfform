@@ -17,15 +17,21 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..core.observability.logging import get_logger
+from ..core.observability.metrics import get_metrics
 from ..services.metrics.observability import (
     classify_error_type,
     ensure_duration_breakdown,
     extract_duration_breakdown,
 )
+
+# Phase 0 hotfix: retry & DLQ constants for billing flush failures
+_FLUSH_RETRY_BACKOFFS: tuple[float, ...] = (0.1, 0.5, 2.0)
+_BILLING_DLQ_KEY = "metrics:billing:dead_letter"
+_BILLING_DLQ_CAP = 10_000
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
@@ -128,9 +134,26 @@ class BillingInterceptor:
         self._flush_task: asyncio.Task | None = None
         self._running = False
 
+        # Phase 0 hotfix: tracked fire-and-forget buffer flushes so that
+        # shutdown can await them instead of GC'ing them mid-write.
+        self._inflight_flushes: set[asyncio.Task] = set()
+
         # 统计
         self._total_events = 0
         self._total_tokens = 0
+
+    def _spawn_tracked_flush(self) -> asyncio.Task:
+        """Spawn a buffer flush task that ``stop()`` can drain before exit.
+
+        Replaces direct ``asyncio.create_task(self._flush_buffer())`` calls
+        from StreamProcessor. Without tracking, those tasks could be
+        garbage-collected on interpreter shutdown before their
+        database/Redis writes completed, silently dropping billing records.
+        """
+        task = asyncio.create_task(self._flush_buffer())
+        self._inflight_flushes.add(task)
+        task.add_done_callback(self._inflight_flushes.discard)
+        return task
 
     @property
     def realtime_metrics(self):
@@ -154,7 +177,14 @@ class BillingInterceptor:
         logger.info("Billing interceptor started")
 
     async def stop(self) -> None:
-        """停止后台任务并刷新剩余数据"""
+        """停止后台任务并刷新剩余数据.
+
+        Phase 0 hotfix: drains any fire-and-forget flushes spawned by
+        StreamProcessor BEFORE running the final ``_flush_buffer()``. Without
+        this, tasks created via ``_spawn_tracked_flush()`` could be
+        garbage-collected mid-write on shutdown, silently dropping billing
+        records.
+        """
         self._running = False
 
         if self._flush_task:
@@ -162,7 +192,11 @@ class BillingInterceptor:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._flush_task
 
-        # 刷新剩余数据
+        # Drain in-flight flushes spawned by StreamProcessor
+        if self._inflight_flushes:
+            await asyncio.gather(*self._inflight_flushes, return_exceptions=True)
+
+        # Final flush of anything still in the buffer
         await self._flush_buffer()
         logger.info(
             f"Billing interceptor stopped. Total events: {self._total_events}, tokens: {self._total_tokens}"
@@ -193,88 +227,190 @@ class BillingInterceptor:
             await self._push_usage(usage)
 
     async def _push_usage(self, usage: UsageData) -> None:
-        """推送单条计费数据"""
-        try:
-            # 回调方式
-            if self.callback:
-                await self.callback(usage)
+        """推送单条计费数据.
 
-            # Redis 发布方式
-            if self.redis:
-                await self._publish_to_redis(usage)
+        Phase 0 hotfix: each sub-stage (callback / redis / database) is
+        classified independently via ``gateway_billing_flush_failures_total``.
+        A failing stage triggers exponential-backoff retry (0.1/0.5/2.0s);
+        if all retries exhaust, the full record is pushed to the Redis DLQ
+        (``metrics:billing:dead_letter``) and
+        ``gateway_billing_records_dropped_total`` is incremented.
 
-            # 持久化到数据库（通过 UsageRecorder）
-            await self._record_to_database(usage)
+        Stages are independent: a callback failure does NOT prevent the DB
+        write from proceeding — this preserves durability of the primary
+        persistence path even when broadcast/callback paths are broken.
+        """
+        reached_durable = False
 
-            # 更新统计
+        # Stage 1: user-supplied callback (optional)
+        if self.callback:
+            await self._run_stage_with_retry(
+                stage="callback",
+                coro_factory=lambda: self.callback(usage),
+                usage=usage,
+            )
+
+        # Stage 2: Redis pub/sub broadcast (optional)
+        if self.redis:
+            await self._run_stage_with_retry(
+                stage="redis",
+                coro_factory=lambda: self._publish_to_redis(usage),
+                usage=usage,
+            )
+
+        # Stage 3: durable DB persistence (primary sink)
+        reached_durable = await self._run_stage_with_retry(
+            stage="database",
+            coro_factory=lambda: self._record_to_database(usage),
+            usage=usage,
+        )
+
+        if reached_durable:
             self._total_events += 1
             self._total_tokens += usage.total_tokens
 
-        except Exception as e:
-            logger.error(f"Failed to push billing data: {e}")
+    async def _run_stage_with_retry(
+        self,
+        *,
+        stage: str,
+        coro_factory: Callable[[], Awaitable[None]],
+        usage: UsageData,
+    ) -> bool:
+        """Run one flush stage with retry + DLQ. Returns True on success.
 
-    async def _record_to_database(self, usage: UsageData) -> None:
-        """持久化使用记录到数据库"""
+        Classifies the first failure via
+        ``gateway_billing_flush_failures_total{stage, error_type}``. Retries
+        with backoffs from ``_FLUSH_RETRY_BACKOFFS``; if all attempts fail,
+        pushes the record to the DLQ and increments
+        ``gateway_billing_records_dropped_total{reason="max_retries_exceeded"}``.
+        """
+        metrics = get_metrics().request_metrics
         try:
-            from ..services.metrics import get_usage_recorder
+            await coro_factory()
+            return True
+        except Exception as first_error:
+            metrics.billing_flush_failures_total.inc(
+                stage=stage, error_type=type(first_error).__name__
+            )
+            logger.exception("Billing flush failed (stage=%s)", stage)
 
-            recorder = get_usage_recorder()
-            if recorder:
-                await recorder.record_usage(
-                    tenant_id=usage.tenant_id or "default",
-                    user_id=usage.user_id or "anonymous",
-                    model=usage.model or "unknown",
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    request_id=usage.request_id,
-                    service_id=usage.service_id,
-                    assistant_id=usage.assistant_id,
-                    provider=usage.provider,
-                    latency_ms=int(usage.duration_ms),
-                    first_token_ms=usage.first_token_latency_ms,
-                    request_total_duration_ms=usage.request_total_duration_ms,
-                    llm_inference_duration_ms=usage.llm_inference_duration_ms,
-                    retrieval_duration_ms=usage.retrieval_duration_ms,
-                    tool_call_duration_ms=usage.tool_call_duration_ms,
-                    agent_or_graph_overhead_ms=usage.agent_or_graph_overhead_ms,
-                    tool_call_breakdown=usage.tool_call_breakdown,
-                    error_type=usage.error_type,
-                    status=usage.status,
-                    request_type=usage.request_type,
-                    metadata=usage.raw_metadata,
-                    trace_steps=usage.trace_steps,
+        # Backoff retries
+        for delay in _FLUSH_RETRY_BACKOFFS:
+            await asyncio.sleep(delay)
+            try:
+                await coro_factory()
+                return True
+            except Exception as retry_error:
+                metrics.billing_flush_failures_total.inc(
+                    stage=stage, error_type=type(retry_error).__name__
                 )
-        except Exception as e:
-            logger.warning(f"Failed to record usage to database: {e}")
+                logger.debug(
+                    "Billing flush retry failed (stage=%s delay=%s): %s",
+                    stage,
+                    delay,
+                    retry_error,
+                )
+                continue
 
-    async def _publish_to_redis(self, usage: UsageData) -> None:
-        """发布计费事件到 Redis"""
-        if not self.redis:
+        # All retries exhausted — push to DLQ
+        await self._push_to_dead_letter(usage, stage=stage)
+        metrics.billing_records_dropped_total.inc(reason="max_retries_exceeded")
+        return False
+
+    async def _push_to_dead_letter(self, usage: UsageData, *, stage: str) -> None:
+        """LPUSH failed record to DLQ with a bounded retention window."""
+        if self.redis is None:
+            # No Redis → nowhere to persist the DLQ; count as a final drop.
+            logger.error(
+                "Cannot DLQ billing record (stage=%s, request_id=%s): no Redis client",
+                stage,
+                usage.request_id,
+            )
+            get_metrics().request_metrics.billing_records_dropped_total.inc(
+                reason="dead_letter_full"
+            )
             return
 
         try:
-            event_data = {
-                "type": "billing",
-                "request_id": usage.request_id,
-                "service_id": usage.service_id,
-                "user_id": usage.user_id,
-                "tenant_id": usage.tenant_id,
-                "model": usage.model,
-                "provider": usage.provider,
-                "assistant_id": usage.assistant_id,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total_tokens,
-                "status": usage.status,
-                "request_type": usage.request_type,
-                "timestamp": usage.timestamp,
-                "duration_ms": usage.duration_ms,
-            }
+            payload = json.dumps(
+                {
+                    "stage": stage,
+                    "usage": asdict(usage),
+                    "dropped_at": time.time(),
+                },
+                default=str,
+            )
+            await self.redis.lpush(_BILLING_DLQ_KEY, payload)
+            await self.redis.ltrim(_BILLING_DLQ_KEY, 0, _BILLING_DLQ_CAP - 1)
+        except Exception:
+            logger.exception(
+                "Failed to push billing record to dead-letter (stage=%s)", stage
+            )
+            get_metrics().request_metrics.billing_records_dropped_total.inc(
+                reason="dead_letter_full"
+            )
 
-            await self.redis.publish("gateway:billing", json.dumps(event_data))
+    async def _record_to_database(self, usage: UsageData) -> None:
+        """持久化使用记录到数据库 — raises on failure.
 
-        except Exception as e:
-            logger.warning(f"Failed to publish billing to Redis: {e}")
+        Phase 0 hotfix: the inner try/except has been removed so that the
+        caller (``_run_stage_with_retry``) can classify failures and trigger
+        retry/DLQ. A silent no-op occurs only when no UsageRecorder is
+        configured (best-effort skip).
+        """
+        from ..services.metrics import get_usage_recorder
+
+        recorder = get_usage_recorder()
+        if recorder is None:
+            return
+        await recorder.record_usage(
+            tenant_id=usage.tenant_id or "default",
+            user_id=usage.user_id or "anonymous",
+            model=usage.model or "unknown",
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            request_id=usage.request_id,
+            service_id=usage.service_id,
+            assistant_id=usage.assistant_id,
+            provider=usage.provider,
+            latency_ms=int(usage.duration_ms),
+            first_token_ms=usage.first_token_latency_ms,
+            request_total_duration_ms=usage.request_total_duration_ms,
+            llm_inference_duration_ms=usage.llm_inference_duration_ms,
+            retrieval_duration_ms=usage.retrieval_duration_ms,
+            tool_call_duration_ms=usage.tool_call_duration_ms,
+            agent_or_graph_overhead_ms=usage.agent_or_graph_overhead_ms,
+            tool_call_breakdown=usage.tool_call_breakdown,
+            error_type=usage.error_type,
+            status=usage.status,
+            request_type=usage.request_type,
+            metadata=usage.raw_metadata,
+            trace_steps=usage.trace_steps,
+        )
+
+    async def _publish_to_redis(self, usage: UsageData) -> None:
+        """发布计费事件到 Redis — raises on failure (see _run_stage_with_retry)."""
+        if not self.redis:
+            return
+
+        event_data = {
+            "type": "billing",
+            "request_id": usage.request_id,
+            "service_id": usage.service_id,
+            "user_id": usage.user_id,
+            "tenant_id": usage.tenant_id,
+            "model": usage.model,
+            "provider": usage.provider,
+            "assistant_id": usage.assistant_id,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "status": usage.status,
+            "request_type": usage.request_type,
+            "timestamp": usage.timestamp,
+            "duration_ms": usage.duration_ms,
+        }
+        await self.redis.publish("gateway:billing", json.dumps(event_data))
 
     def create_stream_processor(
         self,
@@ -710,9 +846,9 @@ class StreamProcessor:
         async with self.interceptor._buffer_lock:
             self.interceptor._buffer.append(usage_data)
 
-            # 如果缓冲区满，立即刷新
+            # 如果缓冲区满，立即刷新（Phase 0 hotfix: tracked for shutdown drain）
             if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
-                asyncio.create_task(self.interceptor._flush_buffer())
+                self.interceptor._spawn_tracked_flush()
 
     async def finalize(self) -> None:
         """
@@ -773,8 +909,9 @@ class StreamProcessor:
 
             async with self.interceptor._buffer_lock:
                 self.interceptor._buffer.append(usage_data)
+                # Phase 0 hotfix: tracked so stop() can drain before shutdown
                 if len(self.interceptor._buffer) >= self.interceptor.buffer_size:
-                    asyncio.create_task(self.interceptor._flush_buffer())
+                    self.interceptor._spawn_tracked_flush()
 
         await self._record_request_complete()
 

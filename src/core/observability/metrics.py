@@ -276,6 +276,24 @@ class RequestMetrics:
         )
     )
 
+    # Billing flush 失败分类 (Phase 0 hotfix)
+    billing_flush_failures_total: Counter = field(
+        default_factory=lambda: Counter(
+            "gateway_billing_flush_failures_total",
+            "Billing buffer flush failures by stage",
+            labels=["stage", "error_type"],  # stage: callback | redis | database
+        )
+    )
+
+    # Billing 最终丢弃 (Phase 0 hotfix)
+    billing_records_dropped_total: Counter = field(
+        default_factory=lambda: Counter(
+            "gateway_billing_records_dropped_total",
+            "Billing records permanently dropped after retries / DLQ",
+            labels=["reason"],  # max_retries_exceeded | dead_letter_full
+        )
+    )
+
     def record_request(
         self,
         method: str,
