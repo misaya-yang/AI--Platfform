@@ -46,13 +46,20 @@ class QuranSyncService:
         text = html.unescape(text)
         return re.sub(r"\s+", " ", text).strip()
 
+    _BARE_DOMAIN_RE = re.compile(r"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/")
+
     def _normalize_audio_url(self, value: Any) -> str | None:
         url = str(value or "").strip()
         if not url:
             return None
         if url.startswith(("http://", "https://")):
             return url
-        return f"{self._VERSE_AUDIO_BASE_URL}{url.lstrip('/')}"
+        if url.startswith("//"):
+            return f"https:{url}"
+        stripped = url.lstrip("/")
+        if self._BARE_DOMAIN_RE.match(stripped):
+            return f"https://{stripped}"
+        return f"{self._VERSE_AUDIO_BASE_URL}{stripped}"
 
     def _normalize_word(self, word: dict[str, Any]) -> dict[str, Any] | None:
         if word.get("char_type_name") != "word":

@@ -114,6 +114,61 @@ async def test_quran_sync_service_cleans_ayah_text_and_audio_urls():
 
 
 @pytest.mark.asyncio
+async def test_quran_sync_service_normalize_audio_url_variants():
+    service = QuranSyncService(
+        QuranSettings(default_translation_id=20, default_recitation_id=7),
+        client=AsyncMock(),
+        repository=AsyncMock(),
+        sync_repository=AsyncMock(),
+    )
+
+    # Relative path (word-by-word) → resolve against verses.quran.foundation
+    assert (
+        service._normalize_audio_url("wbw/001_001_001.mp3")
+        == "https://verses.quran.foundation/wbw/001_001_001.mp3"
+    )
+    assert (
+        service._normalize_audio_url("/wbw/001_001_001.mp3")
+        == "https://verses.quran.foundation/wbw/001_001_001.mp3"
+    )
+
+    # Bare-domain URL (everyayah mirror) → prepend https://, NOT verses base
+    assert (
+        service._normalize_audio_url(
+            "mirrors.quranicaudio.com/everyayah/Mohammad_al_Tablaway_128kbps/002004.mp3"
+        )
+        == "https://mirrors.quranicaudio.com/everyayah/Mohammad_al_Tablaway_128kbps/002004.mp3"
+    )
+    assert (
+        service._normalize_audio_url("everyayah.com/data/Alafasy_128kbps/001001.mp3")
+        == "https://everyayah.com/data/Alafasy_128kbps/001001.mp3"
+    )
+
+    # Full URL (already has scheme) → passthrough
+    assert (
+        service._normalize_audio_url(
+            "https://download.quranicaudio.com/qdc/mishari_al_afasy/murattal/1.mp3"
+        )
+        == "https://download.quranicaudio.com/qdc/mishari_al_afasy/murattal/1.mp3"
+    )
+    assert (
+        service._normalize_audio_url("http://example.com/x.mp3")
+        == "http://example.com/x.mp3"
+    )
+
+    # Protocol-relative URL
+    assert (
+        service._normalize_audio_url("//cdn.example.com/a.mp3")
+        == "https://cdn.example.com/a.mp3"
+    )
+
+    # Empty / None
+    assert service._normalize_audio_url(None) is None
+    assert service._normalize_audio_url("") is None
+    assert service._normalize_audio_url("   ") is None
+
+
+@pytest.mark.asyncio
 async def test_quran_sync_service_normalizes_translation_rows():
     service = QuranSyncService(
         QuranSettings(default_translation_id=20, default_recitation_id=7),
