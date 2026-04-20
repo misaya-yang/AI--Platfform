@@ -54,7 +54,7 @@ class FakeModelRegistry:
         return FakeModelInfo()
 
     async def chat_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        from src.services.assistant.model_registry import StreamDelta
+        from src.services.assistant.models.model_registry import StreamDelta
 
         # Capture the prompt/messages passed by AgentLoop for assertions.
         self.last_messages = kwargs.get("messages")
@@ -73,6 +73,8 @@ class FakeModelRegistry:
 class FakeToolDef:
     def __init__(self, name: str):
         self.name = name
+        self.category = None
+        self.description = "test tool"
 
     def to_openai_schema(self) -> dict[str, Any]:
         return {
@@ -96,6 +98,11 @@ class FakeToolInvoker:
         if tool_names:
             names = [n for n in names if n in tool_names]
         return [FakeToolDef(n) for n in names]
+
+    async def get_tool_definitions_filtered(
+        self, context: Any, tool_names: list[str] | None = None
+    ) -> list[Any]:
+        return self.get_tool_definitions(context, tool_names)
 
     async def invoke(
         self, tool_name: str, arguments: dict[str, Any], context: Any, cancel_event: Any = None
@@ -132,7 +139,7 @@ class FakeArtifactStorage:
 
 @pytest.mark.asyncio
 async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     # One iteration, direct text, no tools.
     model = FakeModelRegistry(
@@ -143,7 +150,7 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
     loop = AgentLoop(model_registry=model)
     user = MockUserContext(user_id="u1")
 
-    cfg = AgentLoopConfig(model_id="test", streaming_first_mode=True, max_tool_iterations=2)
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=2)
 
     events = []
     async for ev in loop.execute(
@@ -167,7 +174,7 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
     Regression: frontend may send a style-only system_prompt.
     Streaming-first must keep the base tool/KR instructions and append extra.
     """
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     model = FakeModelRegistry(
         scripted=[
@@ -179,7 +186,6 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
 
     cfg = AgentLoopConfig(
         model_id="test",
-        streaming_first_mode=True,
         kb_dataset_ids=["d1"],
         kb_mode="auto",
         system_prompt="STYLE_ONLY_PROMPT",
@@ -205,7 +211,7 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_tool_artifact_semantic_events() -> None:
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     # Iteration 1: model requests a generate_image tool call (no text).
     # Iteration 2: model responds with final text.
@@ -254,7 +260,7 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
         artifact_storage=FakeArtifactStorage(),
     )
     user = MockUserContext(user_id="u1")
-    cfg = AgentLoopConfig(model_id="test", streaming_first_mode=True, max_tool_iterations=3)
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
 
     got = []
     async for ev in loop.execute(
@@ -288,7 +294,7 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_kb_web_panel_events() -> None:
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     tool_calls = [
         {
@@ -343,7 +349,7 @@ async def test_streaming_first_kb_web_panel_events() -> None:
         tool_invoker=tool_invoker,  # type: ignore[arg-type]
     )
     user = MockUserContext(user_id="u1")
-    cfg = AgentLoopConfig(model_id="test", streaming_first_mode=True, max_tool_iterations=3)
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
 
     got = []
     async for ev in loop.execute(
@@ -361,7 +367,7 @@ async def test_streaming_first_kb_web_panel_events() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     duplicate_kb_calls = [
         {
@@ -407,7 +413,7 @@ async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
         tool_invoker=tool_invoker,  # type: ignore[arg-type]
     )
     user = MockUserContext(user_id="u1")
-    cfg = AgentLoopConfig(model_id="test", streaming_first_mode=True, max_tool_iterations=3)
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
 
     got = []
     async for ev in loop.execute(
@@ -425,7 +431,7 @@ async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_merges_chunked_tool_calls_before_execute() -> None:
-    from src.services.assistant.agent_loop import AgentLoop, AgentLoopConfig
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     chunked_tool_calls = [
         {
@@ -464,7 +470,7 @@ async def test_streaming_first_merges_chunked_tool_calls_before_execute() -> Non
         tool_invoker=tool_invoker,  # type: ignore[arg-type]
     )
     user = MockUserContext(user_id="u1")
-    cfg = AgentLoopConfig(model_id="test", streaming_first_mode=True, max_tool_iterations=3)
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
 
     events = []
     async for ev in loop.execute(

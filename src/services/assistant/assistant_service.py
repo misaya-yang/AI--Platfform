@@ -2997,20 +2997,19 @@ Please use this web search context to inform your response when relevant."""
         """
         from .agent.agent_loop import AgentLoop, AgentLoopConfig
 
-        # Create AgentLoop configuration with Streaming-First mode enabled
+        # Create AgentLoop configuration. Streaming-first is the only path
+        # — the legacy 8-step pipeline was removed.
         loop_config = AgentLoopConfig(
             model_id=config.model_id,
             temperature=config.temperature,
             max_tokens=config.max_tokens or 4096,
-            # Streaming-First mode - skip all pre-processing for fast TTFT
-            streaming_first_mode=True,
-            # System prompt - if not provided, streaming-first will use minimal prompt
             system_prompt=config.system_prompt,
             # Web search preference (True=force, False=AI decides) - passed to prompt
             web_search_enabled=config.web_search_enabled,
             # File attachments (must be processed in AgentLoop streaming-first)
             file_paths=config.file_paths or [],
-            # Legacy settings (only used when streaming_first_mode=False)
+            # Boundary fields retained for AssistantConfig parity with the frontend;
+            # most are no-ops internally now that the legacy 8-step path is gone.
             enable_task_planning=config.enable_task_planning,
             enable_scenario_retrieval=config.use_scenario_retrieval,
             enable_rag_metrics=config.enable_rag_metrics,
@@ -3038,10 +3037,7 @@ Please use this web search context to inform your response when relevant."""
             ),
         )
 
-        logger.info(
-            f"[AGENT LOOP] streaming_first_mode={loop_config.streaming_first_mode}, "
-            f"model={loop_config.model_id}"
-        )
+        logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
 
         # Create AgentLoop instance (system_prompt passed via loop_config)
         from .tool_invoker import create_tool_invoker

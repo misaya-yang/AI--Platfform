@@ -61,11 +61,14 @@ from .services.metrics.realtime_metrics import init_realtime_metrics
 logger = get_logger(__name__)
 
 OPENAPI_TAGS = [
-    {
-        "name": "Islamic Content",
-        "description": "Quran / Hadith / Dua / Prayer / Qibla 对外内容接口，含 canonical 数据演示接口。",
-    },
-    {"name": "Health", "description": "服务健康检查与就绪状态。"},
+    {"name": "Health", "description": "Service health checks, readiness state, and provider connectivity."},
+    {"name": "Auth", "description": "User authentication — login, logout, password management, token validation."},
+    {"name": "Sessions", "description": "Conversation session management — CRUD, message history, per-user isolation."},
+    {"name": "LangGraph", "description": "LangGraph Platform proxy — assistants, threads, runs (streaming/sync), and key-value store."},
+    {"name": "Knowledge", "description": "Knowledge base proxy — dataset management, document upload, and RAG retrieval."},
+    {"name": "Islamic Content", "description": "Quran / Hadith / Dua / Wahda content proxy to Islamic Content Service."},
+    {"name": "Quiz", "description": "AI quiz system — generation, submission, scoring, and exam management."},
+    {"name": "Dashboard", "description": "Real-time metrics, usage timeseries, and operational dashboard data."},
 ]
 
 
@@ -94,8 +97,20 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="AI Service Gateway",
         version="2.0.0",
-        description="统一 AI 服务网关，支持多协议适配、限流、熔断、会话管理等功能",
+        description=(
+            "Unified AI service gateway with multi-protocol adapters, rate limiting, circuit breaking, and session management.\n\n"
+            "**Core features:**\n"
+            "- JWT authentication with RBAC and multi-tenant isolation\n"
+            "- LangGraph Platform proxy with load balancing and streaming SSE\n"
+            "- Knowledge base management with hybrid RAG retrieval\n"
+            "- Islamic content (Quran, Hadith, Dua) via dedicated microservice\n"
+            "- AI quiz/exam system with scoring and analytics\n"
+            "- Real-time usage metrics and billing\n\n"
+            "**Auth:** All endpoints (except `/health` and `/api/v1/auth/login`) require `Authorization: Bearer <token>`."
+        ),
         openapi_tags=OPENAPI_TAGS,
+        contact={"name": "Hejaz AI Team", "email": "tech@hejazfs.com.au"},
+        license_info={"name": "Proprietary"},
     )
 
     # ========== 中间件配置 ==========
@@ -777,6 +792,18 @@ def create_app() -> FastAPI:
         if usage_scheduler is not None:
             await usage_scheduler.stop()
 
+        # Stop billing interceptor BEFORE usage_recorder — it routes records
+        # through the recorder, so inflight flushes must drain first.
+        # Phase 0 hotfix: without this, fire-and-forget _flush_buffer tasks
+        # spawned by StreamProcessor get GC'd mid-write on shutdown.
+        billing_interceptor = getattr(app.state, "billing_interceptor", None)
+        if billing_interceptor is not None:
+            try:
+                await billing_interceptor.stop()
+                logger.info("billing_interceptor stopped cleanly")
+            except Exception:
+                logger.exception("billing_interceptor.stop() failed")
+
         # Stop usage recorder (flush remaining records)
         usage_recorder = getattr(app.state, "usage_recorder", None)
         if usage_recorder is not None:
@@ -900,7 +927,10 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     )
 
     # Initialize metrics recorder with Redis for dashboard
-    init_metrics_recorder(container.redis)
+    init_metrics_recorder(
+        container.redis,
+        latency_sample_cap=container.settings.metrics.latency_sample_cap,
+    )
 
     # Initialize realtime metrics service for LangSmith-style dashboard
     init_realtime_metrics(container.redis)
@@ -1378,8 +1408,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     google_key_present = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
     logger.info(
-        "[Assistant Startup] default_engine=agent_loop streaming_first_mode=%s tools=%s keys={google:%s,dashscope:%s,tavily:%s}",
-        True,
+        "[Assistant Startup] default_engine=agent_loop tools=%s keys={google:%s,dashscope:%s,tavily:%s}",
         tool_names,
         google_key_present,
         dashscope_key_present,

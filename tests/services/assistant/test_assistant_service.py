@@ -35,7 +35,7 @@ class TestAssistantServiceInit:
     def test_init_with_required_args(self):
         """Should initialize with just model_registry."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
 
@@ -48,7 +48,7 @@ class TestAssistantServiceInit:
     def test_init_with_kb_service(self):
         """Should initialize with knowledge service."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
         from src.services.knowledge.knowledge_service import KnowledgeService
 
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -64,7 +64,7 @@ class TestAssistantServiceInit:
     def test_init_with_session_manager(self):
         """Should initialize with session manager."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
         from src.services.session.database_session_manager import DatabaseSessionManager
 
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -80,7 +80,7 @@ class TestAssistantServiceInit:
     def test_init_creates_context_manager(self):
         """Should create context manager during init."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
 
@@ -91,7 +91,7 @@ class TestAssistantServiceInit:
     def test_builtin_domain_policy_disabled_by_default(self):
         """Built-in domain policy should be off for generic assistant by default."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
         service = AssistantService(model_registry=mock_registry)
@@ -102,7 +102,7 @@ class TestAssistantServiceInit:
     def test_builtin_domain_policy_can_be_enabled_by_env(self, monkeypatch):
         """Emergency rollback switch can re-enable built-in domain policy."""
         from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
 
         monkeypatch.setenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "true")
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -161,7 +161,7 @@ class TestAssistantServiceChatStream:
     @pytest.fixture
     def mock_model_registry(self):
         """Create mock model registry."""
-        from src.services.assistant.model_registry import ModelRegistry
+        from src.services.assistant.models.model_registry import ModelRegistry
 
         registry = MagicMock(spec=ModelRegistry)
         registry.get_model = MagicMock(

@@ -702,9 +702,18 @@ class ModelRegistry:
             "stream": stream,
         }
         if system_prompt:
-            body["system"] = system_prompt
+            # Wrap as a single-block list with `cache_control: ephemeral` so
+            # Anthropic caches the system prefix (up to 4 breakpoints allowed).
+            # Plain-string form bypasses prompt caching entirely.
+            body["system"] = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if tools:
-            # Convert OpenAI tool format to Anthropic format
+            # Convert OpenAI tool format to Anthropic format.
             anthropic_tools = []
             for tool in tools:
                 if tool.get("type") == "function":
@@ -719,6 +728,10 @@ class ModelRegistry:
                         }
                     )
             if anthropic_tools:
+                # Cache the tool definitions too — they're stable across turns
+                # for the same session. Put the marker on the last tool entry;
+                # Anthropic caches everything up to (and including) the marker.
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
                 body["tools"] = anthropic_tools
         return body
 

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 # =============================================================================
 # Preserve Patterns
@@ -459,3 +459,48 @@ Summary:"""
             return " ".join(text_parts)
 
         return ""
+
+
+# =============================================================================
+# LLM Adapter — concrete LLMService backed by ModelRegistry
+# =============================================================================
+
+import logging
+
+if TYPE_CHECKING:
+    from ..models.model_registry import ModelRegistry
+
+_compressor_logger = logging.getLogger(__name__)
+
+
+class ModelRegistryLLMService:
+    """LLMService impl wrapping ModelRegistry.chat().
+
+    Concrete counterpart to the `LLMService` Protocol in this module; keeps
+    compressor callers from having to construct their own adapter."""
+
+    def __init__(
+        self,
+        model_registry: "ModelRegistry",
+        model_id: str,
+        max_tokens: int = 500,
+        temperature: float = 0.3,
+    ) -> None:
+        self._registry = model_registry
+        self._model_id = model_id
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+
+    async def complete(self, prompt: str, max_tokens: int = 200) -> str:
+        effective_max = min(max_tokens or self._max_tokens, self._max_tokens)
+        try:
+            content, _usage = await self._registry.chat(
+                model_id=self._model_id,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self._temperature,
+                max_tokens=effective_max,
+            )
+            return content or ""
+        except Exception:
+            _compressor_logger.exception("ModelRegistryLLMService.complete failed")
+            return ""

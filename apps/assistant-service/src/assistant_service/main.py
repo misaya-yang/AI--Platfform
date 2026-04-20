@@ -168,6 +168,21 @@ async def lifespan(app: FastAPI):
         pass
     register_image_generation_tool()
 
+    # ── Todo tools (Phase 5) — always on; exposes the per-session
+    # WorkingMemory to the model for long-horizon task tracking.
+    from src.services.assistant.tools.todo_tools import register_todo_tools
+    register_todo_tools()
+
+    # ── Primitive tools (Phase 4) — env-gated opt-in ──
+    # Exposes fs_read/fs_write/fs_glob/fs_grep to the model. Requires a writable
+    # workspace root (default /tmp/ai-gateway-workspace, override with
+    # ASSISTANT_WORKSPACE_ROOT). Off by default to keep legacy deployments
+    # unchanged.
+    if os.environ.get("ASSISTANT_ENABLE_PRIMITIVES", "").lower() in {"1", "true", "yes"}:
+        from src.services.assistant.tools.primitives import register_primitive_tools
+        register_primitive_tools()
+        logger.info("Primitive tools enabled (fs_read/fs_write/fs_glob/fs_grep)")
+
     # ── AssistantService ──
     from src.services.assistant import AssistantService
     assistant_service = AssistantService(

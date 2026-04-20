@@ -140,7 +140,7 @@ class QueryIntentAnalyzer:
     def __init__(
         self,
         model_registry: Any = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "qwen3.6-plus",
         enable_llm_tier: bool = True,
         cache_ttl: int = 3600,
         cache_max_size: int = 1000,
@@ -741,7 +741,7 @@ JSON 格式:
 
 def create_query_intent_analyzer(
     model_registry: Any = None,
-    model_name: str = "gemini-2.0-flash",
+    model_name: str = "qwen3.6-plus",
     enable_llm_tier: bool = True,
     cache_ttl: int = 3600,
     cache_max_size: int = 1000,

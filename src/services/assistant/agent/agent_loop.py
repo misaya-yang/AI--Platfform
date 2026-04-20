@@ -77,7 +77,11 @@ from .error_recovery import (
     RecoveryResult,
 )
 from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
-from ..memory.compressor import CompressedContext, ContextCompressor
+from ..memory.compressor import (
+    CompressedContext,
+    ContextCompressor,
+    ModelRegistryLLMService,
+)
 from ..openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
 from ..rag.query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from ..rag.rag_metrics import (
@@ -91,6 +95,22 @@ from .react_executor import ReActEvent, ReActExecutor
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_manager import SubAgentManager
 from .subagent_types import SubAgentConfig, SubAgentType
+from .artifact_persister import (
+    persist_and_collect_events as _artifact_persist_and_collect_events,
+    sanitize_output_files as _artifact_sanitize_output_files,
+)
+from .middleware import AgentMiddleware, MiddlewareChain, ToolVerdict, VerdictKind
+from .middlewares.openclaw_memory import OpenClawMemoryMiddleware
+from .middlewares.permission import PermissionMiddleware
+from .tool_dedup import KB_REUSE_MESSAGE, KBDedupState
+from .tool_result_formatter import (
+    compact_context_payload as _fmt_compact_context_payload,
+    compact_tool_result_for_model as _fmt_compact_tool_result_for_model,
+    kb_query_fingerprint as _fmt_kb_query_fingerprint,
+    split_text_for_stream as _fmt_split_text_for_stream,
+    tool_schema_name as _fmt_tool_schema_name,
+    truncate_chars as _fmt_truncate_chars,
+)
 from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
 from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
@@ -236,7 +256,7 @@ class AgentLoopConfig:
     """
 
     # Model configuration
-    model_id: str = "gemini-2.0-flash"
+    model_id: str = "qwen3.6-plus"
     temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)
     max_tokens: int = 4096
 
@@ -304,14 +324,6 @@ class AgentLoopConfig:
     error_base_delay: float = 1.0  # Base delay for exponential backoff (seconds)
     error_max_delay: float = 10.0  # Maximum delay between retries (was 30s, too conservative)
 
-    # ========================================================================
-    # Streaming-First Mode (Manus-style architecture)
-    # ========================================================================
-    # When enabled, skips ALL pre-processing and starts LLM streaming immediately
-    # LLM decides if tools/RAG are needed during generation via tool calls
-    # This dramatically reduces TTFT from ~10s to <2s
-    streaming_first_mode: bool = True  # Default ON for best TTFT
-
     # System prompt (optional override, otherwise uses default from prompts)
     system_prompt: str | None = None
 
@@ -338,7 +350,6 @@ class AgentLoopConfig:
             "kb_dataset_ids": self.kb_dataset_ids,
             "kb_mode": self.kb_mode,
             "kb_top_k": self.kb_top_k,
-            "streaming_first_mode": self.streaming_first_mode,
             "file_paths": self.file_paths,
             "execution_profile": self.execution_profile,
             "memory_mode": self.memory_mode,
@@ -509,6 +520,27 @@ class AgentLoop:
         # ADR-003: Lazy-initialized sub-agent manager (reused across tool calls)
         self._subagent_manager: SubAgentManager | None = None
 
+        # Registered in order; the loop calls `before_call(ctx, messages)`
+        # after building the system prompt and before appending history/user
+        # message, and `on_tool_call(...)` before each tool invocation.
+        self.middleware_chain = self._build_default_middleware_chain()
+
+    def _build_default_middleware_chain(self) -> MiddlewareChain:
+        """Register middleware concerns that were previously inlined in the loop."""
+        chain = MiddlewareChain()
+        chain.add(
+            OpenClawMemoryMiddleware(
+                runtime=self.openclaw_runtime,
+                phase_tag=AgentLoopPhase.MEMORY_LOADING,
+            )
+        )
+        # PermissionMiddleware with the default allow-all policy is a no-op;
+        # deployments that want real gating swap in a stricter policy via
+        # `loop.middleware_chain.add(PermissionMiddleware(my_policy))` or by
+        # overriding this method in a subclass.
+        chain.add(PermissionMiddleware())
+        return chain
+
     def _get_subagent_manager(self) -> SubAgentManager:
         """Return a reusable SubAgentManager, creating it on first access."""
         if self._subagent_manager is None:
@@ -550,10 +582,15 @@ class AgentLoop:
         return configs, tool_ids
 
     def _create_query_intent_analyzer(self) -> QueryIntentAnalyzer:
-        """Create a QueryIntentAnalyzer instance with LLM support."""
+        """Create a QueryIntentAnalyzer instance.
+
+        Model selection is delegated to the analyzer's default (sourced from
+        the gateway's configured default model) — we don't hardcode a model
+        ID here. Deployments swap models via ModelRegistry + settings, not
+        by patching this file.
+        """
         return create_query_intent_analyzer(
             model_registry=self.model_registry,
-            model_name="gemini-2.0-flash",  # Fast model for quick decisions
             enable_llm_tier=True,
             cache_ttl=3600,
         )
@@ -693,6 +730,7 @@ class AgentLoop:
                 history=history,
                 max_tokens=config.max_history_tokens,
                 min_recent=config.min_recent_messages,
+                model_id=config.model_id,
             )
 
         # Use TaskManager for session isolation
@@ -763,7 +801,7 @@ class AgentLoop:
                         "session_id": session_id,
                         "task_id": task_id,
                         "request_id": ctx.request_id,
-                        "mode": "streaming_first" if config.streaming_first_mode else "legacy",
+                        "mode": "streaming_first",
                     },
                 )
                 if config.queue_mode != "collect":
@@ -777,265 +815,61 @@ class AgentLoop:
                         },
                     )
 
-                # ============================================================
-                # STREAMING-FIRST MODE (Manus-style architecture)
-                # ============================================================
-                # Skip ALL pre-processing, start LLM streaming immediately
-                # LLM decides if tools/RAG are needed via tool calls
-                # This reduces TTFT from ~10s to <2s
-                if config.streaming_first_mode:
-                    logger.info(
-                        f"[STREAMING-FIRST] Starting immediate generation for "
-                        f"session={session_id}, query='{message[:50]}...'"
-                    )
-                    had_fatal_error = False
-                    fatal_error_message: str | None = None
-                    async for event in self._execute_streaming_first(
-                        ctx=ctx,
-                        user=user,
-                        history=history,
-                        task_ctx=task_ctx,
-                    ):
-                        # If streaming-first hits an unexpected internal exception, it emits an "error" event.
-                        # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
-                        if event.event_type == "error" and not had_fatal_error:
-                            had_fatal_error = True
-                            if isinstance(event.data, dict):
-                                fatal_error_message = str(
-                                    event.data.get("message") or event.data.get("error") or ""
-                                )
-                            else:
-                                fatal_error_message = str(event.data)
-                        yield event
-
-                    # Ensure lifecycle is complete: always end with run_finished or run_error.
-                    if had_fatal_error:
-                        run_status = "failed"
-                        run_error = fatal_error_message or "AgentLoop streaming-first failed"
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.GENERATION_STORAGE,
-                            event_type=StreamEventType.RUN_ERROR.value,
-                            data={
-                                "run_id": ctx.run_id,
-                                "thread_id": session_id,
-                                "error": run_error,
-                            },
-                        )
-                    else:
-                        run_status = "succeeded"
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.GENERATION_STORAGE,
-                            event_type=StreamEventType.RUN_FINISHED.value,
-                            data={
-                                "run_id": ctx.run_id,
-                                "thread_id": session_id,
-                                "metadata": {
-                                    "usage": ctx.usage or {},
-                                    "mode": "streaming_first",
-                                },
-                            },
-                        )
-                    return  # Exit after streaming-first completes
-
-                # ============================================================
-                # LEGACY 8-STEP MODE (for backward compatibility)
-                # ============================================================
-                # Step 1: Memory Loading (optional, disabled by default for lower TTFT)
-                if config.enable_memory_loading and self.memory_service:
-                    async for event in self._step_memory_loading(ctx, user):
-                        yield event
-                    if task_ctx and task_ctx.cancelled:
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.MEMORY_LOADING,
-                            event_type="cancelled",
-                            data={"reason": "User requested cancellation"},
-                        )
-                        return
-
-                # Step 2: Scenario Analysis
-                async for event in self._step_scenario_analysis(ctx):
-                    yield event
-                if task_ctx and task_ctx.cancelled:
-                    yield AgentLoopEvent(
-                        phase=AgentLoopPhase.SCENARIO_ANALYSIS,
-                        event_type="cancelled",
-                        data={"reason": "User requested cancellation"},
-                    )
-                    return
-
-                # Step 3: Task Planning
-                if config.enable_task_planning:
-                    async for event in self._step_task_planning(ctx):
-                        yield event
-                    if task_ctx and task_ctx.cancelled:
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.TASK_PLANNING,
-                            event_type="cancelled",
-                            data={"reason": "User requested cancellation"},
-                        )
-                        return
-
-                # Step 4: RAG Retrieval - LLM-Driven Intelligent Decision (Self-RAG Style)
-                # Use QueryIntentAnalyzer for truly intelligent retrieval decisions
-                # This replaces pattern-matching with LLM-based understanding
-                should_retrieve = False
-                intent_result: QueryIntent | None = None
-                skip_reason = "Unknown"
-
-                if not config.kb_dataset_ids:
-                    skip_reason = "No KB datasets configured"
-                elif not config.enable_scenario_retrieval:
-                    skip_reason = "Scenario retrieval disabled"
-                else:
-                    # LLM-driven decision: Ask the model if retrieval is needed
-                    try:
-                        intent_result = await self.query_intent_analyzer.analyze(
-                            query=ctx.message,
-                            available_datasets=config.kb_dataset_ids,
-                            user_context={"user_id": user.user_id, "tenant_id": user.tenant_id},
-                        )
-                        should_retrieve = intent_result.requires_kb_search
-                        skip_reason = intent_result.decision_reason
-
-                        # Emit intent analysis event for observability
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.RAG_RETRIEVAL,
-                            event_type="intent_analyzed",
-                            data={
-                                "requires_kb_search": intent_result.requires_kb_search,
-                                "decision": intent_result.decision.value,
-                                "reason": intent_result.decision_reason,
-                                "domain": intent_result.domain,
-                                "tier_used": intent_result.tier_used,
-                                "confidence": intent_result.confidence,
-                                "analysis_time_ms": intent_result.analysis_time_ms,
-                            },
-                        )
-
-                        logger.info(
-                            f"[INTENT] decision={intent_result.decision.value}, "
-                            f"tier={intent_result.tier_used}, "
-                            f"reason='{intent_result.decision_reason}', "
-                            f"time={intent_result.analysis_time_ms:.1f}ms"
-                        )
-
-                        # Store intent result in context for later use
-                        ctx.query_intent = intent_result
-
-                    except Exception as e:
-                        # Fallback to conservative: retrieve if analysis fails
-                        logger.exception("Intent analysis failed, defaulting to retrieve")
-                        should_retrieve = True
-                        skip_reason = "Intent analysis failed, defaulting to retrieve"
-
-                if should_retrieve:
-                    async for event in self._step_rag_retrieval(ctx, user):
-                        yield event
-                    if task_ctx and task_ctx.cancelled:
-                        yield AgentLoopEvent(
-                            phase=AgentLoopPhase.RAG_RETRIEVAL,
-                            event_type="cancelled",
-                            data={"reason": "User requested cancellation"},
-                        )
-                        return
-                else:
-                    # Skip retrieval - emit event for observability
-                    yield AgentLoopEvent(
-                        phase=AgentLoopPhase.RAG_RETRIEVAL,
-                        event_type="skipped",
-                        data={
-                            "reason": skip_reason,
-                            "intent": intent_result.to_dict() if intent_result else None,
-                            "scenario": ctx.scenario.primary_scenario.value
-                            if ctx.scenario
-                            else None,
-                            "query_preview": ctx.message[:50] + "..."
-                            if len(ctx.message) > 50
-                            else ctx.message,
-                        },
-                    )
-                    logger.info(f"[RAG SKIP] {skip_reason}. Query='{ctx.message[:50]}...'")
-
-                # Step 5: Context Building
-                async for event in self._step_context_building(ctx, history):
-                    yield event
-                if task_ctx and task_ctx.cancelled:
-                    yield AgentLoopEvent(
-                        phase=AgentLoopPhase.CONTEXT_BUILDING,
-                        event_type="cancelled",
-                        data={"reason": "User requested cancellation"},
-                    )
-                    return
-
-                # Step 6: Execution Loop
-                async for event in self._step_execution(ctx, session):
-                    yield event
-                if task_ctx and task_ctx.cancelled:
-                    yield AgentLoopEvent(
-                        phase=AgentLoopPhase.EXECUTION,
-                        event_type="cancelled",
-                        data={"reason": "User requested cancellation"},
-                    )
-                    return
-
-                # Step 7: Context Compression (future)
-                if config.enable_context_compression:
-                    async for event in self._step_context_compression(ctx):
-                        yield event
-
-                # Step 8: Content Generation & Storage
-                async for event in self._step_generation_storage(ctx, user):
+                # Model-driven streaming loop (Manus-style).
+                # Pre-processing is opt-in via tool calls; the model decides when
+                # to retrieve, plan, or reflect. The legacy 8-step pipeline was
+                # removed; streaming-first is the only path.
+                logger.info(
+                    f"[STREAMING-FIRST] Starting immediate generation for "
+                    f"session={session_id}, query='{message[:50]}...'"
+                )
+                had_fatal_error = False
+                fatal_error_message: str | None = None
+                async for event in self._execute_streaming_first(
+                    ctx=ctx,
+                    user=user,
+                    history=history,
+                    task_ctx=task_ctx,
+                ):
+                    # If streaming-first hits an unexpected internal exception, it emits an "error" event.
+                    # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
+                    if event.event_type == "error" and not had_fatal_error:
+                        had_fatal_error = True
+                        if isinstance(event.data, dict):
+                            fatal_error_message = str(
+                                event.data.get("message") or event.data.get("error") or ""
+                            )
+                        else:
+                            fatal_error_message = str(event.data)
                     yield event
 
-                # Emit context metrics event (before finally block)
-                if ctx.metrics_builder:
-                    # Set memory metrics
-                    ctx.metrics_builder.set_memory(
-                        long_term_loaded=ctx.long_term_memory is not None,
-                        session_loaded=ctx.session_memory is not None,
-                        working_memory_tasks=len(ctx.working_memory.tasks)
-                        if ctx.working_memory
-                        else 0,
-                        working_memory_restored=ctx.session_memory.get("working_memory") is not None
-                        if ctx.session_memory
-                        else False,
-                        working_memory_persisted=False,  # Will be set in finally
-                    )
-
-                    # Set cache metrics from LLM response usage
-                    if ctx.usage:
-                        ctx.metrics_builder.set_cache(
-                            cache_read=ctx.usage.get("cache_read_input_tokens", 0),
-                            cache_creation=ctx.usage.get("cache_creation_input_tokens", 0),
-                        )
-
-                    # Build and emit metrics
-                    metrics = ctx.metrics_builder.build()
+                # Ensure lifecycle is complete: always end with run_finished or run_error.
+                if had_fatal_error:
+                    run_status = "failed"
+                    run_error = fatal_error_message or "AgentLoop streaming-first failed"
                     yield AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
-                        event_type="context_metrics",
-                        data=metrics.to_event_data(),
-                    )
-
-                    # Record to collector (async, non-blocking)
-                    try:
-                        collector = get_context_metrics_collector()
-                        await collector.record(metrics)
-                    except Exception as metrics_error:
-                        logger.exception("Failed to record context metrics")
-                run_status = "succeeded"
-                yield AgentLoopEvent(
-                    phase=AgentLoopPhase.GENERATION_STORAGE,
-                    event_type=StreamEventType.RUN_FINISHED.value,
-                    data={
-                        "run_id": ctx.run_id,
-                        "thread_id": session_id,
-                        "metadata": {
-                            "usage": ctx.usage or {},
-                            "mode": "legacy",
+                        event_type=StreamEventType.RUN_ERROR.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": session_id,
+                            "error": run_error,
                         },
-                    },
-                )
+                    )
+                else:
+                    run_status = "succeeded"
+                    yield AgentLoopEvent(
+                        phase=AgentLoopPhase.GENERATION_STORAGE,
+                        event_type=StreamEventType.RUN_FINISHED.value,
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": session_id,
+                            "metadata": {
+                                "usage": ctx.usage or {},
+                                "mode": "streaming_first",
+                            },
+                        },
+                    )
 
             except Exception as loop_error:
                 run_status = "failed"
@@ -1089,6 +923,7 @@ class AgentLoop:
         history: list[dict[str, Any]],
         max_tokens: int,
         min_recent: int,
+        model_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Proactively trim history to prevent context overflow.
@@ -1136,7 +971,56 @@ class AgentLoop:
         # Calculate budget for summary of old messages
         summary_budget = max_tokens - recent_tokens - 100  # Reserve 100 tokens for overhead
 
-        # Try to summarize old messages
+        # Prefer ContextCompressor when available — it preserves URLs and code
+        # blocks on top of summarization, better recovery of useful structure
+        # than a raw LLM summary.
+        if self.model_registry:
+            try:
+                # Use the session's model for compression so we don't run a
+                # different model than the conversation is using — keeps the
+                # compressed summary in the same "voice" and avoids a second
+                # provider round-trip when the session already has one warm.
+                compressor = ContextCompressor(
+                    llm_service=ModelRegistryLLMService(
+                        self.model_registry,
+                        model_id=model_id or "qwen3.6-plus",
+                        max_tokens=min(summary_budget, 500),
+                    ),
+                    max_summary_tokens=min(summary_budget, 500),
+                )
+                compressed = await compressor.compress(
+                    messages=old_messages,
+                    target_tokens=summary_budget,
+                    preserve_recent=0,  # recent slice is already separated above
+                )
+                summary_parts: list[str] = []
+                if compressed.summary:
+                    summary_parts.append(f"Summary: {compressed.summary}")
+                if compressed.preserved_urls:
+                    summary_parts.append(
+                        "URLs referenced: " + ", ".join(compressed.preserved_urls[:10])
+                    )
+                if compressed.key_artifacts:
+                    summary_parts.append(
+                        "Artifacts mentioned: " + ", ".join(compressed.key_artifacts[:10])
+                    )
+                if summary_parts:
+                    summary_message = {
+                        "role": "system",
+                        "content": "[Previous conversation]\n" + "\n".join(summary_parts),
+                    }
+                    trimmed_history = [summary_message] + recent_messages
+                    final_tokens = estimate_history_tokens(trimmed_history)
+                    logger.info(
+                        f"History compressed: {total_tokens} -> {final_tokens} tokens "
+                        f"({len(old_messages)} msgs, {len(compressed.preserved_urls)} urls, "
+                        f"{len(compressed.preserved_code_blocks)} code blocks)"
+                    )
+                    return trimmed_history
+            except Exception:
+                logger.exception("ContextCompressor failed — falling back to raw summary")
+
+        # Fallback path: simple LLM summary (original behavior).
         try:
             summary = await self._summarize_history(old_messages, max_tokens=summary_budget)
             if summary:
@@ -1151,10 +1035,10 @@ class AgentLoop:
                     f"(summarized {len(old_messages)} old messages)"
                 )
                 return trimmed_history
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to summarize history")
 
-        # Fallback: just keep recent messages
+        # Last resort: just keep recent messages.
         logger.info(f"Fallback: keeping only {min_recent} recent messages")
         return recent_messages
 
@@ -1335,16 +1219,7 @@ class AgentLoop:
             quiz_id_for_persistence: str | None = None
             created_artifact_ids: list[str] = []
 
-            def _sanitize_output_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-                """Reduce payload for non-image files when we already have download_url/artifact_id."""
-                sanitized: list[dict[str, Any]] = []
-                for f in files:
-                    mime = str(f.get("mime_type") or "")
-                    if f.get("artifact_id") and (not mime.startswith("image/")):
-                        sanitized.append({**f, "content_base64": ""})
-                    else:
-                        sanitized.append(f)
-                return sanitized
+            _sanitize_output_files = _artifact_sanitize_output_files
 
             def _tool_step_info(name: str, args: dict[str, Any]) -> dict[str, str]:
                 """Minimal mapping for Manus-style task panel visualization."""
@@ -1367,168 +1242,14 @@ class AgentLoop:
                     return {"title": "生成PPT", "description": t, "icon": "ppt"}
                 return {"title": f"执行工具: {name}", "description": "", "icon": "tool"}
 
-            def _truncate_text(value: str, max_len: int) -> str:
-                text = (value or "").replace("\r\n", "\n").strip()
-                if len(text) <= max_len:
-                    return text
-                return text[: max_len - 3].rstrip() + "..."
-
-            def _split_text_for_stream(text: str, max_chunk_chars: int = 120) -> list[str]:
-                """Split large provider chunks so frontend receives visible incremental updates."""
-                text = text or ""
-                if len(text) <= max_chunk_chars:
-                    return [text] if text else []
-
-                chunks: list[str] = []
-                delimiters = {"。", "！", "？", ".", "!", "?", "\n"}
-                start = 0
-                n = len(text)
-                while start < n:
-                    end = min(start + max_chunk_chars, n)
-                    if end < n:
-                        split_at = -1
-                        for i in range(end, start, -1):
-                            if text[i - 1] in delimiters:
-                                split_at = i
-                                break
-                        if split_at > start + max_chunk_chars // 3:
-                            end = split_at
-                    chunk = text[start:end]
-                    if chunk:
-                        chunks.append(chunk)
-                    start = end
-                return chunks
-
-            def _compact_context_payload(ctx_item: dict[str, Any]) -> dict[str, Any]:
-                """Trim large KB payloads for SSE/session metadata to reduce transfer latency."""
-                compact_chunks: list[dict[str, Any]] = []
-                for chunk in (ctx_item.get("chunks") or [])[:3]:
-                    if not isinstance(chunk, dict):
-                        continue
-                    meta = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
-                    compact_meta = {
-                        "source_document": meta.get("source_document"),
-                        "section_title": meta.get("section_title"),
-                        "page_number": meta.get("page_number"),
-                    }
-                    compact_meta = {k: v for k, v in compact_meta.items() if v is not None}
-                    compact_chunks.append(
-                        {
-                            "content": _truncate_text(str(chunk.get("content") or ""), 320),
-                            "score": chunk.get("score"),
-                            "dataset_id": chunk.get("dataset_id") or ctx_item.get("dataset_id"),
-                            "dataset_name": chunk.get("dataset_name")
-                            or ctx_item.get("dataset_name"),
-                            "segment_id": chunk.get("segment_id"),
-                            "document_id": chunk.get("document_id"),
-                            "source_url": chunk.get("source_url"),
-                            "image_url": chunk.get("image_url"),
-                            "citation_text": chunk.get("citation_text"),
-                            "metadata": compact_meta,
-                        }
-                    )
-
-                compact: dict[str, Any] = {
-                    "dataset_id": ctx_item.get("dataset_id"),
-                    "dataset_name": ctx_item.get("dataset_name"),
-                    "query": ctx_item.get("query"),
-                    "took_ms": ctx_item.get("took_ms"),
-                    "chunks": compact_chunks,
-                }
-                if ctx_item.get("error"):
-                    compact["error"] = ctx_item.get("error")
-                return compact
-
-            def _compact_tool_result_for_model(
-                tool_name: str,
-                tool_result_text: Any,
-                tool_metadata: dict[str, Any],
-            ) -> str:
-                """
-                Build a concise tool result payload for follow-up LLM calls.
-                This prevents huge prompt expansion (high input tokens + slow first token).
-                """
-                text_result = str(tool_result_text or "")
-                if tool_name == "search_knowledge_base":
-                    contexts = (
-                        tool_metadata.get("contexts") if isinstance(tool_metadata, dict) else None
-                    )
-                    if isinstance(contexts, list):
-                        flat_chunks: list[dict[str, Any]] = []
-                        for ctx_item in contexts:
-                            if not isinstance(ctx_item, dict):
-                                continue
-                            for c in ctx_item.get("chunks") or []:
-                                if isinstance(c, dict):
-                                    flat_chunks.append(c)
-
-                        flat_chunks.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
-                        selected = flat_chunks[:6]
-                        lines: list[str] = []
-                        q = tool_metadata.get("query")
-                        if q:
-                            lines.append(f"KB query: {q}")
-                        lines.append(
-                            f"KB results: {len(flat_chunks)} total, using top {len(selected)} snippets."
-                        )
-                        for idx, item in enumerate(selected, 1):
-                            ds = item.get("dataset_name") or item.get("dataset_id") or "dataset"
-                            score = float(item.get("score") or 0.0)
-                            cite = item.get("citation_text")
-                            lines.append(f"[{idx}] {ds} (score={score:.2f})")
-                            lines.append(_truncate_text(str(item.get("content") or ""), 260))
-                            if cite:
-                                lines.append(f"citation: {_truncate_text(str(cite), 120)}")
-                        if not selected and text_result:
-                            lines.append(_truncate_text(text_result, 1200))
-                        return "\n".join(lines)
-
-                if tool_name == "search_web":
-                    display = (
-                        tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
-                    )
-                    if isinstance(display, dict) and isinstance(display.get("results"), list):
-                        lines = [f"Web results for: {display.get('query') or ''}".strip()]
-                        for idx, item in enumerate(display.get("results", [])[:6], 1):
-                            if not isinstance(item, dict):
-                                continue
-                            title = item.get("title") or "untitled"
-                            url = item.get("url") or ""
-                            content = _truncate_text(str(item.get("content") or ""), 220)
-                            lines.append(f"[{idx}] {title}")
-                            if url:
-                                lines.append(f"url: {url}")
-                            if content:
-                                lines.append(content)
-                        return "\n".join(lines)
-
-                return _truncate_text(text_result, 3000)
-
-            def _tool_schema_name(schema: Any) -> str:
-                if not isinstance(schema, dict):
-                    return ""
-                function_block = schema.get("function")
-                if isinstance(function_block, dict):
-                    return str(function_block.get("name") or "").strip()
-                return str(schema.get("name") or "").strip()
-
-            def _kb_query_fingerprint(arguments: dict[str, Any]) -> str:
-                query = " ".join(str(arguments.get("query") or "").split()).lower()
-                if not query:
-                    return ""
-                intent = str(arguments.get("intent") or "general").strip().lower()
-                dataset_ids = arguments.get("dataset_ids")
-                if isinstance(dataset_ids, list):
-                    normalized_ids = sorted(
-                        str(dataset_id).strip()
-                        for dataset_id in dataset_ids
-                        if str(dataset_id).strip()
-                    )
-                elif dataset_ids is None:
-                    normalized_ids = []
-                else:
-                    normalized_ids = [str(dataset_ids).strip()]
-                return f"q={query}|intent={intent}|datasets={','.join(normalized_ids)}"
+            # Pure helpers extracted to tool_result_formatter.py — kept as local
+            # aliases so call sites below don't need to change yet.
+            _truncate_text = _fmt_truncate_chars
+            _split_text_for_stream = _fmt_split_text_for_stream
+            _compact_context_payload = _fmt_compact_context_payload
+            _compact_tool_result_for_model = _fmt_compact_tool_result_for_model
+            _tool_schema_name = _fmt_tool_schema_name
+            _kb_query_fingerprint = _fmt_kb_query_fingerprint
 
             def _select_tools_for_request(
                 all_defs: list[Any],
@@ -1796,16 +1517,19 @@ class AgentLoop:
                 except Exception as exc:
                     logger.exception("Failed to load long-term memory in streaming-first mode")
 
-            # System prompt - ALWAYS include the streaming-first base prompt so the model
-            # receives consistent tool/RAG instructions even when the frontend provides a
-            # style-only system prompt (common in the assistant UI).
+            # System prompt is kept BYTE-IDENTICAL across requests for the same
+            # (tenant, enabled_tools, kb_datasets) combo. All query-dependent
+            # context (skills selection, user memory, OpenClaw snippets) moves
+            # to the user turn as a `<context>...</context>` block — that way
+            # Anthropic / Gemini prompt caching on the system prefix actually
+            # hits.
             base_prompt = get_streaming_first_prompt(
                 available_datasets=ctx.config.kb_dataset_ids,
                 kb_mode=ctx.config.kb_mode,
-                web_search_enabled=ctx.config.web_search_enabled,  # Preference hint for AI
+                web_search_enabled=ctx.config.web_search_enabled,
                 available_tools=available_tool_names or None,
                 dataset_name_map=dataset_name_map,
-                os_agent_enabled=ctx.config.os_agent_enabled,  # P1.3: inject OS tools prompt
+                os_agent_enabled=ctx.config.os_agent_enabled,
             )
             extra_prompt = (ctx.config.system_prompt or "").strip()
             if extra_prompt:
@@ -1814,19 +1538,31 @@ class AgentLoop:
                 )
             else:
                 system_prompt = base_prompt
-            # Progressive disclosure: L1 metadata always, L2 instructions on trigger match
+            messages.append({"role": "system", "content": system_prompt})
+
+            # Middleware chain populates ctx.openclaw_memory_snippets and friends
+            # but no longer inserts its own system messages (see middleware
+            # OpenClawMemoryMiddleware for the storage-only contract).
+            async for _mw_event in self.middleware_chain.run_before_call(ctx, messages):
+                yield _mw_event
+
+            # Collect all dynamic context sections into a single `<context>` block
+            # that rides on the user turn. Order: skills → user memory → retrieved
+            # memory snippets. All query-dependent — intentionally NOT in system.
+            dynamic_sections: list[str] = []
             if ctx.openclaw_skills_metadata:
-                # L1: compact metadata (~200 tokens) — always in system prompt
                 skill_lines = []
                 for skill in ctx.openclaw_skills_metadata[:5]:
                     skill_lines.append(
                         f"- {skill.get('name')}@{skill.get('version', '1.0.0')}: "
                         f"{str(skill.get('summary') or skill.get('description') or '')[:180]}"
                     )
-                skills_block = "\n".join(skill_lines)
-                system_prompt = f"{system_prompt}\n\n## Available Skills\n{skills_block}\nUse skill tools (skill_*) to invoke them."
+                dynamic_sections.append(
+                    "## Available Skills\n" + "\n".join(skill_lines)
+                    + "\nUse skill tools (skill_*) to invoke them."
+                )
 
-                # L2: load instructions for trigger-matched skills (max 2, ~2000 tokens each)
+                # L2: instructions for trigger-matched skills (max 2).
                 import re as _re
                 l2_loaded = 0
                 for skill in ctx.openclaw_skills_metadata[:3]:
@@ -1837,70 +1573,34 @@ class AgentLoop:
                     if patterns and any(_re.search(p, ctx.message, _re.IGNORECASE) for p in patterns):
                         instructions = skill.get("instructions", "")
                         if instructions:
-                            # Inject as context message (not system prompt) to preserve KV-cache prefix
-                            messages.append({
-                                "role": "system",
-                                "content": f"[Skill: {skill['name']}]\n{instructions[:skill.get('max_context_tokens', 2000)]}",
-                            })
+                            max_ctx = skill.get("max_context_tokens", 2000)
+                            dynamic_sections.append(
+                                f"## Skill Instructions: {skill['name']}\n"
+                                f"{instructions[:max_ctx]}"
+                            )
                             l2_loaded += 1
 
             long_term_memory_prompt = format_long_term_memory(ctx.long_term_memory or {})
             if long_term_memory_prompt:
-                system_prompt = f"{system_prompt}\n\n## User Memory\n{long_term_memory_prompt}"
+                dynamic_sections.append(f"## User Memory\n{long_term_memory_prompt}")
 
-            messages.append({"role": "system", "content": system_prompt})
+            if ctx.openclaw_memory_snippets:
+                snippet_lines = [
+                    f"[{idx}] {s[:240]}"
+                    for idx, s in enumerate(ctx.openclaw_memory_snippets[:6], 1)
+                ]
+                dynamic_sections.append(
+                    "## Retrieved Memory Snippets\n" + "\n".join(snippet_lines)
+                )
 
-            # OpenClaw memory retrieval for request-time grounding.
-            if self.openclaw_runtime:
-                try:
-                    memory_result = await self.openclaw_runtime.load_memory_context(
-                        tenant_id=ctx.tenant_id,
-                        user_id=ctx.user_id,
-                        query=ctx.message,
-                        openclaw_mode=ctx.config.openclaw_mode,
-                        memory_profile=ctx.config.memory_profile,
-                        max_results=6,
-                    )
-                    if memory_result.snippets:
-                        ctx.openclaw_memory_snippets = [
-                            snippet.content for snippet in memory_result.snippets
-                        ]
-                        memory_block_lines = ["## Retrieved Memory Snippets"]
-                        for idx, snippet in enumerate(memory_result.snippets[:6], 1):
-                            memory_block_lines.append(
-                                f"[{idx}] ({snippet.source_type}) {snippet.content[:240]}"
-                            )
-                        messages.append(
-                            {
-                                "role": "system",
-                                "content": "\n".join(memory_block_lines),
-                            }
-                        )
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="memory_retrieved",
-                        data={
-                            "loaded_sources": memory_result.loaded_sources,
-                            "snippet_count": len(memory_result.snippets),
-                            "fallback_used": memory_result.fallback_used,
-                            "fallback_reason": memory_result.fallback_reason,
-                        },
-                    )
-                except Exception as exc:
-                    logger.exception("OpenClaw memory retrieval failed")
-
-                with contextlib.suppress(Exception):
-                    scheduled_job_id = await self.openclaw_runtime.schedule_daily_reflection(
-                        tenant_id=ctx.tenant_id,
-                        user_id=ctx.user_id,
-                        payload={"run_id": ctx.run_id, "session_id": ctx.session_id},
-                    )
-                    if scheduled_job_id:
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type="memory_reflection_scheduled",
-                            data={"job_id": scheduled_job_id},
-                        )
+            # Flatten into a context block string that will be prepended to the
+            # user message below. Empty when no dynamic sections — no wrapper
+            # noise in that case.
+            dynamic_context_block = ""
+            if dynamic_sections:
+                dynamic_context_block = (
+                    "<context>\n" + "\n\n".join(dynamic_sections) + "\n</context>\n\n"
+                )
 
             # Add conversation history (already trimmed if needed)
             trimmed_history = _trim_history_for_streaming(history or [])
@@ -1912,8 +1612,13 @@ class AgentLoop:
                     }
                 )
 
-            # Build the current user message with potential file content
-            final_message = ctx.message
+            # Build the current user message with potential file content.
+            # Dynamic context (skills/memory/snippets/time) is prepended here —
+            # kept OUT of the system prompt so the prefix stays byte-identical
+            # across requests and Anthropic / Gemini prompt caching hits.
+            from ..prompts.system_prompt_v2 import get_time_context_block
+            time_block = f"<context>\nCurrent time: {get_time_context_block()}\n</context>\n\n"
+            final_message = f"{dynamic_context_block}{time_block}{ctx.message}"
             user_images: list[str] | None = None
             if processed_files:
                 try:
@@ -1997,8 +1702,7 @@ class AgentLoop:
             thinking_ended = False
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
-            kb_query_fingerprints_seen: set[str] = set()
-            kb_search_completed = False
+            kb_dedup = KBDedupState()
             force_answer_without_tools = False
 
             while iteration < max_iterations:
@@ -2019,7 +1723,7 @@ class AgentLoop:
                     f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start - t0) * 1000:.0f}ms"
                 )
                 tools_for_iteration = tools if tools else None
-                if tools_for_iteration and kb_search_completed:
+                if tools_for_iteration and kb_dedup.search_completed:
                     filtered_tools = [
                         schema
                         for schema in tools_for_iteration
@@ -2197,46 +1901,67 @@ class AgentLoop:
                     except (json.JSONDecodeError, ValueError):
                         parsed_args = {}
                     tool_args = parsed_args if isinstance(parsed_args, dict) else {}
-                    kb_reuse_result_for_model = (
-                        "Knowledge base has already been searched in this turn. "
-                        "Use the previously retrieved evidence to answer now; "
-                        "only call KB again if the user asks about a different topic."
-                    )
                     kb_query_fp = (
                         _kb_query_fingerprint(tool_args)
                         if tool_name == "search_knowledge_base"
                         else ""
                     )
-                    if tool_name == "search_knowledge_base":
-                        if kb_query_fp and kb_query_fp in kb_query_fingerprints_seen:
-                            logger.info(
-                                "[STREAMING-FIRST] Skipping duplicate KB call by query fingerprint: %s",
-                                kb_query_fp[:160],
+                    _dedup_skip, _dedup_reason = kb_dedup.should_skip(tool_name, kb_query_fp)
+                    if _dedup_skip:
+                        logger.info(
+                            "[STREAMING-FIRST] Skipping KB call (%s): %s",
+                            _dedup_reason,
+                            kb_query_fp[:160] if kb_query_fp else "<no-fp>",
+                        )
+                        force_answer_without_tools = True
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": KB_REUSE_MESSAGE,
+                            }
+                        )
+                        continue
+
+                    # Permission middleware: gate the tool call before any
+                    # lifecycle event is emitted. Deny/confirm short-circuits
+                    # with a synthetic tool result so the model can adapt.
+                    _verdict = await self.middleware_chain.run_on_tool_call(
+                        ctx, tool_name, tool_args
+                    )
+                    if not _verdict.is_allow:
+                        if _verdict.kind is VerdictKind.CONFIRM:
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="approval_required",
+                                data={
+                                    "tool_id": tool_id,
+                                    "tool_name": tool_name,
+                                    "reason": _verdict.reason,
+                                    "source": _verdict.source,
+                                },
                             )
-                            force_answer_without_tools = True
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_id,
-                                    "name": tool_name,
-                                    "content": kb_reuse_result_for_model,
-                                }
-                            )
-                            continue
-                        if kb_search_completed:
-                            logger.info(
-                                "[STREAMING-FIRST] Skipping additional KB call after first completion."
-                            )
-                            force_answer_without_tools = True
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_id,
-                                    "name": tool_name,
-                                    "content": kb_reuse_result_for_model,
-                                }
-                            )
-                            continue
+                        logger.info(
+                            "[STREAMING-FIRST] Tool %s %s by %s: %s",
+                            tool_name,
+                            _verdict.kind.value,
+                            _verdict.source or "<policy>",
+                            _verdict.reason,
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": (
+                                    f"[tool call {_verdict.kind.value}] "
+                                    f"{_verdict.reason or 'blocked by policy'}"
+                                ),
+                            }
+                        )
+                        force_answer_without_tools = True
+                        continue
 
                     # Manus-style step card (parent) for this tool call
                     step_id = f"step_{tool_id}"
@@ -2596,64 +2321,26 @@ class AgentLoop:
                             if int(results_count or 0) > 0:
                                 force_answer_without_tools = True
 
-                        # Persist output files into ArtifactStorage (if available)
-                        persisted_output_files: list[dict[str, Any]] = tool_output_files
-                        if tool_output_files and not self.artifact_storage:
-                            logger.warning(
-                                "[AgentLoop] %d output files from %s but artifact_storage is None — files will NOT be persisted",
-                                len(tool_output_files), tool_name,
+                        # Persist output files into ArtifactStorage and emit
+                        # ARTIFACT_CREATED events for each newly stored artifact.
+                        (
+                            persisted_output_files,
+                            _artifact_event_payloads,
+                            _artifact_new_ids,
+                        ) = await _artifact_persist_and_collect_events(
+                            artifact_storage=self.artifact_storage,
+                            user=user,
+                            session_id=ctx.session_id,
+                            tool_name=tool_name,
+                            tool_output_files=tool_output_files,
+                        )
+                        created_artifact_ids.extend(_artifact_new_ids)
+                        for _payload in _artifact_event_payloads:
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.ARTIFACT_CREATED.value,
+                                data=_payload,
                             )
-                        if tool_output_files and self.artifact_storage:
-                            from ..artifacts import persist_output_files
-
-                            source_map = {
-                                "execute_python_code": "code_execution",
-                                "generate_image": "image_generation",
-                                "generate_document": "document_generation",
-                                "generate_pptx": "pptx_generation",
-                            }
-                            source = source_map.get(tool_name, "tool_output")
-
-                            persisted_output_files = await persist_output_files(
-                                artifact_storage=self.artifact_storage,
-                                user=user,
-                                session_id=ctx.session_id,
-                                output_files=tool_output_files,
-                                source=source,
-                            )
-
-                            # Emit ARTIFACT_CREATED for UI panel (use presigned download_url)
-                            for file_info in persisted_output_files:
-                                artifact_id = file_info.get("artifact_id")
-                                if artifact_id:
-                                    created_artifact_ids.append(str(artifact_id))
-                                    yield AgentLoopEvent(
-                                        phase=phase,
-                                        event_type=StreamEventType.ARTIFACT_CREATED.value,
-                                        data={
-                                            "artifact_id": artifact_id,
-                                            "type": file_info.get("type")
-                                            or (
-                                                "image"
-                                                if str(file_info.get("mime_type", "")).startswith(
-                                                    "image/"
-                                                )
-                                                else "file"
-                                            ),
-                                            "format": file_info.get("format")
-                                            or (
-                                                str(file_info.get("mime_type", "")).split("/")[-1]
-                                                if file_info.get("mime_type")
-                                                else "bin"
-                                            ),
-                                            "title": file_info.get("filename", "output"),
-                                            "filename": file_info.get("filename"),
-                                            "mime_type": file_info.get("mime_type"),
-                                            "size_bytes": file_info.get("size_bytes"),
-                                            "source": source,
-                                            "download_url": file_info.get("download_url"),
-                                        },
-                                    )
 
                         # Reduce payload for non-image files when we already have download_url
                         output_files_for_events = _sanitize_output_files(
@@ -2779,9 +2466,7 @@ class AgentLoop:
                         )
 
                     if tool_name == "search_knowledge_base":
-                        kb_search_completed = True
-                        if kb_query_fp:
-                            kb_query_fingerprints_seen.add(kb_query_fp)
+                        kb_dedup.mark_completed(kb_query_fp)
 
                     # Add tool result to messages with lifecycle management
                     # M02: Truncate large tool results to prevent context rot
@@ -3030,1780 +2715,6 @@ class AgentLoop:
                 },
             )
 
-    # =========================================================================
-    # Step Implementations (Legacy 8-Step Mode)
-    # =========================================================================
-
-    async def _step_memory_loading(
-        self,
-        ctx: AgentLoopContext,
-        user: UserContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """
-        Step 1: Load three-layer memory system.
-
-        Layers loaded:
-        1. Long-term Memory - User preferences and learned patterns
-        2. Session Memory - Current session context and task state
-        3. Working Memory - Initialized empty (populated during execution)
-
-        This follows Manus architecture for context-aware agent behavior.
-        """
-        phase = AgentLoopPhase.MEMORY_LOADING
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        if self.memory_service:
-            try:
-                # Layer 1 + 2: Parallel load (independent DB queries)
-                _results = await asyncio.gather(
-                    self.memory_service.get_long_term_context(
-                        tenant_id=user.tenant_id,
-                        user_id=user.user_id,
-                    ),
-                    self.memory_service.get_session_context(
-                        tenant_id=user.tenant_id,
-                        session_id=ctx.session_id,
-                    ),
-                    return_exceptions=True,
-                )
-                # Handle partial failures gracefully
-                long_term_ctx = _results[0] if not isinstance(_results[0], Exception) else None
-                session_ctx = _results[1] if not isinstance(_results[1], Exception) else None
-                if isinstance(_results[0], Exception):
-                    logger.warning(f"Long-term memory load failed: {_results[0]}")
-                if isinstance(_results[1], Exception):
-                    logger.warning(f"Session memory load failed: {_results[1]}")
-
-                ctx.long_term_memory = long_term_ctx
-                ctx.user_preferences = long_term_ctx.get("preferences") if long_term_ctx else None
-                ctx.session_memory = session_ctx
-
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="long_term_loaded",
-                    data={
-                        "preferences_loaded": ctx.user_preferences is not None,
-                        "frequent_memories_count": len(long_term_ctx.get("frequent_memories", []))
-                        if long_term_ctx
-                        else 0,
-                    },
-                )
-
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="session_loaded",
-                    data={
-                        "session_context_loaded": ctx.session_memory is not None,
-                        "has_compressed_context": bool(session_ctx.get("compressed_context"))
-                        if session_ctx
-                        else False,
-                        "has_task_state": bool(session_ctx.get("task_state"))
-                        if session_ctx
-                        else False,
-                    },
-                )
-
-                # Layer 3: Working Memory - Restore from session if available
-                working_memory_restored = False
-                if session_ctx and session_ctx.get("working_memory"):
-                    try:
-                        working_memory_data = session_ctx["working_memory"]
-                        if isinstance(working_memory_data, dict):
-                            ctx.working_memory = WorkingMemory.from_dict(working_memory_data)
-                            working_memory_restored = True
-                            logger.info(
-                                f"Restored working memory with {len(ctx.working_memory.tasks)} tasks"
-                            )
-                    except Exception as wm_error:
-                        logger.exception("Failed to restore working memory")
-
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="working_memory_status",
-                    data={
-                        "restored": working_memory_restored,
-                        "task_count": len(ctx.working_memory.tasks) if ctx.working_memory else 0,
-                        "has_goal": bool(ctx.working_memory.goal) if ctx.working_memory else False,
-                    },
-                )
-
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="memory_loaded",
-                    data={
-                        "long_term_loaded": ctx.long_term_memory is not None,
-                        "session_loaded": ctx.session_memory is not None,
-                        "working_initialized": True,
-                        "working_restored": working_memory_restored,
-                    },
-                )
-
-                if self.openclaw_runtime and self.openclaw_runtime.features.memory_v2:
-                    memory_result = await self.openclaw_runtime.load_memory_context(
-                        tenant_id=ctx.tenant_id,
-                        user_id=ctx.user_id,
-                        query=ctx.message,
-                        openclaw_mode=ctx.config.openclaw_mode,
-                        memory_profile=ctx.config.memory_profile,
-                        max_results=6,
-                    )
-                    ctx.openclaw_memory_snippets = [
-                        snippet.content for snippet in memory_result.snippets
-                    ]
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="memory_retrieved",
-                        data={
-                            "snippet_count": len(memory_result.snippets),
-                            "loaded_sources": memory_result.loaded_sources,
-                            "fallback_used": memory_result.fallback_used,
-                            "fallback_reason": memory_result.fallback_reason,
-                        },
-                    )
-
-            except Exception as e:
-                logger.exception("Failed to load memory")
-                error = StructuredError(
-                    code="MEMORY_LOAD_FAILED",
-                    message=f"加载记忆失败: {str(e)}",
-                    severity=ErrorSeverity.WARNING,
-                    recoverable=True,
-                    phase=phase,
-                    suggestion="将继续执行，但无法使用个性化记忆",
-                )
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="error",
-                    data=error.to_event_data(),
-                )
-        else:
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="skipped",
-                data={"reason": "No memory service configured"},
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-                "layers_loaded": {
-                    "long_term": ctx.long_term_memory is not None,
-                    "session": ctx.session_memory is not None,
-                    "working": True,
-                },
-            },
-        )
-
-    async def _step_scenario_analysis(
-        self,
-        ctx: AgentLoopContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Step 2: Analyze user scenario for intelligent routing."""
-        phase = AgentLoopPhase.SCENARIO_ANALYSIS
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        try:
-            ctx.scenario = self.scenario_analyzer.detect_scenario_fast(ctx.message)
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="scenario_detected",
-                data={
-                    "primary_scenario": ctx.scenario.primary_scenario.value,
-                    "urgency": ctx.scenario.urgency.value
-                    if hasattr(ctx.scenario.urgency, "value")
-                    else str(ctx.scenario.urgency),
-                    "confidence": ctx.scenario.confidence,
-                    "suggested_queries": len(ctx.scenario.suggested_kb_queries),
-                },
-            )
-
-            logger.info(
-                f"[SCENARIO] Detected: {ctx.scenario.primary_scenario.value} "
-                f"(confidence={ctx.scenario.confidence:.2f})"
-            )
-        except Exception as e:
-            logger.exception("Scenario analysis failed")
-            # Create default scenario
-            ctx.scenario = ScenarioDetectionResult(
-                primary_scenario=ScenarioType.GENERAL_INQUIRY,
-                confidence=0.5,
-            )
-            error = StructuredError(
-                code="SCENARIO_ANALYSIS_FAILED",
-                message=f"场景分析失败: {str(e)}",
-                severity=ErrorSeverity.WARNING,
-                recoverable=True,
-                phase=phase,
-                suggestion="已使用默认场景继续执行",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-    async def _step_task_planning(
-        self,
-        ctx: AgentLoopContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Step 3: Create execution plan for complex requests."""
-        phase = AgentLoopPhase.TASK_PLANNING
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        # Create task planner if needed (with LLM support for intelligent planning)
-        if self.task_planner is None:
-            try:
-                from ..tasks.task_planner import create_task_planner
-
-                # Create LLM adapter for TaskPlanner
-                llm_adapter = None
-                if self.model_registry:
-                    llm_adapter = self._create_planner_llm_adapter(ctx.config.model_id)
-
-                self.task_planner = create_task_planner(
-                    model_client=llm_adapter,
-                    model_name=ctx.config.model_id,
-                )
-            except Exception as e:
-                logger.exception("Could not create task planner")
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="skipped",
-                    data={"reason": str(e)},
-                )
-                # Emit phase_completed even for skipped
-                duration_ms = (time.time() - start_time) * 1000
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="phase_completed",
-                    data={
-                        "phase_index": PHASE_INDEX[phase],
-                        "total_phases": TOTAL_PHASES,
-                        "phase_name": phase.value,
-                        "display_name": PHASE_DISPLAY_NAMES[phase],
-                        "status": "skipped",
-                        "duration_ms": round(duration_ms, 2),
-                    },
-                )
-                return
-
-        try:
-            # Get available tools
-            invocation_context = self._build_invocation_context(ctx, user=None)
-            available_tools = self.tool_invoker.get_available_tools(invocation_context)
-
-            # Create plan
-            ctx.execution_plan = await self.task_planner.create_plan(
-                user_request=ctx.message,
-                available_tools=available_tools,
-                context={
-                    "scenario": ctx.scenario.primary_scenario.value if ctx.scenario else None,
-                    "entities": ctx.scenario.entities if ctx.scenario else {},
-                },
-            )
-
-            if ctx.execution_plan and ctx.execution_plan.tasks:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="plan_created",
-                    data={
-                        "goal": ctx.execution_plan.goal,
-                        "task_count": len(ctx.execution_plan.tasks),
-                        "parallel_groups": len(ctx.execution_plan.parallel_groups),
-                    },
-                )
-
-                # Add tasks to working memory
-                if ctx.working_memory:
-                    ctx.working_memory.set_goal(ctx.execution_plan.goal)
-                    for task in ctx.execution_plan.tasks:
-                        ctx.working_memory.add_task(task.id, task.description)
-            else:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="no_plan_needed",
-                    data={"reason": "Simple request"},
-                )
-
-        except Exception as e:
-            logger.exception("Task planning failed")
-            error = StructuredError(
-                code="TASK_PLANNING_FAILED",
-                message=f"任务规划失败: {str(e)}",
-                severity=ErrorSeverity.WARNING,
-                recoverable=True,
-                phase=phase,
-                suggestion="将直接进行简单回答，不执行复杂任务",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-    async def _step_rag_retrieval(
-        self,
-        ctx: AgentLoopContext,
-        user: UserContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Step 4: RAG retrieval using ScenarioAwareRetriever."""
-        phase = AgentLoopPhase.RAG_RETRIEVAL
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        if not self.kb_service:
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="skipped",
-                data={"reason": "No knowledge service configured"},
-            )
-            # Emit phase_completed for skipped
-            duration_ms = (time.time() - start_time) * 1000
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="phase_completed",
-                data={
-                    "phase_index": PHASE_INDEX[phase],
-                    "total_phases": TOTAL_PHASES,
-                    "phase_name": phase.value,
-                    "display_name": PHASE_DISPLAY_NAMES[phase],
-                    "status": "skipped",
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-            return
-
-        try:
-            # Create ScenarioAwareRetriever if needed
-            if self.scenario_retriever is None:
-                from ..rag.scenario_aware_retriever import ScenarioAwareRetriever
-
-                self.scenario_retriever = ScenarioAwareRetriever(
-                    knowledge_service=self.kb_service,
-                    default_top_k=ctx.config.kb_top_k,
-                    max_queries=ctx.config.kb_max_queries,
-                    results_per_query=ctx.config.kb_results_per_query,
-                )
-
-            # Perform scenario-aware retrieval
-            ctx.retrieval_context = await self.scenario_retriever.retrieve(
-                user_query=ctx.message,
-                scenario=ctx.scenario,
-                dataset_ids=ctx.config.kb_dataset_ids,
-                user=user,
-                top_k=ctx.config.kb_top_k,
-            )
-
-            retrieval_time_ms = (time.time() - start_time) * 1000
-
-            # JIT Filtering: Remove low-relevance results and truncate long content
-            original_count = len(ctx.retrieval_context.results)
-            filtered_results = []
-
-            for result in ctx.retrieval_context.results:
-                # Filter by relevance threshold
-                if result.score < ctx.config.kb_min_relevance:
-                    continue
-
-                # Truncate overly long content to save tokens
-                if len(result.content) > ctx.config.kb_max_content_length:
-                    result.content = result.content[: ctx.config.kb_max_content_length] + "..."
-
-                filtered_results.append(result)
-
-            # Update results with filtered list
-            ctx.retrieval_context.results = filtered_results
-            ctx.retrieval_context.after_dedupe = len(filtered_results)
-
-            filtered_count = original_count - len(filtered_results)
-            if filtered_count > 0:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="jit_filtered",
-                    data={
-                        "original_count": original_count,
-                        "filtered_count": filtered_count,
-                        "remaining_count": len(filtered_results),
-                        "min_relevance": ctx.config.kb_min_relevance,
-                    },
-                )
-                logger.info(
-                    f"[JIT] Filtered {filtered_count} low-relevance results "
-                    f"(threshold: {ctx.config.kb_min_relevance})"
-                )
-
-            # Create retrieval metrics
-            ctx.retrieval_metrics = RetrievalMetrics(
-                queries_expanded=len(ctx.retrieval_context.queries_used),
-                queries_executed=len(ctx.retrieval_context.queries_used),
-                total_retrieved=ctx.retrieval_context.total_retrieved,
-                after_dedupe=ctx.retrieval_context.after_dedupe,
-                retrieval_time_ms=retrieval_time_ms,
-                avg_score=sum(r.score for r in ctx.retrieval_context.results)
-                / max(len(ctx.retrieval_context.results), 1),
-                top_score=max((r.score for r in ctx.retrieval_context.results), default=0.0),
-                scenario_type=ctx.scenario.primary_scenario.value if ctx.scenario else "general",
-                dataset_ids=ctx.config.kb_dataset_ids,
-                user_query=ctx.message,
-            )
-
-            # Record metrics
-            if ctx.config.enable_rag_metrics:
-                await self.metrics_collector.record_retrieval(
-                    session_id=ctx.session_id,
-                    tenant_id=ctx.tenant_id,
-                    metrics=ctx.retrieval_metrics,
-                    user_id=ctx.user_id,
-                    request_id=ctx.request_id,
-                )
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="retrieval_complete",
-                data={
-                    "queries_used": len(ctx.retrieval_context.queries_used),
-                    "total_retrieved": ctx.retrieval_context.total_retrieved,
-                    "after_dedupe": ctx.retrieval_context.after_dedupe,
-                    "retrieval_time_ms": retrieval_time_ms,
-                },
-            )
-
-            logger.info(
-                f"[RAG] Retrieved {ctx.retrieval_context.after_dedupe} chunks "
-                f"from {ctx.retrieval_context.total_retrieved} in {retrieval_time_ms:.1f}ms"
-            )
-
-        except Exception as e:
-            logger.exception("RAG retrieval failed")
-            error = StructuredError(
-                code="RAG_RETRIEVAL_FAILED",
-                message=f"知识库检索失败: {str(e)}",
-                severity=ErrorSeverity.WARNING,
-                recoverable=True,
-                phase=phase,
-                suggestion="将不使用知识库内容继续回答",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-    async def _step_context_building(
-        self,
-        ctx: AgentLoopContext,
-        history: list[dict[str, Any]],
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Step 5: Build context structure for LLM."""
-        phase = AgentLoopPhase.CONTEXT_BUILDING
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        try:
-            # Format RAG context
-            rag_context = ""
-            if ctx.retrieval_context and ctx.retrieval_context.results:
-                rag_context = ctx.retrieval_context.to_formatted_context()
-
-            # Format user preferences (from long-term memory)
-            user_prefs_str = ""
-            if ctx.user_preferences:
-                if isinstance(ctx.user_preferences, dict):
-                    # Format preferences dict for prompt
-                    pref_items = [
-                        f"- {k}: {v}"
-                        for k, v in ctx.user_preferences.items()
-                        if v and k not in ("language",)
-                    ]
-                    user_prefs_str = "\n".join(pref_items) if pref_items else ""
-                else:
-                    user_prefs_str = str(ctx.user_preferences)
-
-            # Format long-term memory context
-            long_term_str = ""
-            if ctx.long_term_memory:
-                long_term_str = format_long_term_memory(ctx.long_term_memory)
-
-            # Format task state from working memory
-            task_state = ""
-            if ctx.working_memory:
-                task_state = ctx.working_memory.to_markdown()
-
-            # Format compressed context if available from session memory
-            compressed_ctx = ""
-            if ctx.session_memory and ctx.session_memory.get("compressed_context"):
-                compressed_ctx = ctx.session_memory["compressed_context"]
-
-            memory_context = ""
-            if ctx.openclaw_memory_snippets:
-                memory_context = "\n".join(
-                    f"- {snippet[:280]}" for snippet in ctx.openclaw_memory_snippets[:6]
-                )
-
-            # Build context structure with all layers
-            ctx.context_structure = ContextStructure(
-                system_prompt=self.system_prompt,
-                tool_definitions=[],  # Will be added by model call
-                user_preferences=user_prefs_str if user_prefs_str else None,
-                long_term_memory=long_term_str if long_term_str else None,
-                task_state=task_state if task_state else None,
-                conversation_history=history,
-                current_context=(
-                    f"{rag_context}\n\n## Retrieved Memory\n{memory_context}"
-                    if rag_context and memory_context
-                    else rag_context
-                    if rag_context
-                    else f"{compressed_ctx}\n\n## Retrieved Memory\n{memory_context}"
-                    if compressed_ctx and memory_context
-                    else compressed_ctx
-                    if compressed_ctx
-                    else f"## Retrieved Memory\n{memory_context}"
-                    if memory_context
-                    else None
-                ),
-                current_query=ctx.message,
-            )
-
-            model_context_window = 128000
-            if self.model_registry:
-                with contextlib.suppress(Exception):
-                    model_info = self.model_registry.get_model(ctx.config.model_id)
-                    if model_info and getattr(model_info, "context_window", None):
-                        model_context_window = int(model_info.context_window)
-
-            assembly_plan: ContextAssemblyPlan = self.context_budget_manager.create_plan(
-                context=ctx.context_structure,
-                model_context_window=model_context_window,
-            )
-            ctx.context_structure.conversation_history = assembly_plan.trimmed_history
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="context_budget",
-                data=assembly_plan.to_budget_event(),
-            )
-            if assembly_plan.compacted:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="context_compacted",
-                    data=assembly_plan.to_compaction_event(),
-                )
-
-            # Build messages
-            ctx.messages = self.context_engine.build_messages(ctx.context_structure)
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="context_built",
-                data={
-                    "message_count": len(ctx.messages),
-                    "has_rag_context": bool(rag_context),
-                    "has_task_state": bool(task_state),
-                    "history_compacted": assembly_plan.compacted,
-                    "dropped_history_messages": assembly_plan.dropped_history_messages,
-                },
-            )
-
-            if (
-                ctx.config.context_detail
-                and self.openclaw_runtime
-                and self.openclaw_runtime.features.context_v2
-            ):
-                detail = self.openclaw_runtime.build_context_assembler(
-                    provider="openai"
-                ).cost_breakdown.analyze(
-                    system_prompt=ctx.context_structure.system_prompt,
-                    messages=ctx.messages,
-                    tool_definitions=ctx.context_structure.tool_definitions,
-                    skills_metadata=ctx.openclaw_skills_metadata,
-                    memory_snippets=ctx.openclaw_memory_snippets,
-                )
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="context_detail",
-                    data=detail,
-                )
-                await self._persist_context_detail(ctx, detail)
-
-        except Exception as e:
-            logger.exception("Context building failed")
-            error = StructuredError(
-                code="CONTEXT_BUILD_FAILED",
-                message=f"上下文构建失败: {str(e)}",
-                severity=ErrorSeverity.ERROR,
-                recoverable=False,
-                phase=phase,
-                suggestion="请刷新页面重试",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-    async def _step_execution(
-        self,
-        ctx: AgentLoopContext,
-        session: SessionResources,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """
-        Step 6: Execute tools using ReAct loop or simple orchestration.
-
-        When enable_react_loop is True (default), uses ReActExecutor for:
-        - Think-Act-Observe-Update cycle
-        - Dynamic task adjustment
-        - Working Memory updates
-        - AG-UI compatible events
-
-        When disabled, falls back to simple ToolOrchestrator execution.
-        """
-        phase = AgentLoopPhase.EXECUTION
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        # Check if we have something to execute
-        has_plan = ctx.execution_plan and ctx.execution_plan.tasks
-
-        if not has_plan:
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="no_execution",
-                data={"reason": "No execution plan or simple request"},
-            )
-        elif ctx.config.enable_react_loop:
-            # Use ReAct Loop for intelligent execution
-            async for event in self._execute_with_react(ctx, phase):
-                yield event
-        else:
-            # Fallback to simple orchestration
-            async for event in self._execute_with_orchestrator(ctx, phase):
-                yield event
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-    async def _execute_with_react(
-        self,
-        ctx: AgentLoopContext,
-        phase: AgentLoopPhase,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Execute using ReAct reasoning loop."""
-        try:
-            # Create ReActExecutor
-            react_executor = ReActExecutor(
-                task_planner=self.task_planner,
-                tool_executor=self._create_tool_executor(ctx),
-                llm_caller=self._create_llm_caller(ctx),
-                max_iterations=ctx.config.react_max_iterations,
-            )
-
-            # Build context for ReAct
-            react_context = {
-                "run_id": ctx.run_id,
-                "session_id": ctx.session_id,
-                "scenario": ctx.scenario.to_dict() if ctx.scenario else None,
-                "rag_context": ctx.retrieval_context.to_formatted_context()
-                if ctx.retrieval_context
-                else None,
-            }
-
-            # Get available tools (ADR-002: tenant-filtered)
-            available_tools = []
-            if self.tool_invoker:
-                invocation_context = self._build_invocation_context(ctx, user=None)
-                available_tools = await self.tool_invoker.get_tool_definitions_filtered(
-                    context=invocation_context,
-                )
-
-            # Execute ReAct loop
-            async for event in react_executor.execute(
-                user_message=ctx.message,
-                available_tools=available_tools,
-                context=react_context,
-                working_memory=ctx.working_memory,
-            ):
-                # Convert ReActEvent to AgentLoopEvent
-                yield self._convert_react_event(event, phase)
-
-                # Track tool results (AG-UI: tool_result event)
-                if event.event_type == "tool_result":
-                    # Extract task_id from tool_call_id (legacy format)
-                    task_id = event.data.get("tool_call_id", event.data.get("task_id", ""))
-                    tool_name = event.data.get("name", event.data.get("tool", ""))
-
-                    tool_result = ToolExecutionResult(
-                        task_id=task_id,
-                        tool=tool_name,
-                        success=event.data.get("success", False),
-                        result=event.data.get("result"),
-                        error=event.data.get("error"),
-                        duration_ms=event.data.get("duration_ms", 0),
-                    )
-                    ctx.tool_results.append(tool_result)
-
-                # Track AG-UI TOOL_CALL_RESULT event
-                elif event.event_type == StreamEventType.TOOL_CALL_RESULT.value:
-                    tool_call_id = event.data.get("tool_call_id", "")
-                    success = event.data.get("success", True)
-                    result_data = event.data.get("result")
-                    event.data.get("duration_ms", 0)
-
-                    # The tool_call_id format is "{task_id}_{uuid8}" so extract task_id
-                    # Using rsplit to handle task_ids that may contain underscores
-                    parts = tool_call_id.rsplit("_", 1)
-                    task_id = parts[0] if len(parts) == 2 and len(parts[1]) == 8 else tool_call_id
-
-                    # Update Working Memory with result
-                    if ctx.working_memory and task_id:
-                        if success:
-                            ctx.working_memory.update_task(
-                                task_id=task_id,
-                                status=TaskStatus.COMPLETED,
-                                result=str(result_data)[:500] if result_data else None,
-                            )
-                        else:
-                            ctx.working_memory.update_task(
-                                task_id=task_id,
-                                status=TaskStatus.FAILED,
-                                error=str(result_data),
-                            )
-
-                        # Emit Working Memory update event
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type="working_memory_updated",
-                            data={
-                                "task_id": task_id,
-                                "new_status": "completed" if success else "failed",
-                                "progress": ctx.working_memory.get_progress(),
-                            },
-                        )
-
-                # Track AG-UI STEP_STARTED event (task start)
-                elif event.event_type == StreamEventType.STEP_STARTED.value:
-                    step_id = event.data.get("step_id")
-                    if ctx.working_memory and step_id:
-                        ctx.working_memory.update_task(
-                            task_id=step_id,
-                            status=TaskStatus.IN_PROGRESS,
-                        )
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type="working_memory_updated",
-                            data={
-                                "task_id": step_id,
-                                "new_status": "in_progress",
-                                "progress": ctx.working_memory.get_progress(),
-                            },
-                        )
-
-                # Track working_memory_update from ReActExecutor
-                elif event.event_type == "working_memory_update":
-                    # ReActExecutor already updates working memory, emit pass-through event
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="working_memory_sync",
-                        data=event.data,
-                    )
-
-            # Get final Working Memory progress
-            wm_progress = ctx.working_memory.get_progress() if ctx.working_memory else {}
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="execution_complete",
-                data={
-                    "mode": "react",
-                    "total_tasks": len(ctx.tool_results),
-                    "successful": sum(1 for r in ctx.tool_results if r.success),
-                    "failed": sum(1 for r in ctx.tool_results if not r.success),
-                    "working_memory_progress": wm_progress,
-                },
-            )
-
-        except Exception as e:
-            logger.exception("ReAct execution failed")
-            error = StructuredError(
-                code="REACT_EXECUTION_FAILED",
-                message=f"ReAct 执行失败: {str(e)}",
-                severity=ErrorSeverity.ERROR,
-                recoverable=True,
-                phase=phase,
-                suggestion="将尝试降级到简单执行模式",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-            # Fallback to simple orchestration on ReAct failure
-            if ctx.config.react_auto_retry:
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="fallback",
-                    data={"reason": "ReAct failed, falling back to orchestrator"},
-                )
-                async for event in self._execute_with_orchestrator(ctx, phase):
-                    yield event
-
-    async def _execute_with_orchestrator(
-        self,
-        ctx: AgentLoopContext,
-        phase: AgentLoopPhase,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Execute using simple ToolOrchestrator (fallback mode)."""
-        try:
-            orchestrator = ToolOrchestrator(
-                tool_invoker=self.tool_invoker,
-                max_parallel=ctx.config.max_concurrent_tools,
-                execution_gateway=self.execution_gateway,
-                routed_request=ctx.routed_request,
-            )
-
-            invocation_context = self._build_invocation_context(ctx, user=None)
-
-            async for result in orchestrator.execute_plan(
-                plan=ctx.execution_plan,
-                working_memory=ctx.working_memory,
-                invocation_context=invocation_context,
-            ):
-                ctx.tool_results.append(result)
-
-                yield AgentLoopEvent(
-                    phase=phase,
-                    event_type="tool_result",
-                    data={
-                        "task_id": result.task_id,
-                        "tool": result.tool,
-                        "success": result.success,
-                        "duration_ms": result.duration_ms,
-                        "error": result.error,
-                    },
-                )
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="execution_complete",
-                data={
-                    "mode": "orchestrator",
-                    "total_tasks": len(ctx.tool_results),
-                    "successful": sum(1 for r in ctx.tool_results if r.success),
-                    "failed": sum(1 for r in ctx.tool_results if not r.success),
-                },
-            )
-
-        except Exception as e:
-            logger.exception("Orchestrator execution failed")
-            error = StructuredError(
-                code="TOOL_EXECUTION_FAILED",
-                message=f"工具执行失败: {str(e)}",
-                severity=ErrorSeverity.ERROR,
-                recoverable=True,
-                phase=phase,
-                suggestion="部分工具执行失败，将尽可能提供回答",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-    def _create_tool_executor(self, ctx: AgentLoopContext):
-        """
-        Create a tool executor function for ReActExecutor with error recovery.
-
-        When error recovery is enabled, wraps tool invocation with:
-        - Automatic retry with exponential backoff
-        - Intelligent error classification
-        - Graceful degradation on permanent failures
-        """
-        # Create error recovery manager if enabled
-        error_manager = None
-        if ctx.config.enable_error_recovery:
-            error_manager = ErrorRecoveryManager(
-                max_retries=ctx.config.error_max_retries,
-                base_delay=ctx.config.error_base_delay,
-                max_delay=ctx.config.error_max_delay,
-            )
-
-        async def execute_tool(
-            call_id: str,
-            tool_name: str,
-            arguments: dict[str, Any],
-        ) -> Any:
-            """
-            Execute a tool with error recovery.
-
-            Args:
-                call_id: Unique identifier for this tool call
-                tool_name: Name of the tool to execute
-                arguments: Tool parameters/arguments
-
-            Returns:
-                Tool execution result
-            """
-            if not self.tool_invoker:
-                raise ValueError("No tool invoker configured")
-
-            invocation_context = self._build_invocation_context(ctx, user=None)
-
-            async def _invoke_tool():
-                """Inner function for error recovery wrapping."""
-                if self.execution_gateway and self.execution_gateway.enabled:
-                    return await self.execution_gateway.invoke_tool(
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        context=invocation_context,
-                        routed_request=ctx.routed_request,
-                        cancel_event=ctx.cancel_event,
-                    )
-                return await self.tool_invoker.invoke(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    context=invocation_context,
-                    cancel_event=ctx.cancel_event,
-                )
-
-            # Execute with error recovery if enabled
-            if error_manager:
-                result: RecoveryResult = await error_manager.execute_with_recovery(
-                    _invoke_tool,
-                    error_classifier=self._classify_tool_error,
-                )
-
-                if result.success:
-                    return result.value
-                else:
-                    # Log recovery failure
-                    error_ctx = result.error_context
-                    logger.warning(
-                        f"Tool '{tool_name}' failed after {result.total_attempts} attempts: "
-                        f"{error_ctx.message if error_ctx else 'Unknown error'}"
-                    )
-                    # Re-raise the original error for upstream handling
-                    if error_ctx and error_ctx.original_error:
-                        raise error_ctx.original_error
-                    raise RuntimeError(
-                        f"Tool '{tool_name}' failed: {error_ctx.message if error_ctx else 'Unknown error'}"
-                    )
-            else:
-                # Direct execution without recovery
-                return await _invoke_tool()
-
-        return execute_tool
-
-    def _classify_tool_error(self, error: Exception) -> ErrorType:
-        """
-        Classify tool execution errors for recovery strategy selection.
-
-        Args:
-            error: The exception from tool execution
-
-        Returns:
-            ErrorType for recovery strategy selection
-        """
-        error_str = str(error).lower()
-        error_type = type(error).__name__.lower()
-
-        # Rate limit errors
-        if any(kw in error_str for kw in ["rate limit", "429", "quota", "throttle"]):
-            return ErrorType.RATE_LIMIT
-
-        # Transient network errors
-        if any(
-            kw in error_str
-            for kw in ["timeout", "connection", "network", "temporary", "unavailable"]
-        ):
-            return ErrorType.TRANSIENT
-
-        if any(kw in error_type for kw in ["timeout", "connection", "network"]):
-            return ErrorType.TRANSIENT
-
-        # Validation errors (tool input issues)
-        if any(
-            kw in error_str for kw in ["validation", "invalid", "parameter", "argument", "schema"]
-        ):
-            return ErrorType.VALIDATION_ERROR
-
-        # Permission/auth errors are permanent
-        if any(kw in error_str for kw in ["permission", "unauthorized", "forbidden", "403", "401"]):
-            return ErrorType.PERMANENT
-
-        # Not found errors are usually permanent
-        if any(kw in error_str for kw in ["not found", "404", "does not exist"]):
-            return ErrorType.PERMANENT
-
-        # Default to transient (allows retry)
-        return ErrorType.TRANSIENT
-
-    def _create_llm_caller(self, ctx: AgentLoopContext):
-        """Create an LLM caller function for ReActExecutor."""
-
-        async def call_llm(messages: list[dict[str, Any]], **kwargs):
-            if not self.model_registry:
-                raise ValueError("No model registry configured")
-
-            async for delta in self.model_registry.chat_stream(
-                model_id=kwargs.get("model_id", ctx.config.model_id),
-                messages=messages,
-                temperature=kwargs.get("temperature", ctx.config.temperature),
-                max_tokens=kwargs.get("max_tokens", ctx.config.max_tokens),
-            ):
-                yield delta
-
-        return call_llm
-
-    def _create_planner_llm_adapter(self, model_id: str) -> _PlannerLLMAdapter:
-        """
-        Create an LLM adapter for TaskPlanner.
-
-        TaskPlanner expects either:
-        - Anthropic-style: model_client.messages.create()
-        - OpenAI-style: model_client.chat.completions.create()
-
-        This adapter provides the Anthropic-style interface wrapping ModelRegistry.
-
-        Args:
-            model_id: The model ID to use for planning
-
-        Returns:
-            LLM adapter compatible with TaskPlanner's _call_llm method
-        """
-        if not self.model_registry:
-            logger.warning(
-                "No model_registry available for TaskPlanner. "
-                "LLM-based planning disabled, falling back to rule-based planning only."
-            )
-            return None
-
-        return _PlannerLLMAdapter(
-            model_registry=self.model_registry,
-            model_id=model_id,
-        )
-
-    def _convert_react_event(self, event: ReActEvent, phase: AgentLoopPhase) -> AgentLoopEvent:
-        """Convert ReActEvent to AgentLoopEvent for consistent API."""
-        return AgentLoopEvent(
-            phase=phase,
-            event_type=event.event_type,
-            data=event.data,
-            timestamp=event.timestamp,
-        )
-
-    async def _step_context_compression(
-        self,
-        ctx: AgentLoopContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """
-        Step 7: Compress context if needed.
-
-        Follows Manus principles:
-        - Preserve structure (URLs, code, tables) over prose
-        - Maintain recoverability through extracted elements
-        - Keep recent messages intact for context continuity
-        """
-        phase = AgentLoopPhase.CONTEXT_COMPRESSION
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        # Get conversation history from context
-        history = []
-        if ctx.context_structure and ctx.context_structure.conversation_history:
-            history = ctx.context_structure.conversation_history
-
-        original_count = len(history)
-
-        # Check if compression is needed
-        if original_count <= ctx.config.compress_threshold:
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="skipped",
-                data={
-                    "reason": "Below threshold",
-                    "message_count": original_count,
-                    "threshold": ctx.config.compress_threshold,
-                },
-            )
-            # Emit phase_completed event
-            duration_ms = (time.time() - start_time) * 1000
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="phase_completed",
-                data={
-                    "phase_index": PHASE_INDEX[phase],
-                    "total_phases": TOTAL_PHASES,
-                    "phase_name": phase.value,
-                    "display_name": PHASE_DISPLAY_NAMES[phase],
-                    "status": "skipped",
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-            return
-
-        # Check if model_registry is available for compression
-        if not self.model_registry:
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="skipped",
-                data={"reason": "No model registry available for compression"},
-            )
-            duration_ms = (time.time() - start_time) * 1000
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="phase_completed",
-                data={
-                    "phase_index": PHASE_INDEX[phase],
-                    "total_phases": TOTAL_PHASES,
-                    "phase_name": phase.value,
-                    "display_name": PHASE_DISPLAY_NAMES[phase],
-                    "status": "skipped",
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-            return
-
-        try:
-            # Create LLM adapter for compressor
-            llm_adapter = _ModelRegistryAdapter(
-                model_registry=self.model_registry,
-                model_id=ctx.config.model_id,
-                temperature=0.3,  # Lower temperature for summarization
-            )
-
-            # Initialize compressor
-            compressor = ContextCompressor(
-                llm_service=llm_adapter,
-                max_summary_tokens=ctx.config.max_summary_tokens,
-            )
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="compressing",
-                data={
-                    "message_count": original_count,
-                    "preserve_recent": ctx.config.min_recent_messages,
-                },
-            )
-
-            # Perform compression
-            compressed: CompressedContext = await compressor.compress(
-                messages=history,
-                target_tokens=ctx.config.compressed_context_tokens,
-                preserve_recent=ctx.config.min_recent_messages,
-            )
-
-            # Store compression results in context
-            ctx.compressed_context = compressed.summary
-
-            # Calculate tokens saved (rough estimate)
-            original_tokens = sum(len(str(m.get("content", ""))) // 4 for m in history)
-            ctx.tokens_saved = max(0, original_tokens - compressed.token_count)
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="compressed",
-                data={
-                    "original_messages": original_count,
-                    "preserved_messages": len(compressed.recent_messages),
-                    "compressed_messages": original_count - len(compressed.recent_messages),
-                    "preserved_urls": len(compressed.preserved_urls),
-                    "preserved_code_blocks": len(compressed.preserved_code_blocks),
-                    "key_artifacts": len(compressed.key_artifacts),
-                    "summary_length": len(compressed.summary),
-                    "tokens_saved": ctx.tokens_saved,
-                    "compression_ratio": round(original_tokens / max(1, compressed.token_count), 2)
-                    if original_tokens > 0
-                    else 1.0,
-                },
-            )
-
-            logger.info(
-                f"Context compressed: {original_count} messages -> "
-                f"{len(compressed.recent_messages)} + summary, "
-                f"~{ctx.tokens_saved} tokens saved"
-            )
-
-        except Exception as e:
-            logger.exception("Context compression failed")
-            error = StructuredError(
-                code="COMPRESSION_FAILED",
-                message=f"上下文压缩失败: {str(e)}",
-                severity=ErrorSeverity.WARNING,
-                recoverable=True,
-                phase=phase,
-                suggestion="继续使用未压缩的上下文",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-                "tokens_saved": ctx.tokens_saved,
-            },
-        )
-
-    async def _step_generation_storage(
-        self,
-        ctx: AgentLoopContext,
-        user: UserContext,
-    ) -> AsyncGenerator[AgentLoopEvent, None]:
-        """Step 8: Generate final content and persist."""
-        phase = AgentLoopPhase.GENERATION_STORAGE
-        start_time = time.time()
-
-        # Emit phase_started event
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_started",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "started",
-            },
-        )
-
-        if not self.model_registry:
-            error = StructuredError(
-                code="NO_MODEL_REGISTRY",
-                message="未配置模型服务",
-                severity=ErrorSeverity.FATAL,
-                recoverable=False,
-                phase=phase,
-                suggestion="请联系管理员配置模型服务",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-            # Emit phase_completed for error
-            duration_ms = (time.time() - start_time) * 1000
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="phase_completed",
-                data={
-                    "phase_index": PHASE_INDEX[phase],
-                    "total_phases": TOTAL_PHASES,
-                    "phase_name": phase.value,
-                    "display_name": PHASE_DISPLAY_NAMES[phase],
-                    "status": "error",
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-            return
-
-        try:
-            # Add tool results to context if any
-            if ctx.tool_results:
-                tool_results_summary = "\n".join(
-                    [
-                        f"- {r.tool}: {'Success' if r.success else 'Failed'} - {str(r.result)[:200] if r.result else r.error}"
-                        for r in ctx.tool_results
-                    ]
-                )
-                ctx.messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Tool execution results:\n{tool_results_summary}\n\nPlease provide a final response based on these results.",
-                    }
-                )
-
-            # Stream from model
-            async for delta in self.model_registry.chat_stream(
-                model_id=ctx.config.model_id,
-                messages=ctx.messages,
-                temperature=ctx.config.temperature,
-                max_tokens=ctx.config.max_tokens,
-            ):
-                if hasattr(delta, "content") and delta.content:
-                    ctx.generated_content += delta.content
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="text_delta",
-                        data=delta.content,
-                    )
-
-                if hasattr(delta, "usage") and delta.usage:
-                    ctx.usage.update(delta.usage)
-
-            # Evaluate RAG quality if we had retrieval
-            if (
-                ctx.retrieval_context
-                and ctx.retrieval_context.results
-                and ctx.config.enable_rag_metrics
-            ):
-                try:
-                    evaluator = get_rag_evaluator()
-                    chunks = [
-                        {
-                            "chunk_id": r.chunk_id,
-                            "dataset_id": r.dataset_id,
-                            "content": r.content,
-                            "score": r.score,
-                            "source_url": r.metadata.get("source_url"),
-                            "source_title": r.source,
-                        }
-                        for r in ctx.retrieval_context.results
-                    ]
-
-                    ctx.rag_metrics = evaluator.evaluate(
-                        query=ctx.message,
-                        response=ctx.generated_content,
-                        retrieved_chunks=chunks,
-                        retrieval_time_ms=ctx.retrieval_metrics.retrieval_time_ms
-                        if ctx.retrieval_metrics
-                        else 0,
-                    )
-
-                    # Record evaluation metrics
-                    await self.metrics_collector.record_evaluation(
-                        session_id=ctx.session_id,
-                        tenant_id=ctx.tenant_id,
-                        metrics=ctx.rag_metrics,
-                        user_id=ctx.user_id,
-                        request_id=ctx.request_id,
-                    )
-
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="rag_evaluation",
-                        data={
-                            "quality_score": ctx.rag_metrics.quality_score,
-                            "chunks_used": ctx.rag_metrics.chunks_used,
-                            "response_grounding": ctx.rag_metrics.response_grounding,
-                        },
-                    )
-                except Exception as e:
-                    logger.exception("RAG evaluation failed")
-                    # Non-critical, emit warning but continue
-                    error = StructuredError(
-                        code="RAG_EVALUATION_FAILED",
-                        message=f"RAG质量评估失败: {str(e)}",
-                        severity=ErrorSeverity.INFO,
-                        recoverable=True,
-                        phase=phase,
-                        suggestion=None,
-                    )
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="error",
-                        data=error.to_event_data(),
-                    )
-
-            # Store to session memory
-            if self.memory_service:
-                try:
-                    await self.memory_service.set_session_memory(
-                        tenant_id=ctx.tenant_id,
-                        session_id=ctx.session_id,
-                        key="last_response",
-                        value=ctx.generated_content[:500],
-                    )
-                except Exception as e:
-                    logger.exception("Failed to store session memory")
-                    # Non-critical, don't emit error event
-
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="complete",
-                data={
-                    "content_length": len(ctx.generated_content),
-                    "usage": ctx.usage,
-                },
-            )
-
-        except Exception as e:
-            logger.exception("Generation failed")
-            error = StructuredError(
-                code="GENERATION_FAILED",
-                message=f"生成回答失败: {str(e)}",
-                severity=ErrorSeverity.FATAL,
-                recoverable=False,
-                phase=phase,
-                suggestion="请稍后重试，或尝试简化您的问题",
-            )
-            yield AgentLoopEvent(
-                phase=phase,
-                event_type="error",
-                data=error.to_event_data(),
-            )
-
-        # Emit phase_completed event
-        duration_ms = (time.time() - start_time) * 1000
-        yield AgentLoopEvent(
-            phase=phase,
-            event_type="phase_completed",
-            data={
-                "phase_index": PHASE_INDEX[phase],
-                "total_phases": TOTAL_PHASES,
-                "phase_name": phase.value,
-                "display_name": PHASE_DISPLAY_NAMES[phase],
-                "status": "completed",
-                "duration_ms": round(duration_ms, 2),
-            },
-        )
-
-
-# =============================================================================
-# Internal Adapters
-# =============================================================================
-
-
-class _PlannerLLMAdapter:
-    """
-    Adapter to make ModelRegistry compatible with TaskPlanner's LLM interface.
-
-    TaskPlanner expects either Anthropic-style or OpenAI-style interface.
-    This adapter provides the Anthropic-style `messages.create()` interface.
-    """
-
-    def __init__(
-        self,
-        model_registry: ModelRegistry,
-        model_id: str,
-    ):
-        """
-        Initialize the adapter.
-
-        Args:
-            model_registry: The model registry instance
-            model_id: Model ID to use for planning
-        """
-        self.model_registry = model_registry
-        self.model_id = model_id
-        # Provide Anthropic-style messages interface
-        self.messages = _MessagesInterface(model_registry, model_id)
-
-
-class _MessagesInterface:
-    """
-    Provides Anthropic-style messages.create() interface.
-
-    This enables TaskPlanner to call:
-        response = await model_client.messages.create(
-            model=model_name,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text
-    """
-
-    def __init__(
-        self,
-        model_registry: ModelRegistry,
-        model_id: str,
-    ):
-        self.model_registry = model_registry
-        self.model_id = model_id
-
-    async def create(
-        self,
-        model: str,
-        max_tokens: int,
-        messages: list[dict[str, Any]],
-        **kwargs,
-    ) -> _MessageResponse:
-        """
-        Create a message completion (Anthropic-style interface).
-
-        Args:
-            model: Model name (may be overridden by adapter's model_id)
-            max_tokens: Maximum tokens to generate
-            messages: List of message dicts with role and content
-
-        Returns:
-            Response object with content[0].text
-        """
-        try:
-            # Use the adapter's model_id (which comes from config)
-            # but allow override if needed
-            effective_model = self.model_id
-
-            response = await self.model_registry.chat(
-                model_id=effective_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=0.7,  # Task planning temperature
-            )
-
-            # Extract content from response
-            content_text = ""
-            if hasattr(response, "content"):
-                content_text = response.content or ""
-            elif isinstance(response, dict):
-                content_text = response.get("content", "")
-            else:
-                content_text = str(response)
-
-            return _MessageResponse(content_text)
-
-        except Exception as e:
-            logger.exception("LLM planning call failed")
-            raise
-
-
-class _MessageResponse:
-    """
-    Response object mimicking Anthropic's message response structure.
-
-    Provides access via response.content[0].text pattern.
-    """
-
-    def __init__(self, text: str):
-        self.content = [_ContentBlock(text)]
-
-
-class _ContentBlock:
-    """Single content block with text attribute."""
-
-    def __init__(self, text: str):
-        self.text = text
-
-
-class _ModelRegistryAdapter:
-    """
-    Adapter to make ModelRegistry compatible with ContextCompressor's LLMService protocol.
-
-    This adapter wraps the ModelRegistry to provide a simple `complete()` method
-    that the ContextCompressor expects for generating summaries.
-    """
-
-    def __init__(
-        self,
-        model_registry: ModelRegistry,
-        model_id: str,
-        temperature: float = 0.3,
-    ):
-        """
-        Initialize the adapter.
-
-        Args:
-            model_registry: The model registry instance
-            model_id: Model ID to use for completions
-            temperature: Temperature for generation (default: 0.3 for summarization)
-        """
-        self.model_registry = model_registry
-        self.model_id = model_id
-        self.temperature = temperature
-
-    async def complete(self, prompt: str, max_tokens: int = 200) -> str:
-        """
-        Generate a completion for the given prompt.
-
-        Args:
-            prompt: The input prompt to complete
-            max_tokens: Maximum number of tokens to generate
-
-        Returns:
-            The generated completion text
-        """
-        messages = [{"role": "user", "content": prompt}]
-
-        try:
-            response = await self.model_registry.chat(
-                model_id=self.model_id,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=max_tokens,
-            )
-
-            # Extract content from response
-            if hasattr(response, "content"):
-                return response.content or ""
-            elif isinstance(response, dict):
-                return response.get("content", "")
-            else:
-                return str(response)
-
-        except Exception as e:
-            logger.exception("LLM completion failed in adapter")
-            return ""
-
 
 # =============================================================================
 # Factory Function
@@ -4834,3 +2745,5 @@ def create_agent_loop(
         memory_service=memory_service,
         system_prompt=system_prompt,
     )
+
+

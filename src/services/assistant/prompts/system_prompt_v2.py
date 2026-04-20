@@ -1128,6 +1128,20 @@ def get_cache_stable_prompt_hash(
     return hashlib.md5(prompt.encode()).hexdigest()[:16]
 
 
+def get_time_context_block() -> str:
+    """Dynamic time block. Returned separately so it can be injected at the
+    end of the user-turn context block instead of polluting the cached
+    system-prompt prefix. Keeps "today is X" available to the model without
+    invalidating the KV-cache on every request."""
+    from datetime import datetime as _dt
+    _now = _dt.now()
+    return (
+        f"Today is {_now.strftime('%Y-%m-%d')} ({_now.strftime('%A')}). "
+        f"Current time: {_now.strftime('%H:%M')}. "
+        f"When searching the web for time-sensitive queries, include the year {_now.year}."
+    )
+
+
 def get_streaming_first_prompt(
     available_datasets: list[str] | None = None,
     kb_mode: str = "auto",
@@ -1244,15 +1258,6 @@ Web search is available. Use it intelligently when:
 For general knowledge questions you can answer confidently, respond directly without searching.
 """
 
-    # P1.1: Inject current time (via dynamic section, not in static prefix to preserve KV-cache)
-    from datetime import datetime as _dt
-    _now = _dt.now()
-    time_context = f"""
-## Current Time
-Today is {_now.strftime('%Y-%m-%d')} ({_now.strftime('%A')}). Current time: {_now.strftime('%H:%M')}.
-Always use this as "today". When searching the web, include the year {_now.year} in time-sensitive queries.
-"""
-
     # P1.3: OS Agent instructions when enabled
     os_agent_hint = ""
     if os_agent_enabled:
@@ -1271,7 +1276,7 @@ Write tools (require user confirmation): write_file, edit_file, bash.
 """
 
     return f"""You are an enterprise AI assistant.
-{time_context}
+
 ## Response Priority (CRITICAL)
 1. For simple greetings (hi, hello, 你好): reply briefly (1-2 sentences), do NOT list capabilities
 2. For simple questions you can answer confidently: respond directly without tools
