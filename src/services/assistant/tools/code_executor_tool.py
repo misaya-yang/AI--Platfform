@@ -133,8 +133,13 @@ numpy, pandas, matplotlib, seaborn, openpyxl, xlrd, scipy, plotly
    Never use `plt.show()` alone — it produces no artifact. After each
    figure, call `plt.savefig('/workspace/output/<name>.png', dpi=150,
    bbox_inches='tight')` then `plt.close()`.
-4. Print key metrics and analysis results to stdout
-5. Use Chinese labels for charts when user speaks Chinese
+4. **CRITICAL — when embedding images in your reply, use ONLY the URLs
+   returned at the end of the tool result under "Artifact URLs"**.
+   Do NOT reference files by their sandbox path (e.g.
+   `![chart](/workspace/output/foo.png)`) — those paths don't resolve
+   from the browser. Copy the presigned URL as-is into the markdown.
+5. Print key metrics and analysis results to stdout
+6. Use Chinese labels for charts when user speaks Chinese
 
 ## Example: Analyze uploaded Excel
 ```python

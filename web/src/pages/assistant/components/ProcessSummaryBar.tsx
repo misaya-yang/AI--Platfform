@@ -111,6 +111,21 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
     return null;
   }
 
+  // Nothing concrete to show yet — the "Thinking..." block below already
+  // communicates that work is in progress, and this bar would only render a
+  // vague "Preparing response" placeholder. Hide it until there's an actual
+  // step or tool to report (or an error).
+  if (
+    !hasError
+    && summary.status !== "succeeded"
+    && !visibleCurrentStep
+    && toolRunning === 0
+    && toolTotal === 0
+    && stepTotal === 0
+  ) {
+    return null;
+  }
+
   return (
     <div
       className={cn(

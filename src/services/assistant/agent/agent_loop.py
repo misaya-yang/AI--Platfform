@@ -2342,6 +2342,29 @@ class AgentLoop:
                                 data=_payload,
                             )
 
+                        # Append artifact URLs to the model-facing result so the
+                        # model can embed images with the correct presigned URL
+                        # (instead of guessing a sandbox path like
+                        # `activation_functions.png`, which won't resolve from
+                        # the browser).
+                        _url_lines: list[str] = []
+                        for _pf in persisted_output_files or []:
+                            _url = _pf.get("download_url")
+                            if not _url:
+                                continue
+                            _name = _pf.get("filename") or "artifact"
+                            _mime = str(_pf.get("mime_type") or "")
+                            if _mime.startswith("image/"):
+                                _url_lines.append(f"![{_name}]({_url})")
+                            else:
+                                _url_lines.append(f"[{_name}]({_url})")
+                        if _url_lines:
+                            tool_result_for_model = (
+                                f"{tool_result_for_model or ''}\n\n"
+                                f"Artifact URLs (embed as-is, do NOT rewrite the path):\n"
+                                + "\n".join(_url_lines)
+                            )
+
                         # Reduce payload for non-image files when we already have download_url
                         output_files_for_events = _sanitize_output_files(
                             persisted_output_files or []
