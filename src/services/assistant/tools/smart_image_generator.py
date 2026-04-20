@@ -6,6 +6,14 @@ Routes image generation across providers with safe fallback rules:
 - If Gemini fails with a non-safety error, fallback to DashScope Wanx when configured
 - If Gemini is blocked by safety filters, DO NOT fallback (avoid provider bypass)
 - Iterative editing (reference_image) is Gemini-only — DashScope does not support image input
+
+Style handling contract (since 2026-04-16):
+- ``prompt`` is the caller's final prompt. For public /generate-image requests
+  the API layer pre-injects the StylePreset modifier via
+  ``compose_styled_prompt``, so Gemini and Doubao see the style hint directly.
+- ``style`` and ``negative_prompt`` are DashScope-specific tags/filters. They
+  are only forwarded to DashScope. For presets without a native DashScope tag
+  we pass ``<auto>``; the prompt-level modifier still drives the rendering.
 """
 
 from __future__ import annotations

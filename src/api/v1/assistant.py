@@ -43,10 +43,16 @@ from ...services.assistant.tools.image_helpers import (
     build_gemini_contents_from_history,
     parse_image_size,
     resolve_image_routing,
-    resolve_style,
 )
 from ...services.assistant.tools.image_watermark import apply_watermark_b64
 from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
+from ...services.assistant.tools.style_presets import (
+    StylePreset,
+    compose_styled_prompt,
+    resolve_dashscope_style_tag,
+    resolve_negative_prompt,
+    resolve_style_preset,
+)
 from ...services.knowledge.embedding import is_multimodal_embedding_model
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
@@ -142,32 +148,104 @@ def get_model_registry(request: Request) -> ModelRegistry:
     return registry
 
 
-def _slim_image_history(history: list[dict]) -> list[dict]:
-    """
-    Cap image_chat_history size to prevent JSONB bloat.
+_SESSION_METADATA_SOFT_CAP = 1_000_000  # leave ~48KB headroom under the 1MB DB cap
 
-    Keep base64 for the last 2 model turns only (enough for Gemini multi-turn
-    continuity); older image turns keep their text but drop base64.
-    Without this, long image-edit sessions can push metadata to 15+ MB.
+
+async def _upload_to_gemini_files(gemini, result_image: dict) -> str | None:
+    """Upload a freshly generated image to Gemini Files API, return its URI.
+
+    Returning None signals the caller to fall back to inline base64 for this
+    turn (which will almost certainly blow the 1MB session cap and lose the
+    visual anchor — but at least the current response still works). Upload
+    failure is logged but never propagates: image generation already succeeded,
+    and a missing URI only affects the *next* turn's editing ability, not the
+    current user-facing response.
+    """
+    try:
+        import base64 as _b64
+        data_b64 = result_image.get("content_base64")
+        if not data_b64:
+            return None
+        raw = _b64.b64decode(data_b64)
+        return await gemini.upload_image(raw, result_image.get("mime_type", "image/jpeg"))
+    except Exception as exc:
+        logger.warning(
+            "Gemini Files API upload failed; next-turn edit will lack visual anchor: %s",
+            exc,
+        )
+        return None
+
+
+def _slim_image_history(history: list[dict]) -> list[dict]:
+    """Cap image_chat_history size so it fits under the 1MB session metadata limit.
+
+    Multi-turn image history has three heavy per-turn fields, each of which can
+    independently exceed 1MB:
+      - ``image_base64``       — the generated image itself (~1MB for 1024x1024 JPEG)
+      - ``thought_signature``  — Gemini 3.x reasoning-continuity blob (~1MB)
+      - ``mime_type``          — trivial, dropped alongside image_base64
+
+    We apply graduated degradation so the most useful context survives under the
+    tightest budget:
+
+    * **Pass 1** — keep ``image_base64`` + ``thought_signature`` only on the
+      most recent model turn. Older model turns drop both so they can't add
+      multiple MB each.
+    * **Pass 2** — if the kept turn alone still exceeds the soft cap, drop its
+      ``thought_signature`` (Gemini can still edit from the visible image).
+    * **Pass 3** — if still over, drop the ``image_base64`` too. The history
+      survives as text-only scaffolding instead of being silently rejected.
+
+    Losing the whole session lineage on every turn is strictly worse than
+    degrading: the user at least keeps their prior prompts, and a partial
+    context is something, rather than the current "every turn looks like a
+    fresh session" failure mode.
     """
     if not history:
         return history
 
-    # Walk backwards, keep base64 for last 2 model turns with images
-    keep_base64_count = 0
-    max_keep = 2
+    import json as _json
+
+    def _strip_image(turn: dict) -> None:
+        turn.pop("image_base64", None)
+        turn.pop("mime_type", None)
+
+    def _strip_signature(turn: dict) -> None:
+        turn.pop("thought_signature", None)
+
+    # Pass 1: keep image+signature only on the last model turn
+    keep_count = 0
+    max_keep = 1
     result: list[dict] = []
     for turn in reversed(history):
-        turn = dict(turn)  # shallow copy
-        if turn.get("role") == "model" and turn.get("image_base64"):
-            if keep_base64_count < max_keep:
-                keep_base64_count += 1
-            else:
-                # Strip base64 from older model turns
-                turn.pop("image_base64", None)
-                turn.pop("mime_type", None)
+        turn = dict(turn)  # shallow copy so mutations don't leak
+        if turn.get("role") == "model":
+            has_heavy_payload = turn.get("image_base64") or turn.get("thought_signature")
+            if has_heavy_payload:
+                if keep_count < max_keep:
+                    keep_count += 1
+                else:
+                    _strip_image(turn)
+                    _strip_signature(turn)
         result.append(turn)
     result.reverse()
+
+    # Pass 2: if signature alone pushes us over, drop it (image is more useful)
+    try:
+        if len(_json.dumps(result)) > _SESSION_METADATA_SOFT_CAP:
+            for turn in result:
+                if turn.get("role") == "model":
+                    _strip_signature(turn)
+
+            # Pass 3: image too large? drop it; text-only history still beats
+            # losing the whole lineage.
+            if len(_json.dumps(result)) > _SESSION_METADATA_SOFT_CAP:
+                for turn in result:
+                    if turn.get("role") == "model":
+                        _strip_image(turn)
+    except (TypeError, ValueError):
+        pass
+
     return result
 
 
@@ -1377,6 +1455,38 @@ async def generate_image(
         # ------------------------------------------------------------------
         session_mgr = getattr(request.app.state, "session_manager", None)
 
+        # App-driven edit mode: caller sent reference_image → stateless single
+        # request, no session required. Preferred for mobile apps that keep the
+        # prior turn's image locally and re-submit it each edit request.
+        if body.reference_image and prefer_gemini:
+            gemini = get_gemini_image_generator()
+            if gemini.is_configured:
+                preset = body.style
+                styled_prompt = compose_styled_prompt(body.prompt, preset)
+                logger.info(
+                    "Image edit (reference_image): model=%s, preset=%s, prompt=%s...",
+                    body.model_id, preset.value, body.prompt[:50],
+                )
+                res = await gemini.generate(
+                    prompt=styled_prompt,
+                    n=body.n,
+                    aspect_ratio=aspect_ratio,
+                    reference_image=body.reference_image,
+                )
+                if res.success and res.images:
+                    urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
+                    return ImageGenerationResponse(
+                        success=True,
+                        images=[GeneratedImage(url=u, width=width, height=height) for u in urls],
+                        provider="google",
+                        duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                    )
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="google",
+                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                    error=res.error or "Image edit failed",
+                )
+
         if body.session_id and session_mgr and prefer_gemini:
             gemini = get_gemini_image_generator()
             if not gemini.is_configured:
@@ -1388,14 +1498,27 @@ async def generate_image(
 
             session = await session_mgr.get(body.session_id)
             image_history: list[dict] = []
+            locked_preset = StylePreset.DEFAULT
             if session and session.metadata:
                 image_history = session.metadata.get("image_chat_history", [])
+                locked_preset = resolve_style_preset(
+                    session.metadata.get("style_preset"),
+                )
 
-            contents = build_gemini_contents_from_history(image_history, body.prompt)
+            # Style lock semantics: requested preset overrides the session lock
+            # only when the caller sends something other than DEFAULT. This lets
+            # follow-up edits inherit the original style automatically while
+            # still allowing explicit style switches.
+            effective_preset = (
+                body.style if body.style is not StylePreset.DEFAULT else locked_preset
+            )
+            styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
+
+            contents = build_gemini_contents_from_history(image_history, styled_prompt)
 
             logger.info(
-                "Image multi-turn: session=%s, turns=%d, prompt=%s...",
-                body.session_id, len(contents), body.prompt[:50],
+                "Image multi-turn: session=%s, turns=%d, preset=%s, prompt=%s...",
+                body.session_id, len(contents), effective_preset.value, body.prompt[:50],
             )
 
             res = await gemini.generate_chat(
@@ -1405,12 +1528,21 @@ async def generate_image(
             # Only persist the turn pair on success — skipping on failure avoids
             # dangling unanswered user prompts that would poison the next request.
             if res.success and res.images:
+                # Upload the generated image to Gemini Files API so the next
+                # turn can reference it via fileData URI instead of inline base64.
+                # Keeps session metadata small (~50 bytes/turn vs 1MB+).
+                file_uri = await _upload_to_gemini_files(gemini, res.images[0])
+                # Persist the raw user prompt in history (not the styled one) —
+                # style is tracked separately so future edits can re-style
+                # without the modifier compounding turn after turn.
                 append_image_turns(
                     image_history, body.prompt, res.images[0], res.text,
+                    file_uri=file_uri,
                 )
                 if session_mgr and session:
                     meta = dict(session.metadata or {})
-                    meta["image_chat_history"] = _slim_image_history(image_history)
+                    meta["image_chat_history"] = image_history
+                    meta["style_preset"] = effective_preset.value
                     await session_mgr.update_metadata(body.session_id, meta)
             else:
                 return ImageGenerationResponse(
@@ -1430,17 +1562,24 @@ async def generate_image(
         # ------------------------------------------------------------------
         # Single-turn mode (no session, non-Gemini, or Gemini single-shot)
         # ------------------------------------------------------------------
-        style = resolve_style(body.style)
+        # Expand the preset into three artefacts: a styled prompt (used by all
+        # providers so Gemini/Doubao see the modifier), a DashScope native tag,
+        # and a DashScope negative prompt. See style_presets.py for the table.
+        preset = body.style
+        styled_prompt = compose_styled_prompt(body.prompt, preset)
+        dashscope_tag = resolve_dashscope_style_tag(preset)
+        negative_prompt = resolve_negative_prompt(preset)
 
         router = get_smart_image_generator()
         logger.info(
-            "Image single-turn: model_id=%s, prompt=%s..., size=%s",
-            body.model_id, body.prompt[:50], body.size,
+            "Image single-turn: model_id=%s, preset=%s, prompt=%s..., size=%s",
+            body.model_id, preset.value, body.prompt[:50], body.size,
         )
 
         res = await router.generate(
-            prompt=body.prompt, n=body.n, size=body.size or "1024*1024",
-            style=style, aspect_ratio=aspect_ratio,
+            prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+            style=dashscope_tag, negative_prompt=negative_prompt,
+            aspect_ratio=aspect_ratio,
             prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
             dashscope_model=dashscope_model,
         )
@@ -1568,16 +1707,37 @@ async def _run_image_generation_task(
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
             body.model_id, selected_provider,
         )
-        style = resolve_style(body.style)
         width, height, aspect_ratio = parse_image_size(body.size)
 
         task["progress"] = 30
 
         # ------------------------------------------------------------------
-        # Multi-turn mode: session_id + Gemini → use chat history
+        # App-driven edit mode: caller sent reference_image → stateless single
+        # request to Gemini with the prior image attached. No session read/write,
+        # no 1MB metadata concerns, works across users trivially. This is the
+        # recommended pattern for mobile apps that manage their own history.
         # ------------------------------------------------------------------
         res = None
-        if body.session_id and session_manager and prefer_gemini:
+        if body.reference_image and prefer_gemini:
+            gemini = get_gemini_image_generator()
+            if gemini.is_configured:
+                preset = body.style
+                styled_prompt = compose_styled_prompt(body.prompt, preset)
+                logger.info(
+                    "Async image edit (reference_image): model=%s, preset=%s, prompt=%s...",
+                    body.model_id, preset.value, body.prompt[:50],
+                )
+                res = await gemini.generate(
+                    prompt=styled_prompt,
+                    n=body.n,
+                    aspect_ratio=aspect_ratio,
+                    reference_image=body.reference_image,
+                )
+
+        # ------------------------------------------------------------------
+        # Multi-turn mode: session_id + Gemini → use chat history
+        # ------------------------------------------------------------------
+        if res is None and body.session_id and session_manager and prefer_gemini:
             gemini = get_gemini_image_generator()
             if gemini.is_configured:
                 session = await session_manager.get(body.session_id)
@@ -1589,14 +1749,25 @@ async def _run_image_generation_task(
                         metadata={"image_chat_history": []},
                     )
                 image_history: list[dict] = []
+                locked_preset = StylePreset.DEFAULT
                 if session and session.metadata:
                     image_history = session.metadata.get("image_chat_history", [])
+                    locked_preset = resolve_style_preset(
+                        session.metadata.get("style_preset"),
+                    )
 
-                contents = build_gemini_contents_from_history(image_history, body.prompt)
+                # Inherit session's locked style when the caller sent DEFAULT;
+                # an explicit non-DEFAULT preset overrides and updates the lock.
+                effective_preset = (
+                    body.style if body.style is not StylePreset.DEFAULT else locked_preset
+                )
+                styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
+
+                contents = build_gemini_contents_from_history(image_history, styled_prompt)
 
                 logger.info(
-                    "Async image multi-turn: session=%s, turns=%d, prompt=%s...",
-                    body.session_id, len(contents), body.prompt[:50],
+                    "Async image multi-turn: session=%s, turns=%d, preset=%s, prompt=%s...",
+                    body.session_id, len(contents), effective_preset.value, body.prompt[:50],
                 )
 
                 res = await gemini.generate_chat(
@@ -1605,24 +1776,33 @@ async def _run_image_generation_task(
 
                 # Skip history update on failure to avoid dangling user turn
                 if res.success and res.images:
+                    file_uri = await _upload_to_gemini_files(gemini, res.images[0])
                     append_image_turns(
                         image_history, body.prompt, res.images[0], res.text,
+                        file_uri=file_uri,
                     )
                     if session_manager and session:
                         meta = dict(session.metadata or {})
-                        meta["image_chat_history"] = _slim_image_history(image_history)
+                        meta["image_chat_history"] = image_history
+                        meta["style_preset"] = effective_preset.value
                         await session_manager.update_metadata(body.session_id, meta)
 
         # ------------------------------------------------------------------
         # Single-turn fallback (no session, non-Gemini, or Gemini not configured)
         # ------------------------------------------------------------------
         if res is None:
+            preset = body.style
+            styled_prompt = compose_styled_prompt(body.prompt, preset)
+            dashscope_tag = resolve_dashscope_style_tag(preset)
+            negative_prompt = resolve_negative_prompt(preset)
+
             router = get_smart_image_generator()
             res = await router.generate(
-                prompt=body.prompt,
+                prompt=styled_prompt,
                 n=body.n,
                 size=body.size or "1024*1024",
-                style=style,
+                style=dashscope_tag,
+                negative_prompt=negative_prompt,
                 aspect_ratio=aspect_ratio,
                 prefer_gemini=prefer_gemini,
                 prefer_doubao=prefer_doubao,

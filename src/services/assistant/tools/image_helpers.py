@@ -112,10 +112,17 @@ def build_gemini_contents_from_history(
 ) -> list[dict[str, Any]]:
     """Build Gemini ``contents`` array from stored image chat history.
 
-    - Each turn becomes ``{role, parts: [...]}``
-    - Model-generated images include ``thought_signature`` if present
-      (required by Gemini 3.x for multi-turn editing)
-    - Appends the new user text as the final turn
+    Each history turn can carry the image either as an inline base64 payload or
+    as a Gemini Files API URI. The URI form is preferred because it lets the
+    session row stay tiny (~50 bytes per turn vs 1MB+) while Gemini still sees
+    the real image on each call.
+
+    - ``file_uri`` turns → ``{"fileData": {"fileUri": ..., "mimeType": ...}}``
+    - ``image_base64`` turns → ``{"inlineData": {"data": ..., "mimeType": ...}}``
+      (kept for backward-compatibility with history written before the Files
+      API migration)
+    - ``thought_signature`` is passed through verbatim when present, but is not
+      required for image-only turns (Gemini only enforces it for function calls)
     """
     contents: list[dict[str, Any]] = []
     for turn in image_history:
@@ -123,14 +130,21 @@ def build_gemini_contents_from_history(
         parts: list[dict[str, Any]] = []
         if turn.get("text"):
             parts.append({"text": turn["text"]})
-        if turn.get("image_base64"):
-            mime = turn.get("mime_type", "image/jpeg")
-            img_part: dict[str, Any] = {
-                "inlineData": {"mimeType": mime, "data": turn["image_base64"]}
-            }
+
+        file_uri = turn.get("file_uri")
+        inline_b64 = turn.get("image_base64")
+        mime = turn.get("mime_type", "image/jpeg")
+        img_part: dict[str, Any] | None = None
+        if file_uri:
+            img_part = {"fileData": {"fileUri": file_uri, "mimeType": mime}}
+        elif inline_b64:
+            img_part = {"inlineData": {"mimeType": mime, "data": inline_b64}}
+
+        if img_part is not None:
             if turn.get("thought_signature"):
                 img_part["thoughtSignature"] = turn["thought_signature"]
             parts.append(img_part)
+
         if parts:
             contents.append({"role": role, "parts": parts})
 
@@ -143,23 +157,37 @@ def append_image_turns(
     user_text: str,
     result_image: dict[str, Any] | None,
     result_text: str | None,
+    *,
+    file_uri: str | None = None,
 ) -> None:
     """Append one user turn and (on success) one model turn to ``image_history``.
 
-    Mutates the list in place. Call only when Gemini responded successfully.
-    Skip the user turn entirely on failure to avoid a dangling unanswered
-    prompt in the next turn's context.
+    When ``file_uri`` is provided (preferred path), the model turn stores only
+    the URI — the actual base64 lives on Gemini's Files API side. Without a
+    ``file_uri`` we fall back to persisting the base64 inline, which keeps
+    behaviour consistent with old sessions but will be rejected by the 1 MB
+    session metadata cap and lose the visual anchor on the next turn.
+
+    Mutates the list in place. Call only when Gemini responded successfully;
+    skip entirely on failure to avoid a dangling unanswered prompt in the next
+    turn's context.
     """
     if result_image is None:
         return
     image_history.append({"role": "user", "text": user_text})
     model_turn: dict[str, Any] = {
         "role": "model",
-        "image_base64": result_image["content_base64"],
         "mime_type": result_image.get("mime_type", "image/jpeg"),
     }
+    if file_uri:
+        model_turn["file_uri"] = file_uri
+    else:
+        model_turn["image_base64"] = result_image["content_base64"]
     if result_text:
         model_turn["text"] = result_text
-    if result_image.get("thought_signature"):
-        model_turn["thought_signature"] = result_image["thought_signature"]
+    # thought_signature is intentionally NOT persisted: it's a 1MB+ blob that
+    # Gemini only strictly requires for function-call parts. For plain image
+    # editing turns the docs say "the API does not strictly enforce validation"
+    # and omitting it does not trigger a 400. Storing it would push session
+    # metadata back over the 1MB cap.
     image_history.append(model_turn)
