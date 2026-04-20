@@ -24,8 +24,9 @@ class ChatRequest:
     history: list[dict[str, str]] | None = None
     """Optional explicit message history (list of ``{role, content}``)."""
 
-    model_id: str = "gemini-3-flash-preview"
-    """LLM model identifier."""
+    model_id: str = "qwen3.6-plus"
+    """LLM model identifier. Gateway default — override per request for
+    other registered models."""
 
     temperature: float = 0.7
     max_tokens: int | None = None
@@ -84,7 +85,7 @@ class ImageGenerationRequest:
     """Parameters for image generation via smart routing."""
 
     prompt: str
-    model_id: str = "gemini-3-flash-preview"
+    model_id: str = "gemini-3.1-flash-image-preview"
     style: str | None = None
     size: str | None = None
     n: int = 1

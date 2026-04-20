@@ -9,7 +9,9 @@ Phase 1: Unified session + message + streaming protocol.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from ...services.assistant.tools.style_presets import StylePreset, resolve_style_preset
 
 # =============================================================================
 # Tool Call Structures (for Agentic workflows)
@@ -129,7 +131,7 @@ class AssistantChatRequest(BaseModel):
     )
 
     # Model settings
-    model_id: str = Field(default="gemini-3-flash-preview", description="Model ID to use")
+    model_id: str = Field(default="qwen3.6-plus", description="Model ID to use")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(default=None, description="Maximum tokens to generate")
 
@@ -522,14 +524,42 @@ class ImageGenerationRequest(BaseModel):
 
     prompt: str = Field(..., description="Text description or edit instruction", min_length=1)
     model_id: str = Field(..., description="Current model ID to determine provider routing")
-    style: str | None = Field(default="default", description="Image style (DashScope only)")
+    style: StylePreset = Field(
+        default=StylePreset.DEFAULT,
+        description=(
+            "Visual style preset. Works across all providers: injected as a prompt "
+            "modifier for Gemini/Doubao, mapped to a native tag for DashScope. "
+            "Supported: default, realistic, anime, abstract, oil_paint, watercolor, "
+            "3d_render, pixel_art, sketch, comic."
+        ),
+    )
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
     session_id: str | None = Field(
         default=None,
         description="Image chat session ID. Enables multi-turn editing with full conversation history.",
     )
+    reference_image: str | None = Field(
+        default=None,
+        description=(
+            "Previous image to edit (base64 or data URL). When provided, the backend "
+            "sends it to Gemini along with the prompt so the model edits that image "
+            "instead of generating a new one. Use this for app-managed multi-turn "
+            "editing — the app keeps the prior turn's image and re-submits it each "
+            "request. Gemini-only; ignored for DashScope/Doubao."
+        ),
+    )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def _coerce_style(cls, value: Any) -> StylePreset:
+        """Accept legacy strings (e.g. ``"oil"``, ``"<photography>"``) and unknowns.
+
+        Style is a hint, not a security boundary — silent normalisation to
+        DEFAULT keeps old clients working while new clients get the enum.
+        """
+        return resolve_style_preset(value)
 
 
 class GeneratedImage(BaseModel):
@@ -560,12 +590,33 @@ class AsyncImageGenerationRequest(BaseModel):
 
     prompt: str = Field(..., description="Text description of the image to generate", min_length=1)
     model_id: str = Field(..., description="Model ID to determine provider routing")
-    style: str | None = Field(default="default", description="Image style")
+    style: StylePreset = Field(
+        default=StylePreset.DEFAULT,
+        description=(
+            "Visual style preset. Works across all providers. Supported: default, "
+            "realistic, anime, abstract, oil_paint, watercolor, 3d_render, "
+            "pixel_art, sketch, comic."
+        ),
+    )
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
     session_id: str | None = Field(default=None, description="Session ID for artifact storage")
+    reference_image: str | None = Field(
+        default=None,
+        description=(
+            "Previous image to edit (base64 or data URL). When provided, the backend "
+            "sends it to Gemini with the prompt so the model edits that image. Use "
+            "this for app-managed multi-turn editing (app keeps the prior turn's "
+            "image and re-submits it each request). Gemini-only."
+        ),
+    )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
     callback_url: str | None = Field(default=None, description="URL to POST results when generation completes")
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def _coerce_style(cls, value: Any) -> StylePreset:
+        return resolve_style_preset(value)
 
 
 class AsyncImageTaskSubmitResponse(BaseModel):

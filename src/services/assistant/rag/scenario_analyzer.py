@@ -121,7 +121,7 @@ class ScenarioAnalyzer:
     def __init__(
         self,
         llm_client: Any = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "qwen3.6-plus",
     ):
         """
         Initialize the scenario analyzer.
@@ -546,7 +546,7 @@ class DocumentAnalyzer:
     def __init__(
         self,
         llm_client: Any = None,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "qwen3.6-plus",
     ):
         """
         Initialize the document analyzer.
@@ -672,7 +672,7 @@ class DocumentAnalyzer:
 
 def create_scenario_analyzer(
     llm_client: Any = None,
-    model_name: str = "gemini-2.0-flash",
+    model_name: str = "qwen3.6-plus",
 ) -> ScenarioAnalyzer:
     """Create a scenario analyzer instance."""
     return ScenarioAnalyzer(llm_client=llm_client, model_name=model_name)
@@ -680,7 +680,7 @@ def create_scenario_analyzer(
 
 def create_document_analyzer(
     llm_client: Any = None,
-    model_name: str = "gemini-2.0-flash",
+    model_name: str = "qwen3.6-plus",
 ) -> DocumentAnalyzer:
     """Create a document analyzer instance."""
     return DocumentAnalyzer(llm_client=llm_client, model_name=model_name)

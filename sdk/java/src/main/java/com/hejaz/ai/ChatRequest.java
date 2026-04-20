@@ -11,7 +11,7 @@ import java.util.Map;
  * <pre>{@code
  * ChatRequest req = ChatRequest.builder("What is Zakat?")
  *     .sessionId("sess_abc123")
- *     .modelId("gemini-3-flash-preview")
+ *     .modelId("qwen3.6-plus")
  *     .temperature(0.5)
  *     .maxTokens(2048)
  *     .kbDatasetIds(List.of("ds_quran", "ds_hadith"))
@@ -24,7 +24,7 @@ public final class ChatRequest {
 
     private final String message;
     private String sessionId;
-    private String modelId = "gemini-3-flash-preview";
+    private String modelId = "qwen3.6-plus";
     private double temperature = 0.7;
     private Integer maxTokens;
     private String systemPrompt;
@@ -72,7 +72,7 @@ public final class ChatRequest {
             return this;
         }
 
-        /** LLM model identifier (default: {@code "gemini-3-flash-preview"}). */
+        /** LLM model identifier (default: {@code "qwen3.6-plus"}). */
         public Builder modelId(String modelId) {
             req.modelId = modelId;
             return this;

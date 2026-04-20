@@ -24,7 +24,7 @@ void main() async {
     print('--- Non-streaming chat ---');
     final response = await ai.chat.send(
       'What is Zakat?',
-      modelId: 'gemini-3-flash-preview',
+      modelId: 'qwen3.6-plus',
       temperature: 0.7,
     );
     print('Session: ${response.sessionId}');

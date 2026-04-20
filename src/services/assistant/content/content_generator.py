@@ -129,7 +129,7 @@ class DeepContentGenerator:
         self,
         llm_client: Any,
         guardrails: QualityGuardrails | None = None,
-        model_name: str = "claude-sonnet-4-20250514",
+        model_name: str = "qwen3.6-plus",
     ):
         """
         Initialize the generator.
@@ -772,7 +772,7 @@ class DeepContentGenerator:
 def create_content_generator(
     llm_client: Any,
     guardrails: QualityGuardrails | None = None,
-    model_name: str = "claude-sonnet-4-20250514",
+    model_name: str = "qwen3.6-plus",
 ) -> DeepContentGenerator:
     """
     Factory function to create a DeepContentGenerator.

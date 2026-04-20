@@ -198,8 +198,8 @@ class AssistantConfig:
     """Configuration for an assistant conversation."""
 
     # Model settings
-    model_provider: ModelProvider = ModelProvider.GOOGLE
-    model_id: str = "gemini-3-flash-preview"
+    model_provider: ModelProvider = ModelProvider.DASHSCOPE
+    model_id: str = "qwen3.6-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
 
@@ -362,7 +362,7 @@ class AssistantService:
         assistant = AssistantService(model_registry, kb_service)
 
         config = AssistantConfig(
-            model_id="gemini-3-flash-preview",
+            model_id="qwen3.6-plus",
             kb_dataset_ids=["docs", "wiki"],
         )
 

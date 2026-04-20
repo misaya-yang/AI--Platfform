@@ -122,7 +122,7 @@ class TestAssistantConfig:
         config = AssistantConfig()
 
         # Model defaults
-        assert config.model_id == "gemini-3-flash-preview"  # Default model
+        assert config.model_id == "qwen3.6-plus"  # Gateway default
         assert config.temperature == 0.7
         assert config.max_tokens is None
 

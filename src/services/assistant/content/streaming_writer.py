@@ -197,7 +197,7 @@ class StreamingWriter:
         user: UserContext | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        model_id: str = "gemini-3-flash-preview",
+        model_id: str = "qwen3.6-plus",
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Generate text while verifying facts against knowledge base.
@@ -218,7 +218,7 @@ class StreamingWriter:
             user: User context for KB access authorization
             temperature: Model temperature for generation (default: 0.7)
             max_tokens: Maximum tokens to generate (None for model default)
-            model_id: Model ID to use for generation (default: "gemini-3-flash-preview")
+            model_id: Model ID to use for generation (default: "qwen3.6-plus")
 
         Yields:
             StreamChunk objects with different types:
@@ -592,7 +592,7 @@ class StreamingWriter:
     async def _generate_text(
         self,
         prompt: str,
-        model_id: str = "gemini-3-flash-preview",
+        model_id: str = "qwen3.6-plus",
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> AsyncGenerator[str, None]:

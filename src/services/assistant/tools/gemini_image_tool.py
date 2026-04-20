@@ -50,7 +50,7 @@ class GeminiImageGenerator:
 
     BASE_URL = "https://generativelanguage.googleapis.com"
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
-    FALLBACK_MODEL = "gemini-2.5-flash-image"
+    FALLBACK_MODEL = "gemini-3.1-flash-image-preview"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -243,6 +243,47 @@ class GeminiImageGenerator:
             mime = header.split(";")[0].split(":")[1] if "image/" in header else default_mime
             return data_url[comma + 1:], mime
         return data_url, default_mime
+
+    async def upload_image(
+        self,
+        data_bytes: bytes,
+        mime_type: str = "image/jpeg",
+    ) -> str:
+        """Upload binary image to Gemini Files API; return a stable file URI.
+
+        The URI is reusable across generateContent requests for 48 hours (Google-side
+        expiration). Callers persist the URI in session metadata instead of raw
+        base64 so session rows stay tiny and multi-turn editing keeps the actual
+        visual anchor visible to Gemini.
+
+        Raises on API error so the caller can fall back cleanly (e.g. degrade the
+        current turn to text-only instead of storing a dangling reference).
+        """
+        if not self.is_configured:
+            raise RuntimeError("Gemini API key is not configured — cannot upload file")
+
+        client = await self._get_client()
+        url = f"{self.BASE_URL}/upload/v1beta/files"
+        response = await client.post(
+            url,
+            params={"key": self.api_key},
+            headers={
+                "Content-Type": mime_type,
+                "X-Goog-Upload-Protocol": "raw",
+            },
+            content=data_bytes,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        file_obj = payload.get("file") or {}
+        uri = file_obj.get("uri") or file_obj.get("name")
+        if not uri:
+            raise RuntimeError(f"Gemini Files API returned no URI: {payload}")
+        logger.info(
+            "Gemini Files API uploaded %d bytes mime=%s uri=%s",
+            len(data_bytes), mime_type, uri,
+        )
+        return uri
 
     async def close(self):
         if self._client:

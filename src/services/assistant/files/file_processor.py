@@ -1354,7 +1354,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             result = await processor.process_file_for_provider(
                 file_path="/uploads/user/doc.pdf",
                 provider="google",
-                model_id="gemini-1.5-pro",
+                model_id="gemini-3-flash-preview",
                 content_type="application/pdf",
                 google_api_key="YOUR_API_KEY",
             )
