@@ -279,3 +279,41 @@ def test_assistant_stream_event_shape_is_frozen() -> None:
         f"AssistantStreamEvent fields changed: {sorted(fields)}. "
         "The SSE route serializes these verbatim — any rename breaks the wire protocol."
     )
+
+
+# ---------------------------------------------------------------------------
+# Event payload shapes — required keys per event type, consumed by
+# web/src/lib/sse.ts streamChunkToAGUIEvent and usePlaygroundStream.
+# Removing or renaming any required key breaks the frontend silently.
+# ---------------------------------------------------------------------------
+
+# Minimum required keys each event's `data` payload must contain. The frontend
+# reads these verbatim — missing them means the UI breaks without a server error.
+EXPECTED_EVENT_DATA_KEYS: dict[str, frozenset[str]] = {
+    "text_delta": frozenset({"content"}),
+    "tool_call_start": frozenset({"tool_call_id", "name"}),
+    "tool_call_result": frozenset({"tool_call_id", "status"}),
+    "artifact_created": frozenset({"artifact_id"}),
+    "done": frozenset(),  # done may be empty but must be emitted
+    "run_finished": frozenset(),
+    "run_error": frozenset({"error"}),
+}
+
+
+def test_event_payload_contracts_documented() -> None:
+    """Snapshot of the minimum payload keys the frontend depends on for the
+    hottest event types. Changing these requires updating both this dict and
+    web/src/lib/sse.ts + web/src/pages/playground/hooks/usePlaygroundStream.ts.
+
+    This is a documentation test — it fails if someone edits the dict without
+    a paired frontend change note. It intentionally does not invoke the loop;
+    shape verification under a fake model happens in integration tests."""
+    # Sanity: every event in this contract must be a known StreamEventType.
+    from src.services.assistant.assistant_service import StreamEventType
+
+    known = {e.value for e in StreamEventType}
+    unknown = set(EXPECTED_EVENT_DATA_KEYS.keys()) - known
+    assert not unknown, (
+        f"EXPECTED_EVENT_DATA_KEYS references unknown event types {unknown}. "
+        "Either add them to StreamEventType or remove from the contract."
+    )

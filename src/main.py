@@ -1283,6 +1283,56 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     register_subagent_tool()
     logger.info("Registered spawn_subagent tool")
 
+    # ── Auto-reactivate external connectors from DB on startup ──
+    # `register_confluence_tools` writes into the in-process ToolRegistry
+    # which is wiped on every restart. Without this step the frontend shows
+    # "Confluence connected" (the DB row persists) but the model has zero
+    # Confluence tools, which produces hallucinated "I have created…"
+    # responses. Rehydrate from the active rows in confluence_connections.
+    database_for_rehydrate = getattr(app.state, "database", None)
+    if database_for_rehydrate:
+        try:
+            from .services.assistant.tools.confluence_tool import register_confluence_tools
+
+            rows = await database_for_rehydrate.list_confluence_connections(
+                status="active", limit=500
+            )
+            activated = 0
+            for row in rows:
+                domain = row.get("domain") or ""
+                email = row.get("email") or ""
+                token = row.get("api_token") or ""
+                tenant_id = row.get("tenant_id") or ""
+                if not (domain and email and token):
+                    logger.warning(
+                        "Confluence connection %s missing credentials; skipping",
+                        row.get("connection_id"),
+                    )
+                    continue
+                try:
+                    register_confluence_tools(
+                        domain=domain,
+                        email=email,
+                        api_token=token,
+                        tenant_id=tenant_id,
+                    )
+                    activated += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to auto-register Confluence tools for tenant %s",
+                        tenant_id,
+                    )
+            logger.info(
+                "Auto-registered Confluence tools from DB: %d/%d active connections",
+                activated,
+                len(rows),
+            )
+        except Exception:
+            logger.exception(
+                "Confluence auto-rehydration failed — frontend 'activate' will "
+                "need to be clicked manually to restore tools"
+            )
+
     # Store in app.state
     app.state.model_registry = model_registry
     app.state.assistant_service = assistant_service

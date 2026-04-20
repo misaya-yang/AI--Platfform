@@ -164,17 +164,17 @@ class ContextCompressor:
 
         Args:
             messages: List of conversation messages to compress
-            target_tokens: Target maximum token count for compressed context.
-                Note: Currently used for estimation only. Future versions may
-                implement adaptive compression to meet this target.
+            target_tokens: Soft ceiling for the compressed context. Caps the
+                summary-generation budget (clamped to at least 100 tokens so the
+                summary stays useful even under aggressive budgets).
             preserve_recent: Number of recent messages to keep intact (default: 6)
 
         Returns:
             CompressedContext containing summary, preserved elements, and recent messages
         """
-        # Note: target_tokens is reserved for future adaptive compression
-        # Currently, we do fixed preservation based on preserve_recent
-        _ = target_tokens
+        # target_tokens caps the summary budget for this call. Floor at 100
+        # tokens — a summary shorter than that is worthless.
+        effective_summary_tokens = max(100, min(self.max_summary_tokens, target_tokens))
 
         if not messages:
             return CompressedContext(
@@ -211,7 +211,9 @@ class ContextCompressor:
         preserved_code_blocks = preserved_code_blocks[:MAX_PRESERVED_CODE_BLOCKS]
 
         # Generate summary of compressed messages
-        summary = await self._generate_summary(messages_to_compress)
+        summary = await self._generate_summary(
+            messages_to_compress, budget_tokens=effective_summary_tokens
+        )
 
         # Calculate total token count
         token_count = self._estimate_compressed_tokens(
@@ -300,7 +302,9 @@ class ContextCompressor:
 
         return artifacts
 
-    async def _generate_summary(self, messages: list[dict[str, Any]]) -> str:
+    async def _generate_summary(
+        self, messages: list[dict[str, Any]], budget_tokens: int | None = None
+    ) -> str:
         """
         Generate a concise summary of compressed messages using LLM.
 
@@ -309,6 +313,8 @@ class ContextCompressor:
 
         Args:
             messages: List of messages to summarize
+            budget_tokens: Optional per-call max_tokens ceiling (defaults to
+                the compressor's `max_summary_tokens`).
 
         Returns:
             Generated summary text
@@ -347,7 +353,7 @@ Summary:"""
         try:
             summary = await self.llm_service.complete(
                 prompt=prompt,
-                max_tokens=self.max_summary_tokens,
+                max_tokens=budget_tokens or self.max_summary_tokens,
             )
             return summary.strip()
         except Exception:

@@ -173,6 +173,11 @@ async def lifespan(app: FastAPI):
     from src.services.assistant.tools.todo_tools import register_todo_tools
     register_todo_tools()
 
+    # ── Context management tool — always on; lets the model (or a user
+    # /compact slash command) explicitly request history compression.
+    from src.services.assistant.tools.context_tools import register_context_tools
+    register_context_tools()
+
     # ── Primitive tools (Phase 4) — env-gated opt-in ──
     # Exposes fs_read/fs_write/fs_glob/fs_grep to the model. Requires a writable
     # workspace root (default /tmp/ai-gateway-workspace, override with
@@ -199,6 +204,56 @@ async def lifespan(app: FastAPI):
     app.state.session_manager = session_manager
     app.state.kb_proxy = kb_proxy
     app.state.memory_service = memory_service
+
+    # ── Auto-reactivate external connectors from DB on startup ──
+    # `register_confluence_tools` registers into the global in-process
+    # ToolRegistry — that state is wiped on every restart. Without this
+    # step the frontend UI shows "Confluence connected" (the DB row
+    # persists) but the model has zero Confluence tools, which produces
+    # hallucinated "I have created the page" responses. Rehydrate here.
+    if database:
+        try:
+            from src.services.assistant.tools.confluence_tool import register_confluence_tools
+
+            rows = await database.list_confluence_connections(
+                status="active", limit=500
+            )
+            activated = 0
+            for row in rows:
+                domain = row.get("domain") or ""
+                email = row.get("email") or ""
+                token = row.get("api_token") or ""
+                tenant_id = row.get("tenant_id") or ""
+                if not (domain and email and token):
+                    logger.warning(
+                        "Confluence connection %s missing credentials; skipping",
+                        row.get("connection_id"),
+                    )
+                    continue
+                try:
+                    register_confluence_tools(
+                        domain=domain,
+                        email=email,
+                        api_token=token,
+                        tenant_id=tenant_id,
+                    )
+                    activated += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to auto-register Confluence tools for tenant %s",
+                        tenant_id,
+                    )
+            logger.info(
+                "Auto-registered Confluence tools from DB: %d/%d connections",
+                activated,
+                len(rows),
+            )
+        except Exception:
+            logger.exception(
+                "Confluence connector auto-rehydration failed — frontend 'activate' "
+                "button will need to be clicked manually to restore tools"
+            )
+
     app.state._ready = True
     logger.info("Assistant Service ready ✓")
 

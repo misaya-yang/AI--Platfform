@@ -2962,12 +2962,6 @@ Please use this web search context to inform your response when relevant."""
             )
         return self._tool_orchestrator
 
-    def _legacy_get_working_memory(self, session_id: str) -> WorkingMemory:
-        """Get or create working memory for a session (TTL-bounded)."""
-        if session_id not in self._working_memories:
-            self._working_memories[session_id] = WorkingMemory(session_id=session_id)
-        return self._working_memories[session_id]
-
     async def _execute_agent_loop(
         self,
         user: UserContext,
@@ -3231,101 +3225,6 @@ Please use this web search context to inform your response when relevant."""
             timestamp=event.timestamp,
         )
 
-    async def _legacy_execute_with_planning(
-        self,
-        user: UserContext,
-        session_id: str,
-        message: str,
-        config: AssistantConfig,
-        history: list[dict[str, str]],
-        retrieved_contexts: list[RetrievedContext],
-        web_search_context: str | None = None,
-    ) -> AsyncIterator[AssistantStreamEvent]:
-        """
-        Execute user request using Task Planning (Phase 2.5).
-        """
-        try:
-            planner = self._get_task_planner()
-            orchestrator = self._get_tool_orchestrator()
-            working_memory = self.get_working_memory(session_id)
-
-            # Clear previous task state for new request
-            working_memory.clear()
-            # Restore goal (optional, but for now we set new goal from plan)
-
-            # Context for planner
-            planner_context = {
-                "history_summary": history[-3:] if history else [],
-                "retrieved_context_count": len(retrieved_contexts),
-            }
-
-            # Create plan
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.STATUS.value,
-                data={"status": "planning", "message": "Analyzing request and creating plan..."},
-            )
-
-            # Get available tools (full definitions for better planning)
-            tools = self.model_registry.get_tools()
-
-            plan = await planner.create_plan(
-                user_request=message, available_tools=tools, context=planner_context
-            )
-
-            # Emit plan event
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.TASK_PLANNING.value, data=plan.to_dict()
-            )
-
-            # Execute plan
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.STATUS.value,
-                data={
-                    "status": "executing_plan",
-                    "message": f"Executing {len(plan.tasks)} tasks...",
-                },
-            )
-
-            invocation_context = ToolInvocationContext(
-                session_id=session_id,
-                user_id=user.user_id,
-                tenant_id=user.tenant_id,
-                request_id=f"legacy-planning:{session_id}:{int(time.time() * 1000)}",
-                run_id=str(uuid.uuid4()),
-                scope_id=session_id,
-                policy_profile=config.execution_profile,
-                os_agent_enabled=config.os_agent_enabled,
-                kb_dataset_ids=config.kb_dataset_ids or [],
-                user=user,
-            )
-
-            async for result in orchestrator.execute_plan(
-                plan,
-                working_memory,
-                invocation_context=invocation_context,
-            ):
-                # Emit result update
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
-                    data=working_memory.to_dict(),
-                )
-
-                # Emit tool result event
-                yield AssistantStreamEvent(
-                    event_type=StreamEventType.TOOL_RESULT.value,
-                    data={
-                        "tool_call_id": result.task_id,
-                        "name": result.tool,
-                        "result": str(result.result)[:1000],  # Truncate for display
-                        "success": result.success,
-                    },
-                )
-        except Exception as e:
-            logger.error(f"Task planning execution failed: {e}", exc_info=True)
-            yield AssistantStreamEvent(
-                event_type=StreamEventType.ERROR.value,
-                data={"message": f"Planning execution failed: {str(e)}", "recoverable": True},
-            )
 
     # P2.2: Correction detection patterns
     _CORRECTION_RE = __import__("re").compile(
@@ -3914,29 +3813,6 @@ Please use this web search context to inform your response when relevant."""
             )
 
         return content, user_images
-
-    def _legacy_get_provider_from_model(self, model_id: str) -> str:
-        """Get provider name from model ID for ContextEngine configuration.
-
-        Args:
-            model_id: The model identifier.
-
-        Returns:
-            Provider name string.
-        """
-        model_id_lower = model_id.lower()
-        if "claude" in model_id_lower:
-            return "anthropic"
-        elif "gpt" in model_id_lower or "o1" in model_id_lower:
-            return "openai"
-        elif "deepseek" in model_id_lower:
-            return "deepseek"
-        elif "qwen" in model_id_lower:
-            return "dashscope"
-        elif "gemini" in model_id_lower:
-            return "google"
-        else:
-            return "openai"  # Default to OpenAI format
 
     def get_working_memory(self, session_id: str) -> WorkingMemory:
         """Get or create working memory for a session.

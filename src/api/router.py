@@ -5,6 +5,7 @@ from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
 from .v1.confluence import router as confluence_router
+from .v1.debug_tools import router as debug_tools_router
 from .v1.conversations import router as conversations_router
 from .v1.dashboard import router as dashboard_router
 from .v1.files import router as files_router
@@ -60,6 +61,7 @@ api_router.include_router(knowledge_router)  # KBMS Knowledge Base
 api_router.include_router(islamic_content_router)  # Islamic content proxy → :8091
 api_router.include_router(kb_tools_router)  # KB Tools API for LangGraph agents
 api_router.include_router(confluence_router)  # Confluence 集成
+api_router.include_router(debug_tools_router)  # /debug/tools — live registry visibility
 api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(usage_router)  # 使用量追踪与分析
 api_router.include_router(quota_router)  # 用户配额管理

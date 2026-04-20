@@ -574,10 +574,16 @@ class ModelRegistry:
         thinking_level: str | None = None,
     ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
+        from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
+
         formatted_messages = []
         for raw_msg in messages:
             msg = _normalize_message(raw_msg)
-            m: dict[str, Any] = {"role": msg.role, "content": msg.content}
+            content = msg.content
+            # Anthropic-only cache marker — strip for OpenAI-compat providers.
+            if msg.role == "system" and isinstance(content, str) and CACHE_SPLIT_MARKER in content:
+                content = content.replace(CACHE_SPLIT_MARKER, "").replace("\n\n\n\n", "\n\n")
+            m: dict[str, Any] = {"role": msg.role, "content": content}
             if msg.name:
                 m["name"] = msg.name
             if msg.tool_calls:
@@ -702,16 +708,43 @@ class ModelRegistry:
             "stream": stream,
         }
         if system_prompt:
-            # Wrap as a single-block list with `cache_control: ephemeral` so
-            # Anthropic caches the system prefix (up to 4 breakpoints allowed).
-            # Plain-string form bypasses prompt caching entirely.
-            body["system"] = [
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            # Split the prompt on CACHE_SPLIT_MARKER (inserted by
+            # build_system_prompt_v2) into a tenant-stable static prefix and
+            # a per-tenant/per-scenario tail. Both get `cache_control:
+            # ephemeral` so the prefix caches across all tenants while the
+            # tail still caches per (tenant, scenario, tools) combination.
+            # Anthropic allows up to 4 cache breakpoints; we use 2.
+            from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
+
+            if CACHE_SPLIT_MARKER in system_prompt:
+                static_prefix, dynamic_tail = system_prompt.split(
+                    CACHE_SPLIT_MARKER, 1
+                )
+                blocks = [
+                    {
+                        "type": "text",
+                        "text": static_prefix.rstrip(),
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                dynamic_tail = dynamic_tail.lstrip()
+                if dynamic_tail:
+                    blocks.append(
+                        {
+                            "type": "text",
+                            "text": dynamic_tail,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    )
+                body["system"] = blocks
+            else:
+                body["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
         if tools:
             # Convert OpenAI tool format to Anthropic format.
             anthropic_tools = []
@@ -867,6 +900,13 @@ class ModelRegistry:
             body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level}
 
         if system_instruction:
+            # Strip Anthropic-only cache marker before sending to Gemini.
+            from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
+
+            if isinstance(system_instruction, str) and CACHE_SPLIT_MARKER in system_instruction:
+                system_instruction = system_instruction.replace(
+                    CACHE_SPLIT_MARKER, ""
+                ).replace("\n\n\n\n", "\n\n")
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
         if tools:

@@ -1042,6 +1042,126 @@ class AgentLoop:
         logger.info(f"Fallback: keeping only {min_recent} recent messages")
         return recent_messages
 
+    async def _compact_messages_by_turns(
+        self,
+        messages: list[dict[str, Any]],
+        keep_recent_turns: int,
+        model_id: str,
+    ) -> dict[str, Any]:
+        """Compact `messages` in place, keeping the last `keep_recent_turns`
+        user turns intact. Returns a stats dict describing the result.
+
+        A "turn" begins at each `role="user"` message and includes all
+        subsequent assistant/tool messages until the next user message.
+        System messages at the head are always preserved.
+
+        If there aren't enough turns to compact, this is a no-op.
+        """
+        user_indices = [
+            i for i, m in enumerate(messages) if m.get("role") == "user"
+        ]
+        if len(user_indices) <= keep_recent_turns:
+            return {
+                "compacted": False,
+                "reason": "not_enough_turns",
+                "turns_total": len(user_indices),
+                "turns_kept": len(user_indices),
+            }
+
+        cutoff_idx = user_indices[-keep_recent_turns]
+        # Preserve any leading system messages exactly as-is.
+        head_system: list[dict[str, Any]] = []
+        first_non_system = 0
+        for i, m in enumerate(messages):
+            if m.get("role") == "system":
+                head_system.append(m)
+                first_non_system = i + 1
+            else:
+                break
+        old_messages = messages[first_non_system:cutoff_idx]
+        recent_messages = messages[cutoff_idx:]
+
+        if not old_messages:
+            return {
+                "compacted": False,
+                "reason": "nothing_to_compact",
+                "turns_total": len(user_indices),
+                "turns_kept": keep_recent_turns,
+            }
+
+        before_tokens = estimate_history_tokens(messages)
+
+        summary_block: str | None = None
+        if self.model_registry:
+            try:
+                compressor = ContextCompressor(
+                    llm_service=ModelRegistryLLMService(
+                        self.model_registry,
+                        model_id=model_id,
+                        max_tokens=500,
+                    ),
+                    max_summary_tokens=500,
+                )
+                compressed = await compressor.compress(
+                    messages=old_messages,
+                    target_tokens=800,
+                    preserve_recent=0,
+                )
+                parts: list[str] = []
+                if compressed.summary:
+                    parts.append(f"Summary: {compressed.summary}")
+                if compressed.preserved_urls:
+                    parts.append(
+                        "URLs referenced: "
+                        + ", ".join(compressed.preserved_urls[:10])
+                    )
+                if compressed.key_artifacts:
+                    parts.append(
+                        "Artifacts mentioned: "
+                        + ", ".join(compressed.key_artifacts[:10])
+                    )
+                if parts:
+                    summary_block = (
+                        "[Previous conversation — compacted]\n" + "\n".join(parts)
+                    )
+            except Exception:
+                logger.exception(
+                    "context_compact: compressor failed, falling back to simple summary"
+                )
+
+        if not summary_block:
+            summary_block = (
+                f"[Previous conversation — compacted: "
+                f"{len(old_messages)} messages omitted]"
+            )
+
+        # Attach as a user-role context block so the KV-cache-stable system
+        # prefix isn't polluted by per-turn varying content.
+        summary_message = {"role": "user", "content": summary_block}
+
+        # Mutate the live list in place so the caller's reference tracks it.
+        messages.clear()
+        messages.extend(head_system)
+        messages.append(summary_message)
+        messages.extend(recent_messages)
+
+        after_tokens = estimate_history_tokens(messages)
+        logger.info(
+            "context_compact: %d → %d tokens (kept %d turns, summarized %d msgs)",
+            before_tokens,
+            after_tokens,
+            keep_recent_turns,
+            len(old_messages),
+        )
+        return {
+            "compacted": True,
+            "turns_total": len(user_indices),
+            "turns_kept": keep_recent_turns,
+            "messages_summarized": len(old_messages),
+            "tokens_before": before_tokens,
+            "tokens_after": after_tokens,
+        }
+
     async def _summarize_history(
         self,
         messages: list[dict[str, Any]],
@@ -2491,16 +2611,36 @@ class AgentLoop:
                     if tool_name == "search_knowledge_base":
                         kb_dedup.mark_completed(kb_query_fp)
 
-                    # Add tool result to messages with lifecycle management
-                    # M02: Truncate large tool results to prevent context rot
+                    # Add tool result to messages with lifecycle management.
+                    # Per-tool cap: retrieval tools legitimately return long
+                    # payloads (KB hits, Confluence pages, web search). Action
+                    # tools (fs_write, execute_python_code) don't — their
+                    # results are mostly status + short echoes. Using one
+                    # 2000-char cap for both destroys retrieval quality
+                    # (Confluence list pages get cut to the first 5 items).
                     _tool_content = (
                         tool_result_for_model
                         if tool_result_for_model is not None
                         else (str(tool_result) if not isinstance(tool_result, str) else tool_result)
                     ) or ""
-                    _MAX_TOOL_RESULT_LEN = 2000
+                    _RETRIEVAL_TOOLS = {
+                        "search_knowledge_base",
+                        "search_web",
+                        "confluence_read",
+                        "fs_read",
+                        "fs_glob",
+                        "fs_grep",
+                    }
+                    _MAX_TOOL_RESULT_LEN = (
+                        10_000 if tool_name in _RETRIEVAL_TOOLS else 2_000
+                    )
                     if len(_tool_content) > _MAX_TOOL_RESULT_LEN:
-                        _tool_content = _tool_content[:_MAX_TOOL_RESULT_LEN] + "\n...[truncated]"
+                        _tool_content = (
+                            _tool_content[:_MAX_TOOL_RESULT_LEN]
+                            + f"\n...[truncated at {_MAX_TOOL_RESULT_LEN} chars; "
+                            "call the underlying tool with a narrower query or "
+                            "read_* for a specific item]"
+                        )
 
                     messages.append(
                         {
@@ -2511,92 +2651,232 @@ class AgentLoop:
                         }
                     )
 
+                    # context_compact signal — the tool itself doesn't touch
+                    # `messages`; it stamps metadata that the loop honors here.
+                    # Skip tool-result-trim below when we already compacted the
+                    # whole history.
+                    _compact_signal = (
+                        tool_metadata.get("compact_context")
+                        if isinstance(tool_metadata, dict)
+                        else None
+                    )
+                    if isinstance(_compact_signal, dict):
+                        _keep_turns = int(_compact_signal.get("keep_recent_turns") or 3)
+                        try:
+                            _stats = await self._compact_messages_by_turns(
+                                messages=messages,
+                                keep_recent_turns=_keep_turns,
+                                model_id=ctx.config.model_id,
+                            )
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type=StreamEventType.CONTEXT_COMPACTED.value,
+                                data={
+                                    **_stats,
+                                    "trigger": "tool:context_compact",
+                                    "reason": _compact_signal.get("reason", ""),
+                                },
+                            )
+                        except Exception:
+                            logger.exception(
+                                "context_compact signal handling failed; continuing without compaction"
+                            )
+                        # Skip the tool-result-trim block below — if we
+                        # compacted, the whole history including old tool
+                        # results is already summarized.
+                        continue
+
                     # M02: Summarize old tool results beyond the 5 most recent
-                    # to keep context window lean across multi-iteration loops
+                    # to keep context window lean across multi-iteration loops.
+                    # Reverse-scan to find the (keep+1)-th newest tool message,
+                    # then linear-scan forward only up to that point — O(kept)
+                    # instead of O(len(messages)) per iteration.
                     _TOOL_RESULT_KEEP_RECENT = 5
-                    _tool_msg_indices = [
-                        i for i, m in enumerate(messages) if m.get("role") == "tool"
-                    ]
-                    if len(_tool_msg_indices) > _TOOL_RESULT_KEEP_RECENT:
-                        for _old_idx in _tool_msg_indices[:-_TOOL_RESULT_KEEP_RECENT]:
+                    _seen = 0
+                    _cutoff_idx: int | None = None
+                    for _i in range(len(messages) - 1, -1, -1):
+                        if messages[_i].get("role") == "tool":
+                            _seen += 1
+                            if _seen > _TOOL_RESULT_KEEP_RECENT:
+                                _cutoff_idx = _i
+                                break
+                    if _cutoff_idx is not None:
+                        for _old_idx in range(_cutoff_idx + 1):
                             _old_msg = messages[_old_idx]
+                            if _old_msg.get("role") != "tool":
+                                continue
                             _old_content = str(_old_msg.get("content") or "")
-                            if len(_old_content) > 200:
+                            # 800 chars keeps enough retrieval context (a few
+                            # bullets from a list page, the first section of
+                            # a spec) for the model to reference. 200 was
+                            # too aggressive — it destroyed list-page hits.
+                            if len(_old_content) > 800 and "[summarized:" not in _old_content:
                                 _old_msg["content"] = (
-                                    _old_content[:200]
+                                    _old_content[:800]
                                     + f"\n...[summarized: {len(_old_content)} chars, see recent results for details]"
                                 )
 
                 # Continue loop to get LLM's response to tool results
 
-            # If the loop hit limits without yielding a natural answer, force one
-            # final synthesis pass (tools disabled) based on collected observations.
+            # If the loop hit limits without yielding a natural answer, force
+            # one final synthesis pass (tools disabled) based on collected
+            # observations. `async def` with `yield` can't `return` a value,
+            # so we signal success by checking `ctx.generated_content` after
+            # each call instead of returning a bool.
+            async def _run_forced_synthesis(
+                messages_for_call: list[dict[str, Any]], attempt_label: str
+            ):
+                """Stream a single no-tools completion, yielding events.
+                Caller checks `ctx.generated_content` afterwards to see if
+                anything was produced."""
+                nonlocal first_token_emitted
+                forced_usage: dict[str, int] = {}
+                try:
+                    async for _delta in self.model_registry.chat_stream(
+                        model_id=ctx.config.model_id,
+                        messages=messages_for_call,
+                        temperature=min(ctx.config.temperature, 0.3),
+                        max_tokens=min(ctx.config.max_tokens or 2048, 2048),
+                        tools=None,
+                    ):
+                        if _delta.content:
+                            for _text_chunk in _split_text_for_stream(_delta.content):
+                                ctx.generated_content += _text_chunk
+                                if not first_token_emitted:
+                                    _ttft_ms = (time.time() - ttft_start) * 1000
+                                    first_token_emitted = True
+                                    logger.info(
+                                        "[STREAMING-FIRST] TTFT (forced/%s): %.0fms",
+                                        attempt_label,
+                                        _ttft_ms,
+                                    )
+                                    yield AgentLoopEvent(
+                                        phase=phase,
+                                        event_type="ttft",
+                                        data={"ttft_ms": round(_ttft_ms, 2)},
+                                    )
+                                yield AgentLoopEvent(
+                                    phase=phase,
+                                    event_type="text_delta",
+                                    data=_text_chunk,
+                                )
+                        if _delta.usage:
+                            for _k, _v in _delta.usage.items():
+                                if isinstance(_v, (int, float)):
+                                    forced_usage[_k] = max(forced_usage.get(_k, 0), int(_v))
+                                elif _v is not None:
+                                    with contextlib.suppress(Exception):
+                                        forced_usage[_k] = int(_v)
+                except Exception:
+                    logger.exception(
+                        "[STREAMING-FIRST] Forced synthesis (%s) raised; continuing to next fallback",
+                        attempt_label,
+                    )
+                for _k, _v in forced_usage.items():
+                    ctx.usage[_k] = int(_v)
+
             if not ctx.generated_content.strip():
                 logger.warning(
                     "[STREAMING-FIRST] No final content after %s iterations. "
-                    "Running a forced synthesis pass without tools.",
+                    "Running forced synthesis pass 1 (full history, no tools).",
                     iteration,
                 )
-                forced_call_usage: dict[str, int] = {}
-                async for delta in self.model_registry.chat_stream(
-                    model_id=ctx.config.model_id,
-                    messages=messages,
-                    temperature=min(ctx.config.temperature, 0.3),
-                    max_tokens=ctx.config.max_tokens,
-                    tools=None,
-                ):
-                    if delta.content:
-                        for text_chunk in _split_text_for_stream(delta.content):
-                            ctx.generated_content += text_chunk
-
-                            if not first_token_emitted:
-                                ttft_ms = (time.time() - ttft_start) * 1000
-                                first_token_emitted = True
-                                logger.info("[STREAMING-FIRST] TTFT: %.0fms", ttft_ms)
-                                yield AgentLoopEvent(
-                                    phase=phase,
-                                    event_type="ttft",
-                                    data={"ttft_ms": round(ttft_ms, 2)},
-                                )
-
-                            yield AgentLoopEvent(
-                                phase=phase,
-                                event_type="text_delta",
-                                data=text_chunk,
-                            )
-
-                    if delta.usage:
-                        for key, value in delta.usage.items():
-                            if isinstance(value, (int, float)):
-                                ivalue = int(value)
-                                forced_call_usage[key] = max(forced_call_usage.get(key, 0), ivalue)
-                            elif value is not None:
-                                with contextlib.suppress(Exception):
-                                    forced_call_usage[key] = int(value)
-
-                for key, value in forced_call_usage.items():
-                    ctx.usage[key] = int(value)
+                # Attempt 1: same messages, tools disabled, small token budget.
+                async for _ev in _run_forced_synthesis(messages, "full"):
+                    yield _ev
 
             if not ctx.generated_content.strip():
                 logger.warning(
-                    "[STREAMING-FIRST] Forced synthesis still returned empty content; "
-                    "using deterministic tool-summary fallback."
+                    "[STREAMING-FIRST] Forced synthesis #1 empty. Retrying with "
+                    "compacted history (system + user + tool digest)."
                 )
-                fallback_lines = ["我已完成工具执行，但模型未返回最终文本。以下是关键结果："]
-                for result in ctx.tool_results[-3:]:
-                    preview = (
-                        str(result.result)[:180]
-                        if result.result is not None
-                        else (result.error or "No result")
+                # Attempt 2: reduce to a minimal shape the model can't refuse.
+                # Some models return empty when the message list has many
+                # assistant turns with tool_calls but no final text — this
+                # rebuilds a clean "here's the question, here's what I found,
+                # now answer" shape.
+                #
+                # NOTE: derive the tool digest from `messages` (the live source
+                # of truth), NOT from `ctx.tool_results` — that field is dead
+                # state from the old 8-step pipeline and is never written to
+                # by this loop.
+                _tool_msgs = [m for m in messages if m.get("role") == "tool"]
+                _digest_lines: list[str] = []
+                for _tm in _tool_msgs[-5:]:
+                    _tname = _tm.get("name") or "tool"
+                    _tcontent = str(_tm.get("content") or "").strip()
+                    if _tcontent:
+                        _digest_lines.append(f"• {_tname}: {_tcontent[:1200]}")
+                _digest = "\n".join(_digest_lines) or "(no tool results captured)"
+                _head_system = [m for m in messages if m.get("role") == "system"]
+                # One user message, not two — Anthropic's API rejects
+                # consecutive same-role messages with "roles must alternate".
+                _compact_user_content = (
+                    f"{ctx.message}\n\n"
+                    "---\nTool results collected so far:\n"
+                    f"{_digest}\n\n"
+                    "Please give the user a direct, helpful answer using "
+                    "these results. If the tools didn't find what the user "
+                    "needed, say so politely and suggest one concrete next step."
+                )
+                _compact_messages: list[dict[str, Any]] = [
+                    *_head_system,
+                    {"role": "user", "content": _compact_user_content},
+                ]
+                async for _ev in _run_forced_synthesis(_compact_messages, "compact"):
+                    yield _ev
+
+            if not ctx.generated_content.strip():
+                # Both forced passes failed. Surface the situation as a real
+                # warning event (frontend can style it distinctly) and give
+                # the user a polite, actionable message instead of the old
+                # "我已完成工具执行，但模型未返回最终文本" internal-sounding text.
+                logger.warning(
+                    "[STREAMING-FIRST] Both forced synthesis passes returned empty; "
+                    "emitting graceful fallback with run_error signal."
+                )
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.RUN_ERROR.value,
+                    data={
+                        "error": "model_produced_no_text",
+                        "reason": (
+                            "The model completed tool calls but did not "
+                            "generate a final answer after two synthesis retries."
+                        ),
+                        "recoverable": True,
+                    },
+                )
+                # Build a best-effort answer from the tool observations so the
+                # user sees SOMETHING useful — but framed as a summary from
+                # the assistant, not an internal error dump. Derive from
+                # `messages` since `ctx.tool_results` is dead state.
+                _tool_msgs_final = [m for m in messages if m.get("role") == "tool"]
+                _summary_bits: list[str] = []
+                for _tm in _tool_msgs_final[-3:]:
+                    _tname = _tm.get("name") or "tool"
+                    _tcontent = str(_tm.get("content") or "").strip()
+                    if _tcontent:
+                        _summary_bits.append(f"- **{_tname}**: {_tcontent[:220]}")
+                if _summary_bits:
+                    _fallback_text = (
+                        "I ran into trouble composing a final answer, but "
+                        "here's what I found. Please try rephrasing your "
+                        "question or ask a follow-up.\n\n"
+                        + "\n".join(_summary_bits)
                     )
-                    fallback_lines.append(f"- {result.tool}: {preview}")
-                fallback_text = "\n".join(fallback_lines)
-                ctx.generated_content = fallback_text
-                for text_chunk in _split_text_for_stream(fallback_text):
+                else:
+                    _fallback_text = (
+                        "I wasn't able to complete this request. Please "
+                        "try rephrasing your question or breaking it into "
+                        "smaller parts."
+                    )
+                ctx.generated_content = _fallback_text
+                for _chunk in _split_text_for_stream(_fallback_text):
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="text_delta",
-                        data=text_chunk,
+                        data=_chunk,
                     )
 
             # Emit completion event

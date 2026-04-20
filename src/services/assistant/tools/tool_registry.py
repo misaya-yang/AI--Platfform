@@ -91,6 +91,14 @@ class ToolDefinition:
     when_not_to_use: str | None = None
     examples: list[ToolExample] = field(default_factory=list)
 
+    # Relevance selection — used by tool_selector.py to decide whether to
+    # expose this tool to the model on each request. Self-declared keywords
+    # keep tool additions from needing a second registration in a central
+    # keywords dict (historical trap: new tools silently got 0 score and
+    # never reached the model). Leave empty to fall back on tool_selector's
+    # name/description heuristics.
+    relevance_keywords: list[str] = field(default_factory=list)
+
     # Execution hints
     timeout_seconds: int = 30
     max_retries: int = 2

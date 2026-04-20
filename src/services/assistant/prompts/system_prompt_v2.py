@@ -43,6 +43,14 @@ References:
 
 from typing import Any
 
+# Sentinel inserted into `build_system_prompt_v2`'s output between the
+# cacheable static prefix and the tenant/scenario-dependent tail. Callers
+# that support multi-block prompt caching (Anthropic) split on this marker
+# and attach `cache_control` to both blocks so the static prefix hits across
+# all tenants even when the tail varies. Callers that don't (OpenAI-compat
+# / DashScope) strip it with `.replace(..., "")`.
+CACHE_SPLIT_MARKER = "<<<ANTHROPIC_CACHE_SPLIT>>>"
+
 from .agent_freedom import (
     AGENT_FREEDOM,
     get_agent_freedom,
@@ -198,6 +206,15 @@ ANTI_HALLUCINATION = """<anti_hallucination>
 - Explain what additional data would be needed
 - **DO NOT** fill gaps with plausible-sounding but unverified content
 - Offer to search for more information or ask the user for clarification
+
+### ⚠️ NEVER Fabricate Tool Execution Results
+This is the most serious hallucination failure mode and is strictly forbidden:
+
+- **NEVER say "I have created/updated/moved/deleted/sent …"** unless you actually invoked the corresponding tool AND its response had `success=true`. The tool-call trace is the single source of truth.
+- If a tool you need **doesn't exist** in the currently available tool list, say so ("I don't have a tool to move pages in Confluence — please do it manually or ask an admin to enable the write tools") — do NOT pretend you performed the action.
+- If a tool call **returns an error** (401/403/404/validation/timeout/etc.), relay the failure faithfully: describe what you tried, what the error said, and what the user should do. Do NOT paper over it with language that implies success.
+- If a tool call is **pending user approval** (permission middleware returned `confirm`), say "I've prepared this action; it's waiting for your approval" — do NOT say "I've done X".
+- Past tense ("I created", "I moved", "I sent") commits to a verifiable fact. Only use it when the tool response confirms the action actually happened. Otherwise use "I attempted", "I tried", or stay in present tense ("Here's the draft — want me to send it?").
 </anti_hallucination>"""
 
 
@@ -637,6 +654,11 @@ def build_system_prompt_v2(
 
     if include_state_tracking:
         sections.append(STATE_TRACKING)
+
+    # Static/dynamic boundary — callers that support prompt caching will
+    # split on this so the prefix above can cache across tenants while the
+    # tail (capability, scenario) caches per-scenario.
+    sections.append(CACHE_SPLIT_MARKER)
 
     # Dynamic sections
     sections.append(system_capability)

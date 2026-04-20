@@ -57,6 +57,8 @@ def resolve_under(root: Path, user_path: str) -> Path:
     """
     if not user_path or user_path.strip() == "":
         raise WorkspaceEscapeError("path is required")
+    if "\x00" in user_path:
+        raise WorkspaceEscapeError("path contains NULL byte")
 
     raw = Path(user_path)
     if raw.is_absolute():

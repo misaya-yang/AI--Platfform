@@ -95,7 +95,7 @@ pg_password() { echo "${POSTGRES_PASSWORD:-111111}"; }
 pg_database() { echo "${POSTGRES_DB:-gateway}"; }
 
 # Container names (overridable via env vars for dev setup)
-pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-pg}"; }
+pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-postgres}"; }
 redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
 

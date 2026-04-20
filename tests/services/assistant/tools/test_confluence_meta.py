@@ -1,0 +1,923 @@
+"""
+Meta-tool tests — cover the new P0 capabilities and the dispatch layer
+that replaces the 8 old single-purpose executors.
+
+Scope:
+- URL → page_id resolver
+- Markdown → Confluence storage-format converter
+- find_and_replace_in_page (happy path + 0-match refusal + n-match refusal)
+- list_children pagination / shape
+- confluence_read action dispatch (each action routes correctly)
+- confluence_write action dispatch + validation errors
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+
+def _read_req(arguments: dict):
+    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    return ToolCallRequest(call_id="c", tool_name="confluence_read", arguments=arguments)
+
+
+def _write_req(arguments: dict):
+    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    return ToolCallRequest(call_id="c", tool_name="confluence_write", arguments=arguments)
+
+
+# ---------------------------------------------------------------------------
+# URL → page_id resolver
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_url_pages_slash_form():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    url = "https://ex.atlassian.net/wiki/spaces/SALES/pages/1038712833/Q1-Plan"
+    assert c.resolve_url_to_page_id(url) == "1038712833"
+
+
+def test_resolve_url_query_param_form():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    url = "https://ex.atlassian.net/wiki/pages/viewpage.action?pageId=987654"
+    assert c.resolve_url_to_page_id(url) == "987654"
+
+
+def test_resolve_url_short_form_returns_none():
+    """Short URLs need an API round-trip — not resolvable purely from the string."""
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    assert c.resolve_url_to_page_id("https://ex.atlassian.net/wiki/x/ABCDEF") is None
+
+
+def test_resolve_url_handles_trailing_slash_and_hash():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    assert c.resolve_url_to_page_id("https://x/wiki/spaces/S/pages/42/") == "42"
+    assert c.resolve_url_to_page_id("https://x/wiki/spaces/S/pages/42?foo=bar") == "42"
+
+
+# ---------------------------------------------------------------------------
+# Markdown → Confluence storage-format converter
+# ---------------------------------------------------------------------------
+
+
+def test_md_headings():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("# Title\n\n## Section\n\n### Sub")
+    assert "<h1>Title</h1>" in out
+    assert "<h2>Section</h2>" in out
+    assert "<h3>Sub</h3>" in out
+
+
+def test_md_bullets_and_ordered_lists():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("- a\n- b\n\n1. first\n2. second")
+    assert "<ul><li>a</li><li>b</li></ul>" in out
+    assert "<ol><li>first</li><li>second</li></ol>" in out
+
+
+def test_md_inline_formatting():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("text with **bold** and *italic* and `code`.")
+    assert "<strong>bold</strong>" in out
+    assert "<em>italic</em>" in out
+    assert "<code>code</code>" in out
+
+
+def test_md_fenced_code_becomes_macro():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("```python\nprint('hi')\n```")
+    assert 'ac:name="code"' in out
+    assert 'ac:name="language">python' in out
+    assert "print('hi')" in out
+
+
+def test_md_link():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("see [docs](https://example.com) for details")
+    assert '<a href="https://example.com">docs</a>' in out
+
+
+def test_md_html_passthrough():
+    """If caller supplies raw HTML, don't re-escape it."""
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    raw = "<p>Already <strong>formatted</strong> HTML</p>"
+    assert _markdown_to_storage(raw) == raw
+
+
+def test_md_paragraphs_on_blank_lines():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("para one\n\npara two")
+    assert out == "<p>para one</p><p>para two</p>"
+
+
+def test_md_html_in_text_is_escaped():
+    """Plain-text `<script>` must not become a real tag."""
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("beware <script>alert(1)</script>")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_md_empty_input():
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    assert _markdown_to_storage("") == "<p></p>"
+
+
+# ---------------------------------------------------------------------------
+# find_and_replace_in_page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_replace_happy_path():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    page_id = "123"
+    respx.get(f"https://ex.atlassian.net/wiki/rest/api/content/{page_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": page_id,
+                "title": "My Page",
+                "version": {"number": 5},
+                "body": {"storage": {"value": "<p>line A</p><p>line B</p><p>line C</p>"}},
+            },
+        )
+    )
+    put_route = respx.put(f"https://ex.atlassian.net/wiki/rest/api/content/{page_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": page_id, "title": "My Page",
+                "version": {"number": 6},
+                "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/x"},
+            },
+        )
+    )
+
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    r = await c.find_and_replace_in_page(page_id, "line B", "line β")
+
+    # New version + URL returned.
+    assert r["version"] == 6
+    # PUT carried the replaced body.
+    sent_body = put_route.calls[0].request.content.decode()
+    assert "line β" in sent_body
+    assert "line B" not in sent_body  # original replaced
+    assert "line A" in sent_body and "line C" in sent_body  # rest preserved
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_replace_refuses_zero_match():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "123", "title": "P", "version": {"number": 1},
+                "body": {"storage": {"value": "<p>hello world</p>"}},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="not found"):
+        await c.find_and_replace_in_page("123", "nonexistent text", "whatever")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_find_replace_refuses_multiple_matches():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "123", "title": "P", "version": {"number": 1},
+                "body": {"storage": {"value": "<p>foo</p><p>foo</p><p>foo</p>"}},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="appears 3 times"):
+        await c.find_and_replace_in_page("123", "foo", "bar")
+
+
+@pytest.mark.asyncio
+async def test_find_replace_refuses_empty_find():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="non-empty"):
+        await c.find_and_replace_in_page("123", "", "x")
+
+
+# ---------------------------------------------------------------------------
+# list_children
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_children_normalizes_output():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/100/child/page").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": "101", "title": "Child A",
+                        "version": {"when": "2026-04-10T12:00:00Z"},
+                        "_links": {"webui": "/spaces/S/pages/101"},
+                    },
+                    {
+                        "id": "102", "title": "Child B",
+                        "version": {"when": "2026-04-11T12:00:00Z"},
+                        "_links": {"webui": "/spaces/S/pages/102"},
+                    },
+                ],
+                "_links": {"base": "https://ex.atlassian.net/wiki"},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    kids = await c.list_children("100")
+    assert [k["id"] for k in kids] == ["101", "102"]
+    assert kids[0]["url"] == "https://ex.atlassian.net/wiki/spaces/S/pages/101"
+    assert kids[0]["last_modified"] == "2026-04-10T12:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# confluence_read action dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_missing_action_is_rejected():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(_read_req({}))
+    assert not res.success
+    assert "action" in (res.error or "")
+
+
+@pytest.mark.asyncio
+async def test_read_action_read_page_requires_identifier():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page"})
+    )
+    assert not res.success
+    assert "page_id" in (res.error or "")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_action_read_page_via_url():
+    """URL → page_id auto-resolution then fetches that page."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "Extracted",
+                "space": {"name": "Sales", "key": "SALES"},
+                "version": {"number": 1, "when": "2026-04-01"},
+                "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/x"},
+                "body": {"view": {"value": "<p>hi</p>"}},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "url": "https://ex.atlassian.net/wiki/spaces/S/pages/42/Title"})
+    )
+    assert res.success
+    assert "Extracted" in res.result
+    assert res.metadata["page_id"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_read_action_read_page_bad_url():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "url": "https://ex.atlassian.net/wiki/x/ABCDEF"})
+    )
+    assert not res.success
+    assert "page_id" in (res.error or "")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_action_list_children():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/100/child/page").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [{"id": "101", "title": "C1",
+                             "version": {"when": ""},
+                             "_links": {"webui": "/p/101"}}],
+                "_links": {"base": "https://ex.atlassian.net/wiki"},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "list_children", "page_id": "100"})
+    )
+    assert res.success
+    assert "C1" in res.result
+    assert res.metadata["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# confluence_write action dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_missing_action_is_rejected():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceWriteExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceWriteExecutor(c).execute(_write_req({}))
+    assert not res.success
+
+
+@pytest.mark.asyncio
+async def test_write_find_replace_requires_all_params():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceWriteExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    # missing replace
+    res = await ConfluenceWriteExecutor(c).execute(
+        _write_req({"action": "find_replace", "page_id": "1", "find": "a"})
+    )
+    assert not res.success
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_find_replace_end_to_end():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceWriteExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "123", "title": "P",
+                "version": {"number": 2},
+                "body": {"storage": {"value": "<p>alpha</p><p>beta</p>"}},
+            },
+        )
+    )
+    respx.put("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "123", "title": "P", "version": {"number": 3},
+                  "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/x"}},
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceWriteExecutor(c).execute(
+        _write_req({"action": "find_replace", "page_id": "123",
+                    "find": "alpha", "replace": "α"})
+    )
+    assert res.success
+    assert "version" in res.result.lower()
+    assert res.metadata["action"] == "find_replace"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_find_replace_refusal_surfaces_cleanly():
+    """When the library raises ValueError for 0-match, executor turns it
+    into a clean tool error (not an uncaught exception)."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceWriteExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "123", "title": "P",
+                "version": {"number": 1},
+                "body": {"storage": {"value": "<p>nothing to match here</p>"}},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceWriteExecutor(c).execute(
+        _write_req({"action": "find_replace", "page_id": "123",
+                    "find": "missing phrase", "replace": "x"})
+    )
+    assert not res.success
+    assert "not found" in (res.error or "")
+
+
+# ---------------------------------------------------------------------------
+# Tool catalog shape (for the model) — meta-tool contract
+# ---------------------------------------------------------------------------
+
+
+def test_meta_tools_registered_via_register():
+    """register_confluence_tools exposes exactly 2 tools with the expected names."""
+    from src.services.assistant.tools.confluence_tool import register_confluence_tools
+    from src.services.assistant.tools.tool_registry import get_tool_registry
+
+    register_confluence_tools(domain="ex.atlassian.net", email="u@x.com", api_token="t")
+    reg = get_tool_registry()
+    names = {t.name for t in reg.list_tools()}
+    assert "confluence_read" in names
+    assert "confluence_write" in names
+    # Old names MUST be gone — they'd be ambiguous after the refactor.
+    assert "search_confluence" not in names
+    assert "update_confluence_page" not in names
+
+
+def test_meta_tool_action_enums_cover_all_old_operations():
+    """Verifies the two meta tools between them expose all 11 old operations."""
+    from src.services.assistant.tools.confluence_tool import (
+        CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
+    )
+
+    def _action_enum(td):
+        for p in td.parameters:
+            if p.name == "action":
+                return set(p.enum or [])
+        return set()
+
+    assert _action_enum(CONFLUENCE_READ_DEFINITION) == {
+        "search", "read_page", "list_spaces", "get_space", "list_children"
+    }
+    assert _action_enum(CONFLUENCE_WRITE_DEFINITION) == {
+        "create_page", "update_page", "find_replace", "move_page", "comment", "delete_page"
+    }
+
+
+def test_write_tool_requires_confirmation():
+    """Permission middleware gates confluence_write via this flag."""
+    from src.services.assistant.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
+    assert CONFLUENCE_WRITE_DEFINITION.requires_confirmation is True
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for user-reported production bugs
+# ---------------------------------------------------------------------------
+
+
+def test_md_html_wrapped_markdown_converts_not_passthrough():
+    """The critical production bug: model emits `<p># Heading</p><p>- item</p>`
+    thinking Confluence wants HTML. Old passthrough heuristic sent this verbatim
+    and Confluence rendered literal `#` and `-`. Must now convert."""
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    out = _markdown_to_storage("<p># 会议纪要</p><p>- 决定 A</p><p>- 决定 B</p>")
+    # Heading must become <h1>, not stay as literal # in a <p>
+    assert "<h1>会议纪要</h1>" in out
+    assert "# 会议纪要" not in out
+    # Bullets must be in <li>, not literal `-`
+    assert "<li>决定 A</li>" in out
+    assert "<li>决定 B</li>" in out
+
+
+def test_md_pure_html_with_confluence_macros_still_passthrough():
+    """Passthrough must still work for pure XHTML (no markdown markers),
+    e.g. when the caller supplies Confluence storage-format macros directly."""
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    macro = (
+        '<ac:structured-macro ac:name="info">'
+        '<ac:rich-text-body><p>Hello</p></ac:rich-text-body>'
+        '</ac:structured-macro>'
+    )
+    assert _markdown_to_storage(macro) == macro
+
+
+def test_md_realistic_meeting_notes_convert_cleanly():
+    """Typical model output for 'create a meeting-notes page'."""
+    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    content = (
+        "# 2026-04-21 Sync\n\n"
+        "## Decisions\n\n"
+        "- Ship Phase 5 this week\n"
+        "- Freeze APIs Friday\n\n"
+        "## Action items\n\n"
+        "1. @alice: write migration doc\n"
+        "2. @bob: review PR #42\n\n"
+        "```bash\npytest tests/ -q\n```\n"
+    )
+    out = _markdown_to_storage(content)
+    assert "<h1>2026-04-21 Sync</h1>" in out
+    assert "<h2>Decisions</h2>" in out
+    assert "<ul><li>Ship Phase 5 this week</li>" in out
+    assert "<ol><li>@alice: write migration doc</li>" in out
+    assert 'ac:name="code"' in out
+    assert 'ac:name="language">bash' in out
+    # No literal markdown markers should leak
+    assert "\n# " not in out
+    assert "\n- " not in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_page_exposes_ancestors_and_parent_id():
+    """After reading a page, the response must include parent_id so the
+    model can create a sibling page at the same tree level."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "Q1 Plan",
+                "space": {"name": "Sales", "key": "SALES"},
+                "version": {"number": 3, "when": "2026-04-10"},
+                "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/x"},
+                "body": {"view": {"value": "<p>body</p>"}},
+                "ancestors": [
+                    {"id": "100", "title": "Root", "type": "page"},
+                    {"id": "200", "title": "Planning", "type": "page"},
+                ],
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "page_id": "42"})
+    )
+    assert res.success
+    # The rendered result surfaces "Parent: Planning (id: 200)" so the model sees it.
+    assert "Parent: Planning" in res.result
+    assert "200" in res.result
+    # Breadcrumb shows the full tree path — Root > Planning > Q1 Plan
+    assert "Root" in res.result and "Q1 Plan" in res.result
+    # Metadata carries parent_id as a structured field for programmatic use.
+    assert res.metadata["parent_id"] == "200"
+    assert res.metadata["space_key"] == "SALES"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_page_no_ancestors_shows_homepage_hint():
+    """For a space homepage (no ancestors), the formatter should explain
+    why no parent is available so the model doesn't hallucinate one."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/1").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "1", "title": "Space Home",
+                "space": {"name": "Sales", "key": "SALES"},
+                "version": {"number": 1, "when": "2026-01-01"},
+                "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/h"},
+                "body": {"view": {"value": "<p>home</p>"}},
+                "ancestors": [],
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "page_id": "1"})
+    )
+    assert res.success
+    assert "space homepage" in res.result.lower() or "top-level" in res.result.lower()
+    assert res.metadata["parent_id"] == ""
+
+
+def test_create_page_description_teaches_sibling_pattern():
+    """Model must be told how to create a sibling — look up `parent_id` via
+    read_page first. Regression guard: the description must mention it."""
+    from src.services.assistant.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
+    desc = CONFLUENCE_WRITE_DEFINITION.description
+    assert "sibling" in desc.lower()
+    assert "parent_id" in desc
+    assert "read_page" in desc
+
+
+# ---------------------------------------------------------------------------
+# search now exposes parent_id + ancestors + space_key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_returns_parent_and_space_key():
+    """Every search hit must include parent_id, parent_title, ancestors,
+    and space_key so the model can plan create-sibling / move_page without
+    a second read_page per hit."""
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "_links": {"base": "https://ex.atlassian.net/wiki"},
+                "results": [
+                    {
+                        "id": "42",
+                        "title": "Q1 Plan",
+                        "space": {"name": "Sales", "key": "SALES"},
+                        "version": {"when": "2026-04-10"},
+                        "_links": {"webui": "/spaces/SALES/pages/42"},
+                        "body": {"view": {"value": "<p>body</p>"}},
+                        "ancestors": [
+                            {"id": "100", "title": "Root"},
+                            {"id": "200", "title": "Planning"},
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+    client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(client).execute(
+        _read_req({"action": "search", "query": "Q1"})
+    )
+    assert res.success
+    # Rendered result surfaces parent_id + space_key.
+    assert "Parent: Planning (id: 200)" in res.result
+    assert "key: SALES" in res.result
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_top_level_page_shows_no_parent():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "_links": {"base": "https://ex.atlassian.net/wiki"},
+                "results": [
+                    {
+                        "id": "1", "title": "Homepage",
+                        "space": {"name": "Sales", "key": "SALES"},
+                        "version": {"when": ""},
+                        "_links": {"webui": "/h"},
+                        "body": {"view": {"value": ""}},
+                        "ancestors": [],
+                    }
+                ],
+            },
+        )
+    )
+    client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(client).execute(
+        _read_req({"action": "search", "query": "home"})
+    )
+    assert res.success
+    assert "top-level" in res.result or "homepage" in res.result.lower()
+
+
+# ---------------------------------------------------------------------------
+# move_page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_move_page_happy_path():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+
+    # Current page — in space SALES, currently under parent 100.
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "Q1 Plan",
+                "version": {"number": 3},
+                "ancestors": [{"id": "100", "title": "Root"}],
+                "space": {"key": "SALES"},
+            },
+        )
+    )
+    # Target parent — exists in same space.
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/500").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "500", "title": "Q2 Planning", "space": {"key": "SALES"}},
+        )
+    )
+    # PUT — version bump + ancestors update.
+    put_route = respx.put("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "Q1 Plan",
+                "version": {"number": 4},
+                "_links": {"base": "https://ex.atlassian.net/wiki", "webui": "/x"},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    r = await c.move_page("42", "500")
+    assert r["old_parent_id"] == "100"
+    assert r["new_parent_id"] == "500"
+    assert r["version"] == 4
+    # PUT body carries ancestors=[{id:500}]
+    sent = put_route.calls[0].request.content.decode()
+    assert '"ancestors": [{"id": "500"}]' in sent or '"ancestors":[{"id":"500"}]' in sent
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_move_page_rejects_same_parent_noop():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "P",
+                "version": {"number": 1},
+                "ancestors": [{"id": "100", "title": "R"}],
+                "space": {"key": "SALES"},
+            },
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="already under"):
+        await c.move_page("42", "100")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_move_page_rejects_missing_target():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "P", "version": {"number": 1},
+                "ancestors": [{"id": "100", "title": "R"}],
+                "space": {"key": "SALES"},
+            },
+        )
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/999").mock(
+        return_value=httpx.Response(404, text="not found")
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="does not exist"):
+        await c.move_page("42", "999")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_move_page_rejects_cross_space():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "42", "title": "P", "version": {"number": 1},
+                "ancestors": [{"id": "100", "title": "R"}],
+                "space": {"key": "SALES"},
+            },
+        )
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/500").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": "500", "title": "Other", "space": {"key": "ENG"}},
+        )
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="cross-space"):
+        await c.move_page("42", "500")
+
+
+@pytest.mark.asyncio
+async def test_move_page_rejects_self_parent():
+    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    with pytest.raises(ValueError, match="under itself"):
+        await c.move_page("42", "42")
+
+
+@pytest.mark.asyncio
+async def test_write_action_move_page_needs_both_ids():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceWriteExecutor,
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceWriteExecutor(c).execute(
+        _write_req({"action": "move_page", "page_id": "42"})
+    )
+    assert not res.success
+    assert "target_parent_id" in (res.error or "")
+
+
+# ---------------------------------------------------------------------------
+# HTTP status classification + anti-hallucination hint on errors
+# ---------------------------------------------------------------------------
+
+
+def test_classify_http_errors_distinguishes_401_403_404_409():
+    from src.services.assistant.tools.confluence_tool import _classify_http_error
+    msg_401 = _classify_http_error(401, "read_page")
+    msg_403 = _classify_http_error(403, "read_page")
+    msg_404 = _classify_http_error(404, "read_page")
+    msg_409 = _classify_http_error(409, "update_page")
+    msg_500 = _classify_http_error(500, "create_page")
+
+    assert "Authentication" in msg_401 and "re-connect" in msg_401
+    assert "Permission" in msg_403
+    assert "not found" in msg_404.lower()
+    assert "Version conflict" in msg_409
+    assert "HTTP 500" in msg_500
+
+    # Every classified error must carry the anti-hallucination reminder.
+    for msg in (msg_401, msg_403, msg_404, msg_409, msg_500):
+        assert "FAILED" in msg
+        assert "succeed" in msg or "success" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_404_surfaces_distinct_message():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/99999").mock(
+        return_value=httpx.Response(404, text="not found")
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "page_id": "99999"})
+    )
+    assert not res.success
+    assert "404" in (res.error or "") or "not found" in (res.error or "").lower()
+    assert "FAILED" in (res.error or "")  # anti-hallucination hint
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_read_401_distinct_auth_message():
+    from src.services.assistant.tools.confluence_tool import (
+        ConfluenceAPIClient, ConfluenceReadExecutor,
+    )
+    respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
+        return_value=httpx.Response(401, text="unauthorized")
+    )
+    c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
+    res = await ConfluenceReadExecutor(c).execute(
+        _read_req({"action": "read_page", "page_id": "42"})
+    )
+    assert not res.success
+    assert "Authentication" in (res.error or "") or "401" in (res.error or "")
+    assert "re-connect" in (res.error or "").lower()
+
+
+def test_system_prompt_has_anti_tool_hallucination_rule():
+    """Guard that the explicit tool-execution hallucination rule is in
+    the system prompt. If someone strips it, this test catches it."""
+    from src.services.assistant.prompts.system_prompt_v2 import ANTI_HALLUCINATION
+    assert "NEVER Fabricate Tool Execution Results" in ANTI_HALLUCINATION
+    assert "I have created" in ANTI_HALLUCINATION  # quoted example
+    assert "success=true" in ANTI_HALLUCINATION or "success" in ANTI_HALLUCINATION
+
+
+def test_meta_tool_schemas_are_smaller_than_old_eight():
+    """The whole point of the refactor — 2 tool schemas must be materially
+    smaller than the 8 old ones would have been."""
+    import json
+    from src.services.assistant.tools.confluence_tool import (
+        CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
+    )
+    read_schema = json.dumps(CONFLUENCE_READ_DEFINITION.to_openai_schema(compact=True))
+    write_schema = json.dumps(CONFLUENCE_WRITE_DEFINITION.to_openai_schema(compact=True))
+    total = len(read_schema) + len(write_schema)
+    # Rough upper bound: 2 meta-schemas should stay under ~4000 chars compact.
+    # (8 separate schemas historically ran ~7000-8000+ chars.)
+    assert total < 4000, f"meta-tool schemas are {total} chars — unexpected bloat"

@@ -95,6 +95,60 @@ def test_tenant_workspace_rejects_path_separators(workspace_root):
         tenant_workspace("acme", "s/1")
 
 
+def test_resolve_under_rejects_null_byte(workspace_root):
+    from src.services.assistant.tools.workspace import (
+        WorkspaceEscapeError,
+        resolve_under,
+        tenant_workspace,
+    )
+
+    ws = tenant_workspace("acme", "s1")
+    with pytest.raises(WorkspaceEscapeError):
+        resolve_under(ws, "notes\x00/../etc/passwd")
+
+
+def test_resolve_under_rejects_symlink_escape(workspace_root, tmp_path):
+    """A symlink inside the workspace pointing at an outside directory must
+    not let fs_read / fs_write reach the target. `resolve()` follows the
+    symlink; the containment check then rejects it."""
+    from src.services.assistant.tools.workspace import (
+        WorkspaceEscapeError,
+        resolve_under,
+        tenant_workspace,
+    )
+
+    # Create a file outside the workspace we shouldn't be able to reach.
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text("not-for-tenants")
+
+    ws = tenant_workspace("acme", "s1")
+    evil_link = ws / "escape"
+    evil_link.symlink_to(secret)
+
+    with pytest.raises(WorkspaceEscapeError):
+        resolve_under(ws, "escape")
+
+
+def test_resolve_under_rejects_symlink_to_parent_dir(workspace_root, tmp_path):
+    """Symlink pointing at a directory outside the workspace — any nested
+    access through it must still be rejected."""
+    from src.services.assistant.tools.workspace import (
+        WorkspaceEscapeError,
+        resolve_under,
+        tenant_workspace,
+    )
+
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "secret.txt").write_text("leaked")
+
+    ws = tenant_workspace("acme", "s1")
+    (ws / "backdoor").symlink_to(outside_dir)
+
+    with pytest.raises(WorkspaceEscapeError):
+        resolve_under(ws, "backdoor/secret.txt")
+
+
 # ---------------------------------------------------------------------------
 # fs_write + fs_read round trip
 # ---------------------------------------------------------------------------

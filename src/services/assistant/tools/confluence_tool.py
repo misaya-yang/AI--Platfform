@@ -1,17 +1,23 @@
 """
-Confluence Tool — AI can search and read Confluence pages during chat.
+Confluence Tool — AI can read/edit Confluence during chat.
 
-Uses the stored Confluence connection credentials (API Token + Email)
-to call Atlassian REST API directly. Registered as built-in tools
-so the LLM can invoke them like any other tool.
+Uses stored Confluence credentials (API Token + Email) to call
+Atlassian REST API v1 (content) + v2 (spaces) directly.
+
+Architecture: TWO meta-tools that cover 11 operations via `action` enum.
+~80% smaller tool-schema catalog than 8-tool-per-operation, and avoids
+the "new tool silently scores 0 in selector" pitfall.
 
 Tools:
-  - search_confluence: Search pages via CQL full-text search
-  - read_confluence_page: Read a specific page's content by ID or title
+  - confluence_read — actions: search, read_page, list_spaces,
+    get_space, list_children
+  - confluence_write — actions: create_page, update_page,
+    find_replace, comment, delete_page (all require confirmation)
 """
 
 from __future__ import annotations
 
+import re
 import time
 from base64 import b64encode
 from typing import Any
@@ -34,130 +40,565 @@ from .tool_registry import (
 logger = get_logger(__name__)
 
 
+# ─── HTML → structured-text helpers ─────────────────────────────────
+#
+# The naive "strip all tags" approach collapses list pages into one run-on
+# paragraph; `前 300 字` then covers 3-4 items out of a 30-item schedule
+# and the model mistakenly concludes "that's all". These helpers keep the
+# information density high (bullets, links, headings) while still budgeting
+# the total character count.
+
+
+_TAG_BULLET_OPEN = re.compile(r"<li[^>]*>", re.IGNORECASE)
+_TAG_HEADING = re.compile(r"<h[1-6][^>]*>", re.IGNORECASE)
+_TAG_PARAGRAPH = re.compile(r"</p\s*>|<br\s*/?>", re.IGNORECASE)
+_TAG_LINK = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+_TAG_STRIP = re.compile(r"<[^>]+>")
+_WS = re.compile(r"[ \t]+")
+_EXCESS_NL = re.compile(r"\n{3,}")
+
+
+def _html_to_structured_text(html: str) -> str:
+    """Convert Confluence's body.view HTML into plain text that preserves
+    list bullets, headings, line breaks, and hyperlinks.
+
+    Conversions:
+      <li>…</li>           →  "- …\n"
+      <h1..6>…</h1..6>     →  "\n## …\n"
+      </p>, <br>           →  "\n"
+      <a href=URL>TEXT</a> →  "[TEXT](URL)"
+      all other tags       →  stripped
+    """
+    if not html:
+        return ""
+    # Rewrite links first so the inner text isn't eaten by the tag stripper.
+    t = _TAG_LINK.sub(lambda m: f"[{m.group(2)}]({m.group(1)})", html)
+    t = _TAG_BULLET_OPEN.sub("\n- ", t)
+    t = _TAG_HEADING.sub("\n## ", t)
+    t = re.sub(r"</h[1-6]\s*>", "\n", t, flags=re.IGNORECASE)
+    t = _TAG_PARAGRAPH.sub("\n", t)
+    t = _TAG_STRIP.sub("", t)
+    # Normalize whitespace without destroying line structure.
+    t = _WS.sub(" ", t)
+    t = _EXCESS_NL.sub("\n\n", t)
+    # HTML entity cleanup — basics only; full entity table would be overkill.
+    for entity, char in (
+        ("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+        ("&quot;", '"'), ("&#39;", "'"), ("&hellip;", "…"),
+    ):
+        t = t.replace(entity, char)
+    return t.strip()
+
+
+# ─── Markdown → Confluence Storage Format ──────────────────────────
+#
+# Confluence storage format is XHTML plus a handful of `<ac:…>` macros.
+# We accept markdown input from callers (the common case — model-written
+# content) and produce storage-format XHTML suitable for POST/PUT to the
+# content endpoint. Raw HTML / XML passthrough when the input clearly
+# starts as markup, so power users can supply macros directly.
+
+
+def _md_escape(text: str) -> str:
+    """HTML-escape text outside code blocks."""
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+_MD_BOLD = re.compile(r"\*\*([^*\n]+)\*\*")
+_MD_ITALIC = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+_MD_FENCED_CODE = re.compile(r"```([a-zA-Z0-9_+-]*)\n(.*?)```", re.DOTALL)
+
+
+def _apply_inline_md(text: str) -> str:
+    """Apply inline markdown conversions (code → links → bold → italic).
+    Order matters: inline code is protected first so bold/italic inside
+    backticks aren't mis-parsed."""
+    # Protect inline code with a placeholder so subsequent regexes ignore it.
+    segments: list[str] = []
+
+    def _stash(match: re.Match) -> str:
+        segments.append(f"<code>{_md_escape(match.group(1))}</code>")
+        return f"\x00CODE{len(segments) - 1}\x00"
+
+    t = _MD_INLINE_CODE.sub(_stash, text)
+    t = _md_escape(t)
+    # Restore placeholders
+    for i, seg in enumerate(segments):
+        t = t.replace(f"\x00CODE{i}\x00", seg)
+    # Links (after escape so URL isn't double-escaped — we carefully keep it raw)
+    t = _MD_LINK.sub(
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+        t,
+    )
+    t = _MD_BOLD.sub(r"<strong>\1</strong>", t)
+    t = _MD_ITALIC.sub(r"<em>\1</em>", t)
+    return t
+
+
+_MD_LINE_MARKER_RE = re.compile(
+    r"(?m)"
+    r"(^\s{0,3}#{1,6}\s+\S)"        # # heading
+    r"|(^\s{0,3}[-*]\s+\S)"          # - bullet
+    r"|(^\s{0,3}\d+\.\s+\S)"         # 1. ordered
+    r"|(^```)"                       # ``` fenced code
+)
+_MD_INLINE_MARKER_RE = re.compile(
+    r"\*\*[^*\n]+\*\*"               # **bold**
+    r"|(?<!\*)\*[^*\n]+\*(?!\*)"    # *italic*
+    r"|`[^`\n]+`"                    # `code`
+    r"|\[[^\]]+\]\([^)\s]+\)"        # [text](url)
+)
+
+
+def _looks_like_markdown(text: str) -> bool:
+    """Return True if `text` contains any markdown-only structural markers.
+
+    We check the text TWICE: once as-is (catches raw markdown), and once
+    with HTML tags stripped (catches the common model-confusion pattern
+    of wrapping markdown in `<p>…</p>` tags, e.g. `<p># Heading</p>`).
+    """
+    if _MD_LINE_MARKER_RE.search(text) or _MD_INLINE_MARKER_RE.search(text):
+        return True
+    # Strip tags and re-check. This catches `<p># Heading</p>` etc. where
+    # the markdown marker is at the start of a text node rather than the
+    # start of a line. Tag-stripping is just for detection — the conversion
+    # path below still sees the original text.
+    untagged = re.sub(r"<[^>]+>", "\n", text)
+    if _MD_LINE_MARKER_RE.search(untagged) or _MD_INLINE_MARKER_RE.search(untagged):
+        return True
+    return False
+
+
+def _markdown_to_storage(content: str) -> str:
+    """Convert markdown-ish text to Confluence storage-format XHTML.
+
+    Supported:
+      - Fenced code blocks: ```lang\\n…\\n```  → <ac:structured-macro code>
+      - Inline code: `x`                       → <code>x</code>
+      - Headings: # / ## / … / ######          → <h1> … <h6>
+      - Bullet lists: `- ` / `* `              → <ul><li>…</li></ul>
+      - Ordered lists: `1. ` `2. ` …           → <ol><li>…</li></ol>
+      - Links: [text](url)                     → <a href="url">text</a>
+      - Bold (**x**), italic (*x*)             → <strong>/<em>
+      - Blank-line paragraphs                  → <p>…</p>
+
+    HTML passthrough: if the content looks like pure XHTML (starts with
+    `<`, ends with `>`, AND contains no markdown-only markers) we send it
+    through untouched so advanced users can supply raw Confluence macros
+    / tables / whatever.
+
+    The markdown-marker check is critical: previously any content that
+    merely started with `<p>` and ended with `</p>` would passthrough,
+    which meant models wrapping markdown in `<p>…</p>` tags would render
+    literal `#` and `-` in Confluence. That regression was the original
+    bug report — fix is the `_looks_like_markdown` gate below.
+    """
+    if not content:
+        return "<p></p>"
+
+    stripped = content.strip()
+    if (
+        stripped.startswith("<")
+        and stripped.endswith(">")
+        and not _looks_like_markdown(stripped)
+    ):
+        # Pure storage-format HTML — caller knows what they're doing.
+        return content
+
+    # Pre-process: if the content mixes HTML structural wrappers with
+    # markdown (`<p># Heading</p>` or `line A<br>line B<br># heading` —
+    # common model outputs because the model thinks Confluence is "an
+    # HTML system"), strip only the structural wrappers so the markdown
+    # inside reaches the converter. We do NOT strip semantic tags like
+    # <a>/<strong>/<em>/<code> — those represent formatting intent and
+    # remain as valid XHTML that Confluence renders correctly.
+    if _looks_like_markdown(stripped) and re.search(
+        r"</?(?:p|div|br|span)\b", stripped, flags=re.IGNORECASE
+    ):
+        stripped = re.sub(
+            r"</?(?:p|div|br\s*/?|span)(?:\s[^>]*)?>",
+            "\n",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        # Collapse 3+ consecutive newlines that stripping may have created.
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+        content = stripped.strip()
+
+    # 1. Extract fenced code blocks first so markdown inside them is preserved verbatim.
+    code_blocks: list[tuple[str, str]] = []
+
+    def _stash_code(m: re.Match) -> str:
+        lang = m.group(1) or ""
+        body = m.group(2)
+        code_blocks.append((lang, body))
+        return f"\x00FENCED{len(code_blocks) - 1}\x00"
+
+    body_text = _MD_FENCED_CODE.sub(_stash_code, content)
+
+    # 2. Split into blocks on blank lines (markdown paragraph semantics).
+    blocks = re.split(r"\n\s*\n", body_text)
+    out_parts: list[str] = []
+    for block in blocks:
+        block = block.rstrip()
+        if not block.strip():
+            continue
+        lines = block.split("\n")
+
+        # Fenced-code placeholder — replace and emit as a Confluence code macro.
+        if len(lines) == 1 and re.fullmatch(r"\x00FENCED\d+\x00", lines[0]):
+            idx = int(lines[0][7:-1])
+            lang, body = code_blocks[idx]
+            cdata_safe = body.replace("]]>", "]]]]><![CDATA[>")
+            macro = (
+                '<ac:structured-macro ac:name="code">'
+                + (f'<ac:parameter ac:name="language">{lang}</ac:parameter>' if lang else "")
+                + f"<ac:plain-text-body><![CDATA[{cdata_safe}]]></ac:plain-text-body>"
+                + "</ac:structured-macro>"
+            )
+            out_parts.append(macro)
+            continue
+
+        # Heading (single line starting with # ... #)
+        if len(lines) == 1:
+            m = re.match(r"^(#{1,6})\s+(.*)$", lines[0])
+            if m:
+                level = len(m.group(1))
+                out_parts.append(f"<h{level}>{_apply_inline_md(m.group(2))}</h{level}>")
+                continue
+
+        # Bulleted list — all lines start with `- ` or `* `
+        if all(re.match(r"^\s*[-*]\s+", line) for line in lines):
+            items = [
+                f"<li>{_apply_inline_md(re.sub(r'^\s*[-*]\s+', '', line))}</li>"
+                for line in lines
+            ]
+            out_parts.append("<ul>" + "".join(items) + "</ul>")
+            continue
+
+        # Ordered list — all lines start with `N. `
+        if all(re.match(r"^\s*\d+\.\s+", line) for line in lines):
+            items = [
+                f"<li>{_apply_inline_md(re.sub(r'^\s*\d+\.\s+', '', line))}</li>"
+                for line in lines
+            ]
+            out_parts.append("<ol>" + "".join(items) + "</ol>")
+            continue
+
+        # Plain paragraph — join lines with <br/>, apply inline markdown.
+        inner = "<br/>".join(_apply_inline_md(line) for line in lines)
+        out_parts.append(f"<p>{inner}</p>")
+
+    if not out_parts:
+        return "<p></p>"
+    return "".join(out_parts)
+
+
+def _filter_and_rank_spaces(spaces: list[dict], query: str) -> list[dict]:
+    """Client-side rank spaces by fuzzy relevance to `query`.
+
+    V2's /spaces endpoint doesn't take a name-search parameter, so we
+    fetch a batch and rank in Python. Scoring:
+      +3 exact substring match in name (case-insensitive)
+      +2 substring match in key
+      +1 substring match in description
+      +1 every query token that appears anywhere
+    """
+    if not query or not spaces:
+        return spaces
+
+    q = query.strip().lower()
+    # Split on whitespace and on common CJK separators.
+    tokens = [t for t in re.split(r"[\s、，,/]+", q) if t]
+    scored: list[tuple[int, dict]] = []
+    for sp in spaces:
+        name = (sp.get("name") or "").lower()
+        key = (sp.get("key") or "").lower()
+        desc = (sp.get("description") or "").lower()
+        score = 0
+        if q in name:
+            score += 3
+        if q in key:
+            score += 2
+        if q in desc:
+            score += 1
+        for tok in tokens:
+            if tok and (tok in name or tok in key or tok in desc):
+                score += 1
+        if score > 0:
+            scored.append((score, sp))
+
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [sp for _, sp in scored]
+
+
+def _excerpt_from_html(html: str, max_chars: int) -> str:
+    """Return a structured excerpt from an HTML body, truncated on a line
+    boundary when possible so bullet items aren't cut mid-way."""
+    text = _html_to_structured_text(html)
+    if len(text) <= max_chars:
+        return text
+    head = text[:max_chars]
+    # Prefer cutting at the last newline so we don't chop a list item mid-sentence.
+    nl = head.rfind("\n")
+    if nl >= max_chars // 2:
+        head = head[:nl]
+    return head.rstrip() + "\n…[truncated; use read_confluence_page for full content]"
+
+
 # ─── Tool Definitions ────────────────────────────────────────────────
 
-SEARCH_CONFLUENCE_DEFINITION = ToolDefinition(
-    name="search_confluence",
+
+CONFLUENCE_READ_DEFINITION = ToolDefinition(
+    name="confluence_read",
     description=(
-        "Search Confluence pages by keyword. Returns page titles, excerpts, "
-        "and links. Use this when the user asks about company wiki, documentation, "
-        "internal knowledge, or mentions Confluence."
+        "Read-only Confluence operations. Use the `action` parameter to "
+        "pick what to do. This one tool covers search, full-page read, "
+        "space listing, and page-tree navigation.\n\n"
+        "ACTIONS (pick one, supply only the listed params):\n"
+        "  • \"search\" — find pages by keyword. Required: query. "
+        "Optional: space_key, limit (default 10, max 25). Returns title, "
+        "url, and an ~800-char structured excerpt per hit. The excerpt is "
+        "ALWAYS truncated — for list pages (schedules, rosters) the first "
+        "few items aren't the whole list. Escalate to read_page with "
+        "page_id when you need full content.\n"
+        "  • \"read_page\" — fetch full content of one page (up to 20K "
+        "chars, markdown-formatted). Required: ONE of page_id, title, or "
+        "url. When a URL is given the tool extracts page_id automatically. "
+        "Response includes the page's `parent_id` and full ancestor path — "
+        "use `parent_id` verbatim when calling confluence_write "
+        "action=create_page to create a sibling at the same level.\n"
+        "  • \"list_spaces\" — list/fuzzy-search Confluence spaces "
+        "(top-level workspaces). Use this when the user asks 'find a "
+        "space about X', 'which workspace has…'. Optional: query, keys "
+        "(array of exact keys), space_type, labels, limit (default 50). "
+        "Note: search_confluence searches PAGES, list_spaces searches "
+        "SPACES (containers) — use this first if intent is to locate a "
+        "workspace.\n"
+        "  • \"get_space\" — single space details. Required: ONE of "
+        "space_id or space_key.\n"
+        "  • \"list_children\" — list direct child pages of a page "
+        "(one level). Required: page_id. Optional: limit (default 25).\n\n"
+        "TROUBLESHOOTING: don't retry search with different phrasings to "
+        "get more detail — excerpt length is fixed. Either supply space_key "
+        "to narrow, or escalate to read_page for the single page you want."
     ),
     parameters=[
         ToolParameter(
+            name="action",
+            type="string",
+            description="Which read operation to perform. REQUIRED.",
+            required=True,
+            enum=["search", "read_page", "list_spaces", "get_space", "list_children"],
+        ),
+        # Search / list_spaces query
+        ToolParameter(
             name="query",
             type="string",
-            description="Search query (keywords or phrase). Supports CQL text search.",
-            required=True,
+            description="Keyword or phrase. For search: content full-text. For list_spaces: fuzzy match on name/key/description.",
+            required=False,
         ),
+        # Page identifiers (read_page / list_children)
+        ToolParameter(
+            name="page_id",
+            type="string",
+            description="Numeric page id. Required for list_children; one of page_id/title/url for read_page.",
+            required=False,
+        ),
+        ToolParameter(
+            name="title",
+            type="string",
+            description="Exact page title — fallback lookup for read_page when page_id is unknown.",
+            required=False,
+        ),
+        ToolParameter(
+            name="url",
+            type="string",
+            description="Full Confluence URL. read_page extracts page_id automatically.",
+            required=False,
+        ),
+        # Space identifiers (get_space / search filter)
         ToolParameter(
             name="space_key",
             type="string",
-            description="Confluence space key to limit search (e.g., 'DEV', 'HR'). Optional — searches all spaces if omitted.",
+            description="Space key (e.g. 'SALES'). For search: narrow to this space. For get_space: lookup.",
             required=False,
+        ),
+        ToolParameter(
+            name="space_id",
+            type="string",
+            description="Numeric space id. For get_space (preferred over space_key when available).",
+            required=False,
+        ),
+        ToolParameter(
+            name="keys",
+            type="array",
+            description="For list_spaces: filter to these exact space keys.",
+            required=False,
+            items={"type": "string"},
+        ),
+        ToolParameter(
+            name="space_type",
+            type="string",
+            description="For list_spaces: filter by type.",
+            required=False,
+            enum=["global", "personal", "collaboration", "knowledge_base"],
+        ),
+        ToolParameter(
+            name="labels",
+            type="array",
+            description="For list_spaces: filter spaces that have ALL these labels.",
+            required=False,
+            items={"type": "string"},
         ),
         ToolParameter(
             name="limit",
             type="number",
-            description="Max results to return (1-20). Default 5.",
+            description="Max results. Defaults vary per action (search=10, list_spaces=50, list_children=25).",
             required=False,
-            default=5,
         ),
     ],
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
     when_to_use=(
-        "Use when the user asks about internal documentation, company wiki pages, "
-        "project plans, meeting notes, technical specs, or any content that would "
-        "be stored in Confluence. Also use when user explicitly mentions Confluence."
+        "Any Confluence read task: searching pages/spaces, reading a page, "
+        "navigating page tree."
     ),
     when_not_to_use=(
-        "Do not use for general knowledge questions, external information, "
-        "or when the user is clearly asking about something not in Confluence."
+        "Do not use for mutations (create/update/delete/comment) — use "
+        "confluence_write instead."
     ),
     examples=[
         ToolExample(
-            description="Search for onboarding docs",
-            input={"query": "new employee onboarding process"},
-            expected_output="Returns Confluence pages about onboarding procedures",
+            description="Search pages in SALES space",
+            input={"action": "search", "query": "QA leads", "space_key": "SALES"},
         ),
         ToolExample(
-            description="Search in specific space",
-            input={"query": "API authentication", "space_key": "DEV", "limit": 3},
-            expected_output="Returns dev documentation about API auth",
+            description="Read a page from its URL",
+            input={"action": "read_page", "url": "https://x.atlassian.net/wiki/spaces/S/pages/123/Title"},
+        ),
+        ToolExample(
+            description="Find a sales-related space",
+            input={"action": "list_spaces", "query": "sales"},
+        ),
+        ToolExample(
+            description="List child pages under a parent",
+            input={"action": "list_children", "page_id": "1038712833"},
         ),
     ],
-    timeout_seconds=15,
+    relevance_keywords=[
+        "confluence", "wiki", "atlassian", "space", "page", "workspace",
+        "空间", "页面", "文档库", "内部文档", "wiki页", "排期", "search", "read",
+        "查找", "搜索", "查看", "读取", "列出", "哪个空间", "子页面", "children",
+    ],
+    timeout_seconds=20,
 )
 
-READ_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
-    name="read_confluence_page",
+
+CONFLUENCE_WRITE_DEFINITION = ToolDefinition(
+    name="confluence_write",
     description=(
-        "Read the full content of a specific Confluence page. "
-        "Use after search_confluence to get detailed page content, "
-        "or when user provides a page ID or exact title."
+        "Confluence write operations (create/update/edit/comment/delete). "
+        "ALL actions are reversible only by admins (delete goes to trash); "
+        "the permission layer gates this tool behind user confirmation.\n\n"
+        "ACTIONS (pick one):\n"
+        "  • \"create_page\" — new page. Required: space_key, title, "
+        "content (markdown accepted). Optional: parent_id for nested pages.\n"
+        "    TO CREATE A SIBLING of an existing page (same level, same "
+        "parent): first call confluence_read(action=\"read_page\", page_id=...) "
+        "on the reference page — OR use the parent_id shown in search "
+        "results directly — then pass that SAME parent_id here. Don't "
+        "guess — always consult the reference page's actual parent_id.\n"
+        "  • \"move_page\" — relocate a page under a new parent (within "
+        "the same space). Required: page_id, target_parent_id. Validates "
+        "that target exists and is in the same space before mutating; "
+        "refuses no-op if the page is already there. Cross-space moves "
+        "are not supported by the V1 API.\n"
+        "  • \"update_page\" — FULL REPLACEMENT of page body. Required: "
+        "page_id, content. Optional: title. ⚠️ Overwrites everything — "
+        "prefer find_replace for small edits on long pages.\n"
+        "  • \"find_replace\" — targeted edit: locate a unique substring "
+        "and replace it. Required: page_id, find, replace. Refuses if "
+        "`find` has 0 or >1 matches (narrow the pattern until it's unique). "
+        "USE THIS for 'change line X to Y' type requests — it won't destroy "
+        "the rest of the page.\n"
+        "  • \"comment\" — add a page-level comment. Required: page_id, "
+        "body (the comment text).\n"
+        "  • \"delete_page\" — move page to trash. Required: page_id. "
+        "Confirm the page title/id with the user before calling.\n\n"
+        "Content accepts markdown: headings (# to ######), bullet/ordered "
+        "lists, **bold**, *italic*, `inline code`, ```fenced code```, "
+        "[links](url). Raw HTML passes through. Convert markdown → storage "
+        "format is automatic."
     ),
     parameters=[
+        ToolParameter(
+            name="action",
+            type="string",
+            description="Which write operation to perform. REQUIRED.",
+            required=True,
+            enum=["create_page", "update_page", "find_replace", "move_page", "comment", "delete_page"],
+        ),
         ToolParameter(
             name="page_id",
             type="string",
-            description="Confluence page ID (numeric). Get this from search_confluence results.",
+            description="Target page id. Required for update/find_replace/comment/delete.",
             required=False,
         ),
-        ToolParameter(
-            name="title",
-            type="string",
-            description="Exact page title to look up. Used when page_id is not available.",
-            required=False,
-        ),
-    ],
-    category=ToolCategory.RETRIEVAL,
-    risk_level=ToolRiskLevel.LOW,
-    when_to_use="Use to read the full content of a Confluence page after finding it via search.",
-    when_not_to_use="Do not use without first searching — you need either a page_id or exact title.",
-    examples=[
-        ToolExample(
-            description="Read page by ID",
-            input={"page_id": "12345678"},
-            expected_output="Returns the full text content of the page",
-        ),
-    ],
-    timeout_seconds=15,
-)
-
-
-# ─── Write tool definitions ─────────────────────────────────────────
-
-CREATE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
-    name="create_confluence_page",
-    description=(
-        "Create a new Confluence page in the specified space. Returns the new page ID and URL. "
-        "Use this when the user explicitly asks to create, draft, or add a new page to Confluence. "
-        "Content is automatically converted from plain text/markdown to Confluence storage format."
-    ),
-    parameters=[
         ToolParameter(
             name="space_key",
             type="string",
-            description="Confluence space key where the page will be created (e.g., 'DEV', 'HR', 'TEAM'). Required.",
-            required=True,
+            description="For create_page: space to create the page in.",
+            required=False,
         ),
         ToolParameter(
             name="title",
             type="string",
-            description="Title of the new page. Must be unique within the space.",
-            required=True,
+            description="For create_page: required. For update_page: optional rename.",
+            required=False,
         ),
         ToolParameter(
             name="content",
             type="string",
-            description="Page content as plain text or markdown. Paragraphs separated by blank lines. HTML accepted for rich formatting.",
-            required=True,
+            description="For create_page / update_page: the page body (markdown or HTML).",
+            required=False,
         ),
         ToolParameter(
             name="parent_id",
             type="string",
-            description="Optional parent page ID to nest this page under. Omit for top-level.",
+            description="For create_page: optional parent page to nest under.",
+            required=False,
+        ),
+        ToolParameter(
+            name="target_parent_id",
+            type="string",
+            description="For move_page: id of the page that will become the NEW parent. Must exist and be in the same space.",
+            required=False,
+        ),
+        ToolParameter(
+            name="find",
+            type="string",
+            description="For find_replace: exact substring to locate. Must appear exactly once.",
+            required=False,
+        ),
+        ToolParameter(
+            name="replace",
+            type="string",
+            description="For find_replace: substring to replace `find` with.",
+            required=False,
+        ),
+        ToolParameter(
+            name="body",
+            type="string",
+            description="For comment: the comment text.",
             required=False,
         ),
     ],
@@ -165,161 +606,93 @@ CREATE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=True,
     when_to_use=(
-        "Use when the user explicitly asks to create, draft, publish, or add a new Confluence page. "
-        "Always confirm the space_key and title with the user if ambiguous."
+        "User explicitly asks to create, edit, update, comment on, or "
+        "delete a Confluence page. ALWAYS confirm destructive actions."
     ),
     when_not_to_use=(
-        "Do not use for editing existing pages (use update_confluence_page). "
-        "Do not use without explicit user intent to write — never create pages speculatively."
+        "Never use speculatively. Never delete pages the user did not "
+        "explicitly name. For reads, use confluence_read."
     ),
     examples=[
         ToolExample(
-            description="Create a new team meeting notes page",
-            input={"space_key": "TEAM", "title": "Weekly Sync 2026-04-10", "content": "# Agenda\n\n- Project updates\n- Blockers"},
-            expected_output="Returns new page ID and URL",
+            description="Change one line on a schedule page",
+            input={
+                "action": "find_replace",
+                "page_id": "1038712833",
+                "find": "论文分享 – Manifold-Constrained Hyper-Connections",
+                "replace": "Manifold-Constrained Hyper-Connections",
+            },
+        ),
+        ToolExample(
+            description="Create a meeting-notes page",
+            input={
+                "action": "create_page",
+                "space_key": "DEV",
+                "title": "2026-04-21 Sync",
+                "content": "# Decisions\n\n- Ship Phase 5\n- Freeze APIs Friday",
+            },
+        ),
+        ToolExample(
+            description="Comment on a design doc",
+            input={"action": "comment", "page_id": "12345", "body": "LGTM"},
         ),
     ],
-    timeout_seconds=20,
+    relevance_keywords=[
+        "confluence", "wiki", "atlassian", "page", "空间", "页面",
+        "create", "update", "edit", "modify", "rewrite", "change", "delete",
+        "新建", "创建", "更新", "编辑", "修改", "改", "改为", "改成", "删除",
+        "comment", "评论", "反馈", "批注", "发布", "草稿",
+    ],
+    timeout_seconds=25,
 )
 
-UPDATE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
-    name="update_confluence_page",
-    description=(
-        "Update (overwrite) the content of an existing Confluence page. "
-        "Fetches the current version automatically and increments it. "
-        "The provided content REPLACES the entire page body — read the page first if you want to append."
-    ),
-    parameters=[
-        ToolParameter(
-            name="page_id",
-            type="string",
-            description="Confluence page ID (numeric) of the page to update.",
-            required=True,
-        ),
-        ToolParameter(
-            name="content",
-            type="string",
-            description="New page body content as plain text or markdown. REPLACES existing content entirely.",
-            required=True,
-        ),
-        ToolParameter(
-            name="title",
-            type="string",
-            description="Optional new title. If omitted, keeps the existing title.",
-            required=False,
-        ),
-    ],
-    category=ToolCategory.INTEGRATION,
-    risk_level=ToolRiskLevel.MEDIUM,
-    requires_confirmation=True,
-    when_to_use=(
-        "Use when the user explicitly asks to update, edit, or rewrite a Confluence page. "
-        "Typically preceded by read_confluence_page to get the existing content."
-    ),
-    when_not_to_use=(
-        "Do not use for creating new pages (use create_confluence_page). "
-        "Do not use without the user's explicit update intent — page_id alone is not enough."
-    ),
-    examples=[
-        ToolExample(
-            description="Update a meeting notes page with decisions",
-            input={"page_id": "12345678", "content": "Decisions: ..."},
-            expected_output="Returns updated version number",
-        ),
-    ],
-    timeout_seconds=20,
-)
-
-ADD_CONFLUENCE_COMMENT_DEFINITION = ToolDefinition(
-    name="add_confluence_comment",
-    description=(
-        "Add a comment to a Confluence page. Lightweight, reversible write. "
-        "Use this to leave feedback, suggestions, or notes on a page."
-    ),
-    parameters=[
-        ToolParameter(
-            name="page_id",
-            type="string",
-            description="Confluence page ID to comment on.",
-            required=True,
-        ),
-        ToolParameter(
-            name="comment",
-            type="string",
-            description="Comment text. Plain text or simple markdown.",
-            required=True,
-        ),
-    ],
-    category=ToolCategory.INTEGRATION,
-    risk_level=ToolRiskLevel.LOW,
-    when_to_use="Use when the user asks to comment on, leave feedback on, or annotate a Confluence page.",
-    when_not_to_use="Do not use for page edits (use update_confluence_page) — comments are separate entities.",
-    examples=[
-        ToolExample(
-            description="Leave feedback on a design doc",
-            input={"page_id": "12345678", "comment": "LGTM, one nit: consider adding a rollback plan."},
-            expected_output="Returns new comment ID",
-        ),
-    ],
-    timeout_seconds=15,
-)
-
-DELETE_CONFLUENCE_PAGE_DEFINITION = ToolDefinition(
-    name="delete_confluence_page",
-    description=(
-        "Delete a Confluence page (moves it to trash — recoverable by admin). "
-        "This is destructive and requires explicit user confirmation."
-    ),
-    parameters=[
-        ToolParameter(
-            name="page_id",
-            type="string",
-            description="Confluence page ID to delete.",
-            required=True,
-        ),
-    ],
-    category=ToolCategory.INTEGRATION,
-    risk_level=ToolRiskLevel.MEDIUM,
-    requires_confirmation=True,
-    when_to_use=(
-        "Use ONLY when the user explicitly asks to delete, remove, or archive a specific Confluence page "
-        "AND has confirmed the page ID. Always confirm with the user before executing."
-    ),
-    when_not_to_use=(
-        "Never use speculatively. Never delete pages the user did not explicitly name. "
-        "If unsure, ask the user to confirm the page ID and title first."
-    ),
-    examples=[
-        ToolExample(
-            description="Delete an obsolete draft",
-            input={"page_id": "12345678"},
-            expected_output="Page moved to trash",
-        ),
-    ],
-    timeout_seconds=15,
-)
 
 
 # ─── Confluence API Client ───────────────────────────────────────────
 
 class ConfluenceAPIClient:
-    """Lightweight Confluence REST API client using stored credentials."""
+    """Lightweight Confluence REST API client using stored credentials.
+
+    Uses both API versions on purpose:
+      - V1 `/wiki/rest/api/content/search` for CQL page search (stable, widely supported)
+      - V2 `/wiki/api/v2/spaces` for space listing (V1 doesn't expose a GET list endpoint)
+    """
 
     def __init__(self, domain: str, email: str, api_token: str):
+        self.domain = domain
         self.base_url = f"https://{domain}/wiki/rest/api"
+        self.v2_base_url = f"https://{domain}/wiki/api/v2"
         self.auth_header = "Basic " + b64encode(f"{email}:{api_token}".encode()).decode()
 
-    async def search(self, query: str, space_key: str | None = None, limit: int = 5) -> list[dict]:
-        """Search pages via CQL."""
-        cql_parts = [f'type=page AND text~"{query}"']
+    async def search(self, query: str, space_key: str | None = None, limit: int = 10) -> list[dict]:
+        """Search pages via CQL.
+
+        `query` is injected into a CQL string literal. We escape backslashes
+        and double-quotes so a query like `foo" OR space="ADMIN` can't
+        inject extra CQL clauses and widen the search scope.
+        `space_key` is restricted to the character set Atlassian actually
+        allows for space keys (alphanumerics) to avoid injection there too.
+        """
+        safe_query = query.replace("\\", "\\\\").replace('"', '\\"')
+        cql_parts = [f'type=page AND text~"{safe_query}"']
         if space_key:
+            if not re.fullmatch(r"[A-Za-z0-9]{1,255}", space_key):
+                raise ValueError(f"invalid space_key: {space_key!r}")
             cql_parts.insert(0, f"space={space_key}")
         cql = " AND ".join(cql_parts)
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"{self.base_url}/content/search",
-                params={"cql": cql, "limit": limit, "expand": "body.view,space,version"},
+                params={
+                    "cql": cql,
+                    "limit": limit,
+                    # ancestors expansion is required so every hit carries
+                    # enough structure for the model to make placement
+                    # decisions (create-sibling, move-page) without a
+                    # second read_page round-trip per hit.
+                    "expand": "body.view,space,version,ancestors",
+                },
                 headers={"Authorization": self.auth_header},
             )
             resp.raise_for_status()
@@ -328,13 +701,22 @@ class ConfluenceAPIClient:
         results = []
         for page in data.get("results", []):
             body_html = page.get("body", {}).get("view", {}).get("value", "")
-            # Strip HTML
-            import re
-            text = re.sub(r"<[^>]+>", " ", body_html)
-            text = re.sub(r"\s+", " ", text).strip()[:800]
+            excerpt = _excerpt_from_html(body_html, max_chars=800)
 
             base_url = data.get("_links", {}).get("base", f"https://{self.base_url.split('/wiki')[0].split('//')[1]}")
             web_link = page.get("_links", {}).get("webui", "")
+
+            raw_ancestors = page.get("ancestors") or []
+            ancestors = [
+                {
+                    "id": str(a.get("id", "")),
+                    "title": a.get("title", ""),
+                }
+                for a in raw_ancestors
+                if a.get("id")
+            ]
+            parent_id = ancestors[-1]["id"] if ancestors else ""
+            parent_title = ancestors[-1]["title"] if ancestors else ""
 
             results.append({
                 "id": page["id"],
@@ -342,24 +724,154 @@ class ConfluenceAPIClient:
                 "space": page.get("space", {}).get("name", ""),
                 "space_key": page.get("space", {}).get("key", ""),
                 "url": f"{base_url}{web_link}" if web_link else "",
-                "excerpt": text[:300],
+                "excerpt": excerpt,
                 "last_modified": page.get("version", {}).get("when", ""),
+                "parent_id": parent_id,
+                "parent_title": parent_title,
+                "ancestors": ancestors,
             })
         return results
 
+    # ─── Space operations (V2 API) ─────────────────────────────────────
+
+    async def list_spaces(
+        self,
+        *,
+        query: str | None = None,
+        keys: list[str] | None = None,
+        space_type: str | None = None,
+        labels: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """List workspaces (spaces) via V2 API. Supports server-side
+        filtering by keys/type/labels; `query` does client-side
+        case-insensitive match against name/key/description.
+
+        V2 doesn't expose a name search, so the pattern is:
+        1. Pull one page of up to `limit` spaces with server-side filters
+        2. Rank/filter client-side by `query` if provided
+
+        For tenants with >250 spaces the caller should supply keys or
+        labels to narrow server-side before relying on client match.
+        """
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 250)),
+            "include-icon": "false",
+            "description-format": "plain",
+        }
+        if keys:
+            # V2 accepts comma-separated list.
+            params["keys"] = ",".join(k.strip() for k in keys if k.strip())
+        if space_type:
+            params["type"] = space_type
+        if labels:
+            params["labels"] = ",".join(l.strip() for l in labels if l.strip())
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.v2_base_url}/spaces",
+                params=params,
+                headers={"Authorization": self.auth_header, "Accept": "application/json"},
+            )
+            resp.raise_for_status()
+
+        data = resp.json()
+        raw = data.get("results", []) or []
+        spaces = [self._normalize_space_v2(s) for s in raw]
+
+        if query:
+            spaces = _filter_and_rank_spaces(spaces, query)
+
+        return spaces
+
+    async def get_space(
+        self, *, space_id: str | None = None, space_key: str | None = None
+    ) -> dict | None:
+        """Get a single space by numeric V2 id (preferred) or V1 key.
+
+        V2's GET /spaces/{id} needs a numeric id. If the caller only has
+        a key, we list-and-filter (keys= is server-side) to resolve.
+        """
+        async with httpx.AsyncClient(timeout=15) as client:
+            if space_id:
+                resp = await client.get(
+                    f"{self.v2_base_url}/spaces/{space_id}",
+                    params={"description-format": "plain", "include-icon": "false"},
+                    headers={
+                        "Authorization": self.auth_header,
+                        "Accept": "application/json",
+                    },
+                )
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return self._normalize_space_v2(resp.json())
+
+            if space_key:
+                # Resolve by key via the list endpoint — V2 supports keys filter.
+                resp = await client.get(
+                    f"{self.v2_base_url}/spaces",
+                    params={
+                        "keys": space_key,
+                        "limit": 1,
+                        "description-format": "plain",
+                        "include-icon": "false",
+                    },
+                    headers={
+                        "Authorization": self.auth_header,
+                        "Accept": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+                return self._normalize_space_v2(results[0]) if results else None
+
+        return None
+
+    def _normalize_space_v2(self, space: dict) -> dict:
+        """Flatten a V2 space payload into a stable dict for tool output.
+        Description comes in as either `{plain: {value}}` or a string depending
+        on the description-format query; normalize both shapes."""
+        desc_raw = space.get("description")
+        if isinstance(desc_raw, dict):
+            # {plain: {value, representation}} or {view: {value}}
+            desc = desc_raw.get("plain", {}).get("value") or desc_raw.get("view", {}).get("value") or ""
+        else:
+            desc = desc_raw or ""
+
+        space_key = space.get("key", "")
+        space_id = space.get("id", "")
+        web_path = space.get("_links", {}).get("webui") or f"/spaces/{space_key}"
+        return {
+            "id": str(space_id) if space_id else "",
+            "key": space_key,
+            "name": space.get("name", ""),
+            "type": space.get("type", ""),
+            "status": space.get("status", ""),
+            "description": (desc or "").strip()[:500],
+            "homepage_id": space.get("homepageId", ""),
+            "url": f"https://{self.domain}/wiki{web_path}" if web_path else "",
+            "created_at": space.get("createdAt", ""),
+        }
+
     async def read_page(self, page_id: str | None = None, title: str | None = None) -> dict | None:
-        """Read a single page by ID or title."""
+        """Read a single page by ID or title.
+
+        Expands ancestors so the caller knows the page's parent — required
+        for creating sibling pages (parent_id = this page's parent_id).
+        """
+        expand = "body.view,space,version,ancestors"
         async with httpx.AsyncClient(timeout=15) as client:
             if page_id:
                 resp = await client.get(
                     f"{self.base_url}/content/{page_id}",
-                    params={"expand": "body.view,space,version"},
+                    params={"expand": expand},
                     headers={"Authorization": self.auth_header},
                 )
             elif title:
                 resp = await client.get(
                     f"{self.base_url}/content",
-                    params={"title": title, "expand": "body.view,space,version", "limit": 1},
+                    params={"title": title, "expand": expand, "limit": 1},
                     headers={"Authorization": self.auth_header},
                 )
                 if resp.status_code == 200:
@@ -377,19 +889,44 @@ class ConfluenceAPIClient:
             return self._parse_page(resp.json())
 
     def _parse_page(self, page: dict) -> dict:
-        import re
         body_html = page.get("body", {}).get("view", {}).get("value", "")
-        text = re.sub(r"<[^>]+>", " ", body_html)
-        text = re.sub(r"\s+", " ", text).strip()
+        # Structure-preserving conversion (keeps bullets/headings/links) +
+        # a 20K cap — enough for a long schedule or spec page without
+        # blowing the context window. The agent loop has its own
+        # per-retrieval-tool cap downstream as a second safety net.
+        text = _html_to_structured_text(body_html)
+        if len(text) > 20_000:
+            text = text[:20_000] + "\n…[truncated at 20K chars]"
+
+        # Ancestors come ordered root-first. For sibling creation the caller
+        # needs the *immediate* parent — that's the last ancestor. Also
+        # surface the full chain so the model can render breadcrumbs / show
+        # a path to the user when helpful.
+        raw_ancestors = page.get("ancestors") or []
+        ancestors = [
+            {
+                "id": str(a.get("id", "")),
+                "title": a.get("title", ""),
+                "type": a.get("type", ""),
+            }
+            for a in raw_ancestors
+            if a.get("id")
+        ]
+        parent_id = ancestors[-1]["id"] if ancestors else ""
+        parent_title = ancestors[-1]["title"] if ancestors else ""
 
         return {
             "id": page["id"],
             "title": page["title"],
             "space": page.get("space", {}).get("name", ""),
-            "content": text[:5000],  # Limit to 5K chars for context window
+            "space_key": page.get("space", {}).get("key", ""),
+            "content": text,
             "url": page.get("_links", {}).get("base", "") + page.get("_links", {}).get("webui", ""),
             "last_modified": page.get("version", {}).get("when", ""),
             "version": page.get("version", {}).get("number", 0),
+            "parent_id": parent_id,
+            "parent_title": parent_title,
+            "ancestors": ancestors,
         }
 
     # ─── Write operations ───────────────────────────────────────────
@@ -531,345 +1068,704 @@ class ConfluenceAPIClient:
 
         return {"id": page_id, "status": "trashed"}
 
+    # ─── URL resolver + children + find_replace ────────────────────
+
+    def resolve_url_to_page_id(self, url: str) -> str | None:
+        """Extract page_id from a Confluence URL.
+
+        Supports:
+          - https://x.atlassian.net/wiki/spaces/SPACE/pages/1234567/Title
+          - ?pageId=1234567 query form (legacy viewpage.action)
+        Short URLs (/wiki/x/XYZ) are not resolvable without an API call —
+        caller should use search + title fallback.
+        """
+        if not url:
+            return None
+        m = re.search(r"/pages/(\d+)(?:/|\?|$)", url)
+        if m:
+            return m.group(1)
+        m = re.search(r"[?&]pageId=(\d+)", url, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return None
+
+    async def list_children(
+        self, page_id: str, limit: int = 25
+    ) -> list[dict]:
+        """List direct child pages of a page (one level only)."""
+        params = {
+            "limit": max(1, min(int(limit), 100)),
+            "expand": "version,_links",
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/content/{page_id}/child/page",
+                params=params,
+                headers={"Authorization": self.auth_header},
+            )
+            resp.raise_for_status()
+
+        data = resp.json()
+        base_link = data.get("_links", {}).get("base") or f"https://{self.domain}/wiki"
+        results = []
+        for ch in data.get("results", []):
+            web = ch.get("_links", {}).get("webui", "")
+            results.append({
+                "id": ch.get("id", ""),
+                "title": ch.get("title", ""),
+                "url": f"{base_link}{web}" if web else "",
+                "last_modified": ch.get("version", {}).get("when", ""),
+            })
+        return results
+
+    async def move_page(
+        self, page_id: str, target_parent_id: str
+    ) -> dict:
+        """Move a page under a different parent (same space).
+
+        Atlassian's V1 API moves a page via a PUT that sets the
+        `ancestors` array to `[{id: target_parent_id}]` (single element
+        means "this is the immediate parent"). Version must bump.
+
+        We validate target_parent_id exists first with a HEAD-like GET to
+        catch typos before mutating. Refuses no-op (moving to current parent).
+        """
+        if not page_id or not target_parent_id:
+            raise ValueError("move_page requires page_id and target_parent_id")
+        if page_id == target_parent_id:
+            raise ValueError("cannot move a page under itself")
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Fetch current state: version + title + existing parent + space
+            resp = await client.get(
+                f"{self.base_url}/content/{page_id}",
+                params={"expand": "version,ancestors,space"},
+                headers={"Authorization": self.auth_header},
+            )
+            resp.raise_for_status()
+            current = resp.json()
+            current_version = current.get("version", {}).get("number", 1)
+            current_title = current.get("title", "")
+            current_parents = current.get("ancestors") or []
+            current_parent_id = (
+                str(current_parents[-1].get("id", "")) if current_parents else ""
+            )
+            if current_parent_id == target_parent_id:
+                raise ValueError(
+                    f"page {page_id} is already under parent {target_parent_id} — nothing to move"
+                )
+
+            # Validate target exists to avoid leaving the page in a bad state.
+            validate = await client.get(
+                f"{self.base_url}/content/{target_parent_id}",
+                params={"expand": "space"},
+                headers={"Authorization": self.auth_header},
+            )
+            if validate.status_code == 404:
+                raise ValueError(
+                    f"target parent {target_parent_id} does not exist — check the id first"
+                )
+            validate.raise_for_status()
+            target = validate.json()
+            current_space_key = current.get("space", {}).get("key", "")
+            target_space_key = target.get("space", {}).get("key", "")
+            if current_space_key and target_space_key and current_space_key != target_space_key:
+                raise ValueError(
+                    f"cross-space moves not supported: page is in {current_space_key!r}, "
+                    f"target parent is in {target_space_key!r}"
+                )
+
+            body = {
+                "version": {"number": current_version + 1},
+                "title": current_title,
+                "type": "page",
+                "ancestors": [{"id": target_parent_id}],
+            }
+            resp = await client.put(
+                f"{self.base_url}/content/{page_id}",
+                json=body,
+                headers={
+                    "Authorization": self.auth_header,
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        base = data.get("_links", {}).get("base", "")
+        webui = data.get("_links", {}).get("webui", "")
+        return {
+            "id": data["id"],
+            "title": data.get("title", current_title),
+            "url": f"{base}{webui}" if base else webui,
+            "version": data.get("version", {}).get("number", current_version + 1),
+            "old_parent_id": current_parent_id,
+            "new_parent_id": target_parent_id,
+        }
+
+    async def find_and_replace_in_page(
+        self, page_id: str, find: str, replace: str
+    ) -> dict:
+        """Safe partial edit. Requires `find` to match EXACTLY ONCE, raises
+        ValueError for 0 or >1 matches so the model corrects itself rather
+        than producing a bad edit.
+
+        Operates on Confluence storage-format XHTML. Model should first
+        `read_page` to see the exact text before composing `find`.
+        """
+        if not find:
+            raise ValueError("`find` must be non-empty")
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/content/{page_id}",
+                params={"expand": "body.storage,version,space"},
+                headers={"Authorization": self.auth_header},
+            )
+            resp.raise_for_status()
+            current = resp.json()
+            current_body = (
+                current.get("body", {}).get("storage", {}).get("value") or ""
+            )
+            current_version = current.get("version", {}).get("number", 1)
+            current_title = current.get("title", "")
+
+            count = current_body.count(find)
+            if count == 0:
+                raise ValueError(
+                    f"`find` string not found on page {page_id}. "
+                    "Check exact casing/spacing. Tip: call read_page first."
+                )
+            if count > 1:
+                raise ValueError(
+                    f"`find` string appears {count} times on page {page_id} — "
+                    "refusing ambiguous edit. Narrow with surrounding context so "
+                    "it matches exactly once."
+                )
+
+            new_body = current_body.replace(find, replace, 1)
+            body = {
+                "version": {"number": current_version + 1},
+                "title": current_title,
+                "type": "page",
+                "body": {
+                    "storage": {
+                        "value": new_body,
+                        "representation": "storage",
+                    },
+                },
+            }
+            resp = await client.put(
+                f"{self.base_url}/content/{page_id}",
+                json=body,
+                headers={
+                    "Authorization": self.auth_header,
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        base = data.get("_links", {}).get("base", "")
+        webui = data.get("_links", {}).get("webui", "")
+        return {
+            "id": data["id"],
+            "title": data.get("title", current_title),
+            "url": f"{base}{webui}" if base else webui,
+            "version": data.get("version", {}).get("number", current_version + 1),
+            "chars_before": len(current_body),
+            "chars_after": len(new_body),
+        }
+
     @staticmethod
     def _to_storage_html(content: str) -> str:
-        """Convert plain text / simple markdown to Confluence storage format.
+        """Convert markdown to Confluence storage-format XHTML.
+        Delegates to module-level `_markdown_to_storage` (testable directly)."""
+        return _markdown_to_storage(content)
 
-        Minimal conversion: wraps lines in <p>, escapes HTML, preserves blank-line paragraphs.
-        Users can pass raw HTML if they want rich formatting.
-        """
-        import html as html_mod
-        # If it looks like HTML already, trust the caller
-        stripped = content.strip()
-        if stripped.startswith("<") and stripped.endswith(">"):
-            return content
-        # Otherwise escape + wrap paragraphs
-        paragraphs = content.split("\n\n")
-        escaped = [f"<p>{html_mod.escape(p).replace(chr(10), '<br/>')}</p>" for p in paragraphs if p.strip()]
-        return "".join(escaped) if escaped else "<p></p>"
 
 
 # ─── Tool Executors ──────────────────────────────────────────────────
+#
+# Two meta-executors dispatch on the `action` parameter. This replaces
+# eight separate single-purpose executors — same capabilities, ~80%
+# fewer tokens in the tool-schema catalog the model sees each turn.
 
-class ConfluenceSearchExecutor(ToolExecutor):
-    """Executor for search_confluence tool."""
 
-    def __init__(self, client: ConfluenceAPIClient):
-        self.client = client
+def _err(request: ToolCallRequest, message: str, start: float) -> ToolCallResult:
+    return ToolCallResult(
+        call_id=request.call_id,
+        tool_name=request.tool_name,
+        success=False,
+        error=message,
+        duration_ms=(time.time() - start) * 1000,
+    )
 
-    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
-        start = time.time()
-        query = request.arguments.get("query", "")
-        space_key = request.arguments.get("space_key")
-        limit = min(int(request.arguments.get("limit", 5)), 20)
 
-        try:
-            results = await self.client.search(query, space_key, limit)
-            duration = (time.time() - start) * 1000
+# Always-appended reminder on error paths so the model reports the
+# failure honestly instead of hallucinating success. Short because it
+# rides along on every error message.
+_ANTI_HALLUCINATION_NOTE = (
+    " | ⚠️ This call FAILED. Do not tell the user the action succeeded — "
+    "explain what went wrong and what they should do next."
+)
 
-            if not results:
-                return ToolCallResult(
-                    call_id=request.call_id,
-                    tool_name=request.tool_name,
-                    success=True,
-                    result=f"No Confluence pages found for: {query}",
-                    duration_ms=duration,
-                )
 
-            formatted = []
-            for r in results:
-                formatted.append(
-                    f"**{r['title']}** (Space: {r['space']})\n"
-                    f"ID: {r['id']} | URL: {r['url']}\n"
-                    f"{r['excerpt']}\n"
-                )
+def _classify_http_error(status_code: int, action: str | None = None) -> str:
+    """Map HTTP status to a short human explanation the model can relay.
+    Each message includes the failure reminder so hallucinated 'success'
+    responses stop happening on these paths."""
+    action_text = f" for action={action!r}" if action else ""
+    if status_code == 401:
+        msg = (
+            f"Authentication failed{action_text} (HTTP 401). "
+            "The stored API token is invalid or expired — ask the user to "
+            "re-connect Confluence in the integrations panel."
+        )
+    elif status_code == 403:
+        msg = (
+            f"Permission denied{action_text} (HTTP 403). "
+            "The connected account doesn't have access to this page/space. "
+            "Check that the user's Confluence account has the right role."
+        )
+    elif status_code == 404:
+        msg = (
+            f"Resource not found{action_text} (HTTP 404). "
+            "The page_id / space_key / target_parent_id does not exist, or "
+            "the account can't see it. Verify the id and try again."
+        )
+    elif status_code == 409:
+        msg = (
+            f"Version conflict{action_text} (HTTP 409). "
+            "Someone else updated this page since you read it — read it "
+            "again and retry with the new version."
+        )
+    elif status_code == 429:
+        msg = (
+            f"Rate limited{action_text} (HTTP 429). "
+            "Too many requests — back off and try again in a moment."
+        )
+    else:
+        msg = f"Confluence API error (HTTP {status_code}){action_text}."
+    return msg + _ANTI_HALLUCINATION_NOTE
 
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=f"Found {len(results)} Confluence pages:\n\n" + "\n---\n".join(formatted),
-                duration_ms=duration,
-                metadata={"count": len(results)},
-            )
-        except Exception as e:
-            logger.error(f"Confluence search failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                result=None,
-                error=f"Confluence search failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
+
+def _format_search_results(results: list[dict], query: str) -> str:
+    if not results:
+        return f"No Confluence pages found for: {query!r}"
+    parts = [f"Found {len(results)} Confluence page(s):"]
+    for r in results:
+        parent_id = r.get("parent_id", "")
+        parent_title = r.get("parent_title", "")
+        # Surface parent info so the model can use it for sibling creation
+        # or move_page without a second read_page round-trip.
+        parent_line = (
+            f"Parent: {parent_title} (id: {parent_id})"
+            if parent_id
+            else "Parent: (top-level — space homepage)"
+        )
+        parts.append(
+            f"\n**{r.get('title', '')}** (Space: {r.get('space', '')}, key: {r.get('space_key', '')})\n"
+            f"ID: {r.get('id', '')} | URL: {r.get('url', '')}\n"
+            f"{parent_line}\n"
+            f"{r.get('excerpt', '')}"
+        )
+    return "\n---\n".join(parts) if len(parts) > 1 else parts[0]
+
+
+def _format_spaces(spaces: list[dict], query: str | None) -> str:
+    if not spaces:
+        return (
+            f"No Confluence spaces matched query={query!r}. "
+            "Try listing without a query, or different keywords."
+        )
+    header = (
+        f"Found {len(spaces)} Confluence space(s)"
+        + (f" matching '{query}'" if query else "")
+        + ":"
+    )
+    lines = [header]
+    for s in spaces[:25]:
+        desc = (s.get("description") or "").strip()
+        desc_line = f"\n  {desc[:200]}" if desc else ""
+        lines.append(
+            f"- **{s.get('name', '')}** (key: `{s.get('key', '')}`, "
+            f"id: {s.get('id', '')}, type: {s.get('type', '')})"
+            f"{desc_line}\n  URL: {s.get('url', '')}"
+        )
+    if len(spaces) > 25:
+        lines.append(f"\n…and {len(spaces) - 25} more. Narrow with `query` or `labels`.")
+    return "\n".join(lines)
+
+
+def _format_children(children: list[dict], page_id: str) -> str:
+    if not children:
+        return f"Page {page_id} has no direct child pages."
+    lines = [f"Found {len(children)} child page(s) of {page_id}:"]
+    for ch in children:
+        lines.append(
+            f"- **{ch.get('title', '')}** (id: {ch.get('id', '')})\n"
+            f"  URL: {ch.get('url', '')}"
+        )
+    return "\n".join(lines)
 
 
 class ConfluenceReadExecutor(ToolExecutor):
-    """Executor for read_confluence_page tool."""
+    """Dispatches read-only Confluence operations by `action`."""
 
     def __init__(self, client: ConfluenceAPIClient):
         self.client = client
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         start = time.time()
-        page_id = request.arguments.get("page_id")
-        title = request.arguments.get("title")
-
-        if not page_id and not title:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                result=None,
-                error="Either page_id or title is required.",
-            )
+        args = request.arguments or {}
+        action = str(args.get("action") or "").strip()
+        if not action:
+            return _err(request, "`action` is required (search/read_page/list_spaces/get_space/list_children)", start)
 
         try:
-            page = await self.client.read_page(page_id=page_id, title=title)
-            duration = (time.time() - start) * 1000
-            if not page:
+            if action == "search":
+                query = str(args.get("query") or "").strip()
+                if not query:
+                    return _err(request, "`search` requires `query`", start)
+                space_key = args.get("space_key") or None
+                limit = max(1, min(int(args.get("limit") or 10), 25))
+                results = await self.client.search(query, space_key, limit)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
                     success=True,
-                    result=f"Page not found: {page_id or title}",
-                    duration_ms=duration,
+                    result=_format_search_results(results, query),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"count": len(results), "query": query},
                 )
 
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=(
-                    f"# {page['title']}\n"
-                    f"Space: {page['space']} | Version: {page['version']} | "
-                    f"Modified: {page['last_modified']}\n"
-                    f"URL: {page['url']}\n\n"
-                    f"{page['content']}"
-                ),
-                duration_ms=duration,
-                metadata={"page_id": page["id"]},
+            if action == "read_page":
+                page_id = (args.get("page_id") or "").strip() or None
+                title = (args.get("title") or "").strip() or None
+                url = (args.get("url") or "").strip() or None
+                if url and not page_id:
+                    page_id = self.client.resolve_url_to_page_id(url)
+                    if not page_id:
+                        return _err(
+                            request,
+                            f"Could not extract page_id from URL {url!r}. "
+                            "Short URLs aren't resolvable — try search with title keywords.",
+                            start,
+                        )
+                if not page_id and not title:
+                    return _err(request, "`read_page` requires page_id, title, or url", start)
+                page = await self.client.read_page(page_id=page_id, title=title)
+                if not page:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=True,
+                        result=f"No page found (page_id={page_id!r}, title={title!r}).",
+                        duration_ms=(time.time() - start) * 1000,
+                        metadata={"found": False},
+                    )
+                content = page.get("content") or ""
+                parent_id = page.get("parent_id") or ""
+                parent_title = page.get("parent_title") or ""
+                ancestors = page.get("ancestors") or []
+
+                # Build breadcrumb so the model sees "where am I in the tree"
+                # and can pick the right parent_id for a sibling create_page.
+                if ancestors:
+                    breadcrumb = " > ".join(
+                        f"{a.get('title', '')} ({a.get('id', '')})"
+                        for a in ancestors
+                    )
+                    parent_line = (
+                        f"Parent: {parent_title} (id: {parent_id})\n"
+                        f"Path: {breadcrumb} > {page.get('title', '')}\n"
+                    )
+                else:
+                    parent_line = "Parent: (none — this is a space homepage or top-level page)\n"
+
+                result_text = (
+                    f"**{page.get('title', '')}** (space: {page.get('space', '')}, "
+                    f"id: {page.get('id', '')})\n"
+                    f"URL: {page.get('url', '')}\n"
+                    f"{parent_line}"
+                    f"Last modified: {page.get('last_modified', '')}\n\n"
+                    f"{content}"
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=result_text,
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={
+                        "found": True,
+                        "page_id": page.get("id"),
+                        "parent_id": parent_id,
+                        "space_key": page.get("space_key"),
+                        "chars": len(content),
+                    },
+                )
+
+            if action == "list_spaces":
+                query = (args.get("query") or "").strip() or None
+                keys = args.get("keys") or None
+                if isinstance(keys, str):
+                    keys = [k.strip() for k in keys.split(",") if k.strip()]
+                space_type = args.get("space_type") or None
+                labels = args.get("labels") or None
+                if isinstance(labels, str):
+                    labels = [l.strip() for l in labels.split(",") if l.strip()]
+                try:
+                    limit = max(1, min(int(args.get("limit") or 50), 250))
+                except (TypeError, ValueError):
+                    limit = 50
+                spaces = await self.client.list_spaces(
+                    query=query, keys=keys, space_type=space_type, labels=labels, limit=limit
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=_format_spaces(spaces, query),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"count": len(spaces), "query": query, "shown": min(len(spaces), 25)},
+                )
+
+            if action == "get_space":
+                space_id = (args.get("space_id") or "").strip() or None
+                space_key = (args.get("space_key") or "").strip() or None
+                if not space_id and not space_key:
+                    return _err(request, "`get_space` requires space_id or space_key", start)
+                space = await self.client.get_space(space_id=space_id, space_key=space_key)
+                if not space:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=True,
+                        result=f"No space found (id={space_id!r}, key={space_key!r}).",
+                        duration_ms=(time.time() - start) * 1000,
+                        metadata={"found": False},
+                    )
+                desc = space.get("description") or "(no description)"
+                body_text = (
+                    f"**{space.get('name', '')}** (key: `{space.get('key', '')}`, "
+                    f"id: {space.get('id', '')}, type: {space.get('type', '')})\n"
+                    f"URL: {space.get('url', '')}\n"
+                    f"Homepage ID: {space.get('homepage_id') or '(none)'}\n"
+                    f"Created: {space.get('created_at') or '(unknown)'}\n"
+                    f"Description: {desc}"
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=body_text,
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"found": True, "space_id": space.get("id"), "space_key": space.get("key")},
+                )
+
+            if action == "list_children":
+                page_id = (args.get("page_id") or "").strip()
+                if not page_id:
+                    return _err(request, "`list_children` requires page_id", start)
+                try:
+                    limit = max(1, min(int(args.get("limit") or 25), 100))
+                except (TypeError, ValueError):
+                    limit = 25
+                children = await self.client.list_children(page_id, limit=limit)
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=_format_children(children, page_id),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"count": len(children), "page_id": page_id},
+                )
+
+            return _err(request, f"Unknown action {action!r}", start)
+
+        except ValueError as e:
+            # Expected validation errors — surface to model cleanly.
+            return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"confluence_read action={action} HTTP {e.response.status_code}: "
+                f"{e.response.text[:300]}"
             )
+            return _err(request, _classify_http_error(e.response.status_code, action), start)
         except Exception as e:
-            logger.error(f"Confluence read failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                result=None,
-                error=f"Confluence read failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
+            logger.exception(f"confluence_read action={action} failed")
+            return _err(request, f"confluence_read failed: {e}" + _ANTI_HALLUCINATION_NOTE, start)
 
 
-class ConfluenceCreatePageExecutor(ToolExecutor):
-    """Executor for create_confluence_page tool."""
+class ConfluenceWriteExecutor(ToolExecutor):
+    """Dispatches write Confluence operations by `action`. Gated by
+    `requires_confirmation=True` in the definition — the permission
+    middleware yields a `confirm` verdict before execution."""
 
     def __init__(self, client: ConfluenceAPIClient):
         self.client = client
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         start = time.time()
-        space_key = request.arguments.get("space_key", "")
-        title = request.arguments.get("title", "")
-        content = request.arguments.get("content", "")
-        parent_id = request.arguments.get("parent_id")
-
-        if not space_key or not title or not content:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="space_key, title, and content are all required.",
-            )
+        args = request.arguments or {}
+        action = str(args.get("action") or "").strip()
+        if not action:
+            return _err(request, "`action` is required (create_page/update_page/find_replace/comment/delete_page)", start)
 
         try:
-            page = await self.client.create_page(space_key, title, content, parent_id)
-            duration = (time.time() - start) * 1000
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=(
-                    f"Created Confluence page:\n"
-                    f"**{page['title']}** (ID: {page['id']}, v{page['version']})\n"
-                    f"URL: {page['url']}"
-                ),
-                duration_ms=duration,
-                metadata={"page_id": page["id"], "version": page["version"]},
-            )
+            if action == "create_page":
+                space_key = (args.get("space_key") or "").strip()
+                title = (args.get("title") or "").strip()
+                content = args.get("content") or ""
+                if not space_key or not title:
+                    return _err(request, "`create_page` requires space_key and title", start)
+                parent_id = (args.get("parent_id") or "").strip() or None
+                page = await self.client.create_page(
+                    space_key=space_key, title=title, content=content, parent_id=parent_id
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=(
+                        f"Created Confluence page:\n"
+                        f"- title: {page.get('title', title)}\n"
+                        f"- id: {page.get('id', '')}\n"
+                        f"- url: {page.get('url', '')}\n"
+                        f"- version: {page.get('version', 1)}"
+                    ),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"page_id": page.get("id"), "action": "create_page"},
+                )
+
+            if action == "update_page":
+                page_id = (args.get("page_id") or "").strip()
+                content = args.get("content")
+                if not page_id or content is None:
+                    return _err(request, "`update_page` requires page_id and content", start)
+                title = (args.get("title") or "").strip() or None
+                page = await self.client.update_page(page_id=page_id, content=content, title=title)
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=(
+                        f"Updated Confluence page {page_id} to version {page.get('version', '?')}:\n"
+                        f"- title: {page.get('title', '')}\n"
+                        f"- url: {page.get('url', '')}"
+                    ),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"page_id": page_id, "action": "update_page"},
+                )
+
+            if action == "find_replace":
+                page_id = (args.get("page_id") or "").strip()
+                find = args.get("find") or ""
+                replace = args.get("replace")
+                if not page_id or not find or replace is None:
+                    return _err(
+                        request,
+                        "`find_replace` requires page_id, find (non-empty), replace",
+                        start,
+                    )
+                page = await self.client.find_and_replace_in_page(
+                    page_id=page_id, find=find, replace=replace
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=(
+                        f"Applied find_replace to page {page_id}:\n"
+                        f"- chars before: {page.get('chars_before')}, after: {page.get('chars_after')}\n"
+                        f"- new version: {page.get('version')}\n"
+                        f"- url: {page.get('url', '')}"
+                    ),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"page_id": page_id, "action": "find_replace"},
+                )
+
+            if action == "move_page":
+                page_id = (args.get("page_id") or "").strip()
+                target_parent_id = (args.get("target_parent_id") or "").strip()
+                if not page_id or not target_parent_id:
+                    return _err(
+                        request,
+                        "`move_page` requires page_id and target_parent_id",
+                        start,
+                    )
+                r = await self.client.move_page(
+                    page_id=page_id, target_parent_id=target_parent_id
+                )
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=(
+                        f"Moved page {page_id}:\n"
+                        f"- old parent: {r.get('old_parent_id') or '(top-level)'}\n"
+                        f"- new parent: {r.get('new_parent_id')}\n"
+                        f"- new version: {r.get('version')}\n"
+                        f"- url: {r.get('url', '')}"
+                    ),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={
+                        "page_id": page_id,
+                        "action": "move_page",
+                        "old_parent_id": r.get("old_parent_id"),
+                        "new_parent_id": r.get("new_parent_id"),
+                    },
+                )
+
+            if action == "comment":
+                page_id = (args.get("page_id") or "").strip()
+                body_text = args.get("body") or args.get("comment") or ""
+                if not page_id or not body_text:
+                    return _err(request, "`comment` requires page_id and body", start)
+                r = await self.client.add_comment(page_id=page_id, comment=body_text)
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=(
+                        f"Added comment to page {page_id}:\n"
+                        f"- comment id: {r.get('id', '')}\n"
+                        f"- created: {r.get('created', '')}"
+                    ),
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"page_id": page_id, "action": "comment"},
+                )
+
+            if action == "delete_page":
+                page_id = (args.get("page_id") or "").strip()
+                if not page_id:
+                    return _err(request, "`delete_page` requires page_id", start)
+                r = await self.client.delete_page(page_id=page_id)
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=True,
+                    result=f"Page {page_id} moved to trash (status: {r.get('status', 'trashed')}).",
+                    duration_ms=(time.time() - start) * 1000,
+                    metadata={"page_id": page_id, "action": "delete_page"},
+                )
+
+            return _err(request, f"Unknown action {action!r}", start)
+
+        except ValueError as e:
+            # Validation errors — the model can correct its args and retry.
+            # Still attach the hallucination guard.
+            return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
         except httpx.HTTPStatusError as e:
-            logger.error(f"Confluence create failed: {e.response.status_code} {e.response.text[:200]}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Create failed ({e.response.status_code}): {e.response.text[:200]}",
-                duration_ms=(time.time() - start) * 1000,
+            logger.error(
+                f"confluence_write action={action} HTTP {e.response.status_code}: "
+                f"{e.response.text[:300]}"
             )
+            return _err(request, _classify_http_error(e.response.status_code, action), start)
         except Exception as e:
-            logger.error(f"Confluence create failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Confluence create failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-
-
-class ConfluenceUpdatePageExecutor(ToolExecutor):
-    """Executor for update_confluence_page tool."""
-
-    def __init__(self, client: ConfluenceAPIClient):
-        self.client = client
-
-    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
-        start = time.time()
-        page_id = request.arguments.get("page_id", "")
-        content = request.arguments.get("content", "")
-        title = request.arguments.get("title")
-
-        if not page_id or not content:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="page_id and content are required.",
-            )
-
-        try:
-            page = await self.client.update_page(page_id, content, title)
-            duration = (time.time() - start) * 1000
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=(
-                    f"Updated Confluence page:\n"
-                    f"**{page['title']}** (ID: {page['id']}, v{page['version']})\n"
-                    f"URL: {page['url']}"
-                ),
-                duration_ms=duration,
-                metadata={"page_id": page["id"], "version": page["version"]},
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Confluence update failed: {e.response.status_code} {e.response.text[:200]}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Update failed ({e.response.status_code}): {e.response.text[:200]}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-        except Exception as e:
-            logger.error(f"Confluence update failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Confluence update failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-
-
-class ConfluenceAddCommentExecutor(ToolExecutor):
-    """Executor for add_confluence_comment tool."""
-
-    def __init__(self, client: ConfluenceAPIClient):
-        self.client = client
-
-    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
-        start = time.time()
-        page_id = request.arguments.get("page_id", "")
-        comment = request.arguments.get("comment", "")
-
-        if not page_id or not comment:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="page_id and comment are required.",
-            )
-
-        try:
-            result = await self.client.add_comment(page_id, comment)
-            duration = (time.time() - start) * 1000
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=f"Added comment (ID: {result['id']}) to page {page_id}",
-                duration_ms=duration,
-                metadata={"comment_id": result["id"], "page_id": page_id},
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Confluence comment failed: {e.response.status_code} {e.response.text[:200]}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Comment failed ({e.response.status_code}): {e.response.text[:200]}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-        except Exception as e:
-            logger.error(f"Confluence comment failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Confluence comment failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-
-
-class ConfluenceDeletePageExecutor(ToolExecutor):
-    """Executor for delete_confluence_page tool."""
-
-    def __init__(self, client: ConfluenceAPIClient):
-        self.client = client
-
-    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
-        start = time.time()
-        page_id = request.arguments.get("page_id", "")
-
-        if not page_id:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="page_id is required.",
-            )
-
-        try:
-            result = await self.client.delete_page(page_id)
-            duration = (time.time() - start) * 1000
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=f"Deleted (trashed) Confluence page {page_id}. Recoverable from trash by admin.",
-                duration_ms=duration,
-                metadata={"page_id": page_id, "status": result["status"]},
-            )
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Confluence delete failed: {e.response.status_code} {e.response.text[:200]}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Delete failed ({e.response.status_code}): {e.response.text[:200]}",
-                duration_ms=(time.time() - start) * 1000,
-            )
-        except Exception as e:
-            logger.error(f"Confluence delete failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=f"Confluence delete failed: {e}",
-                duration_ms=(time.time() - start) * 1000,
-            )
+            logger.exception(f"confluence_write action={action} failed")
+            return _err(request, f"confluence_write failed: {e}" + _ANTI_HALLUCINATION_NOTE, start)
 
 
 # ─── Registration ─────────────────────────────────────────────────────
@@ -881,19 +1777,16 @@ def register_confluence_tools(
     tenant_id: str = "",
     database: Any = None,
 ) -> None:
-    """Register Confluence tools with direct credentials or database lookup."""
+    """Register the 2 Confluence meta-tools (confluence_read + confluence_write)."""
     if domain and email and api_token:
         client = ConfluenceAPIClient(domain, email, api_token)
     else:
         logger.warning("Confluence tools registered without credentials — will fail on use")
         client = ConfluenceAPIClient("", "", "")
 
-    # Read tools
-    register_tool(SEARCH_CONFLUENCE_DEFINITION, ConfluenceSearchExecutor(client))
-    register_tool(READ_CONFLUENCE_PAGE_DEFINITION, ConfluenceReadExecutor(client))
-    # Write tools
-    register_tool(CREATE_CONFLUENCE_PAGE_DEFINITION, ConfluenceCreatePageExecutor(client))
-    register_tool(UPDATE_CONFLUENCE_PAGE_DEFINITION, ConfluenceUpdatePageExecutor(client))
-    register_tool(ADD_CONFLUENCE_COMMENT_DEFINITION, ConfluenceAddCommentExecutor(client))
-    register_tool(DELETE_CONFLUENCE_PAGE_DEFINITION, ConfluenceDeletePageExecutor(client))
-    logger.info(f"Registered 6 Confluence tools (2 read + 4 write) for {domain or 'unconfigured'}")
+    register_tool(CONFLUENCE_READ_DEFINITION, ConfluenceReadExecutor(client))
+    register_tool(CONFLUENCE_WRITE_DEFINITION, ConfluenceWriteExecutor(client))
+    logger.info(
+        f"Registered 2 Confluence meta-tools (read + write, 11 actions total) "
+        f"for {domain or 'unconfigured'}"
+    )

@@ -41,8 +41,9 @@ class ConnectorMCPService:
     ) -> list[dict[str, str]]:
         """Activate Confluence tools for a tenant.
 
-        Registers search_confluence and read_confluence_page tools
-        that use the provided credentials.
+        Registers `confluence_read` and `confluence_write` meta-tools
+        that use the provided credentials. Between them they expose 11
+        Confluence operations via an `action` enum.
         """
         key = f"{tenant_id}:confluence"
 
@@ -63,22 +64,23 @@ class ConnectorMCPService:
             raise RuntimeError(f"Failed to activate Confluence tools: {exc}")
 
         self._active[key] = True
+        # Two meta-tools replacing the old 8 single-purpose ones.
+        # Actions: read = search/read_page/list_spaces/get_space/list_children
+        #          write = create_page/update_page/find_replace/comment/delete_page
         self._tool_names[key] = [
-            "search_confluence",
-            "read_confluence_page",
-            "create_confluence_page",
-            "update_confluence_page",
-            "add_confluence_comment",
-            "delete_confluence_page",
+            "confluence_read",
+            "confluence_write",
         ]
 
         tools = [
-            {"name": "search_confluence", "description": "Search Confluence pages by keyword via CQL"},
-            {"name": "read_confluence_page", "description": "Read full content of a Confluence page by ID or title"},
-            {"name": "create_confluence_page", "description": "Create a new Confluence page (requires approval)"},
-            {"name": "update_confluence_page", "description": "Update an existing Confluence page (requires approval)"},
-            {"name": "add_confluence_comment", "description": "Add a comment to a Confluence page"},
-            {"name": "delete_confluence_page", "description": "Delete (trash) a Confluence page (requires approval)"},
+            {
+                "name": "confluence_read",
+                "description": "Read Confluence: search pages, read a page (by id/title/url), list spaces, get a space, list children.",
+            },
+            {
+                "name": "confluence_write",
+                "description": "Write Confluence: create_page / update_page / find_replace (safe partial edit) / comment / delete_page. Requires user approval.",
+            },
         ]
 
         logger.info(
