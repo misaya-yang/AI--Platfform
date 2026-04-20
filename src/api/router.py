@@ -5,7 +5,7 @@ from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
 from .v1.confluence import router as confluence_router
-from .v1.debug_tools import router as debug_tools_router
+from .v1.tool_inventory import router as debug_tools_router
 from .v1.conversations import router as conversations_router
 from .v1.dashboard import router as dashboard_router
 from .v1.files import router as files_router
