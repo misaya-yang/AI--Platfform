@@ -128,7 +128,11 @@ numpy, pandas, matplotlib, seaborn, openpyxl, xlrd, scipy, plotly
 ## Best Practices
 1. Always list input directory first: os.listdir('/workspace/input/')
 2. Use pandas.read_excel() or read_csv() for data files
-3. Save all charts to /workspace/output/ with descriptive names
+3. **CRITICAL — charts must be written to disk with `plt.savefig(...)`**:
+   only files in `/workspace/output/` become user-visible artifacts.
+   Never use `plt.show()` alone — it produces no artifact. After each
+   figure, call `plt.savefig('/workspace/output/<name>.png', dpi=150,
+   bbox_inches='tight')` then `plt.close()`.
 4. Print key metrics and analysis results to stdout
 5. Use Chinese labels for charts when user speaks Chinese
 

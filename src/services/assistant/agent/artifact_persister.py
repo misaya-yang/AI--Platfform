@@ -75,6 +75,14 @@ async def persist_and_collect_events(
           into AgentLoopEvent(data=...).
         - created_artifact_ids: string IDs of newly persisted artifacts.
     """
+    # Always log entry so "did persistence run?" is answerable from logs.
+    logger.info(
+        "[artifact_persister] tool=%s output_files_in=%d storage=%s",
+        tool_name,
+        len(tool_output_files or []),
+        "s3" if artifact_storage is not None else "none",
+    )
+
     if not tool_output_files:
         return [], [], []
 

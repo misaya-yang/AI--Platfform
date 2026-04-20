@@ -2016,6 +2016,25 @@ export function useChatSession() {
                 event.data as Record<string, unknown>
               );
             }
+            // Also flip processSummary to "succeeded" here so the
+            // "Preparing response" indicator always clears on stream end —
+            // decouples the UI from `run_finished` which may arrive late
+            // (or be buffered behind the generator's finally block).
+            updateAssistantMessage((m) => {
+              if (!m.processSummary) return m;
+              if (m.processSummary.status === "failed") return m;
+              const startedAt = m.processSummary.startedAt;
+              return {
+                ...m,
+                processSummary: {
+                  ...m.processSummary,
+                  status: "succeeded",
+                  totalDurationMs: startedAt
+                    ? now - startedAt
+                    : m.processSummary.totalDurationMs,
+                },
+              };
+            });
             syncTurnStateToMessage();
             break;
             

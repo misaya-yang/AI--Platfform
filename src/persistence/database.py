@@ -1464,9 +1464,9 @@ class DatabaseStorage:
             params.append(status)
             param_idx += 1
 
-        # By default, hide expired sessions from list views.
-        if status == "active":
-            query += " AND (expires_at IS NULL OR expires_at > NOW())"
+        # Intentionally NOT filtering by expires_at: the 7-day TTL silently
+        # dropped old sessions from the sidebar (looks like data loss to the
+        # user). Hard expiry is handled by `cleanup_expired_sessions`.
 
         query += f" ORDER BY updated_at DESC LIMIT ${param_idx}"
         params.append(limit)
@@ -1527,8 +1527,7 @@ class DatabaseStorage:
             params.append(status)
             param_idx += 1
 
-        if status == "active":
-            query += " AND (expires_at IS NULL OR expires_at > NOW())"
+        # Same policy as list_sessions: don't silently hide expired sessions.
 
         query += f" ORDER BY updated_at DESC LIMIT ${param_idx}"
         params.append(limit)
