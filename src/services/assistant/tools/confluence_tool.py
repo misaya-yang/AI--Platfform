@@ -297,7 +297,28 @@ def _markdown_to_storage(content: str) -> str:
 
     if not out_parts:
         return "<p></p>"
-    return "".join(out_parts)
+    rendered = "".join(out_parts)
+    # Merge consecutive list blocks that stripping HTML-wrappers produced as
+    # separate single-item lists, e.g. `<ul><li>a</li></ul><ul><li>b</li></ul>`
+    # → `<ul><li>a</li><li>b</li></ul>`. Cosmetic but matters for semantic
+    # list rendering / ordered-list numbering.
+    rendered = re.sub(r"</ul>\s*<ul>", "", rendered)
+    rendered = re.sub(r"</ol>\s*<ol>", "", rendered)
+    return rendered
+
+
+# Standard HTML entities that are "already escaped" — if the user's
+# replacement contains a bare `&` that IS followed by one of these, we
+# leave it alone. A bare `&` followed by anything else becomes `&amp;`.
+_BARE_AMP_RE = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)")
+
+
+def _escape_for_storage(text: str) -> str:
+    """Escape XHTML specials so plain-text content doesn't corrupt
+    Confluence storage format. Idempotent for already-escaped input."""
+    text = _BARE_AMP_RE.sub("&amp;", text)
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
+    return text
 
 
 def _filter_and_rank_spaces(spaces: list[dict], query: str) -> list[dict]:
@@ -360,53 +381,12 @@ def _excerpt_from_html(html: str, max_chars: int) -> str:
 CONFLUENCE_READ_DEFINITION = ToolDefinition(
     name="confluence_read",
     description=(
-        "Read-only Confluence operations. Use the `action` parameter to "
-        "pick what to do. This one tool covers search, full-page read, "
-        "space listing, and page-tree navigation.\n\n"
-        "ACTIONS (pick one, supply only the listed params):\n"
-        "  • \"search\" — find pages. Several search dimensions are "
-        "available; you pick the strategy. Required: at least one of "
-        "`query`, `cql`, `author`, `updated_since`, `under_page_id`.\n"
-        "    Optional dimensions:\n"
-        "      - `fields`: which fields to match keywords against — any "
-        "subset of ['title','text']. DEFAULT ['title','text']. Pages with "
-        "Chinese titles often only match title (body is a table with no "
-        "prose) — if default returns 0, retry with fields=['title'] and a "
-        "shorter, 1-3-token query.\n"
-        "      - `space_key`: narrow to one space.\n"
-        "      - `author`: accountId or username. Filters by page creator.\n"
-        "      - `updated_since`: ISO date 'YYYY-MM-DD'. Only pages "
-        "modified on/after.\n"
-        "      - `under_page_id`: only pages under this page (subtree).\n"
-        "      - `cql`: raw Confluence CQL. OVERRIDES every other "
-        "parameter. Use for advanced ops: `title = \"exact match\"`, "
-        "`label = 'foo'`, `type = blogpost`, negative matches, etc.\n"
-        "      - `limit`: default 10, max 25.\n"
-        "    The tool RETURNS the CQL it executed + a diagnostic hint. "
-        "If hits=0, the hint tells you what to try next (e.g. "
-        "\"try fields=['title']\" or \"drop space_key\"). Read that hint "
-        "and pick ONE narrower/broader retry — don't blindly re-phrase.\n"
-        "    Excerpts are ~800 chars; for list pages escalate to read_page.\n"
-        "  • \"read_page\" — fetch full content of one page (up to 20K "
-        "chars, markdown-formatted). Required: ONE of page_id, title, or "
-        "url. When a URL is given the tool extracts page_id automatically. "
-        "Response includes the page's `parent_id` and full ancestor path — "
-        "use `parent_id` verbatim when calling confluence_write "
-        "action=create_page to create a sibling at the same level.\n"
-        "  • \"list_spaces\" — list/fuzzy-search Confluence spaces "
-        "(top-level workspaces). Use this when the user asks 'find a "
-        "space about X', 'which workspace has…'. Optional: query, keys "
-        "(array of exact keys), space_type, labels, limit (default 50). "
-        "Note: search_confluence searches PAGES, list_spaces searches "
-        "SPACES (containers) — use this first if intent is to locate a "
-        "workspace.\n"
-        "  • \"get_space\" — single space details. Required: ONE of "
-        "space_id or space_key.\n"
-        "  • \"list_children\" — list direct child pages of a page "
-        "(one level). Required: page_id. Optional: limit (default 25).\n\n"
-        "TROUBLESHOOTING: don't retry search with different phrasings to "
-        "get more detail — excerpt length is fixed. Either supply space_key "
-        "to narrow, or escalate to read_page for the single page you want."
+        "Read-only Confluence operations. Pick `action` from: "
+        "`search` (find pages), `read_page` (fetch one page by id/title/url), "
+        "`list_spaces` (find workspaces), `get_space` (one space's details), "
+        "`list_children` (direct child pages of a page). "
+        "Supply only the params listed per action — see `when_to_use` for "
+        "full parameter semantics and failure-recovery tips."
     ),
     parameters=[
         ToolParameter(
@@ -528,7 +508,35 @@ CONFLUENCE_READ_DEFINITION = ToolDefinition(
     risk_level=ToolRiskLevel.LOW,
     when_to_use=(
         "Any Confluence read task: searching pages/spaces, reading a page, "
-        "navigating page tree."
+        "navigating page tree.\n\n"
+        "ACTION DETAILS:\n\n"
+        "• search — find pages. Requires at least one of query, cql, "
+        "author, updated_since, under_page_id. Optional dimensions:\n"
+        "    - fields: subset of ['title','text']. DEFAULT both. Pages "
+        "with Chinese titles often only match title (body is a table with "
+        "no prose) — if default returns 0, retry fields=['title'] with a "
+        "shorter, 1-3-token query.\n"
+        "    - space_key: narrow to one space.\n"
+        "    - author: accountId or username.\n"
+        "    - updated_since: ISO date 'YYYY-MM-DD'.\n"
+        "    - under_page_id: restrict to a page's subtree.\n"
+        "    - cql: raw Confluence CQL, overrides everything. For exact "
+        "titles (`title = \"X\"`), labels, blogposts, negatives.\n"
+        "    - limit: default 10, max 25.\n"
+        "  Returns the CQL it executed + a diagnostic hint on 0 hits. "
+        "READ the hint — pick ONE narrower/broader retry, don't blindly "
+        "re-phrase.\n\n"
+        "• read_page — full content (up to 20K chars, markdown). Requires "
+        "ONE of page_id / title / url. URL → page_id auto-extracted. "
+        "Response includes parent_id + ancestor path — pass parent_id "
+        "verbatim to confluence_write create_page to make a sibling.\n\n"
+        "• list_spaces — find workspaces. Params: query (fuzzy on "
+        "name/key/desc), keys (exact list), space_type, labels, limit "
+        "(default 50). Use this BEFORE search when intent is 'find the "
+        "workspace containing…'.\n\n"
+        "• get_space — one space's metadata. Requires space_id or space_key.\n\n"
+        "• list_children — direct child pages of a page (one level). "
+        "Requires page_id. Optional limit (default 25)."
     ),
     when_not_to_use=(
         "Do not use for mutations (create/update/delete/comment) — use "
@@ -564,38 +572,12 @@ CONFLUENCE_READ_DEFINITION = ToolDefinition(
 CONFLUENCE_WRITE_DEFINITION = ToolDefinition(
     name="confluence_write",
     description=(
-        "Confluence write operations (create/update/edit/comment/delete). "
-        "ALL actions are reversible only by admins (delete goes to trash); "
-        "the permission layer gates this tool behind user confirmation.\n\n"
-        "ACTIONS (pick one):\n"
-        "  • \"create_page\" — new page. Required: space_key, title, "
-        "content (markdown accepted). Optional: parent_id for nested pages.\n"
-        "    TO CREATE A SIBLING of an existing page (same level, same "
-        "parent): first call confluence_read(action=\"read_page\", page_id=...) "
-        "on the reference page — OR use the parent_id shown in search "
-        "results directly — then pass that SAME parent_id here. Don't "
-        "guess — always consult the reference page's actual parent_id.\n"
-        "  • \"move_page\" — relocate a page under a new parent (within "
-        "the same space). Required: page_id, target_parent_id. Validates "
-        "that target exists and is in the same space before mutating; "
-        "refuses no-op if the page is already there. Cross-space moves "
-        "are not supported by the V1 API.\n"
-        "  • \"update_page\" — FULL REPLACEMENT of page body. Required: "
-        "page_id, content. Optional: title. ⚠️ Overwrites everything — "
-        "prefer find_replace for small edits on long pages.\n"
-        "  • \"find_replace\" — targeted edit: locate a unique substring "
-        "and replace it. Required: page_id, find, replace. Refuses if "
-        "`find` has 0 or >1 matches (narrow the pattern until it's unique). "
-        "USE THIS for 'change line X to Y' type requests — it won't destroy "
-        "the rest of the page.\n"
-        "  • \"comment\" — add a page-level comment. Required: page_id, "
-        "body (the comment text).\n"
-        "  • \"delete_page\" — move page to trash. Required: page_id. "
-        "Confirm the page title/id with the user before calling.\n\n"
-        "Content accepts markdown: headings (# to ######), bullet/ordered "
-        "lists, **bold**, *italic*, `inline code`, ```fenced code```, "
-        "[links](url). Raw HTML passes through. Convert markdown → storage "
-        "format is automatic."
+        "Confluence write operations. Pick `action` from: "
+        "`create_page`, `update_page`, `find_replace`, `move_page`, "
+        "`comment`, `delete_page`. ALL actions require user confirmation "
+        "(gated by the permission layer). Content accepts markdown; "
+        "converted to Confluence storage format automatically. See "
+        "`when_to_use` for per-action parameters and safety rules."
     ),
     parameters=[
         ToolParameter(
@@ -654,6 +636,18 @@ CONFLUENCE_WRITE_DEFINITION = ToolDefinition(
             required=False,
         ),
         ToolParameter(
+            name="raw_html",
+            type="boolean",
+            description=(
+                "For find_replace: treat `replace` as raw XHTML (don't escape "
+                "& / < / >). Default false — plain text is auto-escaped so "
+                "innocent content like 'A & B' doesn't corrupt page markup. "
+                "Only set true when intentionally inserting tags like <strong>."
+            ),
+            required=False,
+            default=False,
+        ),
+        ToolParameter(
             name="body",
             type="string",
             description="For comment: the comment text.",
@@ -664,8 +658,31 @@ CONFLUENCE_WRITE_DEFINITION = ToolDefinition(
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=True,
     when_to_use=(
-        "User explicitly asks to create, edit, update, comment on, or "
-        "delete a Confluence page. ALWAYS confirm destructive actions."
+        "User explicitly asks to create, edit, update, comment on, move, "
+        "or delete a Confluence page. Always confirm destructive actions.\n\n"
+        "ACTION DETAILS:\n\n"
+        "• create_page — new page. Requires space_key, title, content "
+        "(markdown accepted). Optional parent_id to nest under a parent. "
+        "TO CREATE A SIBLING of an existing page: first read_page on the "
+        "reference — use the parent_id it returns, or use parent_id from "
+        "a search hit directly. Don't guess.\n\n"
+        "• update_page — FULL body replacement. Requires page_id, content. "
+        "Optional title (rename). ⚠️ Overwrites everything — prefer "
+        "find_replace for small edits on long pages.\n\n"
+        "• find_replace — targeted partial edit. Requires page_id, find, "
+        "replace. Refuses if `find` has 0 or >1 matches (narrow pattern "
+        "until unique). USE FOR 'change X to Y' on long pages. `replace` "
+        "is auto-escaped as plain text; set raw_html=true only when "
+        "intentionally inserting XHTML like <strong>.\n\n"
+        "• move_page — relocate under a new parent (same space). Requires "
+        "page_id, target_parent_id. Refuses cross-space moves and no-ops.\n\n"
+        "• comment — add page-level comment. Requires page_id, body.\n\n"
+        "• delete_page — move to trash. Requires page_id. Confirm title/id "
+        "with user first.\n\n"
+        "Markdown is converted to Confluence storage format automatically: "
+        "headings (# — ######), bullet/ordered lists, **bold**, *italic*, "
+        "`inline code`, ```fenced code```, [links](url). Raw HTML also "
+        "passes through (detected and preserved)."
     ),
     when_not_to_use=(
         "Never use speculatively. Never delete pages the user did not "
@@ -856,6 +873,14 @@ class ConfluenceAPIClient:
 
         # ---------- 2. Execute ----------
         limit = max(1, min(int(limit), 25))
+        # Log CQL at debug — truncated to avoid blowing the log line on
+        # very long queries but full enough for correlation with API logs.
+        logger.debug(
+            "confluence.search strategy=%s cql=%r limit=%d",
+            used_strategy,
+            effective_cql[:300],
+            limit,
+        )
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"{self.base_url}/content/search",
@@ -1421,7 +1446,7 @@ class ConfluenceAPIClient:
         }
 
     async def find_and_replace_in_page(
-        self, page_id: str, find: str, replace: str
+        self, page_id: str, find: str, replace: str, *, raw_html: bool = False
     ) -> dict:
         """Safe partial edit. Requires `find` to match EXACTLY ONCE, raises
         ValueError for 0 or >1 matches so the model corrects itself rather
@@ -1429,9 +1454,18 @@ class ConfluenceAPIClient:
 
         Operates on Confluence storage-format XHTML. Model should first
         `read_page` to see the exact text before composing `find`.
+
+        By default `replace` is treated as plain text and escaped for XHTML
+        (bare `&`, `<`, `>` become entities) so a replacement like
+        "A & B" doesn't corrupt page markup. Set `raw_html=True` when the
+        replacement IS meant to be XHTML (inserting `<strong>` etc.).
         """
         if not find:
             raise ValueError("`find` must be non-empty")
+        if replace is None:
+            raise ValueError("`replace` must not be None")
+        if not raw_html:
+            replace = _escape_for_storage(replace)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 f"{self.base_url}/content/{page_id}",
@@ -1641,11 +1675,121 @@ def _format_children(children: list[dict], page_id: str) -> str:
     return "\n".join(lines)
 
 
-class ConfluenceReadExecutor(ToolExecutor):
-    """Dispatches read-only Confluence operations by `action`."""
+class _TenantClientResolver:
+    """Resolves a `ConfluenceAPIClient` for each call, keyed by the
+    caller's tenant_id.
 
-    def __init__(self, client: ConfluenceAPIClient):
-        self.client = client
+    Why this exists: `register_confluence_tools` runs process-globally and
+    only stores ONE executor instance. If we close over one tenant's
+    credentials at registration time, every tenant's request hits that
+    same Confluence workspace — a cross-tenant credential leak.
+
+    So instead, the executor stores a *database reference* (+ a one-time
+    fallback client for legacy single-tenant deployments & tests). At
+    call time `resolve(request)` reads `request.user.tenant_id`, queries
+    `confluence_connections` for that tenant's active row, and returns a
+    client built from those credentials.
+
+    We cache per-tenant clients for a short TTL (60s) so we don't slam
+    the DB on every tool call during a multi-iteration agent turn.
+    """
+
+    _CACHE_TTL_SECONDS = 60.0
+
+    def __init__(
+        self,
+        database: Any = None,
+        fallback_client: ConfluenceAPIClient | None = None,
+    ):
+        self._database = database
+        self._fallback = fallback_client
+        self._cache: dict[str, tuple[float, ConfluenceAPIClient]] = {}
+
+    def _cache_get(self, tenant_id: str) -> ConfluenceAPIClient | None:
+        entry = self._cache.get(tenant_id)
+        if entry is None:
+            return None
+        ts, client = entry
+        if (time.time() - ts) > self._CACHE_TTL_SECONDS:
+            self._cache.pop(tenant_id, None)
+            return None
+        return client
+
+    def _cache_put(self, tenant_id: str, client: ConfluenceAPIClient) -> None:
+        self._cache[tenant_id] = (time.time(), client)
+
+    async def resolve(self, request: ToolCallRequest) -> ConfluenceAPIClient:
+        """Return the ConfluenceAPIClient the caller should use.
+
+        Resolution order:
+          1. request.user.tenant_id → DB lookup → per-tenant client (CACHED).
+          2. tenant_id in request.metadata → DB lookup (rarely used; kept for
+             backwards compat with call sites that don't wire UserContext).
+          3. Fallback client (legacy single-tenant ctor / tests).
+        If none resolve, raise ValueError with a message the model can relay.
+        """
+        tenant_id = ""
+        user = getattr(request, "user", None)
+        if user is not None:
+            tenant_id = getattr(user, "tenant_id", "") or ""
+        if not tenant_id:
+            tenant_id = str((request.metadata or {}).get("tenant_id") or "")
+
+        if tenant_id and self._database is not None:
+            cached = self._cache_get(tenant_id)
+            if cached is not None:
+                return cached
+            try:
+                rows = await self._database.list_confluence_connections(
+                    tenant_id=tenant_id, status="active", limit=1
+                )
+            except Exception:
+                logger.exception(
+                    "confluence: DB lookup failed for tenant %s — falling back",
+                    tenant_id,
+                )
+                rows = []
+            if rows:
+                row = rows[0]
+                domain = (row.get("domain") or "").strip()
+                email = (row.get("email") or "").strip()
+                token = (row.get("api_token") or "").strip()
+                if domain and email and token:
+                    client = ConfluenceAPIClient(domain, email, token)
+                    self._cache_put(tenant_id, client)
+                    return client
+
+        if self._fallback is not None and self._fallback.domain:
+            # Only use fallback if it has real creds (avoids the empty
+            # placeholder from register_confluence_tools() without args).
+            return self._fallback
+
+        raise ValueError(
+            "No active Confluence connection for this tenant. Ask the user "
+            "to connect Confluence via the Integrations panel, or ensure "
+            f"the tenant row exists in confluence_connections (tenant_id={tenant_id!r})."
+        )
+
+
+class ConfluenceReadExecutor(ToolExecutor):
+    """Dispatches read-only Confluence operations by `action`.
+
+    Two ways to construct (in priority order when both provided):
+      - `database=...`: per-call tenant-scoped credential lookup (production).
+      - `client=...`: static client (tests and legacy single-tenant mode).
+    """
+
+    def __init__(
+        self,
+        client: ConfluenceAPIClient | None = None,
+        database: Any = None,
+    ):
+        self._resolver = _TenantClientResolver(
+            database=database, fallback_client=client
+        )
+        # `self.client` kept as a shim for legacy tests that poke at
+        # `executor.client` directly — always returns the fallback if present.
+        self.client = client  # may be None when DB-only
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         start = time.time()
@@ -1653,6 +1797,13 @@ class ConfluenceReadExecutor(ToolExecutor):
         action = str(args.get("action") or "").strip()
         if not action:
             return _err(request, "`action` is required (search/read_page/list_spaces/get_space/list_children)", start)
+
+        # Resolve the correct per-tenant client BEFORE dispatch so we never
+        # accidentally use another tenant's credentials.
+        try:
+            client = await self._resolver.resolve(request)
+        except ValueError as ve:
+            return _err(request, str(ve) + _ANTI_HALLUCINATION_NOTE, start)
 
         try:
             if action == "search":
@@ -1675,7 +1826,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                 under_page_id = args.get("under_page_id") or None
                 limit = max(1, min(int(args.get("limit") or 10), 25))
                 try:
-                    search_result = await self.client.search(
+                    search_result = await client.search(
                         query=query,
                         space_key=space_key,
                         fields=fields,
@@ -1708,7 +1859,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                 title = (args.get("title") or "").strip() or None
                 url = (args.get("url") or "").strip() or None
                 if url and not page_id:
-                    page_id = self.client.resolve_url_to_page_id(url)
+                    page_id = client.resolve_url_to_page_id(url)
                     if not page_id:
                         return _err(
                             request,
@@ -1718,7 +1869,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                         )
                 if not page_id and not title:
                     return _err(request, "`read_page` requires page_id, title, or url", start)
-                page = await self.client.read_page(page_id=page_id, title=title)
+                page = await client.read_page(page_id=page_id, title=title)
                 if not page:
                     return ToolCallResult(
                         call_id=request.call_id,
@@ -1783,7 +1934,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                     limit = max(1, min(int(args.get("limit") or 50), 250))
                 except (TypeError, ValueError):
                     limit = 50
-                spaces = await self.client.list_spaces(
+                spaces = await client.list_spaces(
                     query=query, keys=keys, space_type=space_type, labels=labels, limit=limit
                 )
                 return ToolCallResult(
@@ -1800,7 +1951,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                 space_key = (args.get("space_key") or "").strip() or None
                 if not space_id and not space_key:
                     return _err(request, "`get_space` requires space_id or space_key", start)
-                space = await self.client.get_space(space_id=space_id, space_key=space_key)
+                space = await client.get_space(space_id=space_id, space_key=space_key)
                 if not space:
                     return ToolCallResult(
                         call_id=request.call_id,
@@ -1836,7 +1987,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                     limit = max(1, min(int(args.get("limit") or 25), 100))
                 except (TypeError, ValueError):
                     limit = 25
-                children = await self.client.list_children(page_id, limit=limit)
+                children = await client.list_children(page_id, limit=limit)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -1865,9 +2016,18 @@ class ConfluenceReadExecutor(ToolExecutor):
 class ConfluenceWriteExecutor(ToolExecutor):
     """Dispatches write Confluence operations by `action`. Gated by
     `requires_confirmation=True` in the definition — the permission
-    middleware yields a `confirm` verdict before execution."""
+    middleware yields a `confirm` verdict before execution.
 
-    def __init__(self, client: ConfluenceAPIClient):
+    See `ConfluenceReadExecutor` for the two-arg ctor rationale."""
+
+    def __init__(
+        self,
+        client: ConfluenceAPIClient | None = None,
+        database: Any = None,
+    ):
+        self._resolver = _TenantClientResolver(
+            database=database, fallback_client=client
+        )
         self.client = client
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
@@ -1877,6 +2037,12 @@ class ConfluenceWriteExecutor(ToolExecutor):
         if not action:
             return _err(request, "`action` is required (create_page/update_page/find_replace/comment/delete_page)", start)
 
+        # Resolve per-tenant client — never trust a process-global one.
+        try:
+            client = await self._resolver.resolve(request)
+        except ValueError as ve:
+            return _err(request, str(ve) + _ANTI_HALLUCINATION_NOTE, start)
+
         try:
             if action == "create_page":
                 space_key = (args.get("space_key") or "").strip()
@@ -1885,7 +2051,7 @@ class ConfluenceWriteExecutor(ToolExecutor):
                 if not space_key or not title:
                     return _err(request, "`create_page` requires space_key and title", start)
                 parent_id = (args.get("parent_id") or "").strip() or None
-                page = await self.client.create_page(
+                page = await client.create_page(
                     space_key=space_key, title=title, content=content, parent_id=parent_id
                 )
                 return ToolCallResult(
@@ -1909,7 +2075,7 @@ class ConfluenceWriteExecutor(ToolExecutor):
                 if not page_id or content is None:
                     return _err(request, "`update_page` requires page_id and content", start)
                 title = (args.get("title") or "").strip() or None
-                page = await self.client.update_page(page_id=page_id, content=content, title=title)
+                page = await client.update_page(page_id=page_id, content=content, title=title)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -1933,8 +2099,9 @@ class ConfluenceWriteExecutor(ToolExecutor):
                         "`find_replace` requires page_id, find (non-empty), replace",
                         start,
                     )
-                page = await self.client.find_and_replace_in_page(
-                    page_id=page_id, find=find, replace=replace
+                raw_html = bool(args.get("raw_html"))
+                page = await client.find_and_replace_in_page(
+                    page_id=page_id, find=find, replace=replace, raw_html=raw_html
                 )
                 return ToolCallResult(
                     call_id=request.call_id,
@@ -1959,7 +2126,7 @@ class ConfluenceWriteExecutor(ToolExecutor):
                         "`move_page` requires page_id and target_parent_id",
                         start,
                     )
-                r = await self.client.move_page(
+                r = await client.move_page(
                     page_id=page_id, target_parent_id=target_parent_id
                 )
                 return ToolCallResult(
@@ -1987,7 +2154,7 @@ class ConfluenceWriteExecutor(ToolExecutor):
                 body_text = args.get("body") or args.get("comment") or ""
                 if not page_id or not body_text:
                     return _err(request, "`comment` requires page_id and body", start)
-                r = await self.client.add_comment(page_id=page_id, comment=body_text)
+                r = await client.add_comment(page_id=page_id, comment=body_text)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -2005,7 +2172,7 @@ class ConfluenceWriteExecutor(ToolExecutor):
                 page_id = (args.get("page_id") or "").strip()
                 if not page_id:
                     return _err(request, "`delete_page` requires page_id", start)
-                r = await self.client.delete_page(page_id=page_id)
+                r = await client.delete_page(page_id=page_id)
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -2038,19 +2205,48 @@ def register_confluence_tools(
     domain: str = "",
     email: str = "",
     api_token: str = "",
-    tenant_id: str = "",
+    tenant_id: str = "",  # accepted for backwards compat; no longer consumed here
     database: Any = None,
 ) -> None:
-    """Register the 2 Confluence meta-tools (confluence_read + confluence_write)."""
-    if domain and email and api_token:
-        client = ConfluenceAPIClient(domain, email, api_token)
-    else:
-        logger.warning("Confluence tools registered without credentials — will fail on use")
-        client = ConfluenceAPIClient("", "", "")
+    """Register the 2 Confluence meta-tools (confluence_read + confluence_write).
 
-    register_tool(CONFLUENCE_READ_DEFINITION, ConfluenceReadExecutor(client))
-    register_tool(CONFLUENCE_WRITE_DEFINITION, ConfluenceWriteExecutor(client))
+    Two modes, picked automatically:
+
+    1. **Multi-tenant (recommended, production)**: pass `database=<Database>`.
+       The executor resolves each call's credentials from
+       `confluence_connections` using `request.user.tenant_id`. Tenants are
+       isolated — one tenant's tool call never hits another's Confluence.
+
+    2. **Single-tenant / legacy**: pass `domain/email/api_token` directly.
+       Used by the old per-tenant activate flow (`/connectors/activate`) and
+       by tests that want a static client. The static client is used as a
+       fallback when no `tenant_id` is on the request.
+
+    Passing both is fine: DB lookup first, static fallback second.
+    """
+    static_client: ConfluenceAPIClient | None = None
+    if domain and email and api_token:
+        static_client = ConfluenceAPIClient(domain, email, api_token)
+
+    if static_client is None and database is None:
+        logger.warning(
+            "Confluence tools registered with neither credentials nor "
+            "database — all calls will fail until a connection is provided."
+        )
+
+    register_tool(
+        CONFLUENCE_READ_DEFINITION,
+        ConfluenceReadExecutor(client=static_client, database=database),
+    )
+    register_tool(
+        CONFLUENCE_WRITE_DEFINITION,
+        ConfluenceWriteExecutor(client=static_client, database=database),
+    )
+
+    mode = (
+        "db-backed (per-tenant)" if database is not None
+        else (f"static ({domain})" if static_client else "uninitialized")
+    )
     logger.info(
-        f"Registered 2 Confluence meta-tools (read + write, 11 actions total) "
-        f"for {domain or 'unconfigured'}"
+        f"Registered 2 Confluence meta-tools (read + write, 11 actions total) — mode: {mode}"
     )

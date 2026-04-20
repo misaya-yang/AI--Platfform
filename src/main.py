@@ -1283,54 +1283,56 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     register_subagent_tool()
     logger.info("Registered spawn_subagent tool")
 
-    # ── Auto-reactivate external connectors from DB on startup ──
-    # `register_confluence_tools` writes into the in-process ToolRegistry
-    # which is wiped on every restart. Without this step the frontend shows
-    # "Confluence connected" (the DB row persists) but the model has zero
-    # Confluence tools, which produces hallucinated "I have created…"
-    # responses. Rehydrate from the active rows in confluence_connections.
+    # ── Register DB-backed Confluence tools ──
+    # Register ONCE with a database reference; the executor resolves
+    # per-call credentials from `confluence_connections` via the request's
+    # tenant_id. Fixes the cross-tenant leak where earlier startup loops
+    # left whichever tenant ran last in control of the process-global
+    # executor.
     database_for_rehydrate = getattr(app.state, "database", None)
     if database_for_rehydrate:
         try:
             from .services.assistant.tools.confluence_tool import register_confluence_tools
 
-            rows = await database_for_rehydrate.list_confluence_connections(
-                status="active", limit=500
-            )
-            activated = 0
-            for row in rows:
-                domain = row.get("domain") or ""
-                email = row.get("email") or ""
-                token = row.get("api_token") or ""
-                tenant_id = row.get("tenant_id") or ""
-                if not (domain and email and token):
-                    logger.warning(
-                        "Confluence connection %s missing credentials; skipping",
-                        row.get("connection_id"),
-                    )
-                    continue
+            register_confluence_tools(database=database_for_rehydrate)
+            # Sanity count with one retry — DB pool may still be warming up.
+            import asyncio as _asyncio
+            count = -1
+            for attempt in (1, 2):
                 try:
-                    register_confluence_tools(
-                        domain=domain,
-                        email=email,
-                        api_token=token,
-                        tenant_id=tenant_id,
+                    rows = await database_for_rehydrate.list_confluence_connections(
+                        status="active", limit=500
                     )
-                    activated += 1
+                    count = len(rows)
+                    if count > 0 or attempt == 2:
+                        break
+                    await _asyncio.sleep(1.0)
                 except Exception:
                     logger.exception(
-                        "Failed to auto-register Confluence tools for tenant %s",
-                        tenant_id,
+                        "Confluence startup sanity query failed (attempt %d)",
+                        attempt,
                     )
-            logger.info(
-                "Auto-registered Confluence tools from DB: %d/%d active connections",
-                activated,
-                len(rows),
-            )
+                    if attempt == 2:
+                        break
+                    await _asyncio.sleep(1.0)
+
+            if count == 0:
+                logger.warning(
+                    "⚠️  Confluence tools registered (DB-backed), but "
+                    "0 active connections in confluence_connections after "
+                    "retry. Tool calls will reject until a tenant connects "
+                    "via the Integrations panel. If you expected active "
+                    "connections, check DB connectivity and the "
+                    "`confluence_connections.status='active'` filter."
+                )
+            elif count > 0:
+                logger.info(
+                    "Confluence tools registered (DB-backed) — %d active tenant connection(s)",
+                    count,
+                )
         except Exception:
             logger.exception(
-                "Confluence auto-rehydration failed — frontend 'activate' will "
-                "need to be clicked manually to restore tools"
+                "Confluence tool registration failed — all Confluence calls will error"
             )
 
     # Store in app.state

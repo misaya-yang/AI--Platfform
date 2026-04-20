@@ -12,24 +12,28 @@ This returns what the model would see on the next request:
 - per-category breakdown
 - flagged Confluence tools (expected: confluence_read + confluence_write)
 
-No authentication is required — the endpoint reveals tool *names* only,
-not credentials or request payloads. Add auth dependency in production
-if even names are considered sensitive.
+Authenticated (bearer token same as other /api/v1 routes) — the tool
+names alone are low-sensitivity, but they reveal which integrations
+this tenant has activated, which counts as reconnaissance info.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from ...core.auth.user_resolver import UserContext
 from ...services.assistant.tools.tool_registry import get_tool_registry
+from ..deps import get_user_context
 
 router = APIRouter(prefix="/debug", tags=["Debug"])
 
 
 @router.get("/tools")
-async def list_registered_tools() -> dict[str, Any]:
+async def list_registered_tools(
+    user: UserContext = Depends(get_user_context),
+) -> dict[str, Any]:
     """Return the live in-process tool registry contents.
 
     Operator sanity check: if `confluence_read` / `confluence_write` are

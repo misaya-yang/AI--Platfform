@@ -205,53 +205,61 @@ async def lifespan(app: FastAPI):
     app.state.kb_proxy = kb_proxy
     app.state.memory_service = memory_service
 
-    # ── Auto-reactivate external connectors from DB on startup ──
-    # `register_confluence_tools` registers into the global in-process
-    # ToolRegistry — that state is wiped on every restart. Without this
-    # step the frontend UI shows "Confluence connected" (the DB row
-    # persists) but the model has zero Confluence tools, which produces
-    # hallucinated "I have created the page" responses. Rehydrate here.
+    # ── Register DB-backed Confluence tools ──
+    # Register ONCE with a database reference. The executors resolve
+    # per-call credentials from `confluence_connections` using the
+    # request's tenant_id. This avoids the old cross-tenant leak where
+    # looping registrations left whichever tenant ran last in control
+    # of the single process-global executor.
+    #
+    # We still do a startup sanity count so logs flag an unexpected
+    # empty state loudly (separate from working auto-registration).
     if database:
         try:
             from src.services.assistant.tools.confluence_tool import register_confluence_tools
 
-            rows = await database.list_confluence_connections(
-                status="active", limit=500
-            )
-            activated = 0
-            for row in rows:
-                domain = row.get("domain") or ""
-                email = row.get("email") or ""
-                token = row.get("api_token") or ""
-                tenant_id = row.get("tenant_id") or ""
-                if not (domain and email and token):
-                    logger.warning(
-                        "Confluence connection %s missing credentials; skipping",
-                        row.get("connection_id"),
-                    )
-                    continue
+            register_confluence_tools(database=database)
+            # Sanity count with a single retry — the DB pool may still be
+            # warming up when startup fires. If both attempts return 0,
+            # we WARN loudly so ops can tell "nobody has connected yet"
+            # apart from "the DB is broken".
+            import asyncio as _asyncio
+            count = -1
+            for attempt in (1, 2):
                 try:
-                    register_confluence_tools(
-                        domain=domain,
-                        email=email,
-                        api_token=token,
-                        tenant_id=tenant_id,
+                    rows = await database.list_confluence_connections(
+                        status="active", limit=500
                     )
-                    activated += 1
+                    count = len(rows)
+                    if count > 0 or attempt == 2:
+                        break
+                    await _asyncio.sleep(1.0)
                 except Exception:
                     logger.exception(
-                        "Failed to auto-register Confluence tools for tenant %s",
-                        tenant_id,
+                        "Confluence startup sanity query failed (attempt %d)",
+                        attempt,
                     )
-            logger.info(
-                "Auto-registered Confluence tools from DB: %d/%d connections",
-                activated,
-                len(rows),
-            )
+                    if attempt == 2:
+                        break
+                    await _asyncio.sleep(1.0)
+
+            if count == 0:
+                logger.warning(
+                    "⚠️  Confluence tools registered (DB-backed), but "
+                    "0 active connections in `confluence_connections` after "
+                    "retry. Tool calls will reject until a tenant connects "
+                    "via the Integrations panel. If you expected active "
+                    "connections, check DB connectivity and the "
+                    "`confluence_connections.status='active'` filter."
+                )
+            elif count > 0:
+                logger.info(
+                    "Confluence tools registered (DB-backed) — %d active tenant connection(s)",
+                    count,
+                )
         except Exception:
             logger.exception(
-                "Confluence connector auto-rehydration failed — frontend 'activate' "
-                "button will need to be clicked manually to restore tools"
+                "Confluence tool registration failed — all Confluence calls will error"
             )
 
     app.state._ready = True
