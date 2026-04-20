@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
@@ -34,7 +34,7 @@ from ..exceptions import AuthError
 # Configuration Constants
 # ============================================================
 ALLOWED_EMAIL_DOMAIN = "hejazfs.com.au"
-DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "111111")
+DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "Hejaz@Welcome2026!")
 MIN_PASSWORD_LENGTH = 8
 BCRYPT_COST_FACTOR = 12
 MAX_LOGIN_ATTEMPTS = 5
@@ -313,18 +313,32 @@ def get_token_id(token: str, secret: str, algorithm: str = "HS256") -> str | Non
 # ============================================================
 
 
-def is_account_locked(locked_until: datetime | None) -> bool:
+def is_account_locked(locked_until: datetime | str | None) -> bool:
     """
     Check if account is currently locked.
 
     Args:
-        locked_until: Lock expiration timestamp
+        locked_until: Lock expiration timestamp. Accepts both ``datetime`` and
+            ISO-8601 ``str`` because the value may round-trip through a Redis
+            JSON cache which serialises datetimes as strings. Without this
+            defensive parse, a stuck lock row would crash every login with a
+            ``TypeError: '>' not supported between instances of 'str' and
+            'datetime.datetime'`` — taking down auth for all users, not just
+            the locked account.
 
     Returns:
         True if account is locked, False otherwise
     """
     if not locked_until:
         return False
+    if isinstance(locked_until, str):
+        try:
+            locked_until = datetime.fromisoformat(locked_until.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    # Normalise to naive UTC so the comparison never blows up on tz mismatch
+    if locked_until.tzinfo is not None:
+        locked_until = locked_until.astimezone(timezone.utc).replace(tzinfo=None)
     return locked_until > datetime.utcnow()
 
 

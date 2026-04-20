@@ -6,7 +6,7 @@ Provides endpoints for user authentication and password management.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -243,7 +243,18 @@ async def login(
     # Check if account is locked
     locked_until = user.get("locked_until")
     if is_account_locked(locked_until):
-        remaining = (locked_until - datetime.utcnow()).seconds // 60 + 1
+        # Normalise string-cached timestamps to a naive UTC datetime before
+        # arithmetic — same defensive parse as is_account_locked. Otherwise a
+        # Redis-cached user row would crash this branch with a TypeError even
+        # though the lock check above passed.
+        if isinstance(locked_until, str):
+            try:
+                locked_until = datetime.fromisoformat(locked_until.replace("Z", "+00:00"))
+            except ValueError:
+                locked_until = datetime.utcnow()
+        if locked_until.tzinfo is not None:
+            locked_until = locked_until.astimezone(timezone.utc).replace(tzinfo=None)
+        remaining = max(0, (locked_until - datetime.utcnow()).seconds // 60 + 1)
         raise HTTPException(
             status_code=423, detail=f"Account is locked. Please try again in {remaining} minutes."
         )

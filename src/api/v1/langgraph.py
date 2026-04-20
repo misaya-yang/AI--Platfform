@@ -627,15 +627,23 @@ async def passthrough(
     upstream_path = "/" + full_path.lstrip("/")
     method = request.method.upper()
 
-    # Best-effort ownership checks for thread/assistant scoped paths.
+    # Ownership checks for thread/assistant scoped paths.
+    # Authorization failures must abort; only non-authorization errors
+    # (network, not-applicable checks) are tolerated.
+    parts = [p for p in upstream_path.split("/") if p]
     try:
-        parts = [p for p in upstream_path.split("/") if p]
         if len(parts) >= 2 and parts[0] == "threads" and parts[1] not in ("search", "count"):
             await proxy.get_thread(user, parts[1])
         if len(parts) >= 2 and parts[0] == "assistants" and parts[1] not in ("search", "count"):
             await proxy.get_assistant(user, parts[1])
+    except (ForbiddenError, AssistantAccessDeniedError) as exc:
+        # Ownership denied — reject immediately, never forward.
+        raise HTTPException(status_code=403, detail=str(exc))
+    except (ThreadNotFoundError, AssistantNotFoundError):
+        # Resource absent — return 404 rather than forwarding.
+        raise HTTPException(status_code=404, detail="resource not found")
     except Exception:
-        # Let upstream decide if our check is not applicable.
+        # Transient / non-applicable check failures: let upstream decide.
         pass
 
     params = list(request.query_params.multi_items())
