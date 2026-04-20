@@ -19,7 +19,7 @@ class UserContext:
     tenant_id: str
     user_tier: str = "normal"
     user_type: str = "user"
-    roles: list = field(default_factory=lambda: ["admin"])
+    roles: list = field(default_factory=lambda: ["user"])
     ip: str = ""
     is_authenticated: bool = True
 

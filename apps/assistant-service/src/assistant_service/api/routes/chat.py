@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -148,8 +151,10 @@ async def chat_stream(
                     "timestamp": event.timestamp,
                 }
                 yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': str(e)}, 'timestamp': time.time()})}\n\n"
+        except Exception:
+            logger.exception("chat_stream_failed", extra={"session_id": session_id, "user_id": user.user_id})
+            # Do not leak internal error details (may contain DSN, API keys, table names).
+            yield f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'Chat stream failed. Please try again.'}, 'timestamp': time.time()})}\n\n"
 
     return StreamingResponse(
         event_generator(),

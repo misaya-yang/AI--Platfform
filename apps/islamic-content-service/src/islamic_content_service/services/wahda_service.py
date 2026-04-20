@@ -66,12 +66,14 @@ class WahdaService:
     # Typeahead (§3.3)
     # ------------------------------------------------------------------
 
+    # PRD §3.3: only these six question-words trigger typeahead.
+    _TYPEAHEAD_WORDS = {"how", "what", "when", "who", "why", "where"}
+
     async def get_typeahead(self, query_prefix: str) -> list[str]:
         prefix = query_prefix.strip().lower()
-        valid = {"how", "what", "when", "who", "why", "where", "is", "can", "does"}
         words = prefix.split()
         word = words[0] if words else ""
-        if word not in valid:
+        if word not in self._TYPEAHEAD_WORDS:
             return []
 
         # Multi-word: fuzzy-match against question pool, prefix matches first
@@ -109,9 +111,18 @@ class WahdaService:
                 "source": "trending",
             }
 
-        # Fallback: mix typeahead + daily
+        # PRD §3.4 fallback: reuse typeahead question pool + daily pool.
+        # Mix from all 6 typeahead categories + daily, randomised.
         fallback = await self._repo.get_daily_questions(today, count=3)
-        extra = await self._repo.get_questions_by_category("typeahead_how", limit=2, random=True)
+        import random
+        categories = [f"typeahead_{w}" for w in self._TYPEAHEAD_WORDS]
+        random.shuffle(categories)
+        extra: list[str] = []
+        for cat in categories:
+            if len(extra) >= 2:
+                break
+            cat_results = await self._repo.get_questions_by_category(cat, limit=1, random=True)
+            extra.extend(cat_results)
         return {
             "questions": (fallback + extra)[:5],
             "period": f"{today.replace(day=max(today.day - 7, 1)).isoformat()} ~ {today.isoformat()}",

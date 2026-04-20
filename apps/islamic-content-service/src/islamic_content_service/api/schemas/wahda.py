@@ -37,7 +37,8 @@ class FeedbackRequest(BaseModel):
         default=None,
         pattern="^(incorrect|not_asked|slow|style|safety|other)$",
     )
-    comment: str | None = None
+    # PRD §3.6.3: 2200 char limit, highlighted red when exceeded (UI enforces).
+    comment: str | None = Field(default=None, max_length=2200)
 
 
 class FeedbackResponse(BaseModel):

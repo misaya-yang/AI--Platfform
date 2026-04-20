@@ -111,10 +111,11 @@ class WahdaRepository:
         return [r["question"] for r in rows]
 
     async def get_all_typeahead_questions(self) -> list[str]:
-        """Get all typeahead + daily questions for client-side pool."""
+        """Get all typeahead questions for client-side pool (PRD-locked to 6 categories × 5)."""
         sql = """
         SELECT DISTINCT question FROM islamic_content.question_pool
         WHERE is_active = true
+          AND category LIKE 'typeahead_%'
         ORDER BY question
         """
         rows = await self._db.fetch(sql)

@@ -29,12 +29,13 @@ from .services.quran_sync_service import QuranSyncService
 from .services.quran_user_service import QuranUserService
 
 OPENAPI_TAGS = [
-    {"name": "Health", "description": "Service liveness and readiness."},
-    {"name": "Meta", "description": "Service metadata, manifest and canonical summary."},
-    {"name": "Quran", "description": "Low-latency Quran read APIs backed by PostgreSQL."},
-    {"name": "Quran User", "description": "Quran OAuth and user API proxy routes."},
-    {"name": "Hadith", "description": "Low-latency Hadith read APIs backed by PostgreSQL."},
-    {"name": "Dua", "description": "Verified Islamic Dua and Adhkar collection."},
+    {"name": "Health", "description": "Service liveness, readiness, and module-level health probes."},
+    {"name": "Meta", "description": "Service metadata, sync manifest, and canonical row-count summary."},
+    {"name": "Quran", "description": "Low-latency Quran read APIs — chapters, ayahs, translations, audio, word-level data. Backed by PostgreSQL (synced from quran.foundation)."},
+    {"name": "Quran User", "description": "Quran user features via OAuth PKCE proxy — bookmarks, notes, collections. Requires `QURAN_USER__ENABLED=true`."},
+    {"name": "Hadith", "description": "Hadith collections, books, and individual narrations with grades. 7 collections, 34,497 hadiths, 74,224 grades (synced from fawazahmed0 CDN + HuggingFace enrichment)."},
+    {"name": "Dua", "description": "Verified Islamic Dua and Adhkar collection — 31 categories, 72 duas with Arabic text, transliteration, and English meaning."},
+    {"name": "Sheikh Wahda", "description": "Wahda AI recommendation system — daily/religious recommendations, typeahead suggestions, trending questions, feedback, conversation sharing, and AI-generated personalized follow-up questions."},
 ]
 
 
@@ -186,10 +187,19 @@ def create_app(settings: Settings | None = None, *, enable_runtime: bool = True)
 
     app = FastAPI(
         title="Islamic Content Service",
-        version="0.1.0",
-        description="Standalone Quran and Hadith content microservice",
+        version="1.0.0",
+        description=(
+            "Standalone Islamic content microservice providing Quran, Hadith, and Dua APIs.\n\n"
+            "**Data sources:**\n"
+            "- Quran: 114 chapters, 6,236 ayahs, 145 translations, 12 recitations (quran.foundation)\n"
+            "- Hadith: 7 collections, 34,497 hadiths, 74,224 grades (fawazahmed0 CDN + HuggingFace)\n"
+            "- Dua: 31 categories, 72 verified duas (local JSON)\n\n"
+            "**Sheikh Wahda:** AI recommendation system with typeahead, trending, feedback, sharing, and personalized questions."
+        ),
         openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
+        contact={"name": "Hejaz AI Team", "email": "tech@hejazfs.com.au"},
+        license_info={"name": "Proprietary"},
     )
 
     from starlette.middleware.cors import CORSMiddleware

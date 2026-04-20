@@ -78,10 +78,15 @@ async def _init_qdrant(settings: Settings) -> Any:
 # ---------------------------------------------------------------------------
 
 OPENAPI_TAGS = [
-    {"name": "Health", "description": "Liveness and readiness probes."},
-    {"name": "Datasets", "description": "Dataset CRUD and listing."},
-    {"name": "Retrieval", "description": "Vector similarity search / RAG retrieval."},
-    {"name": "Worker", "description": "Background ingestion worker status."},
+    {"name": "Health", "description": "Liveness and readiness probes for container orchestration."},
+    {"name": "Datasets", "description": "Dataset CRUD — create, list, update, delete knowledge bases with configurable embedding and chunking."},
+    {"name": "Documents", "description": "Document management — upload (PDF/DOCX/TXT/HTML/images), text creation, batch operations, versioning, and status control."},
+    {"name": "Segments", "description": "Segment (chunk) management — list, create, update, enable/disable individual text segments within documents."},
+    {"name": "Retrieval", "description": "Vector similarity search and hybrid RAG retrieval — dense, BM25, hybrid (RRF/weighted), with optional reranking and MMR diversity."},
+    {"name": "QA", "description": "Question answering — RAG retrieval + LLM generation, with streaming and batch evaluation support."},
+    {"name": "Configuration", "description": "Dataset configuration — chunking strategy, retrieval parameters, embedding settings, and statistics."},
+    {"name": "Maintenance", "description": "Maintenance operations — deduplication, force-complete stuck documents, worker status monitoring."},
+    {"name": "Worker", "description": "Background ingestion worker status and queue monitoring."},
 ]
 
 
@@ -300,11 +305,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Knowledge Base Service",
-        version="0.1.0",
-        description="Independent Knowledge Base microservice extracted from AI Gateway",
+        version="1.0.0",
+        description=(
+            "Independent knowledge base microservice for document ingestion, vector indexing, and RAG retrieval.\n\n"
+            "**Capabilities:**\n"
+            "- Document upload (PDF, DOCX, TXT, HTML, images) with auto-chunking and embedding\n"
+            "- Hybrid search: dense vector + BM25 keyword, with RRF fusion and optional reranking\n"
+            "- Multi-tenant dataset isolation with RBAC permissions\n"
+            "- Document versioning, batch operations, and background worker queue\n\n"
+            "**Stack:** PostgreSQL + Qdrant (vector DB) + Gemini/DashScope embeddings"
+        ),
         openapi_tags=OPENAPI_TAGS,
         default_response_class=ORJSONResponse,
         lifespan=lifespan,
+        contact={"name": "Hejaz AI Team", "email": "tech@hejazfs.com.au"},
+        license_info={"name": "Proprietary"},
     )
 
     # --- CORS ---
