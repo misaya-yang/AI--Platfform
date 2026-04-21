@@ -859,6 +859,20 @@ class ModelRegistry:
                 # Anthropic caches everything up to (and including) the marker.
                 anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
                 body["tools"] = anthropic_tools
+
+        # Native search — Anthropic server tool `web_search_20250305`. Append
+        # to the tools list (the model will call it internally and return
+        # inline citations as `tool_use`/`tool_result` blocks we already
+        # ignore in streaming; sink it to DEBUG if it shows up).
+        if native_search_config and native_search_config.get("tool_type") == "web_search_20250305":
+            server_tool = {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": native_search_config.get("max_uses", 5),
+            }
+            existing = list(body.get("tools") or [])
+            existing.append(server_tool)
+            body["tools"] = existing
         return body
 
     def _build_google_body(
@@ -871,6 +885,7 @@ class ModelRegistry:
         stream: bool,
         thinking_level: str | None = None,
         tool_config: dict[str, Any] | None = None,
+        native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Google Gemini API request body."""
         contents = []
@@ -1022,6 +1037,18 @@ class ModelRegistry:
                 google_tools.append({"functionDeclarations": function_declarations})
                 body["tools"] = google_tools
 
+        # Native search — Gemini 2.x+ exposes `google_search` as a tool; 1.5
+        # uses the older `google_search_retrieval`. The capability map tells
+        # us which form to emit. Append as a separate tool entry (Gemini
+        # accepts multiple tool entries in one request).
+        if native_search_config and native_search_config.get("tool_type") in (
+            "google_search", "google_search_retrieval"
+        ):
+            search_tool_key = native_search_config["tool_type"]
+            existing = list(body.get("tools") or [])
+            existing.append({search_tool_key: {}})
+            body["tools"] = existing
+
         # Apply tool_config if provided
         if tool_config:
             body["toolConfig"] = tool_config
@@ -1036,6 +1063,7 @@ class ModelRegistry:
         max_tokens: int | None = None,
         tools: list[dict[str, Any]] | None = None,
         thinking_level: str | None = None,
+        native_search_config: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, int]]:
         """
         Non-streaming chat completion.
@@ -1057,6 +1085,7 @@ class ModelRegistry:
             tools,
             stream=False,
             thinking_level=thinking_level,
+            native_search_config=native_search_config,
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -1110,6 +1139,7 @@ class ModelRegistry:
         tools: list[dict[str, Any]] | None = None,
         thinking_level: str | None = None,
         tool_config: dict[str, Any] | None = None,
+        native_search_config: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamDelta]:
         """
         Streaming chat completion.
@@ -1131,6 +1161,7 @@ class ModelRegistry:
             stream=True,
             thinking_level=thinking_level,
             tool_config=tool_config,
+            native_search_config=native_search_config,
         )
 
         if model.provider == ModelProvider.GOOGLE:
@@ -1333,6 +1364,16 @@ class ModelRegistry:
                     candidate = candidates[0]
                     content = candidate.get("content", {})
                     parts = content.get("parts", [])
+
+                    # Native search grounding — log chunks/citations at DEBUG.
+                    # Frontend relies on inline markdown links for now; we
+                    # don't emit a new SSE event in this first round.
+                    grounding = candidate.get("groundingMetadata")
+                    if grounding:
+                        chunks = grounding.get("groundingChunks") or []
+                        logger.debug(
+                            f"[GEMINI] groundingChunks received: {len(chunks)} entries"
+                        )
 
                     # Check for finishReason in candidate even if parts are empty
                     finish_reason = candidate.get("finishReason")

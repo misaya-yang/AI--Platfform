@@ -1912,6 +1912,36 @@ class AgentLoop:
                             "[STREAMING-FIRST] Removed search_knowledge_base from remaining "
                             "toolset after first KB completion."
                         )
+
+                # Native web search: if the chosen model has a built-in search
+                # mode AND the user message looks like it wants fresh web info,
+                # enable it and drop Tavily `search_web` from the tool list so
+                # the model doesn't double-search. DeepSeek & other providers
+                # without native search still see Tavily and behave as before.
+                from ..models.model_registry import should_use_native_search
+                _model_info = self.model_registry.get_model(ctx.config.model_id)
+                native_search_cfg: dict[str, Any] | None = None
+                # Use getattr for forward-compat with fake/test ModelInfo objects
+                # that predate the native_search fields.
+                if (
+                    _model_info
+                    and getattr(_model_info, "supports_native_search", False)
+                    and should_use_native_search(ctx.message)
+                ):
+                    native_search_cfg = getattr(_model_info, "native_search_config", None)
+                    if tools_for_iteration:
+                        before_len = len(tools_for_iteration)
+                        tools_for_iteration = [
+                            schema
+                            for schema in tools_for_iteration
+                            if _tool_schema_name(schema) != "search_web"
+                        ]
+                        if len(tools_for_iteration) != before_len:
+                            logger.info(
+                                f"[NATIVE-SEARCH] Using {ctx.config.model_id} built-in "
+                                f"search; dropped search_web tool."
+                            )
+
                 tools_for_call = tools_for_iteration
                 if force_answer_without_tools:
                     tools_for_call = None
@@ -1935,6 +1965,7 @@ class AgentLoop:
                     max_tokens=ctx.config.max_tokens,
                     tools=tools_for_call,
                     thinking_level=ctx.config.thinking_level,
+                    native_search_config=native_search_cfg,
                 ):
                     # Emit thinking content (Qwen reasoning_content / Gemini thought parts)
                     if delta.thinking_content:
