@@ -702,21 +702,22 @@ class ModelRegistry:
             body["tools"] = tools
         if stream:
             body["stream_options"] = {"include_usage": True}
-        # DashScope Qwen 3.x thinking mode
+        # DashScope extensions are TOP-LEVEL fields on the compat endpoint —
+        # NOT nested under `extra_body`. The `extra_body` dict is a client-
+        # side concept in the OpenAI Python SDK (which unpacks it into the
+        # request body); we POST raw JSON, so wrapping silently drops the
+        # flag. Verified live against qwen3.6-plus on 2026-04-21:
+        #   body.extra_body.enable_search = True → flag IGNORED, model
+        #     refuses ("I can't fetch real-time data").
+        #   body.enable_search = True → flag RESPECTED, model returns
+        #     results with real team names and scores.
+        # Same applies to enable_thinking.
         if thinking_level and "qwen3" in model_id.lower():
-            body["extra_body"] = {"enable_thinking": True}
+            body["enable_thinking"] = True
             if not body.get("max_tokens") or body["max_tokens"] < 16384:
                 body["max_tokens"] = 16384
-
-        # Native search — DashScope/Qwen passes `enable_search: true` through
-        # the OpenAI-compat extra_body. Silently ignored by non-DashScope
-        # OpenAI-compatible providers (DeepSeek, OpenAI), so it's safe to
-        # layer blindly — but we only ever set it when the capability map
-        # matched at the caller, which keys on (provider, model_id).
         if native_search_config and native_search_config.get("enable_search"):
-            extra = dict(body.get("extra_body") or {})
-            extra["enable_search"] = True
-            body["extra_body"] = extra
+            body["enable_search"] = True
         return body
 
     def _build_anthropic_body(

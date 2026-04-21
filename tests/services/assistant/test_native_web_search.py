@@ -115,7 +115,10 @@ class TestRequestBodyInjection:
             stream=True,
             native_search_config={"enable_search": True},
         )
-        assert body.get("extra_body", {}).get("enable_search") is True
+        # Top-level, NOT under extra_body. Verified live against DashScope
+        # compat endpoint 2026-04-21 — wrapper is silently ignored.
+        assert body.get("enable_search") is True
+        assert "extra_body" not in body
 
     def test_dashscope_no_injection_when_config_none(self):
         mod = _get_mod()
@@ -129,8 +132,7 @@ class TestRequestBodyInjection:
             stream=True,
             native_search_config=None,
         )
-        # Either no extra_body or no enable_search in it.
-        assert not body.get("extra_body", {}).get("enable_search")
+        assert not body.get("enable_search")
 
     def test_gemini_google_search_tool_appended(self):
         mod = _get_mod()
