@@ -120,7 +120,7 @@ export function ChatInputArea({
   }, [input]);
 
   return (
-    <div className="border-t border-slate-200/80 dark:border-slate-700/50 bg-white/80 dark:bg-slate-800/50 backdrop-blur-xl">
+    <div className="border-t border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))]/90 backdrop-blur-xl">
       {/* File previews */}
       <AnimatePresence>
         {files.length > 0 && (
@@ -128,7 +128,7 @@ export function ChatInputArea({
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden border-b border-slate-200/60 dark:border-slate-700/40"
+            className="overflow-hidden border-b border-[hsl(var(--assistant-border-soft))]"
           >
             <div className="px-4 py-3 flex flex-wrap gap-2">
               {files.map((f, index) => (
@@ -186,7 +186,7 @@ export function ChatInputArea({
       <div className="p-4">
         <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
           {/* Input container */}
-          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm focus-within:border-primary/30 dark:focus-within:border-primary/40 focus-within:shadow-lg focus-within:shadow-primary/5 transition-all duration-200">
+          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] shadow-sm focus-within:border-[hsl(var(--assistant-accent))]/40 focus-within:shadow-lg focus-within:shadow-[hsl(var(--assistant-accent))]/5 transition-all duration-200">
             {/* Quick actions menu */}
             <QuickActionsMenu
               onFileUpload={() => fileInputRef.current?.click()}
@@ -238,10 +238,10 @@ export function ChatInputArea({
                     )
               }
               className={cn(
-                "flex-1 min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-sm text-slate-700 dark:text-slate-200",
+                "flex-1 min-h-[44px] max-h-[200px] resize-none border-0 bg-transparent focus-visible:ring-0 text-sm text-[hsl(var(--assistant-text-primary))]",
                 isImageMode
-                  ? "placeholder:text-primary dark:placeholder:text-primary/80"
-                  : "placeholder:text-slate-400 dark:placeholder:text-slate-500"
+                  ? "placeholder:text-[hsl(var(--assistant-accent))]"
+                  : "placeholder:text-[hsl(var(--assistant-text-tertiary))]"
               )}
               disabled={isStreaming || isGeneratingImage}
               rows={1}
@@ -266,7 +266,7 @@ export function ChatInputArea({
                     ? isImageMode
                       ? "bg-pink-500 hover:bg-pink-600 shadow-sm hover:shadow-md hover:scale-105"
                       : "bg-primary hover:bg-primary/90 shadow-sm hover:shadow-md hover:scale-105"
-                    : "bg-slate-100 dark:bg-slate-700 text-slate-400 cursor-not-allowed"
+                    : "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-tertiary))] cursor-not-allowed"
                 )}
                 onClick={onSend}
                 disabled={!canSend}
@@ -292,7 +292,7 @@ export function ChatInputArea({
                 disabled={isStreaming}
               />
             </div>
-            <span className="text-[11px] text-slate-400 dark:text-slate-500">
+            <span className="text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
               {t("assistant.disclaimer", "AI responses may be inaccurate")}
             </span>
           </div>

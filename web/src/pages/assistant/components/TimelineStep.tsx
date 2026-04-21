@@ -170,16 +170,18 @@ export function TimelineStep({
       ? iconNameForTool(step.icon, toolName)
       : "brain";
 
-  // Marker styling per state — mirrors chat.jsx.
+  // Marker styling per state. Error uses the global destructive token
+  // so the single-accent rule (gold) stays intact and the red signal is
+  // reserved for real failure.
   const markerBg = isRunning
     ? T.accentSoft
     : isError
-      ? "var(--act-errorSoft, oklch(0.97 0.05 25))"
+      ? "hsl(var(--destructive) / 0.15)"
       : T.panel;
   const markerBorder = isRunning
     ? T.accent
     : isError
-      ? "var(--act-error, oklch(0.55 0.2 25))"
+      ? "hsl(var(--destructive))"
       : T.border;
 
   return (
@@ -347,7 +349,7 @@ export function TimelineStep({
             <div
               style={{
                 fontSize: 11.5,
-                color: "var(--act-error, oklch(0.55 0.2 25))",
+                color: "hsl(var(--destructive))",
                 marginTop: 4,
               }}
             >

@@ -222,7 +222,7 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ delay: 0.2 }}
-      className="mt-2 text-[11px] font-mono tabular-nums text-slate-400 dark:text-slate-500"
+      className="mt-2 text-[11px] font-mono tabular-nums text-[hsl(var(--assistant-text-tertiary))]"
     >
       {parts.join(" · ")}
     </motion.div>

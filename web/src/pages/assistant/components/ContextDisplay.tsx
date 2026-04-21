@@ -28,10 +28,10 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
     <div className="mb-4">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 transition-colors group"
+        className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors group"
       >
-        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-gradient-to-br from-emerald-500/20 to-teal-500/20 group-hover:from-emerald-500/30 group-hover:to-teal-500/30 transition-colors">
-          <Database className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+        <div className="flex items-center justify-center w-6 h-6 rounded-lg bg-[hsl(var(--assistant-accent-soft))] group-hover:bg-[hsl(var(--assistant-accent-soft))]/80 transition-colors">
+          <Database className="h-3.5 w-3.5 text-[hsl(var(--assistant-accent))]" />
         </div>
         <span>
           {totalChunks} {t("assistant.sources", "sources")}{" "}
@@ -57,13 +57,13 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
             transition={{ duration: 0.2, ease: "easeInOut" }}
             className="overflow-hidden"
           >
-            <div className="mt-3 space-y-3 p-3 rounded-2xl bg-gradient-to-br from-emerald-50/80 to-teal-50/80 dark:from-emerald-950/30 dark:to-teal-950/30 border border-emerald-200/50 dark:border-emerald-800/30">
+            <div className="mt-3 space-y-3 p-3 rounded-2xl bg-[hsl(var(--assistant-surface-soft))] border border-[hsl(var(--assistant-border-soft))]">
               {contexts.map((ctx) => (
                 <div key={ctx.dataset_id} className="space-y-2">
-                  <div className="flex items-center gap-2 text-xs font-medium text-slate-700 dark:text-slate-300">
-                    <FileText className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <div className="flex items-center gap-2 text-xs font-medium text-[hsl(var(--assistant-text-primary))]">
+                    <FileText className="h-3.5 w-3.5 text-[hsl(var(--assistant-accent))]" />
                     <span>{ctx.dataset_name}</span>
-                    <span className="text-slate-400 dark:text-slate-500 font-normal">
+                    <span className="text-[hsl(var(--assistant-text-tertiary))] font-normal">
                       ({(ctx.took_ms || 0).toFixed(0)}ms)
                     </span>
                   </div>
@@ -74,19 +74,19 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: idx * 0.05 }}
-                        className="text-xs p-3 rounded-xl bg-white/80 dark:bg-slate-900/50 border border-slate-200/60 dark:border-slate-700/40 backdrop-blur-sm"
+                        className="text-xs p-3 rounded-xl bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border-soft))]"
                       >
                         <div className="flex items-center justify-between mb-1.5">
                           <div className="flex items-center gap-1.5">
                             <Badge
                               variant="secondary"
                               className={cn(
-                                "text-[9px] px-1.5 py-0",
+                                "text-[9px] px-1.5 py-0 font-mono tabular-nums",
                                 chunk.score >= 0.8
-                                  ? "bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300"
+                                  ? "bg-[hsl(var(--assistant-accent-soft))] text-[hsl(var(--assistant-accent))]"
                                   : chunk.score >= 0.6
-                                    ? "bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300"
-                                    : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400"
+                                    ? "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]"
+                                    : "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-tertiary))]"
                               )}
                             >
                               {(chunk.score * 100).toFixed(0)}% match
@@ -94,7 +94,7 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                             {chunk.image_url && (
                               <Badge
                                 variant="secondary"
-                                className="text-[9px] px-1.5 py-0 bg-violet-100 dark:bg-violet-900/50 text-violet-700 dark:text-violet-300"
+                                className="text-[9px] px-1.5 py-0 bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]"
                               >
                                 <ImageIcon className="h-2.5 w-2.5 mr-0.5" />
                                 Image
@@ -106,7 +106,7 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                               href={chunk.source_url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 hover:underline"
+                              className="flex items-center gap-1 text-[hsl(var(--assistant-accent))] hover:underline"
                             >
                               <ExternalLink className="h-3 w-3" />
                               <span>Source</span>
@@ -124,19 +124,19 @@ export function ContextDisplay({ contexts }: ContextDisplayProps) {
                               <img
                                 src={chunk.image_url}
                                 alt="Knowledge base image"
-                                className="max-w-full max-h-48 rounded-lg border border-slate-200 dark:border-slate-700 hover:opacity-90 transition-opacity cursor-pointer"
+                                className="max-w-full max-h-48 rounded-lg border border-[hsl(var(--assistant-border))] hover:opacity-90 transition-opacity cursor-pointer"
                                 loading="lazy"
                               />
                             </a>
                           </div>
                         )}
-                        <div className="line-clamp-3 text-slate-600 dark:text-slate-400 leading-relaxed">
+                        <div className="line-clamp-3 text-[hsl(var(--assistant-text-secondary))] leading-relaxed">
                           {chunk.content}
                         </div>
                       </motion.div>
                     ))}
                     {(ctx.chunks?.length || 0) > 3 && (
-                      <div className="text-xs text-slate-500 pl-2">
+                      <div className="text-xs text-[hsl(var(--assistant-text-tertiary))] pl-2">
                         +{(ctx.chunks?.length || 0) - 3} more chunks
                       </div>
                     )}

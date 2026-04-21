@@ -31,9 +31,11 @@ function QualityBadge({ score }: { score: number }) {
   const { t } = useTranslation();
 
   const getColor = () => {
-    if (score >= 80) return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400";
-    if (score >= 60) return "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400";
-    return "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400";
+    // High = accent, medium = neutral muted, low = destructive.
+    // Keeps the single-accent rule (no emerald/amber distractors).
+    if (score >= 80) return "bg-[hsl(var(--assistant-accent-soft))] text-[hsl(var(--assistant-accent))]";
+    if (score >= 60) return "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]";
+    return "bg-[hsl(var(--destructive))]/15 text-[hsl(var(--destructive))]";
   };
 
   const getLabel = () => {
@@ -55,13 +57,15 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
   const [expanded, setExpanded] = useState(false);
 
   const getStatusIcon = () => {
+    // Used = accent-filled check, implicit = muted info, retrieved = muted alert.
+    // No blue. Status differentiation comes from icon shape, not hue.
     switch (citation.status) {
       case "used":
-        return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />;
+        return <CheckCircle2 className="h-3.5 w-3.5 text-[hsl(var(--assistant-accent))]" />;
       case "implicit":
-        return <Info className="h-3.5 w-3.5 text-blue-500" />;
+        return <Info className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))]" />;
       default:
-        return <AlertCircle className="h-3.5 w-3.5 text-slate-400" />;
+        return <AlertCircle className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />;
     }
   };
 
@@ -83,42 +87,43 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
       transition={{ delay: index * 0.05 }}
       className={cn(
         "border rounded-lg overflow-hidden",
+        // Single-accent: "used" gets the gold accent outline, everything
+        // else is neutral hairline. Semantic differentiation lives in the
+        // status icon, not a rainbow of borders.
         citation.status === "used"
-          ? "border-emerald-200 dark:border-emerald-800/50 bg-emerald-50/30 dark:bg-emerald-900/10"
-          : citation.status === "implicit"
-            ? "border-blue-200 dark:border-blue-800/50 bg-blue-50/30 dark:bg-blue-900/10"
-            : "border-slate-200 dark:border-slate-700/50 bg-slate-50/30 dark:bg-slate-800/10"
+          ? "border-[hsl(var(--assistant-accent))]/30 bg-[hsl(var(--assistant-accent-soft))]/30"
+          : "border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-surface-soft))]/40"
       )}
     >
       {/* Header */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-white/50 dark:hover:bg-slate-700/30 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors"
       >
-        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded bg-slate-200/80 dark:bg-slate-700/80 text-[10px] font-medium text-slate-600 dark:text-slate-300">
+        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded bg-[hsl(var(--assistant-surface-soft))] text-[10px] font-medium text-[hsl(var(--assistant-text-secondary))] font-mono tabular-nums">
           {index + 1}
         </span>
 
         {getStatusIcon()}
 
         <div className="flex-1 min-w-0">
-          <span className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate block">
+          <span className="text-xs font-medium text-[hsl(var(--assistant-text-primary))] truncate block">
             {citation.source_title || citation.dataset_name}
           </span>
         </div>
 
-        <span className="text-[10px] text-slate-500 dark:text-slate-400">
+        <span className="text-[10px] text-[hsl(var(--assistant-text-secondary))]">
           {getStatusLabel()}
         </span>
 
-        <span className="text-[10px] text-slate-400 dark:text-slate-500">
+        <span className="text-[10px] text-[hsl(var(--assistant-text-tertiary))] font-mono tabular-nums">
           {(citation.relevance_score * 100).toFixed(0)}%
         </span>
 
         {expanded ? (
-          <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
+          <ChevronUp className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />
         ) : (
-          <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+          <ChevronDown className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />
         )}
       </button>
 
@@ -130,16 +135,16 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="border-t border-slate-200/80 dark:border-slate-700/50"
+            className="border-t border-[hsl(var(--assistant-border-soft))]"
           >
             <div className="px-3 py-2 space-y-2">
-              {/* Source URL */}
+              {/* Source URL — accent color per single-accent rule. */}
               {citation.source_url && (
                 <a
                   href={citation.source_url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                  className="flex items-center gap-1.5 text-xs text-[hsl(var(--assistant-accent))] hover:underline"
                 >
                   <ExternalLink className="h-3 w-3" />
                   <span className="truncate">{citation.source_url}</span>
@@ -148,18 +153,18 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
 
               {/* Context preview */}
               {citation.context_preview && (
-                <div className="text-xs text-slate-600 dark:text-slate-400 bg-white/50 dark:bg-slate-800/50 rounded p-2 leading-relaxed">
-                  <span className="text-slate-400 dark:text-slate-500">Preview: </span>
+                <div className="text-xs text-[hsl(var(--assistant-text-secondary))] bg-[hsl(var(--assistant-surface-bg))] rounded p-2 leading-relaxed">
+                  <span className="text-[hsl(var(--assistant-text-tertiary))]">Preview: </span>
                   {citation.context_preview.length > 200
                     ? `${citation.context_preview.slice(0, 200)}...`
                     : citation.context_preview}
                 </div>
               )}
 
-              {/* Cited text */}
+              {/* Cited text — gold accent for the one that was actually used. */}
               {citation.cited_text && citation.status === "used" && (
-                <div className="text-xs text-slate-700 dark:text-slate-300 bg-emerald-50/50 dark:bg-emerald-900/20 rounded p-2 border-l-2 border-emerald-400">
-                  <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                <div className="text-xs text-[hsl(var(--assistant-text-primary))] bg-[hsl(var(--assistant-accent-soft))]/40 rounded p-2 border-l-2 border-[hsl(var(--assistant-accent))]">
+                  <span className="text-[hsl(var(--assistant-accent))] font-medium">
                     {t("assistant.citedText", "Cited")}:
                   </span>{" "}
                   {citation.cited_text}
@@ -167,7 +172,7 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
               )}
 
               {/* Metadata */}
-              <div className="flex items-center gap-3 text-[10px] text-slate-500 dark:text-slate-400">
+              <div className="flex items-center gap-3 text-[10px] text-[hsl(var(--assistant-text-tertiary))]">
                 <span>Dataset: {citation.dataset_name}</span>
                 <span>Chunk: {citation.chunk_id.slice(0, 8)}</span>
               </div>
@@ -194,16 +199,20 @@ function QualityBreakdown({ breakdown }: { breakdown: RAGQualityBreakdown }) {
     <div className="grid grid-cols-4 gap-1.5">
       {items.map((item) => (
         <div key={item.key} className="text-center">
-          <div className="h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+          <div className="h-1.5 bg-[hsl(var(--assistant-border))] rounded-full overflow-hidden">
             <div
               className={cn(
                 "h-full rounded-full transition-all",
-                item.value >= 20 ? "bg-emerald-500" : item.value >= 15 ? "bg-amber-500" : "bg-red-500"
+                item.value >= 20
+                  ? "bg-[hsl(var(--assistant-accent))]"
+                  : item.value >= 15
+                    ? "bg-[hsl(var(--assistant-accent))]/60"
+                    : "bg-[hsl(var(--destructive))]"
               )}
               style={{ width: `${(item.value / item.max) * 100}%` }}
             />
           </div>
-          <span className="text-[9px] text-slate-500 dark:text-slate-400 mt-0.5 block">
+          <span className="text-[9px] text-[hsl(var(--assistant-text-tertiary))] mt-0.5 block">
             {item.label}
           </span>
         </div>
@@ -228,16 +237,16 @@ export function CitationDisplay({ citations, evaluation, className }: CitationDi
       {/* Header with summary */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-100/80 dark:bg-slate-800/60 hover:bg-slate-200/80 dark:hover:bg-slate-700/60 transition-colors text-left"
+        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-[hsl(var(--assistant-surface-soft))] hover:bg-[hsl(var(--assistant-chip-bg))] transition-colors text-left"
       >
-        <BookOpen className="h-4 w-4 text-slate-500" />
+        <BookOpen className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
 
         <div className="flex-1 min-w-0">
-          <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+          <span className="text-xs font-medium text-[hsl(var(--assistant-text-primary))]">
             {t("assistant.citationsTitle", "{{count}} Sources", { count: relevantCitations.length })}
           </span>
           {usedCount > 0 && (
-            <span className="text-[10px] text-slate-500 dark:text-slate-400 ml-2">
+            <span className="text-[10px] text-[hsl(var(--assistant-text-secondary))] ml-2">
               ({t("assistant.citedCount", "{{count}} cited", { count: usedCount })})
             </span>
           )}
@@ -246,9 +255,9 @@ export function CitationDisplay({ citations, evaluation, className }: CitationDi
         {evaluation && <QualityBadge score={evaluation.quality_score} />}
 
         {expanded ? (
-          <ChevronUp className="h-4 w-4 text-slate-400" />
+          <ChevronUp className="h-4 w-4 text-[hsl(var(--assistant-text-tertiary))]" />
         ) : (
-          <ChevronDown className="h-4 w-4 text-slate-400" />
+          <ChevronDown className="h-4 w-4 text-[hsl(var(--assistant-text-tertiary))]" />
         )}
       </button>
 
@@ -265,17 +274,17 @@ export function CitationDisplay({ citations, evaluation, className }: CitationDi
             <div className="mt-2 space-y-2">
               {/* Quality breakdown */}
               {evaluation && (
-                <div className="px-3 py-2 bg-slate-50/50 dark:bg-slate-800/30 rounded-lg">
+                <div className="px-3 py-2 bg-[hsl(var(--assistant-surface-soft))] rounded-lg">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] font-medium text-slate-600 dark:text-slate-400">
+                    <span className="text-[10px] font-medium text-[hsl(var(--assistant-text-secondary))]">
                       {t("assistant.ragQuality", "Response Quality")}
                     </span>
-                    <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                    <span className="text-xs font-medium text-[hsl(var(--assistant-text-primary))] font-mono tabular-nums">
                       {Math.round(evaluation.quality_score)}/100
                     </span>
                   </div>
                   <QualityBreakdown breakdown={evaluation.quality_breakdown} />
-                  <div className="flex items-center justify-between mt-2 text-[10px] text-slate-500 dark:text-slate-400">
+                  <div className="flex items-center justify-between mt-2 text-[10px] text-[hsl(var(--assistant-text-tertiary))]">
                     <span>
                       {t("assistant.ragGrounding", "{{percent}}% grounded", {
                         percent: Math.round(evaluation.response_grounding * 100),

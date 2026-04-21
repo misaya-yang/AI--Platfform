@@ -49,14 +49,23 @@
 
     --sidebar-bg: 0 0% 100%;
 
-    /* Assistant UI scoped tokens — warm green tint */
+    /* Assistant UI scoped tokens — warm-neutral with green whisper (light).
+       Single accent is gold (--assistant-accent). No secondary hue.
+       Hierarchy: text-primary > text-secondary > text-tertiary. */
     --assistant-canvas-bg: 150 10% 97%;
+    --assistant-surface-bg: 0 0% 100%;         /* panel / chip inner */
+    --assistant-surface-soft: 150 8% 95%;      /* code block, muted fill */
     --assistant-text-primary: 152 12% 12%;
     --assistant-text-secondary: 150 5% 42%;
-    --assistant-border-soft: 150 8% 90%;
+    --assistant-text-tertiary: 150 4% 60%;
+    --assistant-border: 150 8% 88%;            /* hairline */
+    --assistant-border-soft: 150 8% 92%;       /* softer hairline */
     --assistant-accent: 43 50% 45%;
+    --assistant-accent-soft: 43 55% 92%;       /* tinted bg for accent marker */
     --assistant-chip-bg: 150 8% 95%;
     --assistant-user-bubble: 150 8% 93%;
+    --assistant-shadow: 0 1px 2px rgba(20,14,8,.04), 0 4px 24px rgba(20,14,8,.04);
+    --assistant-shadow-lift: 0 2px 8px rgba(20,14,8,.06), 0 12px 40px rgba(20,14,8,.08);
   }
 
   .dark {
@@ -94,15 +103,27 @@
     --input: 152 6% 18%;
     --ring: 153 38% 42%;
 
-    --sidebar-bg: 152 10% 7%;
+    --sidebar-bg: 30 6% 9%;
 
-    --assistant-canvas-bg: 152 8% 7%;
-    --assistant-text-primary: 150 5% 90%;
-    --assistant-text-secondary: 150 4% 52%;
-    --assistant-border-soft: 152 6% 18%;
-    --assistant-accent: 43 42% 55%;
-    --assistant-chip-bg: 152 5% 12%;
-    --assistant-user-bubble: 152 6% 15%;
+    /* Assistant UI scoped tokens — warm-neutral near-black (dark).
+       Hue 30 (warm, whisper of red) replaces prior cool-green 152.
+       Never pure black; text capped at ~88% to avoid harshness.
+       Activity panel + chat canvas share one surface so the drawer
+       feels like the same plane, not a lighter lifted card. */
+    --assistant-canvas-bg: 30 6% 9%;           /* warm near-black, not #000 */
+    --assistant-surface-bg: 30 6% 11%;         /* chip / user-bubble inner */
+    --assistant-surface-soft: 30 5% 13%;       /* code block, muted fill */
+    --assistant-text-primary: 30 6% 88%;       /* ~88% warm-white, not pure */
+    --assistant-text-secondary: 30 4% 62%;     /* ~62%, raised from prior 52 */
+    --assistant-text-tertiary: 30 3% 45%;      /* labels, stats line */
+    --assistant-border: 30 5% 18%;             /* hairline, ~8% white-alpha equiv */
+    --assistant-border-soft: 30 5% 15%;        /* softer hairline */
+    --assistant-accent: 43 48% 62%;            /* gold, slightly warmer+brighter */
+    --assistant-accent-soft: 43 35% 20%;       /* tinted bg for accent marker */
+    --assistant-chip-bg: 30 5% 13%;
+    --assistant-user-bubble: 30 5% 14%;
+    --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
+    --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }
 
   * {
@@ -384,8 +405,8 @@
 .assistant-v2 pre {
   position: relative;
   border-radius: var(--radius-md);
-  border: 1px solid hsl(var(--assistant-border-soft));
-  background: hsl(var(--assistant-chip-bg));
+  border: 1px solid hsl(var(--assistant-border));
+  background: hsl(var(--assistant-surface-soft));
   overflow-x: auto;
 }
 
@@ -415,7 +436,7 @@
 
 /* Blockquote styling */
 .assistant-v2 blockquote {
-  border-left: 3px solid hsl(var(--accent) / 0.5);
+  border-left: 3px solid hsl(var(--assistant-accent) / 0.5);
   padding-left: 16px;
   color: hsl(var(--assistant-text-secondary));
   font-style: italic;

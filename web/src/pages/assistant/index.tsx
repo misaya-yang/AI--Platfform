@@ -452,14 +452,15 @@ export function AssistantPage() {
       >
         <div className="flex flex-1 overflow-hidden">
           
-          {/* Left Sidebar */}
+          {/* Left Sidebar — matches --assistant-canvas-bg so the sidebar
+              and chat area feel like the same plane in both themes. */}
           <AnimatePresence>
             {showLeftPanel && (
               <motion.aside
                 initial={{ width: 0, opacity: 0 }}
                 animate={{ width: 280, opacity: 1 }}
                 exit={{ width: 0, opacity: 0 }}
-                className="border-r border-border/60 bg-white/50 dark:bg-slate-800/30 overflow-hidden flex-shrink-0"
+                className="border-r border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))] overflow-hidden flex-shrink-0"
               >
                 <div className="h-full w-[280px]">
                   <ConversationSidebar
@@ -485,7 +486,7 @@ export function AssistantPage() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-9 w-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                    className="h-9 w-9 rounded-xl hover:bg-[hsl(var(--assistant-surface-soft))]"
                     onClick={() => setShowLeftPanel(!showLeftPanel)}
                     aria-label={
                       showLeftPanel
@@ -493,7 +494,7 @@ export function AssistantPage() {
                         : t("assistant.showHistory", "Show history")
                     }
                   >
-                    {showLeftPanel ? <PanelLeftClose className="h-4 w-4 text-slate-500" /> : <PanelLeft className="h-4 w-4 text-slate-500" />}
+                    {showLeftPanel ? <PanelLeftClose className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" /> : <PanelLeft className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />}
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{showLeftPanel ? t("assistant.hideHistory", "Hide history") : t("assistant.showHistory", "Show history")}</TooltipContent>
@@ -506,11 +507,11 @@ export function AssistantPage() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-9 w-9 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800"
+                      className="h-9 w-9 rounded-xl hover:bg-[hsl(var(--assistant-surface-soft))]"
                       onClick={() => setShowShareDialog(true)}
                       aria-label={t("assistant.share", "Share")}
                     >
-                      <Share2 className="h-4 w-4 text-slate-500" />
+                      <Share2 className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom">{t("assistant.shareConversation", "Share Conversation")}</TooltipContent>
@@ -529,11 +530,11 @@ export function AssistantPage() {
                     setShowArtifacts(true);
                   }}
                   aria-label={t("assistant.showArtifacts", "Show generated files")}
-                  className="group inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[12.5px] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors"
+                  className="group inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[12.5px] text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors"
                 >
-                  <FileText className="h-3.5 w-3.5 text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-200" />
+                  <FileText className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))] group-hover:text-[hsl(var(--assistant-text-primary))]" />
                   <span>{t("assistant.artifacts", "Artifacts")}</span>
-                  <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                  <span className="font-mono tabular-nums text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
                     {artifacts.length + codeExecution.outputFiles.length}
                   </span>
                 </button>

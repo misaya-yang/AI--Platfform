@@ -75,11 +75,13 @@ export function ThinkingPanel({
       transition={{ duration: 0.2 }}
       className={cn("mb-3", className)}
     >
-      {/* Header — always visible */}
+      {/* Header — always visible. Muted-gray/italic treatment per design
+          brief: thinking is secondary context, not a second accent.
+          Violet removed (single-accent rule). */}
       <button
         type="button"
         onClick={() => setIsExpanded((v) => !v)}
-        className="flex items-center gap-2 py-1.5 text-xs font-medium text-violet-600 dark:text-violet-400 hover:text-violet-700 dark:hover:text-violet-300 transition-colors select-none w-full text-left"
+        className="flex items-center gap-2 py-1.5 text-xs font-medium italic text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors select-none w-full text-left"
       >
         <Brain
           className={cn(
@@ -95,7 +97,7 @@ export function ThinkingPanel({
               : t("assistant.thoughtProcess", "Thought process")}
         </span>
         {isStreaming && timeLabel && (
-          <span className="text-violet-400 dark:text-violet-500 tabular-nums">
+          <span className="text-[hsl(var(--assistant-text-tertiary))] tabular-nums not-italic font-mono">
             {timeLabel}
           </span>
         )}
@@ -119,16 +121,16 @@ export function ThinkingPanel({
             <div
               ref={contentRef}
               className={cn(
-                "pl-5 pr-2 py-2 text-sm leading-relaxed",
-                "border-l-2 border-violet-200/50 dark:border-violet-700/30",
-                "text-muted-foreground/80",
+                "pl-5 pr-2 py-2 text-sm leading-relaxed italic",
+                "border-l-2 border-[hsl(var(--assistant-border))]",
+                "text-[hsl(var(--assistant-text-secondary))]",
                 "whitespace-pre-wrap break-words",
                 isStreaming && "max-h-48 overflow-y-auto"
               )}
             >
               {content}
               {isStreaming && (
-                <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 dark:bg-violet-500 animate-pulse align-text-bottom rounded-sm" />
+                <span className="inline-block w-1.5 h-4 ml-0.5 bg-[hsl(var(--assistant-accent))] animate-pulse align-text-bottom rounded-sm not-italic" />
               )}
             </div>
           </motion.div>
