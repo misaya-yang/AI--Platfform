@@ -1,41 +1,91 @@
 /**
- * ActivityTimeline
+ * ActivityTimeline — the vertical rail + circle markers container.
  *
- * Renders a list of TimelineStep rows on a continuous left rail. The
- * ChatMessage → steps transformation lives in ./buildTimeline.ts.
+ * Ported from chat.jsx `ActivityBody`: a continuous 1px rail on the
+ * left, with absolute-positioned 11px circle markers at each step.
+ * The running step (last step while `running`) is accented; completed
+ * steps carry a small check glyph.
+ *
+ * Step rendering delegates to `TimelineStep`.
  */
 
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { cn } from "@/lib/utils";
 import type { ChatMessage as ChatMessageType } from "../types";
-import { TimelineStep } from "./TimelineStep";
+import { TimelineStep, type TimelineStepData } from "./TimelineStep";
+import { T } from "./activityTheme";
 import { buildTimeline } from "./buildTimeline";
 
 interface ActivityTimelineProps {
-  message: ChatMessageType;
+  /** Pre-built steps. Prefer this in the drawer (parent already builds). */
+  steps?: TimelineStepData[];
+  /** Fallback: build from a ChatMessage. Used by share-page / legacy. */
+  message?: ChatMessageType;
+  /** Whether the last step is actively running. */
+  running?: boolean;
   className?: string;
 }
 
-export function ActivityTimeline({ message, className }: ActivityTimelineProps) {
+export function ActivityTimeline({
+  steps: stepsProp,
+  message,
+  running,
+  className,
+}: ActivityTimelineProps) {
   const { t } = useTranslation();
-  const { steps } = useMemo(() => buildTimeline(message, t), [message, t]);
+
+  const steps: TimelineStepData[] =
+    stepsProp ?? (message ? buildTimeline(message, t).steps : []);
 
   if (steps.length === 0) {
     return (
       <div className={className}>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
-          {t("playground.activity.empty", { defaultValue: "No activity recorded." })}
+        <p style={{ fontSize: 13, color: T.textMute }}>
+          {t("playground.activity.empty", {
+            defaultValue: "No activity recorded.",
+          })}
         </p>
       </div>
     );
   }
 
+  const lastIndex = steps.length - 1;
+
   return (
-    <div className={cn("divide-y divide-slate-100 dark:divide-slate-800/60", className)}>
-      {steps.map((step, idx) => (
-        <TimelineStep key={step.id} step={step} isLast={idx === steps.length - 1} />
-      ))}
+    <div
+      className={className}
+      style={{ position: "relative", paddingLeft: 18 }}
+    >
+      {/* Continuous vertical rail */}
+      <div
+        style={{
+          position: "absolute",
+          left: 5,
+          top: 6,
+          bottom: 20,
+          width: 1,
+          background: T.border,
+        }}
+      />
+      {steps.map((step, idx) => {
+        const stepStatus =
+          step.kind === "tool" ? step.status : "completed";
+        const isLast = idx === lastIndex;
+        const isRunning = !!running && isLast && stepStatus !== "error";
+        const isCompleted =
+          stepStatus === "completed" ||
+          (stepStatus === "running" && !isRunning); // earlier running becomes done when new step arrives
+        const isError = stepStatus === "error";
+
+        return (
+          <TimelineStep
+            key={step.id}
+            step={step}
+            isRunning={isRunning}
+            isCompleted={isCompleted}
+            isError={isError}
+          />
+        );
+      })}
     </div>
   );
 }

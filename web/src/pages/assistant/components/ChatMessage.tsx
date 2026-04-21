@@ -16,16 +16,13 @@ import {
   MessageSquare,
   FileText,
   Image as ImageIcon,
-  Loader2,
-  CheckCircle2,
   Zap,
   Brain,
   PenTool,
   Cog,
   Eye,
   ListTodo,
-  ListTree,
-  ChevronDown,
+  CheckCircle2,
   Download,
   ExternalLink,
 } from "lucide-react";
@@ -37,7 +34,8 @@ import { CitationDisplay } from "./CitationDisplay";
 import { DocumentPreview } from "./DocumentPreview";
 import type { ChatMessage as ChatMessageType, AgentPhaseStatus } from "../types";
 import { QuizCard } from "./Quiz";
-import { ActivityPanel } from "./ActivityPanel";
+import { ActivityPill } from "./ActivityPill";
+import { useRightPanel } from "./rightPanelContext";
 import { buildTimeline } from "./buildTimeline";
 
 interface ChatMessageProps {
@@ -334,93 +332,19 @@ function formatDurationLabel(ms: number): string {
   return `${m}m ${s}s`;
 }
 
-/** Claude.ai-style compact activity chip: "Activity · N steps · Ts" */
-function ActivityChip({
-  message,
-  totalDurationMs,
-  stepCount,
-  isOpen,
-  onToggle,
-}: {
-  message: ChatMessageType;
-  totalDurationMs: number;
-  stepCount: number;
-  isOpen: boolean;
-  onToggle: () => void;
-}) {
-  const { t } = useTranslation();
-  const isStreaming = !!message.isStreaming;
-
-  // Live-elapsed ticker while streaming
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!isStreaming) return;
-    const id = window.setInterval(() => setNow(Date.now()), 500);
-    return () => window.clearInterval(id);
-  }, [isStreaming]);
-
-  const createdMs = message.createdAt ? new Date(message.createdAt).getTime() : undefined;
-  const liveElapsed = isStreaming && createdMs ? Math.max(0, now - createdMs) : 0;
-  const effectiveMs = isStreaming
-    ? Math.max(totalDurationMs, liveElapsed)
-    : totalDurationMs;
-
-  const durationLabel = formatDurationLabel(effectiveMs);
-  const stepsText = t("playground.activity.steps", {
-    count: stepCount,
-    defaultValue: "{{count}} steps",
-  });
-
-  const label = durationLabel
-    ? t("playground.activity.triggerWithDuration", {
-        count: stepCount,
-        steps: stepsText,
-        duration: durationLabel,
-        defaultValue: "Activity · {{steps}} · {{duration}}",
-      })
-    : t("playground.activity.trigger", {
-        count: stepCount,
-        steps: stepsText,
-        defaultValue: "Activity · {{steps}}",
-      });
-
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={isOpen}
-      className={cn(
-        "group inline-flex items-center gap-2 rounded-full border px-3 py-1.5",
-        "border-slate-200 dark:border-slate-700/80",
-        isOpen
-          ? "bg-slate-100 dark:bg-slate-800/70 text-slate-900 dark:text-slate-100"
-          : "bg-white/60 dark:bg-slate-900/50 backdrop-blur-sm text-slate-600 dark:text-slate-300",
-        "text-[12px]",
-        "hover:bg-slate-50 dark:hover:bg-slate-800/70 hover:text-slate-900 dark:hover:text-slate-100",
-        "transition-colors",
-      )}
-      aria-label={label}
-    >
-      {isStreaming ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-[hsl(var(--assistant-accent))]" />
-      ) : (
-        <ListTree className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400 group-hover:text-slate-700 dark:group-hover:text-slate-200" />
-      )}
-      <span className="font-medium">{label}</span>
-      <ChevronDown
-        className={cn(
-          "h-3.5 w-3.5 text-slate-400 transition-transform duration-200",
-          isOpen && "rotate-180",
-        )}
-      />
-    </button>
-  );
-}
-
 export function ChatMessage({ message }: ChatMessageProps) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
-  const [activityOpen, setActivityOpen] = useState(false);
+  const { openActivity } = useRightPanel();
+
+  // Live-elapsed ticker for the pill subtitle while streaming. Kept local
+  // to the pill so the panel doesn't re-render every 500ms.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!message.isStreaming) return;
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [message.isStreaming]);
 
   // Pre-compute the timeline so we can decide whether to show the chip at all
   // and to pass totals to the panel/chip. Safe for user messages too — builder
@@ -467,30 +391,34 @@ export function ChatMessage({ message }: ChatMessageProps) {
       ) : (
         /* Assistant message — clean, no bubble, full width */
         <div className="w-full space-y-3 assistant-copy pl-1">
-          {/* Activity chip + inline-expandable panel (replaces the old stack
-              of ProcessSummaryBar / ToolCallsDisplay / ThinkingPanel /
-              SearchStatusDisplay / WebSearchDisplay / Thought Process).
-              Panel is rendered inline here — NOT as a right-side sheet —
-              because the artifacts panel already owns the right rail. */}
-          {hasActivity && (
-            <div>
-              <ActivityChip
-                message={message}
-                totalDurationMs={totalDurationMs}
-                stepCount={timelineSteps.length}
-                isOpen={activityOpen}
-                onToggle={() => setActivityOpen((v) => !v)}
+          {/* ActivityPill — inline affordance that opens the right-side
+              Activity drawer. The drawer itself is mounted at page level
+              (see AssistantPage) as a sibling to ArtifactsPanel, with a
+              mutex enforced via RightPanelContext. */}
+          {hasActivity && (() => {
+            const createdMs = message.createdAt
+              ? new Date(message.createdAt).getTime()
+              : undefined;
+            const liveElapsed =
+              message.isStreaming && createdMs ? Math.max(0, now - createdMs) : 0;
+            const effectiveMs = message.isStreaming
+              ? Math.max(totalDurationMs, liveElapsed)
+              : totalDurationMs;
+            const durationLabel = formatDurationLabel(effectiveMs);
+            const label = message.isStreaming
+              ? t("playground.activity.thinking", { defaultValue: "Thinking" })
+              : t("playground.activity.title", { defaultValue: "Activity" });
+            return (
+              <ActivityPill
+                steps={timelineSteps.length}
+                durationLabel={durationLabel}
+                running={!!message.isStreaming}
+                onOpen={() => openActivity(message.id)}
+                variant="pill"
+                label={label}
               />
-              <ActivityPanel
-                open={activityOpen}
-                onOpenChange={setActivityOpen}
-                message={message}
-                totalDurationMs={totalDurationMs}
-                stepCount={timelineSteps.length}
-                isStreaming={!!message.isStreaming}
-              />
-            </div>
-          )}
+            );
+          })()}
 
           {/* Typing dots: only if we have no signal at all yet */}
           {showTypingDots && (

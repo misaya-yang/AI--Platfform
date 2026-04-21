@@ -4,7 +4,7 @@
  * Refactored modular architecture.
  */
 
-import { useEffect, useState, useRef, useCallback, Component, type ErrorInfo, type ReactNode } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo, Component, type ErrorInfo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -47,6 +47,12 @@ import { ChatInputArea } from "./components/ChatInputArea";
 import { ShareDialog } from "./components/ShareDialog";
 import ConnectorsPanel from "./components/ConnectorsPanel";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { ActivityPanel } from "./components/ActivityPanel";
+import {
+  RightPanelContext,
+  type RightPanel,
+  type RightPanelState,
+} from "./components/rightPanelContext";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
@@ -127,6 +133,12 @@ export function AssistantPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
   const setShowLeftPanel = useAppStore((state) => state.setAssistantSidebarOpen);
+
+  // Right-panel mutex: "activity" | "artifacts" | null. Only one sheet
+  // is visible at a time. Artifacts state continues to live in
+  // useChatSession (it persists across sessions and is driven by SSE
+  // events); Activity lives here.
+  const [activityMessageId, setActivityMessageId] = useState<string | null>(null);
   
   // 4. Complex Logic Hooks
   const {
@@ -152,6 +164,62 @@ export function AssistantPage() {
     showTaskPanel,
     codeExecution,
   } = useChatSession();
+
+  // Mutex: opening Activity forces Artifacts closed, and vice-versa.
+  const openActivity = useCallback(
+    (messageId: string) => {
+      setActivityMessageId(messageId);
+      if (showArtifacts) setShowArtifacts(false);
+    },
+    [showArtifacts, setShowArtifacts],
+  );
+
+  const closeActivity = useCallback(() => {
+    setActivityMessageId(null);
+  }, []);
+
+  // When something opens Artifacts (SSE delivery, user affordance),
+  // close Activity.
+  useEffect(() => {
+    if (showArtifacts && activityMessageId) {
+      setActivityMessageId(null);
+    }
+  }, [showArtifacts, activityMessageId]);
+
+  // If the user switches sessions, drop any stale Activity selection.
+  useEffect(() => {
+    setActivityMessageId(null);
+  }, [activeSessionId]);
+
+  // If the currently-open Activity message is no longer in the list
+  // (session change / history replace), close the drawer.
+  useEffect(() => {
+    if (!activityMessageId) return;
+    if (!messages.some((m) => m.id === activityMessageId)) {
+      setActivityMessageId(null);
+    }
+  }, [messages, activityMessageId]);
+
+  const rightPanel: RightPanel = activityMessageId
+    ? "activity"
+    : showArtifacts
+      ? "artifacts"
+      : null;
+
+  const activeActivityMessage = useMemo(
+    () => (activityMessageId ? messages.find((m) => m.id === activityMessageId) ?? null : null),
+    [messages, activityMessageId],
+  );
+
+  const rightPanelState: RightPanelState = useMemo(
+    () => ({
+      rightPanel,
+      activityMessageId,
+      openActivity,
+      closeActivity,
+    }),
+    [rightPanel, activityMessageId, openActivity, closeActivity],
+  );
 
   const {
     files,
@@ -373,6 +441,7 @@ export function AssistantPage() {
 
   return (
     <>
+    <RightPanelContext.Provider value={rightPanelState}>
     <TooltipProvider>
       <div
         className={cn(
@@ -609,7 +678,11 @@ export function AssistantPage() {
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <button
-                        onClick={() => setShowArtifacts(true)}
+                        onClick={() => {
+                          // Mutex: close Activity when user opens Artifacts.
+                          setActivityMessageId(null);
+                          setShowArtifacts(true);
+                        }}
                         className="group flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg hover:shadow-xl transition-all duration-200 hover:border-violet-300 dark:hover:border-violet-700"
                       >
                         <div className="relative">
@@ -661,9 +734,21 @@ export function AssistantPage() {
             />
           </div>
 
+          {/* Right-side sheet: Activity OR Artifacts. Mutex enforced via
+              rightPanelState; never both. ActivityPanel is mounted first
+              so it takes priority when the user explicitly opens it. */}
+          {!isMobile && (
+            <ActivityPanel
+              open={rightPanel === "activity"}
+              onClose={closeActivity}
+              message={activeActivityMessage}
+              width={380}
+            />
+          )}
+
           {/* Artifacts Panel */}
           <AnimatePresence>
-            {showArtifacts && !isMobile && (
+            {showArtifacts && !isMobile && rightPanel === "artifacts" && (
               <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden flex-shrink-0">
                 <div className="h-full w-[400px]">
                   <ArtifactsPanel
@@ -732,6 +817,7 @@ export function AssistantPage() {
       open={showConnectors}
       onClose={() => setShowConnectors(false)}
     />
+    </RightPanelContext.Provider>
     </>
   );
 }

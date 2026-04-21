@@ -1,34 +1,24 @@
 /**
- * TimelineStep — Claude-design reference
+ * TimelineStep — single row in the Activity rail (Claude Design).
  *
- * Each step is a compact row. Status marker on the left (✓ completed,
- * ○ pending/running, ⊗ error). Content to its right.
+ * Ported from chat.jsx `ActivityBody` step rendering. The row is
+ * `position: relative` and the circle marker is absolutely positioned
+ * onto the rail drawn by the parent ActivityTimeline.
  *
- * - Narrative / thinking step: bold title + small prose body, no rail icon.
- * - Tool step: monospace tool name (e.g. `web_search`) inline with a
- *   topical glyph (Search/Globe/File/...); query arg rendered in a gray
- *   code-block; source chips as small dot-prefixed pills.
+ *  Thought row:
+ *    - Bold title (13.5px)
+ *    - Pre-wrapped prose body in muted text (12.5px)
  *
- * The previous colored-bubble icons on a left rail were too loud. This
- * version mirrors the reference (ChatGPT / Claude activity panel).
+ *  Tool row:
+ *    - Glyph (search/globe/file/...) + monospace tool name + duration right-aligned
+ *    - Primary query/URL/path in a gray code block
+ *    - Source chips (pill with leading accent dot)
  */
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Globe,
-  Search,
-  FileText,
-  FilePlus,
-  Terminal,
-  Image as ImageIcon,
-  FileOutput,
-  Check,
-  Circle,
-  AlertCircle,
-  Loader2,
-} from "lucide-react";
-import { cn } from "@/lib/utils";
+import { T, ui } from "./activityTheme";
+import { Icon } from "./activityIcons";
 
 export type TimelineIcon =
   | "thinking"
@@ -69,54 +59,29 @@ export type TimelineStepData =
       queryArg?: string;
     };
 
-// Topical glyph shown inline next to the monospace tool name.
-const TOOL_GLYPH: Record<TimelineIcon, React.ComponentType<{ className?: string }>> = {
-  thinking: Circle,
-  web: Search,
-  file_read: FileText,
-  file_write: FilePlus,
-  code: Terminal,
-  image: ImageIcon,
-  document: FileOutput,
-  other: Globe,
-};
-
-// ---------------------------------------------------------------------------
-// Status marker (left-side ✓ / ○ / ⊗)
-// ---------------------------------------------------------------------------
-
-function StatusMarker({
-  status,
-  kind,
-}: {
-  status?: "running" | "completed" | "error";
-  kind: "thinking" | "tool";
-}) {
-  const effective = kind === "thinking" ? "completed" : status ?? "running";
-  if (effective === "completed") {
-    return (
-      <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-400">
-        <Check className="h-2.5 w-2.5" strokeWidth={2.5} />
-      </div>
-    );
+// Glyph name (chat.jsx Icon names) for each tool-icon category.
+function iconNameForTool(icon: TimelineIcon, toolName?: string): string {
+  // Match design: web_search → search, fetch_page → globe, else → tool glyph
+  if (icon === "web") {
+    if (toolName?.toLowerCase().includes("fetch")) return "globe";
+    return "search";
   }
-  if (effective === "error") {
-    return (
-      <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-red-400 bg-red-50 text-red-500 dark:border-red-600/60 dark:bg-red-950/40">
-        <AlertCircle className="h-2.5 w-2.5" />
-      </div>
-    );
-  }
-  return (
-    <div className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-slate-300 dark:border-slate-600">
-      <Loader2 className="h-2.5 w-2.5 animate-spin text-slate-400" />
-    </div>
-  );
+  if (icon === "file_read" || icon === "file_write") return "file";
+  if (icon === "code") return "code";
+  if (icon === "image") return "image";
+  if (icon === "document") return "file";
+  return "tool";
 }
 
-// ---------------------------------------------------------------------------
-// SourceChip — "• domain.com"
-// ---------------------------------------------------------------------------
+function formatDuration(ms?: number): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// -----------------------------------------------------------------------------
+// Source chip — pill with leading accent dot + favicon.
+// -----------------------------------------------------------------------------
 
 function SourceChip({ source }: { source: TimelineSource }) {
   const [failed, setFailed] = useState(false);
@@ -129,114 +94,264 @@ function SourceChip({ source }: { source: TimelineSource }) {
       target="_blank"
       rel="noopener noreferrer"
       title={source.title || source.url}
-      className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-800/80 transition-colors max-w-[200px]"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "2px 7px",
+        borderRadius: 10,
+        background: T.panel,
+        border: `1px solid ${T.border}`,
+        fontSize: 11,
+        color: T.textMute,
+        maxWidth: 200,
+        textDecoration: "none",
+      }}
     >
-      {failed ? (
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-400" />
-      ) : (
+      <span
+        style={{
+          width: 4,
+          height: 4,
+          borderRadius: 2,
+          background: T.accent,
+          flexShrink: 0,
+        }}
+      />
+      {!failed && (
         <img
           src={favicon}
           alt=""
           loading="lazy"
           width={10}
           height={10}
-          className="h-2.5 w-2.5 shrink-0 rounded-sm"
           onError={() => setFailed(true)}
+          style={{ width: 10, height: 10, borderRadius: 2, flexShrink: 0 }}
         />
       )}
-      <span className="truncate">{source.domain}</span>
+      <span
+        style={{
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {source.domain}
+      </span>
     </a>
   );
 }
 
-// ---------------------------------------------------------------------------
-
-function formatDuration(ms?: number): string | null {
-  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
+// -----------------------------------------------------------------------------
 
 interface TimelineStepProps {
   step: TimelineStepData;
-  isLast?: boolean;
+  /** This step is actively running (spinning dot marker). */
+  isRunning?: boolean;
+  /** This step has finished successfully (check-mark marker). */
+  isCompleted?: boolean;
+  /** This step errored (red marker). */
+  isError?: boolean;
 }
 
-export function TimelineStep({ step }: TimelineStepProps) {
+export function TimelineStep({
+  step,
+  isRunning,
+  isCompleted,
+  isError,
+}: TimelineStepProps) {
   const { t } = useTranslation();
-  const status = step.kind === "tool" ? step.status : undefined;
-  const duration = step.kind === "tool" ? formatDuration(step.durationMs) : null;
-  const sources = step.kind === "tool" ? step.sources : undefined;
-  const Glyph = step.kind === "tool" ? TOOL_GLYPH[step.icon] ?? Globe : null;
+
   const toolName = step.kind === "tool" ? step.toolName : undefined;
   const queryArg = step.kind === "tool" ? step.queryArg : undefined;
+  const sources = step.kind === "tool" ? step.sources : undefined;
+  const duration = step.kind === "tool" ? formatDuration(step.durationMs) : null;
+  const glyphName =
+    step.kind === "tool"
+      ? iconNameForTool(step.icon, toolName)
+      : "brain";
+
+  // Marker styling per state — mirrors chat.jsx.
+  const markerBg = isRunning ? T.accentSoft : isError ? "oklch(0.97 0.05 25)" : T.panel;
+  const markerBorder = isRunning
+    ? T.accent
+    : isError
+      ? "oklch(0.55 0.2 25)"
+      : T.border;
 
   return (
-    <div className="flex gap-3 py-2.5">
-      <div className="pt-[3px]">
-        <StatusMarker status={status} kind={step.kind} />
-      </div>
-      <div className="min-w-0 flex-1">
-        {step.kind === "thinking" ? (
-          <>
-            <div className="text-[13px] font-semibold text-slate-900 dark:text-slate-100">
-              {step.title}
-            </div>
-            {step.body && (
-              <p className="mt-1 whitespace-pre-wrap text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-400">
-                {step.body}
-              </p>
-            )}
-          </>
-        ) : (
-          <>
-            {/* Tool name row — monospace like `web_search` + glyph + duration */}
-            <div className="flex items-center gap-2">
-              {Glyph && <Glyph className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" />}
-              <span className="font-mono text-[12.5px] font-medium text-slate-900 dark:text-slate-100">
-                {toolName || step.title}
-              </span>
-              {duration && (
-                <span className="ml-auto shrink-0 font-mono text-[11px] text-slate-400 dark:text-slate-500">
-                  {duration}
-                </span>
-              )}
-            </div>
-            {/* Query / URL / path as a gray code-block if present */}
-            {queryArg && (
-              <div
-                className={cn(
-                  "mt-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1",
-                  "dark:border-slate-700/60 dark:bg-slate-900/40",
-                )}
-              >
-                <code className="block truncate font-mono text-[12px] text-slate-700 dark:text-slate-300">
-                  {queryArg}
-                </code>
-              </div>
-            )}
-            {/* Fallback body text (for tools without a query arg, e.g. code exec) */}
-            {!queryArg && step.body && (
-              <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-[12px] leading-relaxed text-slate-500 dark:text-slate-400">
-                {step.body}
-              </p>
-            )}
-            {/* Source chips */}
-            {sources && sources.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1">
-                {sources.map((src, idx) => (
-                  <SourceChip key={`${src.url}-${idx}`} source={src} />
-                ))}
-              </div>
-            )}
-            {status === "error" && !step.body && (
-              <p className="mt-1 text-[11.5px] text-red-500">
-                {t("playground.activity.errorFallback", "Step failed")}
-              </p>
-            )}
-          </>
+    <div
+      className="act-step-new"
+      style={{ position: "relative", marginBottom: 14 }}
+    >
+      {/* Circle marker on the rail */}
+      <div
+        style={{
+          position: "absolute",
+          left: -18,
+          top: 3,
+          width: 11,
+          height: 11,
+          borderRadius: 6,
+          background: markerBg,
+          border: `1.5px solid ${markerBorder}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {isRunning && <span className="act-running-dot" />}
+        {!isRunning && isCompleted && (
+          <span style={{ color: T.textMute, display: "inline-flex" }}>
+            <Icon name="check" size={7} stroke={3} />
+          </span>
         )}
       </div>
+
+      {step.kind === "thinking" ? (
+        <div>
+          <div
+            style={{
+              fontSize: 13.5,
+              fontWeight: 600,
+              color: T.text,
+              marginBottom: 4,
+              fontFamily: ui.sans,
+            }}
+          >
+            {step.title}
+          </div>
+          {step.body && (
+            <div
+              style={{
+                fontSize: 12.5,
+                color: T.textMute,
+                lineHeight: 1.55,
+                whiteSpace: "pre-line",
+                fontFamily: ui.sans,
+              }}
+            >
+              {step.body}
+              {isRunning && <span className="act-caret" />}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div>
+          {/* Tool name row */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 13.5,
+              color: T.text,
+              marginBottom: 4,
+              fontFamily: ui.sans,
+            }}
+          >
+            <span
+              style={{
+                color: T.textMute,
+                display: "inline-flex",
+                flexShrink: 0,
+              }}
+            >
+              <Icon name={glyphName} size={12} />
+            </span>
+            <span
+              style={{
+                fontFamily: ui.mono,
+                fontWeight: 500,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                minWidth: 0,
+              }}
+            >
+              {toolName || step.title}
+            </span>
+            {duration && (
+              <span
+                style={{
+                  fontFamily: ui.mono,
+                  fontSize: 11,
+                  color: T.textDim,
+                  marginLeft: "auto",
+                  flexShrink: 0,
+                }}
+              >
+                {duration}
+              </span>
+            )}
+          </div>
+
+          {/* Query / URL / path code block */}
+          {queryArg && (
+            <div
+              style={{
+                padding: "6px 8px",
+                background: T.bgSoft,
+                borderRadius: 6,
+                fontSize: 12,
+                fontFamily: ui.mono,
+                color: T.textMute,
+                marginBottom: 6,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+              title={queryArg}
+            >
+              "{queryArg}"
+            </div>
+          )}
+
+          {/* Fallback body prose if no queryArg */}
+          {!queryArg && step.body && (
+            <div
+              style={{
+                fontSize: 12,
+                color: T.textMute,
+                lineHeight: 1.55,
+                marginBottom: 6,
+                display: "-webkit-box",
+                WebkitLineClamp: 3,
+                WebkitBoxOrient: "vertical",
+                overflow: "hidden",
+              }}
+            >
+              {step.body}
+            </div>
+          )}
+
+          {/* Source chips */}
+          {sources && sources.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 4,
+              }}
+            >
+              {sources.map((src, i) => (
+                <SourceChip key={`${src.url}-${i}`} source={src} />
+              ))}
+            </div>
+          )}
+
+          {isError && !step.body && (
+            <div
+              style={{
+                fontSize: 11.5,
+                color: "oklch(0.55 0.2 25)",
+                marginTop: 4,
+              }}
+            >
+              {t("playground.activity.errorFallback", "Step failed")}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
