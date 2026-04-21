@@ -149,6 +149,39 @@ class TestRequestBodyInjection:
         tools = body.get("tools") or []
         assert any("google_search" in t for t in tools), tools
 
+    def test_gemini_google_search_dropped_when_function_tools_present(self):
+        """
+        Guard: Gemini REST API rejects any request that mixes
+        `functionDeclarations` with the `google_search` built-in tool (400
+        Bad Request). When callers forget to suppress `native_search_config`
+        upstream, the body builder must silently drop the grounding tool
+        rather than produce an un-sendable request.
+        """
+        mod = _get_mod()
+        reg = self._registry()
+        fn_tool = {
+            "type": "function",
+            "function": {
+                "name": "generate_quiz",
+                "description": "Make a quiz",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        body = reg._build_google_body(
+            model_id="gemini-3-flash-preview",
+            messages=[mod.ChatMessage(role="user", content="quiz on transformers")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=[fn_tool],
+            stream=True,
+            native_search_config={"tool_type": "google_search"},
+        )
+        tools = body.get("tools") or []
+        # functionDeclarations preserved
+        assert any(t.get("functionDeclarations") for t in tools), tools
+        # google_search NOT appended — mixing them would 400
+        assert not any("google_search" in t for t in tools), tools
+
     def test_anthropic_web_search_tool_appended(self):
         mod = _get_mod()
         reg = self._registry()

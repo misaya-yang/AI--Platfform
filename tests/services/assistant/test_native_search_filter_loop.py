@@ -69,10 +69,15 @@ class FakeModelInfo:
         *,
         supports_native_search: bool = False,
         native_search_config: dict[str, Any] | None = None,
+        provider: str | None = None,
     ) -> None:
         self.supports_vision = False
         self.supports_native_search = supports_native_search
         self.native_search_config = native_search_config
+        # Only set when a test needs to exercise provider-aware branches
+        # (e.g. Gemini's google_search incompatibility with function tools).
+        if provider is not None:
+            self.provider = provider
 
 
 class CapturingModelRegistry:
@@ -365,3 +370,65 @@ async def test_native_capable_model_preserves_other_tools() -> None:
     # guaranteed to survive relevance scoring.
     assert "search_knowledge_base" in forwarded, forwarded
     assert "update_memory" in forwarded, forwarded
+
+
+# --------------------------------------------------------------------------- #
+# Gemini regression — google_search can NOT coexist with functionDeclarations.
+# Live incident 2026-04-21: switching to Gemini 3 Flash produced a 400 from
+# the Gemini REST endpoint (~850ms, 0 steps in the Activity drawer) because
+# the loop was dropping `search_web` and forwarding `native_search_config`
+# with the full tool list. This suite locks in the compat behavior: for
+# Google providers with function tools present, native search is suppressed
+# and `search_web` stays in scope.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_gemini_keeps_search_web_and_suppresses_native() -> None:
+    """
+    Gemini → `search_web` MUST NOT be dropped and `native_search_config`
+    MUST be None, because `_build_gemini_body` would otherwise append
+    `{google_search: {}}` alongside functionDeclarations and the API
+    returns 400. The assistant always has function tools in scope, so the
+    policy is to unconditionally suppress native-search for Google provider.
+    """
+    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+
+    loop, registry = _build_loop(
+        model_infos={
+            "gemini-3-flash-preview": FakeModelInfo(
+                supports_native_search=True,
+                native_search_config={"tool_type": "google_search"},
+                provider="google",
+            ),
+        },
+        tool_names=["search_web", "search_knowledge_base"],
+    )
+
+    cfg = AgentLoopConfig(
+        model_id="gemini-3-flash-preview", max_tool_iterations=1
+    )
+    user = MockUserContext(user_id="u1")
+
+    async for _ in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="帮我做一个quiz的关于transformer的测验题",
+        config=cfg,
+        history=[],
+    ):
+        pass
+
+    assert len(registry.calls) == 1
+    call = registry.calls[0]
+    forwarded = _tool_names_in(call["tools"])
+    assert "search_web" in forwarded, (
+        f"search_web was stripped for Gemini — will produce an invalid "
+        f"request because google_search cannot coexist with functionDeclarations; "
+        f"tools forwarded: {forwarded}"
+    )
+    assert call["native_search_config"] is None, (
+        f"native_search_config leaked to Gemini while function tools were "
+        f"present; would trigger a 400 from the API. Got: "
+        f"{call['native_search_config']!r}"
+    )

@@ -1042,13 +1042,31 @@ class ModelRegistry:
         # uses the older `google_search_retrieval`. The capability map tells
         # us which form to emit. Append as a separate tool entry (Gemini
         # accepts multiple tool entries in one request).
+        #
+        # HARD CONSTRAINT: Gemini's built-in grounding tools CANNOT coexist
+        # with user `functionDeclarations` in a single request — the API
+        # returns 400. Callers upstream already suppress native_search_config
+        # for Google when function tools are in scope, but guard here too:
+        # if functionDeclarations are present, silently drop the grounding
+        # tool rather than produce an un-sendable request.
         if native_search_config and native_search_config.get("tool_type") in (
             "google_search", "google_search_retrieval"
         ):
-            search_tool_key = native_search_config["tool_type"]
-            existing = list(body.get("tools") or [])
-            existing.append({search_tool_key: {}})
-            body["tools"] = existing
+            has_function_decls = any(
+                bool(t.get("functionDeclarations"))
+                for t in (body.get("tools") or [])
+            )
+            if has_function_decls:
+                logger.info(
+                    "[GEMINI] Dropping native %s tool — cannot coexist with "
+                    "functionDeclarations in one request.",
+                    native_search_config["tool_type"],
+                )
+            else:
+                search_tool_key = native_search_config["tool_type"]
+                existing = list(body.get("tools") or [])
+                existing.append({search_tool_key: {}})
+                body["tools"] = existing
 
         # Apply tool_config if provided
         if tool_config:

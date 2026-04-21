@@ -1937,19 +1937,41 @@ class AgentLoop:
                 # Use getattr for forward-compat with fake/test ModelInfo
                 # objects that predate the native_search fields.
                 if _model_info and getattr(_model_info, "supports_native_search", False):
-                    native_search_cfg = getattr(_model_info, "native_search_config", None)
-                    if tools_for_iteration:
-                        before_len = len(tools_for_iteration)
-                        tools_for_iteration = [
-                            schema
-                            for schema in tools_for_iteration
-                            if _tool_schema_name(schema) != "search_web"
-                        ]
-                        if len(tools_for_iteration) != before_len:
-                            logger.info(
-                                f"[NATIVE-SEARCH] Using {ctx.config.model_id} built-in "
-                                f"search; dropped search_web tool."
-                            )
+                    # Gemini's `googleSearch` built-in tool is MUTUALLY
+                    # EXCLUSIVE with `functionDeclarations` — the API rejects
+                    # any request that mixes them with a 400. Since this
+                    # assistant always runs with function tools in scope
+                    # (quiz / KB / code-executor), auto-enabling google_search
+                    # for Gemini kills every turn. Suppress native-search for
+                    # Google provider unconditionally and fall back to Tavily
+                    # `search_web`.
+                    _provider_val = getattr(_model_info, "provider", None)
+                    _is_google = (
+                        getattr(_provider_val, "value", _provider_val) == "google"
+                    )
+                    if _is_google:
+                        logger.info(
+                            "[NATIVE-SEARCH] Skipping google_search for %s — "
+                            "Gemini cannot combine it with functionDeclarations. "
+                            "Keeping Tavily search_web as fallback.",
+                            ctx.config.model_id,
+                        )
+                    else:
+                        native_search_cfg = getattr(
+                            _model_info, "native_search_config", None
+                        )
+                        if tools_for_iteration:
+                            before_len = len(tools_for_iteration)
+                            tools_for_iteration = [
+                                schema
+                                for schema in tools_for_iteration
+                                if _tool_schema_name(schema) != "search_web"
+                            ]
+                            if len(tools_for_iteration) != before_len:
+                                logger.info(
+                                    f"[NATIVE-SEARCH] Using {ctx.config.model_id} built-in "
+                                    f"search; dropped search_web tool."
+                                )
                 elif iteration == 1 and tools_for_iteration and any(
                     _tool_schema_name(s) == "search_web" for s in tools_for_iteration
                 ):

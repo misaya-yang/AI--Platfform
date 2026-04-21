@@ -1398,19 +1398,35 @@ Please use this web search context to inform your response when relevant."""
         if _legacy_model_info and getattr(
             _legacy_model_info, "supports_native_search", False
         ):
-            _legacy_native_search_cfg = getattr(
-                _legacy_model_info, "native_search_config", None
+            # Gemini's `googleSearch` grounding is mutually exclusive with
+            # `functionDeclarations` — mixing them 400s. The assistant always
+            # runs with function tools in scope, so suppress native-search
+            # for Google provider unconditionally; keep Tavily `search_web`.
+            _legacy_provider = getattr(_legacy_model_info, "provider", None)
+            _legacy_is_google = (
+                getattr(_legacy_provider, "value", _legacy_provider) == "google"
             )
-            before_n = len(tools)
-            tools = [
-                t for t in tools if t.get("function", {}).get("name") != "search_web"
-            ]
-            if len(tools) != before_n:
+            if _legacy_is_google:
                 logger.info(
-                    "[NATIVE-SEARCH] (legacy path) Using %s built-in search; "
-                    "dropped search_web tool.",
+                    "[NATIVE-SEARCH] (legacy path) Skipping google_search for "
+                    "%s — cannot combine with functionDeclarations. Keeping "
+                    "Tavily search_web as fallback.",
                     config.model_id,
                 )
+            else:
+                _legacy_native_search_cfg = getattr(
+                    _legacy_model_info, "native_search_config", None
+                )
+                before_n = len(tools)
+                tools = [
+                    t for t in tools if t.get("function", {}).get("name") != "search_web"
+                ]
+                if len(tools) != before_n:
+                    logger.info(
+                        "[NATIVE-SEARCH] (legacy path) Using %s built-in search; "
+                        "dropped search_web tool.",
+                        config.model_id,
+                    )
 
         logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
 
