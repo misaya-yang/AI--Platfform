@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import time
 import uuid
@@ -1355,6 +1356,15 @@ Please use this web search context to inform your response when relevant."""
 
         # Step 4: Stream from model
         total_content = ""
+        # Turn-level accumulators for activity-drawer persistence (legacy path).
+        # These survive across iterations of the agentic tool loop below and
+        # get serialized onto the final assistant message's metadata so the
+        # frontend can rebuild the timeline on session reload. Without these,
+        # the Activity drawer shows "No activity recorded · 0 steps" even
+        # though thinking_delta and tool_call events streamed during the turn.
+        total_thinking_content: str = ""
+        turn_tool_calls: list[dict[str, Any]] = []
+        turn_tool_results: list[dict[str, Any]] = []
         usage: dict[str, int] = {}
 
         # Get tools from registry (always load tools, not just when code executor exists)
@@ -1485,6 +1495,19 @@ Please use this web search context to inform your response when relevant."""
                             logger.info(f"[TTFT] First token received after {ttft_ms:.0f}ms")
                         total_content += delta.content
                         yield AssistantStreamEvent(event_type="text_delta", data=delta.content)
+
+                    # Accumulate reasoning content (Qwen reasoning_content /
+                    # Gemini thought parts) for activity-drawer persistence.
+                    # The legacy path did not previously surface thinking to
+                    # clients here, but the aggregate still needs to reach
+                    # the DB so the Activity drawer can rebuild the timeline
+                    # on session reload.
+                    if delta.thinking_content:
+                        total_thinking_content += delta.thinking_content
+                        yield AssistantStreamEvent(
+                            event_type=StreamEventType.THINKING_DELTA.value,
+                            data=delta.thinking_content,
+                        )
 
                     if delta.thought_signature:
                         thought_signature_accumulated = delta.thought_signature
@@ -2237,6 +2260,42 @@ Please use this web search context to inform your response when relevant."""
                             }
                         )
 
+            # Accumulate tool calls + results at the turn level so the final
+            # assistant message persists everything the Activity drawer needs.
+            # (Done once per iteration, after tool execution settles.)
+            for _idx in sorted(tool_calls_accumulated.keys()):
+                _tc = tool_calls_accumulated[_idx]
+                try:
+                    _args = (
+                        json.loads(_tc.get("function", {}).get("arguments") or "{}")
+                        if _tc.get("function", {}).get("arguments")
+                        else {}
+                    )
+                    if not isinstance(_args, dict):
+                        _args = {}
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    _args = {}
+                turn_tool_calls.append(
+                    {
+                        "id": _tc.get("id", ""),
+                        "name": _tc.get("function", {}).get("name", ""),
+                        "arguments": _args,
+                        "status": "completed",
+                    }
+                )
+            for _tr in tool_results:
+                _content = _tr.get("content") if isinstance(_tr, dict) else None
+                _stored = _content[:4000] if isinstance(_content, str) else _content
+                turn_tool_results.append(
+                    {
+                        "tool_call_id": _tr.get("tool_call_id") if isinstance(_tr, dict) else None,
+                        "name": None,
+                        "result": _stored,
+                        "error": None,
+                        "duration_ms": None,
+                    }
+                )
+
             # Emit ReAct OBSERVING phase status after tool execution
             yield AssistantStreamEvent(
                 event_type=StreamEventType.STATUS,
@@ -2316,6 +2375,22 @@ Please use this web search context to inform your response when relevant."""
                         }
                     )
 
+                # Cap thinking payload to avoid JSONB bloat (session metadata
+                # hard cap is 1MB). Reasoning models can emit 10k+ chars; keep
+                # head + tail so reload still shows context.
+                _persisted_thinking: str | None = None
+                if total_thinking_content:
+                    _stripped = total_thinking_content.strip()
+                    if _stripped:
+                        if len(_stripped) > 16000:
+                            _persisted_thinking = (
+                                _stripped[:8000]
+                                + "\n\n…[truncated]…\n\n"
+                                + _stripped[-8000:]
+                            )
+                        else:
+                            _persisted_thinking = _stripped
+
                 await self.session_manager.add_message(
                     session_id=session_id,
                     role="assistant",
@@ -2326,6 +2401,11 @@ Please use this web search context to inform your response when relevant."""
                         "usage": usage,
                         "contexts": contexts_data if contexts_data else None,
                         "web_search_results": web_search_results_data,
+                        # Activity-drawer restoration fields (None when absent
+                        # so no DB/UX overhead for turns without reasoning/tools).
+                        "thinking_content": _persisted_thinking,
+                        "tool_calls": turn_tool_calls or None,
+                        "tool_results": turn_tool_results or None,
                     },
                 )
             except Exception as e:

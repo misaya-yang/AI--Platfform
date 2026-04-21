@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -7,6 +7,7 @@ import { ImageIcon, Download, ExternalLink, FileDown } from "lucide-react";
 import "katex/dist/katex.min.css";
 import { useLatexCopy } from "@/hooks/useLatexCopy";
 import { useTranslation } from "react-i18next";
+import { api } from "@/lib/api";
 
 /**
  * Custom URL transform that allows data: URLs for base64 images.
@@ -21,6 +22,31 @@ function allowDataUrlTransform(url: string): string {
   }
   // Use default transform for all other URLs (security filtering)
   return defaultUrlTransform(url);
+}
+
+/**
+ * True if the URL points at an authenticated same-origin API route that
+ * an unauthenticated `<img>` tag cannot load (no Authorization header).
+ * When the backend's artifact storage doesn't produce a public presigned
+ * URL (e.g. local filesystem backend, or presigned URL generation failed),
+ * it falls back to `/api/v1/assistant/artifacts/<id>/download` — which
+ * requires a Bearer token. We blob-fetch those via axios.
+ */
+function needsAuthenticatedFetch(src: string | undefined): boolean {
+  if (!src) return false;
+  if (/^https?:\/\//i.test(src)) return false; // external (presigned S3, OSS, etc.)
+  if (src.startsWith("data:") || src.startsWith("blob:")) return false;
+  return src.startsWith("/api/") || src.includes("/api/v1/assistant/artifacts/");
+}
+
+/**
+ * Fetch a same-origin authenticated URL through axios (Bearer auto-attached)
+ * and turn the response into a blob: URL. Returned URL must be released by
+ * the caller via URL.revokeObjectURL when the consuming element unmounts.
+ */
+async function fetchAsBlobUrl(src: string): Promise<string> {
+  const res = await api.get(src, { responseType: "blob" });
+  return URL.createObjectURL(res.data as Blob);
 }
 
 interface StreamOutputProps {
@@ -92,7 +118,48 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [resolvedSrc, setResolvedSrc] = useState<string | undefined>(() =>
+    src && !needsAuthenticatedFetch(src) ? src : undefined,
+  );
   const { t } = useTranslation();
+
+  // For authenticated same-origin routes the raw `<img src=...>` fails
+  // because browsers don't send Authorization headers on image loads.
+  // Fetch via axios (Bearer attached by the interceptor), wrap in a
+  // blob URL, and render that. Revoke on unmount / src change.
+  useEffect(() => {
+    if (!src) {
+      setResolvedSrc(undefined);
+      return;
+    }
+    if (!needsAuthenticatedFetch(src)) {
+      setResolvedSrc(src);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setHasError(false);
+    setIsLoading(true);
+    fetchAsBlobUrl(src)
+      .then((blobUrl) => {
+        if (cancelled) {
+          URL.revokeObjectURL(blobUrl);
+          return;
+        }
+        objectUrl = blobUrl;
+        setResolvedSrc(blobUrl);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHasError(true);
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [src]);
 
   const isBase64 = src?.startsWith("data:");
   const displayAlt = alt || t("common.generatedImage");
@@ -171,7 +238,7 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 
       {/* Image */}
       <img
-        src={src}
+        src={resolvedSrc || src}
         alt={displayAlt}
         className={`
           max-w-full rounded-xl shadow-lg border border-slate-200 dark:border-slate-700

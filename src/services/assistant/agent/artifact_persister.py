@@ -39,6 +39,28 @@ def sanitize_output_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sanitized
 
 
+def _browser_safe_download_url(file_info: dict[str, Any]) -> str | None:
+    """Return a URL the browser can actually render an `<img>` from.
+
+    LocalStorageBackend produces `file://` URLs which the browser refuses
+    to load for security. In that case, fall back to the authenticated
+    gateway route; the frontend has a blob-fetch path that attaches the
+    Bearer token and renders via a blob: URL.
+    """
+    raw = file_info.get("download_url")
+    artifact_id = file_info.get("artifact_id")
+    if isinstance(raw, str) and raw:
+        if raw.startswith("file://"):
+            # Never ship file:// to the browser / model — it 100% fails.
+            if artifact_id:
+                return f"/api/v1/assistant/artifacts/{artifact_id}/download"
+            return None
+        return raw
+    if artifact_id:
+        return f"/api/v1/assistant/artifacts/{artifact_id}/download"
+    return None
+
+
 def _build_artifact_event_data(file_info: dict[str, Any], source: str) -> dict[str, Any]:
     mime = str(file_info.get("mime_type") or "")
     mime_tail = mime.split("/")[-1] if mime else "bin"
@@ -51,7 +73,7 @@ def _build_artifact_event_data(file_info: dict[str, Any], source: str) -> dict[s
         "mime_type": file_info.get("mime_type"),
         "size_bytes": file_info.get("size_bytes"),
         "source": source,
-        "download_url": file_info.get("download_url"),
+        "download_url": _browser_safe_download_url(file_info),
     }
 
 
@@ -106,6 +128,16 @@ async def persist_and_collect_events(
 
     event_payloads: list[dict[str, Any]] = []
     created_ids: list[str] = []
+    # Rewrite any file:// URLs in-place so the agent loop's Artifact-URL
+    # block (which gets appended to tool_result_for_model) never leaks a
+    # file:// URL to the model. The model otherwise copies it verbatim into
+    # its markdown, producing `![chart](file:///...)` that no browser can
+    # render — the "Image failed to load" saga.
+    for file_info in persisted:
+        safe_url = _browser_safe_download_url(file_info)
+        if safe_url is not None:
+            file_info["download_url"] = safe_url
+
     for file_info in persisted:
         artifact_id = file_info.get("artifact_id")
         if artifact_id:

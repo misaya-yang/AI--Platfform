@@ -1350,6 +1350,15 @@ class AgentLoop:
             web_search_results_for_persistence: dict[str, Any] | None = None
             quiz_id_for_persistence: str | None = None
             created_artifact_ids: list[str] = []
+            # Turn-level accumulators for activity-drawer persistence.
+            # These cross iteration boundaries (per-iteration `accumulated_thinking`
+            # and `tool_calls_accumulated` get reset), so we append to these from
+            # inside the loop and then serialize them onto the final assistant
+            # message. Without this, reloading a session shows "0 steps" in the
+            # Activity drawer even though the original turn ran tools + thinking.
+            turn_thinking_content: str = ""
+            turn_tool_calls: list[dict[str, Any]] = []
+            turn_tool_results: list[dict[str, Any]] = []
 
             _sanitize_output_files = _artifact_sanitize_output_files
 
@@ -2000,6 +2009,7 @@ class AgentLoop:
                                 data={"model_id": ctx.config.model_id},
                             )
                         accumulated_thinking += delta.thinking_content
+                        turn_thinking_content += delta.thinking_content
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type="thinking_delta",
@@ -2125,6 +2135,18 @@ class AgentLoop:
                     tool_name = func_info.get("name", "unknown")
                     tool_args_str = func_info.get("arguments", "{}")
 
+                    # Turn-level persistence record: capture the call as soon as
+                    # we know its identity. `arguments` is parsed below into
+                    # `tool_args` (dict). If the tool errors out, we still want
+                    # the record in the activity drawer on reload.
+                    _turn_call_record: dict[str, Any] = {
+                        "id": tool_id,
+                        "name": tool_name,
+                        "arguments": {},
+                        "status": "running",
+                    }
+                    turn_tool_calls.append(_turn_call_record)
+
                     # Parse tool args up-front so we can create a human-friendly step card
                     # and pass structured args into tool execution.
                     try:
@@ -2132,6 +2154,8 @@ class AgentLoop:
                     except (json.JSONDecodeError, ValueError):
                         parsed_args = {}
                     tool_args = parsed_args if isinstance(parsed_args, dict) else {}
+                    # Fill in the arguments now that they're parsed.
+                    _turn_call_record["arguments"] = tool_args
                     kb_query_fp = (
                         _kb_query_fingerprint(tool_args)
                         if tool_name == "search_knowledge_base"
@@ -2729,6 +2753,24 @@ class AgentLoop:
                                 "error": tool_error,
                             },
                         )
+                        # Turn-level persistence: update call status + record
+                        # result so the Activity drawer can rebuild the timeline
+                        # on session reload. Bound the stored result size to
+                        # avoid JSONB bloat for KB/web tools that return large
+                        # payloads — the drawer only needs a short summary.
+                        _turn_call_record["status"] = "completed" if tool_success else "error"
+                        _stored_result: Any = tool_result_preview
+                        if isinstance(tool_result_text, str):
+                            _stored_result = tool_result_text[:4000]
+                        turn_tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "result": _stored_result,
+                                "error": tool_error,
+                                "duration_ms": tool_duration_ms,
+                            }
+                        )
                         step_success = tool_success
                         step_error = tool_error
                         step_result_preview = tool_result_preview or None
@@ -2750,6 +2792,17 @@ class AgentLoop:
                                 "success": False,
                                 "error": str(e),
                             },
+                        )
+                        # Turn-level persistence — record the failure too.
+                        _turn_call_record["status"] = "error"
+                        turn_tool_results.append(
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "result": None,
+                                "error": str(e),
+                                "duration_ms": None,
+                            }
                         )
                         step_success = False
                         step_error = str(e)
@@ -3074,6 +3127,22 @@ class AgentLoop:
                         "completion_tokens": usage_out,
                     }
 
+                    # Cap thinking payload to avoid JSONB bloat (sessions cap
+                    # metadata at 1MB). Reasoning models can emit 10k+ chars;
+                    # we keep the head + tail so reload still shows context.
+                    _persisted_thinking: str | None = None
+                    if turn_thinking_content:
+                        _stripped = turn_thinking_content.strip()
+                        if _stripped:
+                            if len(_stripped) > 16000:
+                                _persisted_thinking = (
+                                    _stripped[:8000]
+                                    + "\n\n…[truncated]…\n\n"
+                                    + _stripped[-8000:]
+                                )
+                            else:
+                                _persisted_thinking = _stripped
+
                     await self.session_manager.add_message(
                         session_id=ctx.session_id,
                         role="assistant",
@@ -3088,6 +3157,12 @@ class AgentLoop:
                             "artifact_ids": created_artifact_ids or None,
                             "engine": "agent_loop",
                             "mode": "streaming_first",
+                            # Activity-drawer restoration fields. Any of these
+                            # may be None/[] for turns without reasoning/tools;
+                            # the frontend guards on presence.
+                            "thinking_content": _persisted_thinking,
+                            "tool_calls": turn_tool_calls or None,
+                            "tool_results": turn_tool_results or None,
                         },
                     )
                 except Exception as e:

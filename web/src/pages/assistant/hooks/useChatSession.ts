@@ -199,6 +199,38 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
     if (msg.metadata.artifact_ids && Array.isArray(msg.metadata.artifact_ids)) {
       baseMessage._artifactIds = msg.metadata.artifact_ids;
     }
+
+    // Restore Activity-drawer fields. These three were persisted starting
+    // with the 2026-04-21 fix — without them, the drawer shows
+    // "No activity recorded · 0 steps" on session reload even though the
+    // original turn ran native-search / emitted thinking. The frontend's
+    // buildTimeline reads thinkingContent + toolCalls + toolResults.
+    if (typeof msg.metadata.thinking_content === "string" && msg.metadata.thinking_content.trim()) {
+      baseMessage.thinkingContent = msg.metadata.thinking_content;
+    }
+    if (Array.isArray(msg.metadata.tool_calls) && msg.metadata.tool_calls.length > 0) {
+      baseMessage.toolCalls = msg.metadata.tool_calls.map((tc: any) => ({
+        id: String(tc?.id ?? ""),
+        name: String(tc?.name ?? ""),
+        arguments:
+          tc?.arguments && typeof tc.arguments === "object" && !Array.isArray(tc.arguments)
+            ? (tc.arguments as Record<string, unknown>)
+            : {},
+        status:
+          tc?.status === "error" || tc?.status === "pending" || tc?.status === "running"
+            ? tc.status
+            : "completed",
+      }));
+    }
+    if (Array.isArray(msg.metadata.tool_results) && msg.metadata.tool_results.length > 0) {
+      baseMessage.toolResults = msg.metadata.tool_results.map((tr: any) => ({
+        tool_call_id: String(tr?.tool_call_id ?? ""),
+        name: typeof tr?.name === "string" ? tr.name : "",
+        result: tr?.result,
+        error: typeof tr?.error === "string" ? tr.error : undefined,
+        duration_ms: typeof tr?.duration_ms === "number" ? tr.duration_ms : undefined,
+      }));
+    }
   }
   return baseMessage;
 };
