@@ -2,16 +2,11 @@
  * ActivityPill — inline affordance that opens the right-side Activity
  * drawer.
  *
- * Visual target (restrained, Linear/Claude.ai style):
- *   icon + "Activity · N steps · XXs" + chevron   — reads as text, not a button
- *
- * At rest: no background, no border, no colored icon halo. Tap target
- * remains accessible (≥32px via vertical padding). On hover: subtle
- * bg-soft fade + primary text colour.
- *
- * Two variants are kept for API compatibility (pill | chip) but they
- * now render with the same reduced-chrome style; only typography size
- * differs.
+ * Restrained chrome: a 1px hairline + surface-bg tint at rest — visible
+ * enough to read as a control on a near-black canvas, quiet enough to
+ * not scream like an AI-flavor filled pill. Earlier iteration went fully
+ * transparent and disappeared on dark mode; this tier restores the
+ * findability floor without regressing the quiet aesthetic.
  */
 
 import { T, ui, ensureActivityStyles } from "./activityTheme";
@@ -60,12 +55,10 @@ export function ActivityPill({
         display: "inline-flex",
         alignItems: "center",
         gap: 7,
-        // Vertical padding keeps the 32px click target while the visual
-        // at rest reads as plain text.
-        padding: "7px 8px",
+        padding: "7px 10px",
         borderRadius: 6,
-        border: "1px solid transparent",
-        background: "transparent",
+        border: `1px solid ${T.border}`,
+        background: T.panel,
         color: T.textMute,
         fontFamily: ui.sans,
         fontSize,

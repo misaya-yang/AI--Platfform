@@ -108,20 +108,20 @@
     /* Assistant UI scoped tokens — warm-neutral near-black (dark).
        Hue 30 (warm, whisper of red) replaces prior cool-green 152.
        Never pure black; text capped at ~88% to avoid harshness.
-       Activity panel + chat canvas share one surface so the drawer
-       feels like the same plane, not a lighter lifted card. */
-    --assistant-canvas-bg: 30 6% 9%;           /* warm near-black, not #000 */
-    --assistant-surface-bg: 30 6% 11%;         /* chip / user-bubble inner */
-    --assistant-surface-soft: 30 5% 13%;       /* code block, muted fill */
-    --assistant-text-primary: 30 6% 88%;       /* ~88% warm-white, not pure */
-    --assistant-text-secondary: 30 4% 62%;     /* ~62%, raised from prior 52 */
-    --assistant-text-tertiary: 30 3% 45%;      /* labels, stats line */
-    --assistant-border: 30 5% 18%;             /* hairline, ~8% white-alpha equiv */
-    --assistant-border-soft: 30 5% 15%;        /* softer hairline */
-    --assistant-accent: 43 48% 62%;            /* gold, slightly warmer+brighter */
-    --assistant-accent-soft: 43 35% 20%;       /* tinted bg for accent marker */
-    --assistant-chip-bg: 30 5% 13%;
-    --assistant-user-bubble: 30 5% 14%;
+       L-steps widened from a 2% ladder (9/11/13/18) to a ~4-5% ladder
+       so layering reads as depth, not a flat black sheet. */
+    --assistant-canvas-bg: 30 6% 8%;           /* warm near-black, slightly under surface */
+    --assistant-surface-bg: 30 6% 14%;         /* chip / user-bubble inner — clear step */
+    --assistant-surface-soft: 30 5% 17%;       /* code block, hover fill */
+    --assistant-text-primary: 30 6% 90%;
+    --assistant-text-secondary: 30 4% 66%;
+    --assistant-text-tertiary: 30 3% 48%;
+    --assistant-border: 30 5% 24%;             /* hairline visible on canvas */
+    --assistant-border-soft: 30 5% 19%;
+    --assistant-accent: 43 50% 64%;            /* gold, a touch brighter for dark */
+    --assistant-accent-soft: 43 35% 22%;
+    --assistant-chip-bg: 30 5% 15%;
+    --assistant-user-bubble: 30 5% 17%;
     --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
     --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }
