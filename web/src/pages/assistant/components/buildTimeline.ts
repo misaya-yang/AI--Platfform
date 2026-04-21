@@ -264,8 +264,16 @@ function buildToolTitle(t: TFn, tc: ToolCall, icon: TimelineIcon): string {
     return t("playground.activity.step.generateDocument", { defaultValue: "Generating document" });
   }
 
+  const displayName = tc.name && tc.name.trim() && tc.name !== "tool" ? tc.name : "";
+  if (!displayName) {
+    // Name missing or still the placeholder from the reducer seed — prefer
+    // a name-free generic label over the jarring "Using ".
+    return t("playground.activity.step.toolGenericNoName", {
+      defaultValue: "External tool",
+    });
+  }
   return t("playground.activity.step.toolGeneric", {
-    name: tc.name,
+    name: displayName,
     defaultValue: "Using {{name}}",
   });
 }

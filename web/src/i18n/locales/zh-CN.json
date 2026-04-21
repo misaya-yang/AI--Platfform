@@ -1832,7 +1832,8 @@
         "searchKb": "搜索 {{dataset}}",
         "searchKbGeneric": "搜索知识库",
         "processFiles": "处理文件",
-        "toolGeneric": "调用 {{name}}"
+        "toolGeneric": "调用 {{name}}",
+        "toolGenericNoName": "外部工具"
       }
     },
     "artifacts": "生成的文件",

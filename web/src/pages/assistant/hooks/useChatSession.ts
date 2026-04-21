@@ -868,10 +868,15 @@ export function useChatSession() {
           if (!toolCallId) return undefined;
           return {
             tool_call_id: toolCallId,
+            // Don't fall back to the literal "tool" — an empty string lets
+            // the downstream reducer preserve the name set by an earlier
+            // event with this same tool_call_id (tool_call_start usually
+            // carries the real name; tool_call_end/result sometimes drop
+            // it, and overwriting would mask the original).
             name:
               (typeof eventPayload.tool_name === "string" &&
                 eventPayload.tool_name) ||
-              (typeof eventPayload.name === "string" ? eventPayload.name : "tool"),
+              (typeof eventPayload.name === "string" ? eventPayload.name : ""),
             arguments: normalizeUnknownToString(eventPayload.arguments),
             status:
               event.event_type === SSEEventType.TOOL_CALL_END ||

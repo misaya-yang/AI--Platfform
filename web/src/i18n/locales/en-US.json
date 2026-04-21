@@ -1834,7 +1834,8 @@
         "searchKb": "Searching {{dataset}}",
         "searchKbGeneric": "Searching knowledge base",
         "processFiles": "Processing files",
-        "toolGeneric": "Using {{name}}"
+        "toolGeneric": "Using {{name}}",
+        "toolGenericNoName": "External tool"
       }
     },
     "artifacts": "Generated Files",

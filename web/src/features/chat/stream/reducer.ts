@@ -230,8 +230,13 @@ function recordSequence(
 }
 
 function extractToolName(event: NormalizedStreamEvent): string {
+  // Return empty string when the event doesn't carry a name — callers OR
+  // with the existing tool.name, so we don't clobber a good name from an
+  // earlier event (e.g. tool_call_start sets name="search_web", then a
+  // later tool_call_end arrives without tool_name metadata → we must not
+  // overwrite with a fallback placeholder).
   const metadata = event.metadata || {};
-  return typeof metadata.tool_name === "string" ? metadata.tool_name : "tool";
+  return typeof metadata.tool_name === "string" ? metadata.tool_name : "";
 }
 
 function extractToolArguments(event: NormalizedStreamEvent): string {
@@ -265,7 +270,9 @@ function upsertToolCall(
   if (index === -1) {
     const seed: StreamToolCallState = {
       id: toolCallId,
-      name: "tool",
+      // Empty seed, filled by the first event's extractToolName result.
+      // Keeps the `extractToolName(event) || tool.name` guard meaningful.
+      name: "",
       arguments: "",
       argsValid: false,
       status: "pending",

@@ -358,6 +358,19 @@ class CodeExecutorService:
             end_time = time.time()
             result.duration_ms = (end_time - start_time) * 1000
 
+            # Log exec outcome before collect so we can correlate 0-file
+            # returns with stderr (e.g. permission denied on savefig) or
+            # silent stdout (matplotlib saved but to wrong path).
+            logger.info(
+                "[code_executor] exec_id=%s exit=%s stdout_len=%d stderr_len=%d",
+                execution_id, exit_code, len(stdout), len(stderr),
+            )
+            if stderr.strip():
+                logger.warning(
+                    "[code_executor] exec_id=%s stderr_tail=%r",
+                    execution_id, stderr[-500:],
+                )
+
             # Collect output files
             output_files = await self._collect_output_files(
                 workspace_dir=workspace_dir,
@@ -558,9 +571,23 @@ class CodeExecutorService:
         output_dir = workspace_dir / "output"
 
         if not output_dir.exists():
+            logger.warning(
+                "[code_executor] output_dir MISSING post-run: %s "
+                "(workspace_dir exists=%s). Container couldn't write back.",
+                output_dir, workspace_dir.exists(),
+            )
             return output_files
 
-        for file_path in output_dir.iterdir():
+        # Diagnostic listing — capture whatever landed there before we filter.
+        all_entries = list(output_dir.iterdir())
+        logger.info(
+            "[code_executor] output_dir=%s entries=%d [%s]",
+            output_dir,
+            len(all_entries),
+            ", ".join(p.name for p in all_entries[:20]) or "<empty>",
+        )
+
+        for file_path in all_entries:
             if file_path.is_file():
                 try:
                     content = file_path.read_bytes()
@@ -578,7 +605,7 @@ class CodeExecutorService:
                 except Exception as e:
                     logger.warning(f"Failed to read output file {file_path}: {e}")
 
-        logger.debug(f"Collected {len(output_files)} output files")
+        logger.info("[code_executor] collected %d output file(s)", len(output_files))
         return output_files
 
     def _guess_mime_type(self, filename: str) -> str:
