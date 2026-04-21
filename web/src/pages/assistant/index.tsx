@@ -516,6 +516,28 @@ export function AssistantPage() {
                   <TooltipContent side="bottom">{t("assistant.shareConversation", "Share Conversation")}</TooltipContent>
                 </Tooltip>
               )}
+              {/* Spacer pushes Artifacts chip to the far right of the top bar */}
+              <div className="flex-1" />
+              {/* Inline Artifacts indicator — replaces the old floating button.
+                  Only appears when there are artifacts in the current session,
+                  and only when the Artifacts panel isn't already open. */}
+              {!isMobile && !showArtifacts && (artifacts.length + codeExecution.outputFiles.length) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActivityMessageId(null);
+                    setShowArtifacts(true);
+                  }}
+                  aria-label={t("assistant.showArtifacts", "Show generated files")}
+                  className="group inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[12.5px] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition-colors"
+                >
+                  <FileText className="h-3.5 w-3.5 text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-200" />
+                  <span>{t("assistant.artifacts", "Artifacts")}</span>
+                  <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                    {artifacts.length + codeExecution.outputFiles.length}
+                  </span>
+                </button>
+              )}
             </div>
 
             {/* Messages Area */}
@@ -661,45 +683,6 @@ export function AssistantPage() {
                   <Button size="icon" variant="outline" onClick={scrollToBottom} className="h-9 w-9 rounded-full shadow-lg">
                     <ArrowDown className="h-4 w-4 text-slate-500" />
                   </Button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Floating Artifacts Toggle Button */}
-            <AnimatePresence>
-              {!showArtifacts && (artifacts.length > 0 || codeExecution.outputFiles.length > 0) && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.8, x: 20 }}
-                  animate={{ opacity: 1, scale: 1, x: 0 }}
-                  exit={{ opacity: 0, scale: 0.8, x: 20 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 25 }}
-                  className={cn("absolute right-4 bottom-[180px] z-20", isMobile && "bottom-[150px]")}
-                >
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        onClick={() => {
-                          // Mutex: close Activity when user opens Artifacts.
-                          setActivityMessageId(null);
-                          setShowArtifacts(true);
-                        }}
-                        className="group flex items-center gap-2 px-3 py-2.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-lg hover:shadow-xl transition-all duration-200 hover:border-violet-300 dark:hover:border-violet-700"
-                      >
-                        <div className="relative">
-                          <FileText className="h-4 w-4 text-violet-500" />
-                          {/* Badge with count */}
-                          <span className="absolute -top-1.5 -right-1.5 flex items-center justify-center h-4 min-w-4 px-1 text-[10px] font-bold text-white bg-violet-500 rounded-full">
-                            {artifacts.length + codeExecution.outputFiles.length}
-                          </span>
-                        </div>
-                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300 group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
-                          Artifacts
-                        </span>
-                        <PanelRightOpen className="h-3.5 w-3.5 text-slate-400 group-hover:text-violet-500 transition-colors" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="left">{t("assistant.showArtifacts", "Show generated files")}</TooltipContent>
-                  </Tooltip>
                 </motion.div>
               )}
             </AnimatePresence>

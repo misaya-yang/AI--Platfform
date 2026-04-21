@@ -183,7 +183,15 @@ function AgentPhaseDisplay({ phase }: { phase: AgentPhaseStatus }) {
   );
 }
 
-/** Stats badge showing token usage and timing */
+/** Stats badge — single hairline text line of muted metadata.
+ *
+ * Replaces the old 3-4 colored pill stack ("18.49s", "TTFT: 5491ms",
+ * "1.2K tokens", "cached") which was loud and feels dated. Metadata
+ * belongs in the margin, not the spotlight — per project design brief
+ * ("composure at rest, drama on change"). Duration already appears in
+ * the Activity pill; this line keeps the secondary numbers accessible
+ * without competing for attention.
+ */
 function StatsBadge({ message }: { message: ChatMessageType }) {
   const { t } = useTranslation();
   if (!message.usage && !message.durationMs) return null;
@@ -191,51 +199,40 @@ function StatsBadge({ message }: { message: ChatMessageType }) {
   const totalTokens =
     (message.usage?.input_tokens || 0) + (message.usage?.output_tokens || 0);
 
+  const parts: string[] = [];
+  if (message.durationMs != null) {
+    parts.push(`${(message.durationMs / 1000).toFixed(2)}s`);
+  }
+  if (message.firstTokenMs != null) {
+    parts.push(`${t("playground.stats.ttft", "TTFT")} ${(message.firstTokenMs / 1000).toFixed(2)}s`);
+  }
+  if (totalTokens > 0) {
+    const compact =
+      totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : String(totalTokens);
+    parts.push(`${compact} ${t("assistant.tokens", "tokens")}`);
+  }
+  if (message.cacheMetrics && message.cacheMetrics.cache_hit_rate > 0) {
+    parts.push(`${Math.round(message.cacheMetrics.cache_hit_rate * 100)}% cached`);
+  }
+
+  if (parts.length === 0) return null;
+
   return (
     <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
       transition={{ delay: 0.2 }}
-      className="flex flex-wrap items-center gap-2 text-[10px] mt-3"
+      className="mt-2 text-[11px] font-mono tabular-nums text-slate-400 dark:text-slate-500"
     >
-      {message.durationMs != null && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
-          <Clock className="h-3 w-3" />
-          {(message.durationMs / 1000).toFixed(2)}s
-        </span>
-      )}
-      {message.firstTokenMs != null && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
-          <Zap className="h-3 w-3" />
-          {t("playground.stats.ttft", "TTFT")}: {message.firstTokenMs}ms
-        </span>
-      )}
-      {totalTokens > 0 && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400">
-          <MessageSquare className="h-3 w-3" />
-          {totalTokens} {t("assistant.tokens", "tokens")}
-          {message.usage?.input_tokens != null &&
-            message.usage?.output_tokens != null && (
-              <span className="text-slate-400 dark:text-slate-500 ml-1">
-                ({message.usage.input_tokens}↑ / {message.usage.output_tokens}↓)
-              </span>
-            )}
-        </span>
-      )}
-      {message.cacheMetrics && message.cacheMetrics.cache_hit_rate > 0 && (
-        <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400">
-          <Zap className="h-3 w-3" />
-          {(message.cacheMetrics.cache_hit_rate * 100).toFixed(0)}% cached
-          {message.cacheMetrics.estimated_savings_usd > 0.0001 && (
-            <span className="text-emerald-500 ml-1">
-              (-${message.cacheMetrics.estimated_savings_usd.toFixed(4)})
-            </span>
-          )}
-        </span>
-      )}
+      {parts.join(" · ")}
     </motion.div>
   );
 }
+
+// Silence unused-import warnings now that pills are gone.
+void Clock;
+void Zap;
+void MessageSquare;
 
 /** Attachments display in message */
 function AttachmentsDisplay({
