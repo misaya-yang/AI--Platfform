@@ -178,9 +178,22 @@ async def test_pipeline_runs_each_format(tmp_path, doc_type):
 
 @pytest.mark.asyncio
 async def test_pipeline_streaming_emits_expected_events(tmp_path):
-    pipe = DocgenPipeline(llm=None)
+    # Verify-off mode: plan → ir → render → done, no critic events.
+    pipe = DocgenPipeline(llm=None, verify=False)
     brief = Brief(doc_type="docx", title="stream", goal="stream test")
     events = []
     async for ev in pipe.run_streaming(brief, tmp_path):
         events.append(ev.event)
     assert events == ["plan", "ir", "render", "done"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_streaming_includes_critic_when_verify_on(tmp_path):
+    pipe = DocgenPipeline(llm=None, verify=True, max_fix_rounds=1)
+    brief = Brief(doc_type="docx", title="stream2", goal="with critic")
+    events = []
+    async for ev in pipe.run_streaming(brief, tmp_path):
+        events.append(ev.event)
+    assert events[0] == "plan"
+    assert events[-1] == "done"
+    assert "critic" in events
