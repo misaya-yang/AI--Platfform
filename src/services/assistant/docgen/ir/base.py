@@ -47,6 +47,12 @@ class FontSpec(BaseModel):
 
 
 class DocMetadata(BaseModel):
+    """Document metadata. ``model_config = ConfigDict(extra='allow')`` so
+    callers can stash deck-level hints (e.g. ``design_system``) here without
+    them being stripped by pydantic."""
+
+    model_config = {"extra": "allow"}
+
     title: str
     subtitle: Optional[str] = None
     author: Optional[str] = None

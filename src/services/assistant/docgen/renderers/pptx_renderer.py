@@ -1,25 +1,26 @@
-"""PptxRenderer — python-pptx with a serious visual toolkit.
+"""PptxRenderer — design-system-driven.
 
-Design language:
-  * Every slide uses the FULL 13.33" × 7.5" canvas.
-  * Titles live on a coloured title bar (palette[0] 96% width, 0.9" tall).
-  * A thin 0.08" accent bar underneath uses palette[1] at ~40% width.
-  * Palette[2] is the page-background tint; palette[3] is card stroke.
-  * Cards are drawn as rounded rectangles with a coloured top edge.
-  * Stat pages use a 160pt number centred on a palette[2] background block.
-  * Quote pages use a dark palette[0] background and oversized italic text.
-  * Icon row draws coloured circles (56pt radius) with an initial letter.
-  * Grid 2×2 draws four full-height cards with staggered accent colours.
+Design conventions (distilled from 2026 SOTA research):
 
-Every colour is taken from the IR's ``theme.palette`` (5 entries). Font
-families are resolved against a safe set so "Inter" / "Noto Sans CJK"
-degrades cleanly to Calibri / Helvetica on machines without them.
+* Token-based colours (surface / ink / accent), not ``palette[0..4]``.
+* Typography scale 1.333 (eyebrow / display / h1 / h2 / lead / body / caption).
+* **Eyebrow kicker** above every H1 — uppercase, tracked, ~11pt, muted.
+* **Section numeral** behind content — 180pt "01 / 08", ~20% opacity.
+* **No accent underline under the title** — Anthropic's skill flags this
+  as the #1 AI-tell.
+* **Asymmetric splits** (38/62), not 50/50.
+* **Soft drop shadow** on every elevated surface via ``a:effectLst`` XML.
+* **Gradient surface tint** for hero and card backgrounds.
+* **Background geometry** — rotated soft rectangle at 4-8% fill.
+* **Layout variety** — caller's planner is responsible for no-two-same
+  consecutive slides; renderer honours whatever IR ships.
 """
 
 from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,17 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
+from ..design_system import (
+    ColorTokens,
+    DesignSystem,
+    TypeScale,
+    available_systems,
+    design_system_from_palette,
+    get_design_system,
+    shade,
+    text_on,
+    tint,
+)
 from ..ir import (
     BulletBlock,
     ChartBlock,
@@ -45,13 +57,24 @@ from ..ir import (
 )
 from ..ir.pptx import _ImageSource, _IconRef, _ShapeSpec, VisualSpec  # noqa
 from .base import BaseRenderer, RenderError, RenderResult
+from .pptx_effects import (
+    add_outer_shadow,
+    set_linear_gradient_fill,
+    set_no_stroke,
+    set_rotation,
+    set_stroke,
+    set_transparency,
+)
 
 
 SLIDE_W = 13.333
 SLIDE_H = 7.5
+MARGIN = 0.66          # outer safe area (≈ 48pt)
+GRID_GAP = 0.33
 
 
-# ---- helpers ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# colour helpers
 
 
 def _rgb(hex_value: str) -> RGBColor:
@@ -62,102 +85,67 @@ def _rgb(hex_value: str) -> RGBColor:
     )
 
 
-def _tint(hex_value: str, amount: float = 0.88) -> str:
-    """Lighten a hex color toward white by ``amount`` (0..1 = fully white)."""
-    r = int(hex_value[0:2], 16)
-    g = int(hex_value[2:4], 16)
-    b = int(hex_value[4:6], 16)
-    r = int(r + (255 - r) * amount)
-    g = int(g + (255 - g) * amount)
-    b = int(b + (255 - b) * amount)
-    return f"{r:02X}{g:02X}{b:02X}"
+_CHART_KINDS = {
+    "bar": XL_CHART_TYPE.BAR_CLUSTERED,
+    "column": XL_CHART_TYPE.COLUMN_CLUSTERED,
+    "line": XL_CHART_TYPE.LINE,
+    "pie": XL_CHART_TYPE.PIE,
+    "area": XL_CHART_TYPE.AREA,
+    "scatter": XL_CHART_TYPE.XY_SCATTER_LINES,
+}
 
 
-def _relative_luminance(hex_value: str) -> float:
-    """Rough WCAG luminance — used to pick white vs. dark text automatically."""
-    def lin(c):
-        c = c / 255
-        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
-
-    r = lin(int(hex_value[0:2], 16))
-    g = lin(int(hex_value[2:4], 16))
-    b = lin(int(hex_value[4:6], 16))
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+# ---------------------------------------------------------------------------
+# renderer
 
 
-def _text_on(bg_hex: str) -> str:
-    """Pick a readable foreground for a background color (white or near-black)."""
-    return "FFFFFF" if _relative_luminance(bg_hex) < 0.45 else "0F172A"
+@dataclass
+class _Ctx:
+    """Per-render context — design system + typography + index."""
 
+    ds: DesignSystem
+    total_slides: int
+    eyebrow_default: str
+    brand: str
+    author: str
 
-def _chart_kind(kind: str):
-    return {
-        "bar": XL_CHART_TYPE.BAR_CLUSTERED,
-        "column": XL_CHART_TYPE.COLUMN_CLUSTERED,
-        "line": XL_CHART_TYPE.LINE,
-        "pie": XL_CHART_TYPE.PIE,
-        "area": XL_CHART_TYPE.AREA,
-        "scatter": XL_CHART_TYPE.XY_SCATTER_LINES,
-    }[kind]
+    @property
+    def c(self) -> ColorTokens:
+        return self.ds.colors
 
-
-_SAFE_BODY_FONTS = {"Inter", "Helvetica", "Calibri", "Arial", "Segoe UI", "Times New Roman"}
-_SAFE_HEADING_FONTS = {"Inter", "Helvetica-Bold", "Calibri", "Arial Black", "Segoe UI Semibold"}
-
-
-def _resolve_body_font(name: str) -> str:
-    if name in _SAFE_BODY_FONTS:
-        return name
-    low = name.lower()
-    if "serif" in low or "times" in low:
-        return "Times New Roman"
-    if "mono" in low or "courier" in low:
-        return "Courier New"
-    return "Calibri"
-
-
-def _resolve_heading_font(name: str) -> str:
-    if name in _SAFE_HEADING_FONTS:
-        return name
-    low = name.lower()
-    if "serif" in low or "times" in low:
-        return "Times New Roman"
-    return "Calibri"
-
-
-# ---- palette extraction ----------------------------------------------------
-
-
-class _Palette:
-    """Adapter that turns a 5-colour IR palette into semantic slots."""
-
-    def __init__(self, theme_palette):
-        colours = [c.value for c in theme_palette] or ["0F172A", "3B82F6", "F1F5F9", "E2E8F0", "F59E0B"]
-        while len(colours) < 5:
-            colours.append(colours[-1])
-        self.dark = colours[0]           # primary / title bar
-        self.primary = colours[1]        # accent / chart
-        self.light = colours[2]          # page background tint
-        self.muted = colours[3]          # card stroke / meta
-        self.accent = colours[4]         # highlight / stat
-
-        # Computed
-        self.dark_tint = _tint(self.dark, 0.92)
-        self.primary_tint = _tint(self.primary, 0.88)
-        self.accent_tint = _tint(self.accent, 0.85)
-
-    def card_edge_color(self, i: int) -> str:
-        """Pick a card top-edge colour for grid layouts."""
-        return [self.primary, self.accent, self.dark, self.muted][i % 4]
-
-
-# ---- renderer --------------------------------------------------------------
+    @property
+    def t(self) -> TypeScale:
+        return self.ds.type_scale
 
 
 class PptxRenderer(BaseRenderer):
     format = "pptx"
 
-    # ---------------- setup
+    # ------------------------------------------------------------------ setup
+
+    def _ctx(self, ir: PptxIR) -> _Ctx:
+        # Pick design system: explicit metadata.extra["design_system"]
+        # overrides; otherwise derive from the 5-colour palette bridge.
+        ds_name = None
+        if ir.metadata.model_extra:
+            ds_name = ir.metadata.model_extra.get("design_system")
+        ds: Optional[DesignSystem] = None
+        if ds_name and ds_name in available_systems():
+            ds = get_design_system(ds_name)
+        if ds is None:
+            palette_hex = [c.value for c in ir.theme.palette]
+            ds = design_system_from_palette(palette_hex)
+
+        subtitle = ir.metadata.subtitle or ""
+        eyebrow = subtitle.upper() if subtitle else ""
+        brand = ir.metadata.author or "PRESENTATION"
+        return _Ctx(
+            ds=ds,
+            total_slides=len(ir.content.slides),
+            eyebrow_default=eyebrow,
+            brand=brand,
+            author=ir.metadata.author or "",
+        )
 
     def _new_presentation(self) -> Presentation:
         prs = Presentation()
@@ -165,37 +153,38 @@ class PptxRenderer(BaseRenderer):
         prs.slide_height = Inches(SLIDE_H)
         return prs
 
-    # ---------------- primitives
+    # ----------------------------------------------------------- primitives
 
-    def _fill(self, shape, hex_value: str) -> None:
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = _rgb(hex_value)
+    def _rect(self, slide, *, left, top, width, height, hex_fill, shadow=False, radius=False):
+        shape_type = MSO_SHAPE.ROUNDED_RECTANGLE if radius else MSO_SHAPE.RECTANGLE
+        shp = slide.shapes.add_shape(shape_type, Inches(left), Inches(top), Inches(width), Inches(height))
+        shp.fill.solid()
+        shp.fill.fore_color.rgb = _rgb(hex_fill)
+        set_no_stroke(shp)
+        if radius:
+            try:
+                shp.adjustments[0] = 0.05
+            except Exception:
+                pass
+        if shadow:
+            add_outer_shadow(shp, blur_emu=40_000, dist_emu=23_000, alpha_per_mille=18_000)
+        return shp
 
-    def _no_stroke(self, shape) -> None:
-        shape.line.fill.background()
-
-    def _rect(self, slide, *, left, top, width, height, hex_fill, stroke=False):
+    def _gradient_rect(self, slide, *, left, top, width, height, stops, angle=90.0, shadow=False):
         shp = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
-        self._fill(shp, hex_fill)
-        if not stroke:
-            self._no_stroke(shp)
+        set_no_stroke(shp)
+        set_linear_gradient_fill(shp, stops=stops, angle_deg=angle)
+        if shadow:
+            add_outer_shadow(shp, blur_emu=40_000, dist_emu=23_000, alpha_per_mille=18_000)
         return shp
 
-    def _rounded(self, slide, *, left, top, width, height, hex_fill, stroke=False):
-        shp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
-        try:
-            shp.adjustments[0] = 0.06
-        except Exception:
-            pass
-        self._fill(shp, hex_fill)
-        if not stroke:
-            self._no_stroke(shp)
-        return shp
-
-    def _ellipse(self, slide, *, left, top, width, height, hex_fill):
+    def _ellipse(self, slide, *, left, top, width, height, hex_fill, shadow=False):
         shp = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(left), Inches(top), Inches(width), Inches(height))
-        self._fill(shp, hex_fill)
-        self._no_stroke(shp)
+        shp.fill.solid()
+        shp.fill.fore_color.rgb = _rgb(hex_fill)
+        set_no_stroke(shp)
+        if shadow:
+            add_outer_shadow(shp, blur_emu=30_000, dist_emu=15_000, alpha_per_mille=15_000)
         return shp
 
     def _text(
@@ -215,14 +204,15 @@ class PptxRenderer(BaseRenderer):
         rgb_hex: str = "0F172A",
         font: str = "Calibri",
         line_spacing: Optional[float] = None,
+        tracking_pct: float = 0.0,
     ):
         box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
         tf = box.text_frame
         tf.word_wrap = True
-        tf.margin_left = Inches(0.05)
-        tf.margin_right = Inches(0.05)
-        tf.margin_top = Inches(0.05)
-        tf.margin_bottom = Inches(0.05)
+        tf.margin_left = Inches(0.02)
+        tf.margin_right = Inches(0.02)
+        tf.margin_top = Inches(0.02)
+        tf.margin_bottom = Inches(0.02)
         tf.vertical_anchor = {
             "top": MSO_ANCHOR.TOP,
             "middle": MSO_ANCHOR.MIDDLE,
@@ -244,324 +234,428 @@ class PptxRenderer(BaseRenderer):
         run.font.bold = bold
         run.font.italic = italic
         run.font.color.rgb = _rgb(rgb_hex)
+        # Letter tracking via XML (a:rPr spc attribute, 100ths of point)
+        if tracking_pct != 0.0:
+            try:
+                from lxml import etree
+                _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+                rpr = run._r.find(f"{{{_A}}}rPr")
+                if rpr is not None:
+                    spc_units = int(tracking_pct * 1000)  # ~em thousandths
+                    rpr.set("spc", str(spc_units))
+            except Exception:
+                pass
         return box
 
-    def _bullets(
-        self,
-        slide,
-        items,
-        *,
-        left: float,
-        top: float,
-        width: float,
-        height: float,
-        size_pt: float,
-        bullet_rgb: str,
-        text_rgb: str = "0F172A",
-        ordered: bool = False,
-        font: str = "Calibri",
-    ):
-        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
-        tf = box.text_frame
-        tf.word_wrap = True
-        tf.margin_left = Inches(0.1)
-        tf.margin_right = Inches(0.1)
-        tf.margin_top = Inches(0.05)
-        tf.margin_bottom = Inches(0.05)
-        for i, item in enumerate(items):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.alignment = PP_ALIGN.LEFT
-            p.line_spacing = 1.4
-            p.space_after = Pt(6)
-            # Bullet glyph run (coloured)
-            marker_run = p.add_run()
-            marker_run.text = f"{i + 1}. " if ordered else "●  "
-            marker_run.font.name = font
-            marker_run.font.size = Pt(size_pt)
-            marker_run.font.bold = True
-            marker_run.font.color.rgb = _rgb(bullet_rgb)
-            # Text run
-            tr = p.add_run()
-            tr.text = item
-            tr.font.name = font
-            tr.font.size = Pt(size_pt)
-            tr.font.color.rgb = _rgb(text_rgb)
-        return box
+    # ----------------------------------------------------------- chrome
 
     def _background(self, slide, hex_fill: str) -> None:
-        """Full-bleed background — drawn as a rectangle sent to the back."""
         bg = self._rect(slide, left=0, top=0, width=SLIDE_W, height=SLIDE_H, hex_fill=hex_fill)
         spTree = bg._element.getparent()
         spTree.remove(bg._element)
-        spTree.insert(2, bg._element)  # move to bottom of z-order
+        spTree.insert(2, bg._element)
 
-    def _title_bar(
-        self,
-        slide,
-        title: str,
-        *,
-        palette: _Palette,
-        heading_font: str,
-        accent_style: str = "none",
-    ):
-        # Top strip — full width, palette.dark
-        self._rect(slide, left=0, top=0, width=SLIDE_W, height=1.1, hex_fill=palette.dark)
-        # Title text over it
-        self._text(
+    def _background_gradient(self, slide, from_hex: str, to_hex: str, angle: float = 135.0) -> None:
+        bg = self._gradient_rect(slide, left=0, top=0, width=SLIDE_W, height=SLIDE_H, stops=[(0.0, from_hex), (1.0, to_hex)], angle=angle)
+        spTree = bg._element.getparent()
+        spTree.remove(bg._element)
+        spTree.insert(2, bg._element)
+
+    def _eyebrow(self, slide, text: str, *, left: float, top: float, ctx: _Ctx, width: float = 8.0):
+        """Small uppercase, tracked text above an H1. The single biggest
+        "looks designed" lever."""
+        text = text.strip()
+        if not text:
+            return None
+        # Small coloured square + label
+        dot_size = 0.14
+        self._rect(
             slide,
-            title,
-            left=0.6,
-            top=0.22,
-            width=SLIDE_W - 1.2,
-            height=0.8,
-            size_pt=30,
-            bold=True,
-            rgb_hex=_text_on(palette.dark),
-            font=heading_font,
-            v_anchor="middle",
+            left=left,
+            top=top + 0.06,
+            width=dot_size,
+            height=dot_size,
+            hex_fill=ctx.c.accent,
         )
-        # Accent strip just below
-        if accent_style == "underline":
-            self._rect(slide, left=0, top=1.1, width=3.2, height=0.06, hex_fill=palette.primary)
-        elif accent_style == "left_bar":
-            self._rect(slide, left=0, top=1.1, width=0.18, height=SLIDE_H - 1.1, hex_fill=palette.accent)
-        else:  # default soft-divider — still readable
-            self._rect(slide, left=0, top=1.1, width=SLIDE_W, height=0.04, hex_fill=palette.primary)
-
-    # ---------------- layouts
-
-    def _draw_title(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        # Left 1/3 — coloured panel with subtitle; right 2/3 — title on page bg
-        self._background(slide, pal.light)
-        self._rect(slide, left=0, top=0, width=SLIDE_W * 0.36, height=SLIDE_H, hex_fill=pal.dark)
-
-        # Brand strip bottom of left panel
-        self._rect(slide, left=0, top=SLIDE_H - 0.6, width=SLIDE_W * 0.36, height=0.04, hex_fill=pal.accent)
-        self._text(
+        return self._text(
             slide,
-            (ir.metadata.subtitle or "").upper() or "PRESENTATION",
-            left=0.6,
-            top=SLIDE_H - 0.9,
-            width=SLIDE_W * 0.36 - 1.2,
-            height=0.4,
-            size_pt=12,
+            text.upper(),
+            left=left + dot_size + 0.18,
+            top=top,
+            width=width,
+            height=0.3,
+            size_pt=ctx.t.eyebrow_pt,
             bold=True,
-            rgb_hex=pal.accent,
-            font=hf,
+            rgb_hex=ctx.c.ink_muted,
+            font=ctx.ds.font_body,
+            tracking_pct=ctx.t.eyebrow_tracking_pct,
         )
 
-        # Small label on left panel
+    def _section_numeral(self, slide, index: int, *, ctx: _Ctx, x: float, y: float) -> None:
+        """Giant muted numeral in the corner — magazine-style decoration.
+
+        Uses outline-ish appearance by drawing in ink_muted at low
+        opacity. Size is ~180pt so it reads as pattern, not content.
+        """
+        label = f"{index:02d} / {ctx.total_slides:02d}"
         self._text(
             slide,
-            s.subtitle or "KEYNOTE · 2026",
-            left=0.7,
-            top=0.7,
-            width=SLIDE_W * 0.36 - 1.4,
-            height=0.4,
-            size_pt=13,
+            label,
+            left=x,
+            top=y,
+            width=4.5,
+            height=2.5,
+            size_pt=ctx.t.section_numeral_pt * 0.6,   # 108pt — looks "big" without overflowing
             bold=True,
-            rgb_hex=pal.accent,
-            font=hf,
+            rgb_hex=tint(ctx.c.ink_muted, 0.6),
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
+            v_anchor="top",
         )
 
-        # Big title on right
+    def _footer(self, slide, *, ctx: _Ctx, index: int) -> None:
+        """Small footer bar with brand + page number. No coloured strip —
+        the trick is that it reads as metadata, not decoration."""
+        # Left: brand
+        self._text(
+            slide,
+            (ctx.brand or "").upper(),
+            left=MARGIN,
+            top=SLIDE_H - 0.42,
+            width=SLIDE_W / 2,
+            height=0.28,
+            size_pt=9,
+            bold=True,
+            rgb_hex=ctx.c.ink_muted,
+            font=ctx.ds.font_body,
+            tracking_pct=0.08,
+        )
+        # Right: page number
+        self._text(
+            slide,
+            f"{index:02d} / {ctx.total_slides:02d}",
+            left=SLIDE_W - MARGIN - 2.0,
+            top=SLIDE_H - 0.42,
+            width=2.0,
+            height=0.28,
+            size_pt=9,
+            bold=True,
+            align="right",
+            rgb_hex=ctx.c.ink_muted,
+            font=ctx.ds.font_body,
+            tracking_pct=0.08,
+        )
+
+    def _background_geometry(self, slide, *, ctx: _Ctx) -> None:
+        """Subtle decoration — a rotated soft square and a corner quarter-circle.
+        Both rendered at 5-8% alpha via transparency injection, so they read
+        as faint pattern."""
+        # Rotated faint square (bottom-left)
+        sq = self._rect(
+            slide,
+            left=-1.5,
+            top=SLIDE_H - 2.2,
+            width=3.5,
+            height=3.5,
+            hex_fill=ctx.c.accent,
+        )
+        set_transparency(sq, alpha_per_mille=6_000)
+        set_rotation(sq, degrees=15.0)
+
+        # Corner circle (top-right)
+        circ = self._ellipse(
+            slide,
+            left=SLIDE_W - 2.0,
+            top=-2.0,
+            width=4.0,
+            height=4.0,
+            hex_fill=ctx.c.accent_secondary,
+        )
+        set_transparency(circ, alpha_per_mille=5_000)
+
+    # ----------------------------------------------------------- layouts
+
+    def _draw_title(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        # Gradient hero
+        self._background_gradient(slide, c.surface_inverted, shade(c.surface_inverted, 0.3), angle=135.0)
+
+        # Decorative circle bleeding from right
+        circ = self._ellipse(slide, left=SLIDE_W - 4.8, top=SLIDE_H - 5.0, width=8.0, height=8.0, hex_fill=c.accent)
+        set_transparency(circ, alpha_per_mille=28_000)
+
+        # Small corner accent square
+        self._rect(slide, left=MARGIN, top=MARGIN, width=0.18, height=0.18, hex_fill=c.accent)
+
+        # Eyebrow at top left
+        self._text(
+            slide,
+            (s.subtitle or ir.metadata.subtitle or "Keynote").upper(),
+            left=MARGIN + 0.4,
+            top=MARGIN - 0.02,
+            width=8.0,
+            height=0.3,
+            size_pt=t.eyebrow_pt,
+            bold=True,
+            rgb_hex=c.accent,
+            font=ctx.ds.font_body,
+            tracking_pct=t.eyebrow_tracking_pct,
+        )
+
+        # Big display title
         title_text = s.title or ir.metadata.title
         self._text(
             slide,
             title_text,
-            left=SLIDE_W * 0.36 + 0.7,
-            top=SLIDE_H / 2 - 1.6,
-            width=SLIDE_W * 0.62,
+            left=MARGIN,
+            top=SLIDE_H / 2 - 1.4,
+            width=SLIDE_W - 2 * MARGIN,
             height=3.0,
-            size_pt=54,
+            size_pt=t.display_pt,
             bold=True,
-            rgb_hex=pal.dark,
-            font=hf,
+            rgb_hex=c.ink_inverted,
+            font=ctx.ds.font_display,
             line_spacing=1.08,
         )
-        # Underline accent
-        self._rect(slide, left=SLIDE_W * 0.36 + 0.72, top=SLIDE_H / 2 + 1.5, width=2.2, height=0.08, hex_fill=pal.primary)
+        # Accent underscore (short, bright — this is OK, it's on hero only)
+        self._rect(slide, left=MARGIN, top=SLIDE_H / 2 + 1.5, width=1.1, height=0.07, hex_fill=c.accent)
+
         # Author / date line
-        author_bits = [ir.metadata.author, ir.metadata.created_at]
-        author_str = " · ".join([b for b in author_bits if b]) or "Hejaz AI Engineering"
+        meta_bits = [b for b in (ctx.author, ir.metadata.created_at) if b]
+        meta_line = " · ".join(meta_bits) or ""
+        if meta_line:
+            self._text(
+                slide,
+                meta_line,
+                left=MARGIN,
+                top=SLIDE_H / 2 + 1.85,
+                width=10.0,
+                height=0.5,
+                size_pt=t.body_pt,
+                rgb_hex=tint(c.ink_inverted, 0.2),
+                font=ctx.ds.font_body,
+            )
+
+        # Bottom brand strip
         self._text(
             slide,
-            author_str,
-            left=SLIDE_W * 0.36 + 0.7,
-            top=SLIDE_H / 2 + 1.9,
-            width=SLIDE_W * 0.62,
-            height=0.6,
-            size_pt=16,
-            rgb_hex=pal.muted,
-            font=bf,
+            (ctx.brand or "").upper(),
+            left=MARGIN,
+            top=SLIDE_H - 0.65,
+            width=8.0,
+            height=0.3,
+            size_pt=10,
+            bold=True,
+            rgb_hex=tint(c.ink_inverted, 0.4),
+            font=ctx.ds.font_body,
+            tracking_pct=0.12,
+        )
+        self._text(
+            slide,
+            f"{index:02d} / {ctx.total_slides:02d}",
+            left=SLIDE_W - MARGIN - 1.5,
+            top=SLIDE_H - 0.65,
+            width=1.5,
+            height=0.3,
+            size_pt=10,
+            bold=True,
+            align="right",
+            rgb_hex=tint(c.ink_inverted, 0.4),
+            font=ctx.ds.font_body,
         )
 
-    def _draw_title_content(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
+    def _draw_title_content(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
 
-        # Section-intro text if subtitle present
-        cursor_top = 1.45
+        # Eyebrow
+        eyebrow_text = self._pick_eyebrow(s, ctx)
+        self._eyebrow(slide, eyebrow_text, left=MARGIN, top=MARGIN, ctx=ctx)
+
+        # H1
+        title_text = s.title or ""
+        self._text(
+            slide,
+            title_text,
+            left=MARGIN,
+            top=MARGIN + 0.45,
+            width=SLIDE_W - 2 * MARGIN - 2.5,
+            height=1.2,
+            size_pt=t.h1_pt,
+            bold=True,
+            rgb_hex=c.ink_primary,
+            font=ctx.ds.font_display,
+            line_spacing=1.1,
+        )
+
+        # Big muted section numeral — top right
+        self._text(
+            slide,
+            f"{index:02d}",
+            left=SLIDE_W - MARGIN - 1.8,
+            top=MARGIN - 0.2,
+            width=1.8,
+            height=1.8,
+            size_pt=108,
+            bold=True,
+            align="right",
+            rgb_hex=tint(c.ink_muted, 0.55),
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
+        )
+
+        # Optional subtitle / lead paragraph
+        cursor_top = MARGIN + 1.75
         if s.subtitle:
             self._text(
                 slide,
                 s.subtitle,
-                left=0.7,
+                left=MARGIN,
                 top=cursor_top,
-                width=SLIDE_W - 1.4,
-                height=0.6,
-                size_pt=18,
-                italic=True,
-                rgb_hex=pal.muted,
-                font=bf,
+                width=SLIDE_W - 2 * MARGIN - 2.5,
+                height=0.7,
+                size_pt=t.lead_pt,
+                rgb_hex=c.ink_secondary,
+                font=ctx.ds.font_body,
+                line_spacing=1.3,
             )
-            cursor_top += 0.7
+            cursor_top += 0.8
 
-        # Heuristic upgrade: when the whole body is ONE bullet list with 2-6 items,
-        # render them as full-width "feature rows" (big index + bold title + accent).
+        # Layout upgrade: if body is a single BulletBlock with 2-6 items,
+        # render as a feature-row stack with index chips.
         body = s.body or []
         simple_bullets = (
             len(body) == 1
             and isinstance(body[0], BulletBlock)
             and 2 <= len(body[0].items) <= 6
         )
+        content_left = MARGIN
+        content_width = SLIDE_W - 2 * MARGIN
+        content_top = cursor_top + 0.25
+        content_height = SLIDE_H - content_top - 0.9
+
         if simple_bullets:
-            self._draw_feature_rows(slide, body[0].items, top=cursor_top + 0.3, ordered=body[0].ordered, palette=pal, heading_font=hf, body_font=bf)
-            return
+            self._draw_feature_rows(slide, body[0].items, ordered=body[0].ordered, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx)
+        else:
+            self._draw_blocks(slide, body, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx)
 
-        self._draw_blocks(slide, body, left=0.7, top=cursor_top + 0.1, width=SLIDE_W - 1.4, height=SLIDE_H - cursor_top - 0.6, palette=pal, heading_font=hf, body_font=bf)
+        self._footer(slide, ctx=ctx, index=index)
 
-    def _draw_feature_rows(self, slide, items: list[str], *, top: float, ordered: bool, palette: _Palette, heading_font: str, body_font: str) -> None:
-        """Each item becomes a row: coloured index chip + split title/body text.
+    def _draw_two_col(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        """Asymmetric 38/62 split — hero text left, support column right."""
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
 
-        An item like "DOCX via python-docx / docx-js" is split on the first
-        " via ", " — ", " - " or ":" so the leading phrase becomes the bold
-        title and the remainder becomes a muted subtitle.
-        """
-        n = len(items)
-        avail_h = SLIDE_H - top - 0.4
-        row_h = min(1.15, max(0.75, avail_h / n - 0.12))
-        gap = 0.18
-        start_left = 0.9
-        chip_w = 0.95
-        chip_h = row_h - 0.08
-        text_left = start_left + chip_w + 0.35
-        text_w = SLIDE_W - text_left - 0.7
-        # Separator pattern: " via ", " — ", " - ", ": ", "：" (full-width colon)
-        import re as _re
+        # Title left column
+        left_w = (SLIDE_W - 2 * MARGIN) * 0.38 - GRID_GAP / 2
+        right_w = (SLIDE_W - 2 * MARGIN) * 0.62 - GRID_GAP / 2
+        right_left = MARGIN + left_w + GRID_GAP
 
-        split_re = _re.compile(r"\s+(?:via|—|-)\s+|[:：]\s*")
-
-        for i, raw in enumerate(items):
-            ty = top + i * (row_h + gap)
-            # colour chip
-            chip_colour = palette.card_edge_color(i)
-            self._rounded(
-                slide,
-                left=start_left,
-                top=ty + 0.04,
-                width=chip_w,
-                height=chip_h,
-                hex_fill=chip_colour,
-            )
-            self._text(
-                slide,
-                f"{i + 1:02d}" if ordered else f"{i + 1:02d}",
-                left=start_left,
-                top=ty + 0.04,
-                width=chip_w,
-                height=chip_h,
-                size_pt=30,
-                bold=True,
-                align="center",
-                v_anchor="middle",
-                rgb_hex=_text_on(chip_colour),
-                font=heading_font,
-            )
-            # split title / description
-            parts = split_re.split(raw, maxsplit=1)
-            head = parts[0].strip()
-            tail = parts[1].strip() if len(parts) > 1 else ""
-            # Bold title line
-            self._text(
-                slide,
-                head,
-                left=text_left,
-                top=ty + 0.05,
-                width=text_w,
-                height=0.55,
-                size_pt=20,
-                bold=True,
-                rgb_hex=palette.dark,
-                font=heading_font,
-                line_spacing=1.12,
-            )
-            # Muted description line
-            if tail:
-                self._text(
-                    slide,
-                    tail,
-                    left=text_left,
-                    top=ty + 0.55,
-                    width=text_w,
-                    height=row_h - 0.55,
-                    size_pt=14,
-                    rgb_hex=palette.muted,
-                    font=body_font,
-                    line_spacing=1.35,
-                )
-            # Thin underline accent under each row
-            self._rect(
-                slide,
-                left=text_left,
-                top=ty + row_h,
-                width=1.2,
-                height=0.02,
-                hex_fill=chip_colour,
-            )
-
-    def _draw_two_col(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
-
-        # Two visually-distinct columns: left = white card, right = tinted card
-        card_top = 1.55
-        card_h = SLIDE_H - card_top - 0.5
-        left_card_w = (SLIDE_W - 2.0) / 2
-        right_card_w = left_card_w
-        gap = 0.4
-
-        # Left card (palette.dark tint edge)
-        self._rounded(slide, left=0.7, top=card_top, width=left_card_w, height=card_h, hex_fill="FFFFFF")
-        self._rect(slide, left=0.7, top=card_top, width=left_card_w, height=0.12, hex_fill=pal.primary)
-
-        # Right card
-        self._rounded(slide, left=0.7 + left_card_w + gap, top=card_top, width=right_card_w, height=card_h, hex_fill=_tint(pal.primary, 0.92))
-        self._rect(slide, left=0.7 + left_card_w + gap, top=card_top, width=right_card_w, height=0.12, hex_fill=pal.accent)
-
-        # Split body evenly
-        body = s.body or []
-        mid = max(1, len(body) // 2) if body else 0
-        self._draw_blocks(slide, body[:mid], left=0.9, top=card_top + 0.4, width=left_card_w - 0.4, height=card_h - 0.6, palette=pal, heading_font=hf, body_font=bf, bullet_color=pal.primary)
-        self._draw_blocks(slide, body[mid:], left=0.7 + left_card_w + gap + 0.2, top=card_top + 0.4, width=right_card_w - 0.4, height=card_h - 0.6, palette=pal, heading_font=hf, body_font=bf, bullet_color=pal.accent)
-
-    def _draw_quote(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        # Dark full-bleed
-        self._background(slide, pal.dark)
-        # Huge opening quotation mark as decorative shape
         self._text(
             slide,
-            "\u201C",
-            left=0.7,
-            top=0.4,
-            width=3.0,
-            height=3.0,
-            size_pt=240,
+            s.title or "",
+            left=MARGIN,
+            top=MARGIN + 0.45,
+            width=left_w,
+            height=3.5,
+            size_pt=t.h1_pt,
             bold=True,
-            rgb_hex=pal.accent,
-            font=hf,
+            rgb_hex=c.ink_primary,
+            font=ctx.ds.font_display,
+            line_spacing=1.1,
+        )
+        if s.subtitle:
+            self._text(
+                slide,
+                s.subtitle,
+                left=MARGIN,
+                top=MARGIN + 0.45 + 2.0,
+                width=left_w,
+                height=2.0,
+                size_pt=t.lead_pt,
+                rgb_hex=c.ink_secondary,
+                font=ctx.ds.font_body,
+                line_spacing=1.3,
+            )
+
+        # Right card stack from body
+        body = s.body or []
+        card_h = (SLIDE_H - MARGIN - 0.9 - MARGIN - 0.45) / max(1, len(body))
+        card_h = min(card_h, 1.6)
+        cursor = MARGIN + 0.45
+        for i, blk in enumerate(body[:4]):
+            card = self._rect(
+                slide,
+                left=right_left,
+                top=cursor,
+                width=right_w,
+                height=card_h - 0.18,
+                hex_fill=c.surface_elevated,
+                shadow=True,
+                radius=True,
+            )
+            # top accent edge
+            self._rect(
+                slide,
+                left=right_left,
+                top=cursor,
+                width=0.12,
+                height=card_h - 0.18,
+                hex_fill=c.accent if i == 0 else c.accent_secondary,
+            )
+            # content
+            if isinstance(blk, ParagraphBlock):
+                self._text(
+                    slide, blk.text,
+                    left=right_left + 0.35, top=cursor + 0.25,
+                    width=right_w - 0.5, height=card_h - 0.68,
+                    size_pt=t.body_pt, rgb_hex=c.ink_secondary,
+                    font=ctx.ds.font_body, line_spacing=1.35,
+                )
+            elif isinstance(blk, BulletBlock):
+                self._bullets(
+                    slide, blk.items,
+                    left=right_left + 0.35, top=cursor + 0.18,
+                    width=right_w - 0.5, height=card_h - 0.48,
+                    ctx=ctx, ordered=blk.ordered,
+                )
+            elif isinstance(blk, HeadingBlock):
+                self._text(
+                    slide, blk.text,
+                    left=right_left + 0.35, top=cursor + 0.3,
+                    width=right_w - 0.5, height=card_h - 0.68,
+                    size_pt=t.h2_pt, bold=True, rgb_hex=c.ink_primary,
+                    font=ctx.ds.font_display,
+                )
+            cursor += card_h
+
+        self._footer(slide, ctx=ctx, index=index)
+
+    def _draw_quote(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface_inverted)
+
+        # Decorative soft gradient behind
+        circ = self._ellipse(slide, left=-2.0, top=-2.0, width=6.0, height=6.0, hex_fill=c.accent)
+        set_transparency(circ, alpha_per_mille=15_000)
+
+        # Big opening quote mark
+        self._text(
+            slide, "\u201C",
+            left=MARGIN, top=MARGIN - 0.2,
+            width=3.0, height=3.0,
+            size_pt=260, bold=True,
+            rgb_hex=c.accent,
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
         )
 
+        # Extract quote + author
         quote_text = None
         author = None
         for b in s.body or []:
@@ -575,226 +669,232 @@ class PptxRenderer(BaseRenderer):
             quote_text = s.title
 
         self._text(
-            slide,
-            quote_text or "",
-            left=1.1,
-            top=2.2,
-            width=SLIDE_W - 2.2,
-            height=3.0,
-            size_pt=36,
-            bold=True,
-            rgb_hex="FFFFFF",
-            font=hf,
-            line_spacing=1.2,
+            slide, quote_text or "",
+            left=MARGIN + 0.4, top=SLIDE_H / 2 - 1.5,
+            width=SLIDE_W - 2 * MARGIN - 0.4, height=3.2,
+            size_pt=36, bold=True, italic=False,
+            rgb_hex=c.ink_inverted, font=ctx.ds.font_display,
+            line_spacing=1.25,
         )
         if author:
-            # accent bar + author line
-            self._rect(slide, left=1.15, top=5.6, width=0.6, height=0.06, hex_fill=pal.accent)
+            # accent rule + author name
+            self._rect(slide, left=MARGIN + 0.45, top=SLIDE_H / 2 + 1.9, width=0.5, height=0.05, hex_fill=c.accent)
             self._text(
-                slide,
-                author,
-                left=1.9,
-                top=5.4,
-                width=SLIDE_W - 3.0,
-                height=0.5,
-                size_pt=18,
-                bold=True,
-                rgb_hex=pal.accent,
-                font=bf,
+                slide, author.upper(),
+                left=MARGIN + 1.1, top=SLIDE_H / 2 + 1.75,
+                width=8.0, height=0.5,
+                size_pt=t.eyebrow_pt + 1, bold=True,
+                rgb_hex=c.accent, font=ctx.ds.font_body,
+                tracking_pct=0.14,
             )
 
-    def _draw_stat_callout(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
-
-        # Huge stat in a tinted panel
-        panel_top = 1.65
-        panel_h = SLIDE_H - panel_top - 0.4
-        self._rounded(slide, left=0.7, top=panel_top, width=SLIDE_W - 1.4, height=panel_h, hex_fill="FFFFFF")
-        # accent bar top
-        self._rect(slide, left=0.7, top=panel_top, width=SLIDE_W - 1.4, height=0.14, hex_fill=pal.accent)
-
-        stat_value = s.stat_value or ""
+        # Page footer (light)
         self._text(
-            slide,
-            stat_value,
-            left=0.9,
-            top=panel_top + 0.6,
-            width=SLIDE_W - 1.8,
-            height=panel_h - 2.2,
-            size_pt=160,
-            bold=True,
-            align="center",
-            v_anchor="middle",
-            rgb_hex=pal.primary,
-            font=hf,
+            slide, f"{index:02d} / {ctx.total_slides:02d}",
+            left=SLIDE_W - MARGIN - 1.5, top=SLIDE_H - 0.6,
+            width=1.5, height=0.3, size_pt=10, align="right",
+            bold=True, rgb_hex=tint(c.ink_inverted, 0.4),
+            font=ctx.ds.font_body,
+        )
+
+    def _draw_stat_callout(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
+        self._text(
+            slide, s.title or "",
+            left=MARGIN, top=MARGIN + 0.45,
+            width=SLIDE_W - 2 * MARGIN, height=1.0,
+            size_pt=t.h2_pt, bold=True,
+            rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+        )
+
+        # Big stat number
+        stat = s.stat_value or ""
+        self._text(
+            slide, stat,
+            left=MARGIN, top=MARGIN + 1.4,
+            width=SLIDE_W - 2 * MARGIN, height=4.2,
+            size_pt=t.stat_numeral_pt, bold=True,
+            align="left", v_anchor="middle",
+            rgb_hex=c.accent, font=ctx.ds.font_display,
             line_spacing=1.0,
         )
+        # label
         if s.stat_label:
-            self._rect(slide, left=(SLIDE_W - 1.4) / 2 + 0.2, top=panel_top + panel_h - 1.35, width=1.0, height=0.05, hex_fill=pal.accent)
+            # accent rule + label
+            self._rect(slide, left=MARGIN, top=SLIDE_H - MARGIN - 1.1, width=0.6, height=0.05, hex_fill=c.accent)
             self._text(
-                slide,
-                s.stat_label,
-                left=1.2,
-                top=panel_top + panel_h - 1.2,
-                width=SLIDE_W - 2.4,
-                height=1.0,
-                size_pt=22,
-                bold=True,
-                align="center",
-                rgb_hex=pal.dark,
-                font=bf,
+                slide, s.stat_label,
+                left=MARGIN + 0.8, top=SLIDE_H - MARGIN - 1.3,
+                width=SLIDE_W - 2 * MARGIN - 0.8, height=1.2,
+                size_pt=t.lead_pt, bold=True,
+                rgb_hex=c.ink_secondary, font=ctx.ds.font_body,
+                line_spacing=1.3,
             )
+        self._footer(slide, ctx=ctx, index=index)
 
-    def _collect_label_list(self, s: PptxSlide) -> list[str]:
-        items: list[str] = []
-        for b in s.body or []:
-            if isinstance(b, BulletBlock):
-                items.extend(b.items)
-            elif isinstance(b, ParagraphBlock):
-                items.append(b.text)
-            elif isinstance(b, HeadingBlock):
-                items.append(b.text)
-        return items
+    def _draw_icon_row(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
+        self._text(
+            slide, s.title or "",
+            left=MARGIN, top=MARGIN + 0.45,
+            width=SLIDE_W - 2 * MARGIN, height=1.1,
+            size_pt=t.h1_pt, bold=True,
+            rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+            line_spacing=1.1,
+        )
 
-    def _draw_icon_row(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
         items = self._collect_label_list(s)
         n = min(max(len(items), 1), 4)
-        row_top = 2.3
-        circle_d = 1.6
-        circle_top = row_top
-        # Equal spacing across
-        usable = SLIDE_W - 1.4
+        # Each item: circle + big word + short subtitle. Alternate circle fills.
+        row_top = MARGIN + 2.2
+        usable = SLIDE_W - 2 * MARGIN
         cell_w = usable / n
-        colours = [pal.primary, pal.accent, pal.dark, pal.muted]
+        circle_d = 1.5
+        ink_tokens = [c.accent, c.accent_secondary, c.ink_primary, shade(c.accent, 0.2)]
 
         for i in range(n):
-            cx = 0.7 + cell_w * i + (cell_w - circle_d) / 2
-            self._ellipse(slide, left=cx, top=circle_top, width=circle_d, height=circle_d, hex_fill=colours[i % 4])
-            letter = (items[i][:1].upper() if i < len(items) and items[i] else str(i + 1))
+            cx = MARGIN + cell_w * i + (cell_w - circle_d) / 2
+            bg = ink_tokens[i % 4]
+            self._ellipse(slide, left=cx, top=row_top, width=circle_d, height=circle_d, hex_fill=bg, shadow=True)
+            # initial letter
+            letter = items[i][:1].upper() if i < len(items) and items[i] else str(i + 1)
             self._text(
-                slide,
-                letter,
-                left=cx,
-                top=circle_top,
-                width=circle_d,
-                height=circle_d,
-                size_pt=60,
-                bold=True,
-                align="center",
-                v_anchor="middle",
-                rgb_hex=_text_on(colours[i % 4]),
-                font=hf,
+                slide, letter,
+                left=cx, top=row_top, width=circle_d, height=circle_d,
+                size_pt=56, bold=True, align="center", v_anchor="middle",
+                rgb_hex=text_on(bg), font=ctx.ds.font_display,
             )
-            # Label below
+            # label below — title + short description split
             label = items[i] if i < len(items) else ""
+            split_re = re.compile(r"\s+(?:via|—|-|:)\s+")
+            parts = split_re.split(label, maxsplit=1)
+            head = parts[0].strip()
+            tail = parts[1].strip() if len(parts) > 1 else ""
             self._text(
-                slide,
-                label,
-                left=0.7 + cell_w * i + 0.1,
-                top=circle_top + circle_d + 0.25,
-                width=cell_w - 0.2,
-                height=1.4,
-                size_pt=16,
-                bold=True,
-                align="center",
-                rgb_hex=pal.dark,
-                font=bf,
-                line_spacing=1.25,
+                slide, head,
+                left=MARGIN + cell_w * i + 0.1, top=row_top + circle_d + 0.3,
+                width=cell_w - 0.2, height=0.6,
+                size_pt=t.h2_pt - 4, bold=True, align="center",
+                rgb_hex=c.ink_primary, font=ctx.ds.font_display,
             )
+            if tail:
+                self._text(
+                    slide, tail,
+                    left=MARGIN + cell_w * i + 0.15, top=row_top + circle_d + 0.95,
+                    width=cell_w - 0.3, height=1.1,
+                    size_pt=t.caption_pt + 1, align="center",
+                    rgb_hex=c.ink_muted, font=ctx.ds.font_body,
+                    line_spacing=1.35,
+                )
+        self._footer(slide, ctx=ctx, index=index)
 
-    def _draw_grid_2x2(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
+    def _draw_grid_2x2(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
+        self._text(
+            slide, s.title or "",
+            left=MARGIN, top=MARGIN + 0.45,
+            width=SLIDE_W - 2 * MARGIN, height=1.1,
+            size_pt=t.h1_pt, bold=True,
+            rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+        )
+
         items = self._collect_label_list(s)
         while len(items) < 4:
             items.append("")
         items = items[:4]
 
-        grid_top = 1.6
-        grid_h = SLIDE_H - grid_top - 0.5
-        cell_w = (SLIDE_W - 1.6) / 2
-        cell_h = (grid_h - 0.4) / 2
+        grid_top = MARGIN + 1.9
+        grid_h = SLIDE_H - grid_top - MARGIN - 0.3
+        cell_w = (SLIDE_W - 2 * MARGIN - GRID_GAP) / 2
+        cell_h = (grid_h - GRID_GAP) / 2
         coords = [
-            (0.7, grid_top),
-            (0.7 + cell_w + 0.4, grid_top),
-            (0.7, grid_top + cell_h + 0.4),
-            (0.7 + cell_w + 0.4, grid_top + cell_h + 0.4),
+            (MARGIN, grid_top),
+            (MARGIN + cell_w + GRID_GAP, grid_top),
+            (MARGIN, grid_top + cell_h + GRID_GAP),
+            (MARGIN + cell_w + GRID_GAP, grid_top + cell_h + GRID_GAP),
         ]
+        edge_colors = [c.accent, c.accent_secondary, c.ink_primary, shade(c.accent, 0.2)]
 
         for i, (lx, ty) in enumerate(coords):
-            edge_color = pal.card_edge_color(i)
-            self._rounded(slide, left=lx, top=ty, width=cell_w, height=cell_h, hex_fill="FFFFFF")
-            self._rect(slide, left=lx, top=ty, width=cell_w, height=0.12, hex_fill=edge_color)
-            # Big index
-            self._text(
-                slide,
-                f"{i + 1:02d}",
-                left=lx + 0.3,
-                top=ty + 0.3,
-                width=1.2,
-                height=0.8,
-                size_pt=40,
-                bold=True,
-                rgb_hex=edge_color,
-                font=hf,
+            card = self._rect(
+                slide, left=lx, top=ty, width=cell_w, height=cell_h,
+                hex_fill=c.surface_elevated, shadow=True, radius=True,
             )
-            # Item text (title + optional remainder)
-            title_text, _, rest = items[i].partition(":") if ":" in items[i] else (items[i], "", "")
+            # top accent
+            self._rect(slide, left=lx, top=ty, width=cell_w, height=0.1, hex_fill=edge_colors[i])
+
+            # big index number at top
             self._text(
-                slide,
-                title_text or items[i],
-                left=lx + 0.3,
-                top=ty + 1.15,
-                width=cell_w - 0.6,
-                height=0.8,
-                size_pt=20,
-                bold=True,
-                rgb_hex=pal.dark,
-                font=hf,
+                slide, f"{i + 1:02d}",
+                left=lx + 0.35, top=ty + 0.35,
+                width=1.3, height=0.9,
+                size_pt=36, bold=True,
+                rgb_hex=edge_colors[i], font=ctx.ds.font_display,
+            )
+
+            # Split label
+            label = items[i]
+            split_re = re.compile(r"\s+(?:via|—|-|:)\s+")
+            parts = split_re.split(label, maxsplit=1)
+            head = parts[0].strip() if parts else label
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            self._text(
+                slide, head,
+                left=lx + 0.35, top=ty + 1.25,
+                width=cell_w - 0.7, height=0.9,
+                size_pt=t.h2_pt - 2, bold=True,
+                rgb_hex=c.ink_primary, font=ctx.ds.font_display,
                 line_spacing=1.15,
             )
-            if rest:
+            if tail:
                 self._text(
-                    slide,
-                    rest.strip(),
-                    left=lx + 0.3,
-                    top=ty + 2.0,
-                    width=cell_w - 0.6,
-                    height=cell_h - 2.3,
-                    size_pt=14,
-                    rgb_hex=pal.muted,
-                    font=bf,
-                    line_spacing=1.35,
+                    slide, tail,
+                    left=lx + 0.35, top=ty + 2.2,
+                    width=cell_w - 0.7, height=cell_h - 2.5,
+                    size_pt=t.body_pt - 2,
+                    rgb_hex=c.ink_muted, font=ctx.ds.font_body,
+                    line_spacing=1.4,
                 )
+        self._footer(slide, ctx=ctx, index=index)
 
-    def _draw_halfbleed_image(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        # Left half: text
-        half_w = SLIDE_W / 2
-        self._rect(slide, left=0, top=0, width=half_w, height=SLIDE_H, hex_fill="FFFFFF")
-        # Title
+    def _draw_halfbleed_image(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface_elevated)
+        half_w = SLIDE_W * 0.58
+
+        # Left panel (text)
+        self._rect(slide, left=0, top=0, width=half_w, height=SLIDE_H, hex_fill=c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
         self._text(
-            slide,
-            s.title or "",
-            left=0.7,
-            top=0.7,
-            width=half_w - 1.0,
-            height=1.5,
-            size_pt=36,
-            bold=True,
-            rgb_hex=pal.dark,
-            font=hf,
-            line_spacing=1.1,
+            slide, s.title or "",
+            left=MARGIN, top=MARGIN + 0.45,
+            width=half_w - MARGIN - 0.5, height=2.4,
+            size_pt=t.h1_pt, bold=True,
+            rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+            line_spacing=1.12,
         )
-        # Accent bar under title
-        self._rect(slide, left=0.7, top=2.25, width=1.0, height=0.1, hex_fill=pal.accent)
-        # Body
-        self._draw_blocks(slide, s.body, left=0.7, top=2.55, width=half_w - 1.0, height=SLIDE_H - 3.3, palette=pal, heading_font=hf, body_font=bf, bullet_color=pal.primary)
+        # accent rule under title
+        self._rect(slide, left=MARGIN, top=MARGIN + 2.55, width=0.8, height=0.05, hex_fill=c.accent)
 
-        # Right half: image or colour block
+        self._draw_blocks(
+            slide, s.body,
+            left=MARGIN, top=MARGIN + 2.95,
+            width=half_w - MARGIN - 0.5,
+            height=SLIDE_H - MARGIN - 0.6 - (MARGIN + 2.95),
+            ctx=ctx,
+        )
+
+        # Right panel: image or decorative stack
         placed = False
         if s.visual and isinstance(s.visual.source, _ImageSource) and s.visual.source.path:
             try:
@@ -803,14 +903,53 @@ class PptxRenderer(BaseRenderer):
             except Exception:
                 placed = False
         if not placed:
-            # Decorative stacked bars on the right half
-            self._rect(slide, left=half_w, top=0, width=half_w, height=SLIDE_H, hex_fill=pal.dark)
-            self._rect(slide, left=half_w + 0.8, top=1.5, width=half_w - 1.6, height=SLIDE_H - 3.0, hex_fill=_tint(pal.primary, 0.3))
-            self._rect(slide, left=half_w + 1.8, top=2.5, width=half_w - 3.6, height=SLIDE_H - 5.0, hex_fill=pal.accent)
+            # Gradient "hero" block on right
+            self._gradient_rect(
+                slide,
+                left=half_w, top=0,
+                width=SLIDE_W - half_w, height=SLIDE_H,
+                stops=[(0.0, c.accent), (1.0, shade(c.accent, 0.3))],
+                angle=135.0,
+            )
+            # Large decorative circle
+            circ = self._ellipse(
+                slide, left=half_w + 0.5, top=SLIDE_H / 2 - 2.3,
+                width=4.6, height=4.6,
+                hex_fill=c.accent_on,
+            )
+            set_transparency(circ, alpha_per_mille=12_000)
+            # decorative big numeral
+            self._text(
+                slide, f"{index:02d}",
+                left=half_w + 0.3, top=MARGIN,
+                width=SLIDE_W - half_w - MARGIN, height=1.8,
+                size_pt=84, bold=True, align="right",
+                rgb_hex=tint(c.accent_on, 0.3),
+                font=ctx.ds.font_display,
+            )
 
-    def _draw_chart(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
-        self._title_bar(slide, s.title or "", palette=pal, heading_font=hf, accent_style=ir.theme.accent_style)
+        # Footer only on the left (text) side
+        self._text(
+            slide, (ctx.brand or "").upper(),
+            left=MARGIN, top=SLIDE_H - 0.5,
+            width=half_w - MARGIN, height=0.3,
+            size_pt=9, bold=True,
+            rgb_hex=c.ink_muted, font=ctx.ds.font_body,
+            tracking_pct=0.08,
+        )
+
+    def _draw_chart(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        c = ctx.c
+        t = ctx.t
+        self._background(slide, c.surface)
+        self._eyebrow(slide, self._pick_eyebrow(s, ctx), left=MARGIN, top=MARGIN, ctx=ctx)
+        self._text(
+            slide, s.title or "",
+            left=MARGIN, top=MARGIN + 0.45,
+            width=SLIDE_W - 2 * MARGIN - 2.5, height=1.1,
+            size_pt=t.h1_pt, bold=True,
+            rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+        )
 
         spec: Optional[ChartSpec] = None
         if s.visual and isinstance(s.visual.source, ChartSpec):
@@ -820,51 +959,141 @@ class PptxRenderer(BaseRenderer):
                 if isinstance(b, ChartBlock):
                     spec = b.spec
                     break
+
         if spec is None:
-            self._text(slide, "[chart missing]", left=0.7, top=1.7, width=SLIDE_W - 1.4, height=5.0, size_pt=22, rgb_hex=pal.muted, font=bf)
+            self._text(
+                slide, "[chart data missing]",
+                left=MARGIN, top=2.2,
+                width=SLIDE_W - 2 * MARGIN, height=4.0,
+                size_pt=20, rgb_hex=c.ink_muted, font=ctx.ds.font_body,
+            )
+            self._footer(slide, ctx=ctx, index=index)
             return
-        # Chart card
-        self._rounded(slide, left=0.7, top=1.55, width=SLIDE_W - 1.4, height=SLIDE_H - 2.2, hex_fill="FFFFFF")
+
+        # Elevated chart card
+        card = self._rect(
+            slide, left=MARGIN, top=MARGIN + 1.7,
+            width=SLIDE_W - 2 * MARGIN, height=SLIDE_H - MARGIN - 1.7 - MARGIN - 0.4,
+            hex_fill=c.surface_elevated,
+            shadow=True, radius=True,
+        )
 
         chart_data = CategoryChartData()
         chart_data.categories = spec.categories
-        for s_i in spec.series:
-            chart_data.add_series(s_i["name"], s_i["values"])
+        for ser in spec.series:
+            chart_data.add_series(ser["name"], ser["values"])
 
-        chart_shape = slide.shapes.add_chart(
-            _chart_kind(spec.chart_type),
-            Inches(1.0),
-            Inches(1.9),
-            Inches(SLIDE_W - 2.0),
-            Inches(SLIDE_H - 3.0),
+        slide.shapes.add_chart(
+            _CHART_KINDS[spec.chart_type],
+            Inches(MARGIN + 0.3), Inches(MARGIN + 2.0),
+            Inches(SLIDE_W - 2 * MARGIN - 0.6),
+            Inches(SLIDE_H - MARGIN - 2.0 - MARGIN - 0.7),
             chart_data,
         )
-        # Nothing much more to style without deep OOXML — but a colored card already helps a lot.
+        self._footer(slide, ctx=ctx, index=index)
 
-    def _draw_blank(self, prs, slide, ir: PptxIR, s: PptxSlide, pal: _Palette, hf: str, bf: str):
-        self._background(slide, pal.light)
+    def _draw_blank(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        self._background(slide, ctx.c.surface)
         if s.body:
-            self._draw_blocks(slide, s.body, left=0.7, top=0.7, width=SLIDE_W - 1.4, height=SLIDE_H - 1.4, palette=pal, heading_font=hf, body_font=bf)
+            self._draw_blocks(slide, s.body, left=MARGIN, top=MARGIN, width=SLIDE_W - 2 * MARGIN, height=SLIDE_H - 2 * MARGIN, ctx=ctx)
 
-    # ---------------- block rendering (content area)
+    # ----------------------------------------------------------- block render
 
-    def _draw_blocks(
-        self,
-        slide,
-        blocks,
-        *,
-        left,
-        top,
-        width,
-        height,
-        palette: _Palette,
-        heading_font: str,
-        body_font: str,
-        bullet_color: Optional[str] = None,
-    ):
+    def _bullets(self, slide, items, *, left, top, width, height, ctx: _Ctx, ordered: bool = False):
+        c = ctx.c
+        t = ctx.t
+        box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.margin_left = Inches(0.05)
+        tf.margin_right = Inches(0.05)
+        for i, item in enumerate(items):
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.alignment = PP_ALIGN.LEFT
+            p.line_spacing = 1.4
+            p.space_after = Pt(6)
+            # marker
+            marker = p.add_run()
+            marker.text = f"{i + 1}.  " if ordered else "●  "
+            marker.font.name = ctx.ds.font_body
+            marker.font.size = Pt(t.body_pt)
+            marker.font.bold = True
+            marker.font.color.rgb = _rgb(c.accent)
+            # content
+            tr = p.add_run()
+            tr.text = item
+            tr.font.name = ctx.ds.font_body
+            tr.font.size = Pt(t.body_pt)
+            tr.font.color.rgb = _rgb(c.ink_secondary)
+
+    def _draw_feature_rows(self, slide, items: list[str], *, ordered: bool, left: float, top: float, width: float, height: float, ctx: _Ctx):
+        """Rich alternative to bullet list — each item is a numbered row."""
+        c = ctx.c
+        t = ctx.t
+        n = len(items)
+        row_gap = 0.2
+        row_h = min(1.1, max(0.75, (height - row_gap * (n - 1)) / n))
+        chip_w = 1.0
+        chip_h = row_h - 0.12
+        text_left = left + chip_w + 0.4
+        text_w = width - chip_w - 0.5
+
+        split_re = re.compile(r"\s+(?:via|—|-)\s+|[:：]\s*")
+        chip_colors = [c.accent, c.accent_secondary, c.ink_primary, shade(c.accent, 0.2)]
+
+        for i, raw in enumerate(items):
+            ty = top + i * (row_h + row_gap)
+            chip_color = chip_colors[i % len(chip_colors)]
+            chip = self._rect(
+                slide,
+                left=left, top=ty + 0.06,
+                width=chip_w, height=chip_h,
+                hex_fill=chip_color,
+                shadow=True, radius=True,
+            )
+            self._text(
+                slide,
+                f"{i + 1:02d}" if ordered else f"{i + 1:02d}",
+                left=left, top=ty + 0.06,
+                width=chip_w, height=chip_h,
+                size_pt=28, bold=True,
+                align="center", v_anchor="middle",
+                rgb_hex=text_on(chip_color),
+                font=ctx.ds.font_display,
+            )
+            parts = split_re.split(raw, maxsplit=1)
+            head = parts[0].strip()
+            tail = parts[1].strip() if len(parts) > 1 else ""
+            self._text(
+                slide, head,
+                left=text_left, top=ty + 0.04,
+                width=text_w, height=0.55,
+                size_pt=t.h2_pt - 2, bold=True,
+                rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+                line_spacing=1.15,
+            )
+            if tail:
+                self._text(
+                    slide, tail,
+                    left=text_left, top=ty + 0.55,
+                    width=text_w, height=row_h - 0.55,
+                    size_pt=t.body_pt - 1,
+                    rgb_hex=c.ink_muted, font=ctx.ds.font_body,
+                    line_spacing=1.4,
+                )
+            # thin rule under each row
+            self._rect(
+                slide,
+                left=text_left, top=ty + row_h,
+                width=1.0, height=0.02,
+                hex_fill=chip_color,
+            )
+
+    def _draw_blocks(self, slide, blocks, *, left, top, width, height, ctx: _Ctx):
+        c = ctx.c
+        t = ctx.t
         if not blocks:
             return
-        bullet_color = bullet_color or palette.primary
         cursor = top
         remaining = height
         for b in blocks:
@@ -872,25 +1101,51 @@ class PptxRenderer(BaseRenderer):
                 break
             h = 0.0
             if isinstance(b, HeadingBlock):
-                h = 0.6
-                self._text(slide, b.text, left=left, top=cursor, width=width, height=h, size_pt=22, bold=True, rgb_hex=palette.dark, font=heading_font)
+                h = 0.55
+                self._text(
+                    slide, b.text,
+                    left=left, top=cursor,
+                    width=width, height=h,
+                    size_pt=t.h2_pt - 2, bold=True,
+                    rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+                )
             elif isinstance(b, ParagraphBlock):
-                # tall enough for 1-3 wrapped lines
                 n_chars = max(1, len(b.text))
-                chars_per_line = max(60, int(width * 10))
+                chars_per_line = max(60, int(width * 9))
                 lines = max(1, (n_chars + chars_per_line - 1) // chars_per_line)
-                h = min(remaining, 0.3 + lines * 0.38)
-                self._text(slide, b.text, left=left, top=cursor, width=width, height=h, size_pt=18, align=b.align, rgb_hex=palette.dark, font=body_font, line_spacing=1.35)
+                h = min(remaining, 0.3 + lines * 0.36)
+                self._text(
+                    slide, b.text,
+                    left=left, top=cursor,
+                    width=width, height=h,
+                    size_pt=t.body_pt,
+                    align=b.align,
+                    rgb_hex=c.ink_secondary,
+                    font=ctx.ds.font_body,
+                    line_spacing=1.4,
+                )
             elif isinstance(b, BulletBlock):
-                h = min(remaining, 0.3 + 0.42 * len(b.items))
-                self._bullets(slide, b.items, left=left, top=cursor, width=width, height=h, size_pt=18, bullet_rgb=bullet_color, text_rgb=palette.dark, ordered=b.ordered, font=body_font)
+                h = min(remaining, 0.3 + 0.4 * len(b.items))
+                self._bullets(
+                    slide, b.items,
+                    left=left, top=cursor,
+                    width=width, height=h,
+                    ctx=ctx, ordered=b.ordered,
+                )
             elif isinstance(b, QuoteBlock):
                 h = min(remaining, 1.2)
-                self._rect(slide, left=left, top=cursor + 0.1, width=0.08, height=h - 0.2, hex_fill=palette.accent)
-                self._text(slide, f"\u201C{b.text}\u201D", left=left + 0.25, top=cursor, width=width - 0.25, height=h, size_pt=20, italic=True, rgb_hex=palette.dark, font=heading_font, line_spacing=1.3)
+                self._rect(slide, left=left, top=cursor + 0.1, width=0.08, height=h - 0.2, hex_fill=c.accent)
+                self._text(
+                    slide, f"\u201C{b.text}\u201D",
+                    left=left + 0.25, top=cursor,
+                    width=width - 0.25, height=h,
+                    size_pt=t.lead_pt, italic=True,
+                    rgb_hex=c.ink_primary, font=ctx.ds.font_display,
+                    line_spacing=1.3,
+                )
             elif isinstance(b, TableBlock):
                 h = min(remaining, 0.45 * len(b.rows) + 0.3)
-                self._draw_table(slide, b, left=left, top=cursor, width=width, height=h, palette=palette, body_font=body_font)
+                self._draw_table(slide, b, left=left, top=cursor, width=width, height=h, ctx=ctx)
             elif isinstance(b, ImageBlock):
                 if b.source_path and Path(b.source_path).exists():
                     h = min(remaining, 3.0)
@@ -898,10 +1153,10 @@ class PptxRenderer(BaseRenderer):
                         slide.shapes.add_picture(b.source_path, Inches(left), Inches(cursor), height=Inches(h))
                     except Exception:
                         h = 0.4
-                        self._text(slide, f"[image: {b.alt_text}]", left=left, top=cursor, width=width, height=h, size_pt=13, italic=True, rgb_hex=palette.muted, font=body_font)
+                        self._text(slide, f"[image: {b.alt_text}]", left=left, top=cursor, width=width, height=h, size_pt=13, italic=True, rgb_hex=c.ink_muted, font=ctx.ds.font_body)
                 else:
                     h = 0.45
-                    self._text(slide, f"[image: {b.alt_text}]", left=left, top=cursor, width=width, height=h, size_pt=13, italic=True, rgb_hex=palette.muted, font=body_font)
+                    self._text(slide, f"[image: {b.alt_text}]", left=left, top=cursor, width=width, height=h, size_pt=13, italic=True, rgb_hex=c.ink_muted, font=ctx.ds.font_body)
             elif isinstance(b, ChartBlock):
                 h = min(remaining, 3.2)
                 try:
@@ -909,16 +1164,17 @@ class PptxRenderer(BaseRenderer):
                     chart_data.categories = b.spec.categories
                     for ser in b.spec.series:
                         chart_data.add_series(ser["name"], ser["values"])
-                    slide.shapes.add_chart(_chart_kind(b.spec.chart_type), Inches(left), Inches(cursor), Inches(width), Inches(h), chart_data)
+                    slide.shapes.add_chart(_CHART_KINDS[b.spec.chart_type], Inches(left), Inches(cursor), Inches(width), Inches(h), chart_data)
                 except Exception:
-                    self._text(slide, f"[chart: {b.alt_text}]", left=left, top=cursor, width=width, height=0.4, size_pt=13, rgb_hex=palette.muted, font=body_font)
+                    self._text(slide, f"[chart: {b.alt_text}]", left=left, top=cursor, width=width, height=0.4, size_pt=13, rgb_hex=c.ink_muted, font=ctx.ds.font_body)
             else:
                 h = 0.4
-                self._text(slide, f"[{type(b).__name__}]", left=left, top=cursor, width=width, height=h, size_pt=12, rgb_hex=palette.muted, font=body_font)
+                self._text(slide, f"[{type(b).__name__}]", left=left, top=cursor, width=width, height=h, size_pt=12, rgb_hex=c.ink_muted, font=ctx.ds.font_body)
             cursor += h + 0.18
             remaining -= h + 0.18
 
-    def _draw_table(self, slide, block: TableBlock, *, left, top, width, height, palette: _Palette, body_font: str):
+    def _draw_table(self, slide, block: TableBlock, *, left, top, width, height, ctx: _Ctx):
+        c = ctx.c
         rows = len(block.rows)
         cols = max(len(r.cells) for r in block.rows)
         shape = slide.shapes.add_table(rows, cols, Inches(left), Inches(top), Inches(width), Inches(height))
@@ -931,25 +1187,53 @@ class PptxRenderer(BaseRenderer):
                     cell.text = src.text
                     for p in cell.text_frame.paragraphs:
                         for run in p.runs:
-                            run.font.size = Pt(12)
+                            run.font.size = Pt(11)
                             run.font.bold = src.bold or row.is_header
-                            run.font.name = body_font
+                            run.font.name = ctx.ds.font_body
                             if row.is_header:
-                                run.font.color.rgb = _rgb(_text_on(palette.dark))
+                                run.font.color.rgb = _rgb(c.ink_inverted)
+                            else:
+                                run.font.color.rgb = _rgb(c.ink_secondary)
                     if row.is_header:
                         cell.fill.solid()
-                        cell.fill.fore_color.rgb = _rgb(palette.dark)
+                        cell.fill.fore_color.rgb = _rgb(c.ink_primary)
+                    elif r_idx % 2 == 0:
+                        cell.fill.solid()
+                        cell.fill.fore_color.rgb = _rgb(c.surface_elevated)
 
-    # ---------------- main
+    # ----------------------------------------------------------- helpers
+
+    def _collect_label_list(self, s: PptxSlide) -> list[str]:
+        items: list[str] = []
+        for b in s.body or []:
+            if isinstance(b, BulletBlock):
+                items.extend(b.items)
+            elif isinstance(b, ParagraphBlock):
+                items.append(b.text)
+            elif isinstance(b, HeadingBlock):
+                items.append(b.text)
+        return items
+
+    def _pick_eyebrow(self, s: PptxSlide, ctx: _Ctx) -> str:
+        # Planner may stash eyebrow in notes like "EYEBROW: ...".
+        if s.notes and "EYEBROW:" in s.notes:
+            for line in s.notes.splitlines():
+                if line.strip().upper().startswith("EYEBROW:"):
+                    return line.split(":", 1)[1].strip()
+        if s.subtitle and len(s.subtitle) < 40:
+            return s.subtitle
+        if ctx.eyebrow_default:
+            return ctx.eyebrow_default
+        return "CHAPTER"
+
+    # ----------------------------------------------------------- main
 
     async def render(self, ir: PptxIR, out_dir: Path) -> RenderResult:
         if not isinstance(ir, PptxIR):
             raise RenderError(f"PptxRenderer got wrong IR type: {type(ir).__name__}")
         started = time.perf_counter()
         prs = self._new_presentation()
-        palette = _Palette(ir.theme.palette)
-        heading_font = _resolve_heading_font(ir.theme.font_heading.family)
-        body_font = _resolve_body_font(ir.theme.font_primary.family)
+        ctx = self._ctx(ir)
 
         dispatch = {
             "title": self._draw_title,
@@ -964,12 +1248,11 @@ class PptxRenderer(BaseRenderer):
             "blank": self._draw_blank,
         }
 
-        for s_ir in ir.content.slides:
-            # Blank layout to draw on freely
+        for idx, s_ir in enumerate(ir.content.slides, start=1):
             blank = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[-1]
             slide = prs.slides.add_slide(blank)
             fn = dispatch.get(s_ir.layout, self._draw_title_content)
-            fn(prs, slide, ir, s_ir, palette, heading_font, body_font)
+            fn(prs, slide, ir, s_ir, ctx, idx)
             if s_ir.notes:
                 slide.notes_slide.notes_text_frame.text = s_ir.notes
 
@@ -983,7 +1266,7 @@ class PptxRenderer(BaseRenderer):
             doc_type="pptx",
             bytes_size=path.stat().st_size,
             duration_ms=int((time.perf_counter() - started) * 1000),
-            extra={"slides": len(ir.content.slides)},
+            extra={"slides": len(ir.content.slides), "design_system": ctx.ds.name},
         )
 
     async def fix(self, ir: PptxIR, critic_findings, out_dir: Path) -> RenderResult:

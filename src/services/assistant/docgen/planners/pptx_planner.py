@@ -135,15 +135,8 @@ class PptxPlanner(BasePlanner):
             ))
         else:
             for idx, (title, blocks) in enumerate(sections):
-                if not blocks:
-                    slides.append(PptxSlide(layout="title_content", title=title, body=[ParagraphBlock(text=title)]))
-                else:
-                    # Stat callouts when a section's first block is a single number
-                    stat_value = self._looks_like_stat(blocks)
-                    if stat_value is not None:
-                        slides.append(PptxSlide(layout="stat_callout", title=title, stat_value=stat_value, stat_label=title))
-                    else:
-                        slides.append(PptxSlide(layout="title_content", title=title, body=blocks[:6]))
+                slide = self._pick_slide_for_section(title, blocks)
+                slides.append(slide)
 
         # If the brief asks for a chart, append one.
         if brief.style_hints.get("chart") or "chart" in brief.goal.lower():
@@ -155,8 +148,151 @@ class PptxPlanner(BasePlanner):
             body=[QuoteBlock(text=f"Questions? — {brief.title}", author=None)],
         ))
 
-        meta = DocMetadata(title=brief.title, locale=brief.locale, page_size="Widescreen16x9")
+        # Enforce layout variety: no two consecutive slides with the same
+        # layout (the first = "title" is fixed). Assign eyebrow kickers in
+        # notes so the renderer can pick them up.
+        slides = self._enforce_layout_variety(slides)
+        slides = self._attach_eyebrow_hints(slides, brief)
+
+        meta_kwargs: dict = {
+            "title": brief.title,
+            "locale": brief.locale,
+            "page_size": "Widescreen16x9",
+        }
+        ds_name = brief.style_hints.get("design_system")
+        if ds_name:
+            meta_kwargs["design_system"] = ds_name
+        if brief.style_hints.get("subtitle"):
+            meta_kwargs["subtitle"] = brief.style_hints["subtitle"]
+        meta = DocMetadata(**{k: v for k, v in meta_kwargs.items() if v is not None})
         return PptxIR(metadata=meta, theme=theme, content=PptxContent(slides=slides))
+
+    # ---------- layout picking heuristics
+
+    def _pick_slide_for_section(self, title: str, blocks: list) -> PptxSlide:
+        """Choose a PPTX layout for a section's content.
+
+        Heuristics — more specific layouts win earlier:
+          * Single big number → stat_callout
+          * 4 short bullets → grid_2x2
+          * 3-4 items with ' via '/'—'/':' separators → icon_row
+          * 2-3 paragraphs, second is short → two_col
+          * Otherwise → title_content
+        """
+        # empty section
+        if not blocks:
+            return PptxSlide(layout="title_content", title=title)
+
+        stat = self._looks_like_stat(blocks)
+        if stat is not None:
+            label = title if title else "Highlight"
+            return PptxSlide(layout="stat_callout", title=title, stat_value=stat, stat_label=label)
+
+        # A single bullet list is the most common content case.
+        bullets = [b for b in blocks if isinstance(b, BulletBlock)]
+        if len(blocks) == 1 and bullets and len(bullets[0].items) == 4 and all(len(it) < 80 for it in bullets[0].items):
+            return PptxSlide(layout="grid_2x2", title=title, body=blocks)
+        if len(blocks) == 1 and bullets and 3 <= len(bullets[0].items) <= 4 and any(
+            " via " in it or " — " in it or ": " in it for it in bullets[0].items
+        ) and all(len(it) < 90 for it in bullets[0].items):
+            return PptxSlide(layout="icon_row", title=title, body=blocks)
+
+        # 2 paragraphs → two_col
+        paragraphs = [b for b in blocks if isinstance(b, ParagraphBlock)]
+        if len(paragraphs) == 2 and len(blocks) <= 3:
+            return PptxSlide(layout="two_col", title=title, body=blocks)
+
+        # Default
+        return PptxSlide(layout="title_content", title=title, body=blocks[:6])
+
+    def _enforce_layout_variety(self, slides: list[PptxSlide]) -> list[PptxSlide]:
+        """If two consecutive slides share a layout, swap the second to an
+        alternative that still matches its content shape."""
+        if len(slides) <= 2:
+            return slides
+        alternatives = {
+            "title_content": ["two_col", "grid_2x2", "halfbleed_image", "title_content"],
+            "grid_2x2": ["title_content", "icon_row", "grid_2x2"],
+            "icon_row": ["grid_2x2", "title_content", "icon_row"],
+            "two_col": ["title_content", "halfbleed_image", "two_col"],
+            "halfbleed_image": ["title_content", "two_col", "halfbleed_image"],
+        }
+        prev = slides[0].layout
+        out = [slides[0]]
+        for s in slides[1:]:
+            if s.layout == prev and s.layout in alternatives:
+                # pick first alternative that differs
+                for alt in alternatives[s.layout]:
+                    if alt != prev:
+                        s = s.model_copy(update={"layout": alt})
+                        break
+            out.append(s)
+            prev = s.layout
+        return out
+
+    def _attach_eyebrow_hints(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        """Add ``EYEBROW: ...`` hints to slide notes so the renderer uses
+        them as kicker text above each H1. The eyebrow is meant to be a
+        *running header* (same across content slides) that names the deck
+        context — e.g. "2026-Q2 QUARTERLY REVIEW" or "PRODUCT · DESIGN".
+
+        Priority:
+          1. ``brief.style_hints["eyebrow"]`` — explicit override.
+          2. Derived from brief.goal: drop filler words, take first 3-4
+             content words, upper-case.
+          3. Derived from brief.title: last "significant" segment.
+        """
+        kicker_default = brief.style_hints.get("eyebrow") or self._derive_eyebrow(brief)
+        out = []
+        for i, s in enumerate(slides):
+            if s.layout == "title":
+                out.append(s)
+                continue
+            existing_notes = s.notes or ""
+            # If this slide already has an explicit EYEBROW in notes, keep it.
+            if "EYEBROW:" in existing_notes:
+                out.append(s)
+                continue
+            eyebrow = kicker_default
+            if not eyebrow:
+                out.append(s)
+                continue
+            new_notes = f"EYEBROW: {eyebrow}\n{existing_notes}".strip()
+            out.append(s.model_copy(update={"notes": new_notes}))
+        return out
+
+    _FILLER_WORDS = {
+        "a", "an", "the", "and", "or", "of", "for", "to", "with",
+        "on", "in", "at", "by", "from", "is", "are", "was", "be",
+        "this", "that", "these", "those", "its", "deck", "slide",
+        "slides", "presentation",
+    }
+
+    def _derive_eyebrow(self, brief: Brief) -> str:
+        """Pick a short running-header label from the brief.
+
+        Strategy: start from goal, strip filler words, take up to 4 tokens,
+        normalise to UPPER, cap at 28 chars. Fallback to title tail.
+        """
+        import re as _re
+
+        def _pick(text: str) -> str:
+            tokens = _re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", text)
+            kept = [t for t in tokens if t.lower() not in self._FILLER_WORDS]
+            # Prefer the first 3-4 "content words" (nouns/adj tend to come first)
+            if not kept:
+                return ""
+            candidate = " ".join(kept[:4])
+            if len(candidate) > 28:
+                candidate = " ".join(kept[:3])
+            if len(candidate) > 28:
+                candidate = candidate[:28].rstrip()
+            return candidate.upper()
+
+        goal_eyebrow = _pick(brief.goal)
+        if goal_eyebrow:
+            return goal_eyebrow
+        return _pick(brief.title) or "SECTION"
 
     def _looks_like_stat(self, blocks) -> Optional[str]:
         for b in blocks:
