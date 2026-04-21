@@ -1941,6 +1941,29 @@ class AgentLoop:
                                 f"[NATIVE-SEARCH] Using {ctx.config.model_id} built-in "
                                 f"search; dropped search_web tool."
                             )
+                elif iteration == 1 and tools_for_iteration and any(
+                    _tool_schema_name(s) == "search_web" for s in tools_for_iteration
+                ):
+                    # Diagnostic: Tavily `search_web` is still in scope even
+                    # though native-search _might_ have been expected. Log
+                    # once per turn so operators can root-cause user reports
+                    # of "search_web fired instead of native search" —
+                    # common causes: model_id typo, DB catalog missing the
+                    # capability flag, provider enum drift.
+                    _ns_flag = (
+                        getattr(_model_info, "supports_native_search", False)
+                        if _model_info
+                        else None
+                    )
+                    logger.info(
+                        "[NATIVE-SEARCH] Tavily search_web retained for "
+                        "model_id=%r (get_model=%s, supports_native_search=%s). "
+                        "This is expected for providers without native search "
+                        "(DeepSeek, OpenAI chat-completions path).",
+                        ctx.config.model_id,
+                        "found" if _model_info else "None",
+                        _ns_flag,
+                    )
 
                 tools_for_call = tools_for_iteration
                 if force_answer_without_tools:

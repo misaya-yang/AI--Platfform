@@ -1376,6 +1376,32 @@ Please use this web search context to inform your response when relevant."""
         if not self.code_executor:
             tools = [t for t in tools if t.get("function", {}).get("name") != "execute_code"]
 
+        # Native web search: when the chosen model has a built-in search mode
+        # (Qwen `enable_search`, Gemini `google_search`, Anthropic web_search),
+        # drop Tavily-backed `search_web` from the schema and forward the
+        # provider-specific config to chat_stream. Mirrors the AgentLoop
+        # filter at agent_loop.py:1926 — the legacy (use_agent_loop=False)
+        # path must behave the same, otherwise Qwen 3.6 Plus keeps calling
+        # `search_web` here even though it has native grounding.
+        _legacy_model_info = self.model_registry.get_model(config.model_id)
+        _legacy_native_search_cfg: dict[str, Any] | None = None
+        if _legacy_model_info and getattr(
+            _legacy_model_info, "supports_native_search", False
+        ):
+            _legacy_native_search_cfg = getattr(
+                _legacy_model_info, "native_search_config", None
+            )
+            before_n = len(tools)
+            tools = [
+                t for t in tools if t.get("function", {}).get("name") != "search_web"
+            ]
+            if len(tools) != before_n:
+                logger.info(
+                    "[NATIVE-SEARCH] (legacy path) Using %s built-in search; "
+                    "dropped search_web tool.",
+                    config.model_id,
+                )
+
         logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
 
         # Agentic loop: handle tool calls until model finishes
@@ -1449,6 +1475,7 @@ Please use this web search context to inform your response when relevant."""
                     tools=tools,
                     thinking_level=current_thinking_level,
                     tool_config=next_iteration_tool_config,  # Pass tool_config if set
+                    native_search_config=_legacy_native_search_cfg,
                 ):
                     if delta.content:
                         # TTFT measurement: log time to first token
