@@ -56,6 +56,83 @@ class ModelInfo:
     output_price_per_1k: float = 0.0
     access_level: ModelAccessLevel = ModelAccessLevel.PUBLIC  # Permission level required
 
+    # --- Native web-search capability (populated from NATIVE_SEARCH_CAPABLE map) ---
+    # True when the provider exposes a built-in search/grounding mode that
+    # replaces the Tavily `search_web` tool. Populated in __post_init__ so
+    # DB-loaded models also pick up the capability.
+    supports_native_search: bool = False
+    native_search_config: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.supports_native_search and self.native_search_config is None:
+            cfg = NATIVE_SEARCH_CAPABLE.get((self.provider, self.id))
+            if cfg is not None:
+                self.supports_native_search = True
+                self.native_search_config = cfg
+
+
+# Hardcoded capability map: (provider, model_id) -> provider-specific config
+# that will be merged into the request body when native search is activated.
+# Keeping this here (not per-ModelInfo field) so DB-backed and default models
+# both benefit and we have one place to update when providers change APIs.
+NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
+    # DashScope / Qwen — `enable_search: true` in extra_body (OpenAI-compat).
+    # Ref: https://help.aliyun.com/zh/model-studio/qwen-web-search
+    (ModelProvider.DASHSCOPE, "qwen-turbo"): {"enable_search": True},
+    (ModelProvider.DASHSCOPE, "qwen-plus"): {"enable_search": True},
+    (ModelProvider.DASHSCOPE, "qwen-max"): {"enable_search": True},
+    (ModelProvider.DASHSCOPE, "qwen3.6-plus"): {"enable_search": True},
+    # Google Gemini — `google_search` tool (2.0+) / `google_search_retrieval` (1.5).
+    # Ref: https://ai.google.dev/gemini-api/docs/grounding
+    (ModelProvider.GOOGLE, "gemini-2.5-pro"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE, "gemini-2.5-flash"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE, "gemini-2.5-flash-lite"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE, "gemini-3-pro-preview"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE, "gemini-3-flash-preview"): {"tool_type": "google_search"},
+    # Anthropic — server tool `web_search_20250305`.
+    # Ref: https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool
+    (ModelProvider.ANTHROPIC, "claude-sonnet-4-20250514"): {
+        "tool_type": "web_search_20250305",
+        "max_uses": 5,
+    },
+    (ModelProvider.ANTHROPIC, "claude-3-5-sonnet-20241022"): {
+        "tool_type": "web_search_20250305",
+        "max_uses": 5,
+    },
+    (ModelProvider.ANTHROPIC, "claude-3-5-haiku-20241022"): {
+        "tool_type": "web_search_20250305",
+        "max_uses": 5,
+    },
+    # OpenAI — deferred: Responses API `web_search_preview` is not supported by
+    # our /chat/completions path. DeepSeek has no native search. Tavily fallback.
+}
+
+
+# Simple heuristic: does the user's message look like it wants fresh web info?
+# Used to decide whether to enable native search for this turn. Kept tiny and
+# dependency-free; the model can still call search_web as a tool when needed.
+_SEARCH_HINT_KEYWORDS = (
+    # English
+    "search", "latest", "news", "today", "current", "recent",
+    "who is", "what is happening", "stock price", "weather",
+    # Chinese
+    "搜索", "查一下", "查询", "最新", "今天", "新闻", "现在", "最近",
+    # Arabic
+    "ابحث", "أخبار", "اليوم", "الآن",
+)
+
+
+def should_use_native_search(user_message: str) -> bool:
+    """Return True if the message looks like it needs fresh web info.
+
+    Intentionally permissive on search intent but conservative on non-search
+    prompts (e.g. "write a poem" returns False).
+    """
+    if not user_message:
+        return False
+    lowered = user_message.lower()
+    return any(kw in lowered for kw in _SEARCH_HINT_KEYWORDS)
+
 
 def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
     """
@@ -540,11 +617,13 @@ class ModelRegistry:
         stream: bool = False,
         thinking_level: str | None = None,
         tool_config: dict[str, Any] | None = None,
+        native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request body for the provider's API."""
         if provider == ModelProvider.ANTHROPIC:
             return self._build_anthropic_body(
-                model_id, messages, temperature, max_tokens, tools, stream
+                model_id, messages, temperature, max_tokens, tools, stream,
+                native_search_config=native_search_config,
             )
         elif provider == ModelProvider.GOOGLE:
             return self._build_google_body(
@@ -556,11 +635,13 @@ class ModelRegistry:
                 stream,
                 thinking_level,
                 tool_config,
+                native_search_config=native_search_config,
             )
         else:
             return self._build_openai_body(
                 model_id, messages, temperature, max_tokens, tools, stream,
                 thinking_level=thinking_level,
+                native_search_config=native_search_config,
             )
 
     def _build_openai_body(
@@ -572,6 +653,7 @@ class ModelRegistry:
         tools: list[dict[str, Any]] | None,
         stream: bool,
         thinking_level: str | None = None,
+        native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build OpenAI-compatible request body."""
         from ..prompts.system_prompt_v2 import CACHE_SPLIT_MARKER
@@ -625,6 +707,16 @@ class ModelRegistry:
             body["extra_body"] = {"enable_thinking": True}
             if not body.get("max_tokens") or body["max_tokens"] < 16384:
                 body["max_tokens"] = 16384
+
+        # Native search — DashScope/Qwen passes `enable_search: true` through
+        # the OpenAI-compat extra_body. Silently ignored by non-DashScope
+        # OpenAI-compatible providers (DeepSeek, OpenAI), so it's safe to
+        # layer blindly — but we only ever set it when the capability map
+        # matched at the caller, which keys on (provider, model_id).
+        if native_search_config and native_search_config.get("enable_search"):
+            extra = dict(body.get("extra_body") or {})
+            extra["enable_search"] = True
+            body["extra_body"] = extra
         return body
 
     def _build_anthropic_body(
@@ -635,6 +727,7 @@ class ModelRegistry:
         max_tokens: int | None,
         tools: list[dict[str, Any]] | None,
         stream: bool,
+        native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Anthropic-specific request body."""
         system_prompt = None

@@ -1871,6 +1871,15 @@ class AgentLoop:
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_dedup = KBDedupState()
             web_dedup = WebSearchDedupState()
+            # Combined hard cap on web-browsing tool calls (search_web + web_fetch).
+            # Observed failure mode: model picks different-enough query strings
+            # to slip past the dedup fingerprint, then piles on web_fetch to
+            # "verify" — 5-10 web tool calls on a single "yesterday's scores"
+            # question. Dedup catches near-duplicates; this cap catches the
+            # long tail of semantically-equivalent-but-textually-distinct calls.
+            web_browsing_calls = 0
+            WEB_BROWSING_CALL_LIMIT = 3
+            _WEB_BROWSING_TOOLS = frozenset({"search_web", "web_search", "web_fetch"})
             force_answer_without_tools = False
 
             while iteration < max_iterations:
@@ -2113,6 +2122,36 @@ class AgentLoop:
                             }
                         )
                         continue
+                    # Hard cap on combined web-browsing tool calls per turn.
+                    # Triggers when model slips past the dedup fingerprint with
+                    # semantically-duplicate queries (e.g. "NBA scores" vs
+                    # "NBA results") or mixes search_web with web_fetch.
+                    if tool_name in _WEB_BROWSING_TOOLS:
+                        web_browsing_calls += 1
+                        if web_browsing_calls > WEB_BROWSING_CALL_LIMIT:
+                            logger.info(
+                                "[STREAMING-FIRST] Web-browsing cap hit (%d > %d); "
+                                "forcing answer from accumulated evidence",
+                                web_browsing_calls,
+                                WEB_BROWSING_CALL_LIMIT,
+                            )
+                            force_answer_without_tools = True
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_id,
+                                    "name": tool_name,
+                                    "content": (
+                                        f"Web-browsing budget exhausted: "
+                                        f"{WEB_BROWSING_CALL_LIMIT} calls already "
+                                        "made this turn (search_web + web_fetch). "
+                                        "Answer the user now from the evidence "
+                                        "you already have. Do not call web tools "
+                                        "again in this turn."
+                                    ),
+                                }
+                            )
+                            continue
 
                     # Permission middleware: gate the tool call before any
                     # lifecycle event is emitted. Deny/confirm short-circuits

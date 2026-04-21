@@ -383,6 +383,39 @@ async def web_fetch(
     except (LookupError, TypeError):
         text = body.decode("utf-8", errors="replace")
 
+    # Detect Cloudflare / anti-bot challenge pages. These return an HTTP 200
+    # or 403 with an "I'm checking your browser" page rather than the real
+    # content. Without flagging, the model sees ~1KB of "Just a moment..."
+    # garbage and retries the fetch or searches again — wasting budget.
+    _preview = text[:2000].lower()
+    cloudflare_markers = (
+        "just a moment...",
+        "checking your browser",
+        "cf-challenge",
+        "cf-error",
+        "cf-browser-verification",
+        "attention required | cloudflare",
+    )
+    blocked_by_antibot = (
+        (resp.status_code == 403 and any(m in _preview for m in cloudflare_markers))
+        or (resp.status_code == 503 and "cloudflare" in _preview)
+    )
+    if blocked_by_antibot:
+        return {
+            "url": final_url,
+            "status": resp.status_code,
+            "content": (
+                f"[Blocked by anti-bot protection at {final_url}. "
+                "The site (likely Cloudflare-protected) rejected the fetch. "
+                "Do not retry this URL or near-duplicate URLs from the same host. "
+                "Try a different source (alternative sports-score site, Wikipedia, "
+                "official league page), or answer from search_web summaries.]"
+            ),
+            "truncated": False,
+            "content_type": content_type,
+            "blocked": True,
+        }
+
     extracted = _extract(text, extract)
     truncated = False
     if len(extracted) > max_chars:
