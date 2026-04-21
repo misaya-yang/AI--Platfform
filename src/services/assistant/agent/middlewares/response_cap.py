@@ -41,10 +41,12 @@ _CHARS_PER_TOKEN = 4
 
 
 def _truncation_hint(max_tokens: int) -> str:
-    return (
-        f"\n\n[response truncated to ~{max_tokens} tokens. "
-        "If you need more, call again with a narrower query or use pagination.]"
-    )
+    # Neutral "truncated" marker only. Earlier wording ("call again with a
+    # narrower query") was acting as an instruction: models that saw it
+    # would retry search_web 5-10x trying to "narrow down". Keep the signal
+    # (content is cut) but drop the implicit action hint — the model can
+    # decide for itself whether it has enough.
+    return f"\n\n[… response truncated — original exceeded ~{max_tokens}-token cap]"
 
 
 def _truncate_str(text: str, max_chars: int, max_tokens: int) -> str:

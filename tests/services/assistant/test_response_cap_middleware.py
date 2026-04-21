@@ -47,7 +47,7 @@ async def test_large_string_result_is_truncated_with_hint() -> None:
     # Length stays near the budget (char-per-token * token budget).
     assert len(out.result) <= 4000 + 10
     assert "truncated" in out.result
-    assert "1000 tokens" in out.result
+    assert "1000-token" in out.result
     assert out.metadata.get("response_cap_applied") is True
 
 

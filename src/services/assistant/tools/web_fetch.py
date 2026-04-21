@@ -60,7 +60,11 @@ _USER_AGENT = "AI-Gateway-Assistant/1.0 (+web_fetch)"
 _TOTAL_TIMEOUT_SECS = 15.0
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB
 _MAX_REDIRECTS = 5
-_DEFAULT_MAX_CHARS = 8000
+# 8K was too aggressive — real content pages (news, docs, scoreboards) blow
+# past that easily, and the model retries when content looks cut. 20K chars
+# ≈ 5K tokens: fits comfortably inside the ResponseCapMiddleware 25K-token
+# cap even after other tool output is stacked on top.
+_DEFAULT_MAX_CHARS = 20000
 _ALLOWED_SCHEMES = {"http", "https"}
 _FORBIDDEN_HOSTS = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 
@@ -195,7 +199,13 @@ def _strip_to_text(html: str) -> str:
 
 
 def _html_to_markdown(html: str) -> str:
-    """Best-effort HTML → markdown. Prefers html2text/markdownify if present."""
+    """Best-effort HTML → markdown. Prefers html2text/markdownify if present,
+    falls back to bs4 (handles tables), then regex stdlib as last resort.
+
+    Table handling matters: scoreboards, spec sheets, comparison docs all use
+    tables, and a regex strip that flattens them drops the only data the
+    model cares about.
+    """
     try:  # pragma: no cover — optional dep
         import html2text  # type: ignore
 
@@ -212,9 +222,55 @@ def _html_to_markdown(html: str) -> str:
     except Exception:
         pass
 
-    # Stdlib fallback.
+    # bs4 fallback — already installed in prod, handles tables & encoding
+    # quirks the regex path drops.
+    try:
+        from bs4 import BeautifulSoup, NavigableString  # type: ignore
+
+        soup = BeautifulSoup(html, "html.parser")
+        # Strip script/style/nav/etc before flattening.
+        for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+            tag.decompose()
+
+        # Replace tables with markdown-pipe format so scores / specs survive.
+        for table in soup.find_all("table"):
+            rows_md: list[str] = []
+            for tr in table.find_all("tr"):
+                cells = [
+                    _clean_whitespace(c.get_text(" ", strip=True))
+                    for c in tr.find_all(["th", "td"])
+                ]
+                if cells:
+                    rows_md.append("| " + " | ".join(cells) + " |")
+            if rows_md:
+                table.replace_with(NavigableString("\n" + "\n".join(rows_md) + "\n"))
+
+        # Preserve heading levels and list bullets.
+        for h in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            level = int(h.name[1])
+            h.insert_before(NavigableString(f"\n\n{'#' * level} "))
+            h.insert_after(NavigableString("\n"))
+            h.unwrap()
+        for li in soup.find_all("li"):
+            li.insert_before(NavigableString("\n- "))
+            li.unwrap()
+        for br in soup.find_all("br"):
+            br.replace_with(NavigableString("\n"))
+
+        text = soup.get_text("\n", strip=False)
+        return _clean_whitespace(text)
+    except Exception:
+        pass
+
+    # Regex stdlib — last resort.
     html = _COMMENT_RE.sub("", html)
     html = _SCRIPT_STYLE_RE.sub("", html)
+
+    # Cheap table preservation: each <td>/<th> opens a cell with " | ",
+    # closing tags disappear, newline per row. Post-collapse `| | |` runs.
+    html = re.sub(r"</(th|td)\s*>", "", html, flags=re.IGNORECASE)
+    html = re.sub(r"<(th|td)\b[^>]*>", " | ", html, flags=re.IGNORECASE)
+    html = re.sub(r"</tr\s*>", " |\n", html, flags=re.IGNORECASE)
 
     def _heading_sub(m: re.Match[str]) -> str:
         level = int(m.group(1))
