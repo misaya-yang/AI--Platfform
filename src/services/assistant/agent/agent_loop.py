@@ -1913,21 +1913,21 @@ class AgentLoop:
                             "toolset after first KB completion."
                         )
 
-                # Native web search: if the chosen model has a built-in search
-                # mode AND the user message looks like it wants fresh web info,
-                # enable it and drop Tavily `search_web` from the tool list so
-                # the model doesn't double-search. DeepSeek & other providers
-                # without native search still see Tavily and behave as before.
-                from ..models.model_registry import should_use_native_search
+                # Native web search: when the chosen model has a built-in
+                # search mode (Qwen `enable_search`, Gemini `google_search`,
+                # Anthropic `web_search_20250305`), always prefer it over the
+                # Tavily-backed `search_web` tool. Drop `search_web` from the
+                # schema list unconditionally for capable models — the previous
+                # keyword heuristic (`should_use_native_search(ctx.message)`)
+                # missed real need-to-fetch cases like "画一个骑士队战绩趋势
+                # 图" where the user doesn't type "search" but the task still
+                # requires fresh data, and the model fell back to Tavily.
+                # Providers without native search keep Tavily as before.
                 _model_info = self.model_registry.get_model(ctx.config.model_id)
                 native_search_cfg: dict[str, Any] | None = None
-                # Use getattr for forward-compat with fake/test ModelInfo objects
-                # that predate the native_search fields.
-                if (
-                    _model_info
-                    and getattr(_model_info, "supports_native_search", False)
-                    and should_use_native_search(ctx.message)
-                ):
+                # Use getattr for forward-compat with fake/test ModelInfo
+                # objects that predate the native_search fields.
+                if _model_info and getattr(_model_info, "supports_native_search", False):
                     native_search_cfg = getattr(_model_info, "native_search_config", None)
                     if tools_for_iteration:
                         before_len = len(tools_for_iteration)

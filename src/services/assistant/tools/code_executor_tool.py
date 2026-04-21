@@ -109,6 +109,21 @@ CODE_EXECUTOR_TOOL = ToolDefinition(
     name="execute_python_code",
     description="""Execute Python code in a secure Docker sandbox for data analysis and visualization.
 
+## Language — Python ONLY
+This tool runs **Python**. MATLAB, R, Julia, Octave, Mathematica, and any
+other language are **NOT available**. If the user asks for a "MATLAB
+script" or "R code", write **Python** (with matplotlib / pandas / numpy)
+and run it through this tool — then show the generated chart. Never
+return raw MATLAB/R code unexecuted.
+
+## NEVER fabricate data
+If the user asks for a chart based on real-world data (scores, stock
+prices, weather, league standings), you **must** obtain the actual data
+before plotting — via `search_web` / `web_fetch` / user-uploaded files.
+Do NOT invent "representative" numbers to satisfy the totals. If real
+data is unavailable after a reasonable search, say so explicitly rather
+than silently substituting placeholder data.
+
 ## When to Use (MUST use for these scenarios)
 - Analyzing Excel/CSV data files (calculations, statistics, growth rates, trends)
 - Creating charts and visualizations (line, bar, pie, scatter, heatmap)
