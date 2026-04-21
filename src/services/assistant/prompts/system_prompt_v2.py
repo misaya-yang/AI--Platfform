@@ -1154,13 +1154,34 @@ def get_time_context_block() -> str:
     """Dynamic time block. Returned separately so it can be injected at the
     end of the user-turn context block instead of polluting the cached
     system-prompt prefix. Keeps "today is X" available to the model without
-    invalidating the KV-cache on every request."""
-    from datetime import datetime as _dt
+    invalidating the KV-cache on every request.
+
+    Worded assertively: we explicitly instruct the model NOT to second-guess
+    the date or add disclaimers about "future-dated" queries. This is the
+    real current date — the model's training cutoff lag (Jan 2026) is not
+    a reason to doubt the system clock.
+    """
+    from datetime import datetime as _dt, timedelta as _td
     _now = _dt.now()
+    _yesterday = _now - _td(days=1)
+    _two_days_ago = _now - _td(days=2)
+    _today_str = _now.strftime("%Y-%m-%d")
+    _yesterday_str = _yesterday.strftime("%Y-%m-%d")
+    _two_days_ago_str = _two_days_ago.strftime("%Y-%m-%d")
     return (
-        f"Today is {_now.strftime('%Y-%m-%d')} ({_now.strftime('%A')}). "
-        f"Current time: {_now.strftime('%H:%M')}. "
-        f"When searching the web for time-sensitive queries, include the year {_now.year}."
+        "## Current Date & Time (authoritative — do NOT question)\n"
+        f"- Today is **{_today_str}** ({_now.strftime('%A')}), "
+        f"local time {_now.strftime('%H:%M')}.\n"
+        f"- \"Yesterday\" = {_yesterday_str}. "
+        f"\"The day before yesterday\" / \"两天前\" = {_two_days_ago_str}.\n"
+        "- This is the real current date from the system clock. "
+        "Do NOT treat it as hypothetical. Do NOT add disclaimers like "
+        "\"this appears to be a future date\" or \"I cannot verify events "
+        "after my training cutoff\" — just answer the question.\n"
+        "- When calling `search_web` for time-sensitive queries, put the "
+        f"**literal date** in the query (e.g. \"NBA scores {_yesterday_str}\"), "
+        "not vague words like \"yesterday\" or \"今天\". One well-formed search "
+        "is better than three reworded ones."
     )
 
 

@@ -103,7 +103,14 @@ from .middleware import AgentMiddleware, MiddlewareChain, ToolVerdict, VerdictKi
 from .middlewares.openclaw_memory import OpenClawMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
-from .tool_dedup import KB_REUSE_MESSAGE, KBDedupState
+from .tool_dedup import (
+    KB_REUSE_MESSAGE,
+    KBDedupState,
+    WEB_SEARCH_REUSE_MESSAGE,
+    WebSearchDedupState,
+    is_web_search_tool as _is_web_search_tool,
+    web_query_fingerprint as _web_query_fingerprint,
+)
 from .tool_result_formatter import (
     compact_context_payload as _fmt_compact_context_payload,
     compact_tool_result_for_model as _fmt_compact_tool_result_for_model,
@@ -1863,6 +1870,7 @@ class AgentLoop:
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_dedup = KBDedupState()
+            web_dedup = WebSearchDedupState()
             force_answer_without_tools = False
 
             while iteration < max_iterations:
@@ -2066,6 +2074,11 @@ class AgentLoop:
                         if tool_name == "search_knowledge_base"
                         else ""
                     )
+                    web_query_fp = (
+                        _web_query_fingerprint(tool_args)
+                        if _is_web_search_tool(tool_name)
+                        else ""
+                    )
                     _dedup_skip, _dedup_reason = kb_dedup.should_skip(tool_name, kb_query_fp)
                     if _dedup_skip:
                         logger.info(
@@ -2080,6 +2093,23 @@ class AgentLoop:
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
                                 "content": KB_REUSE_MESSAGE,
+                            }
+                        )
+                        continue
+                    _web_skip, _web_reason = web_dedup.should_skip(tool_name, web_query_fp)
+                    if _web_skip:
+                        logger.info(
+                            "[STREAMING-FIRST] Skipping web-search call (%s): %s",
+                            _web_reason,
+                            web_query_fp[:160] if web_query_fp else "<no-fp>",
+                        )
+                        force_answer_without_tools = True
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "content": WEB_SEARCH_REUSE_MESSAGE,
                             }
                         )
                         continue
@@ -2663,6 +2693,8 @@ class AgentLoop:
 
                     if tool_name == "search_knowledge_base":
                         kb_dedup.mark_completed(kb_query_fp)
+                    elif _is_web_search_tool(tool_name):
+                        web_dedup.mark_completed(web_query_fp)
 
                     # Add tool result to messages with lifecycle management.
                     # Per-tool cap: retrieval tools legitimately return long

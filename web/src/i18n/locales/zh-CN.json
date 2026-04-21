@@ -1774,6 +1774,31 @@
       "usingTools": "使用工具中...",
       "toolsDone": "{{count}} 次工具调用"
     },
+    "beat": {
+      "thinking": "思考中…",
+      "search_web_one": "搜索了网页",
+      "search_web_other": "搜索网页 {{count}} 次",
+      "search_kb_one": "检索了知识库",
+      "search_kb_other": "检索知识库 {{count}} 次",
+      "read_file_one": "读取 1 个文件",
+      "read_file_other": "读取 {{count}} 个文件",
+      "write_file_one": "创建了文件",
+      "write_file_other": "创建了 {{count}} 个文件",
+      "run_code_one": "运行了 1 条命令",
+      "run_code_other": "运行了 {{count}} 条命令",
+      "create_image_one": "生成了图片",
+      "create_image_other": "生成了 {{count}} 张图片",
+      "create_document_one": "生成了文档",
+      "create_document_other": "生成了 {{count}} 份文档",
+      "fetch_url_one": "抓取了网页",
+      "fetch_url_other": "抓取了 {{count}} 个网页",
+      "memory_one": "更新了记忆",
+      "memory_other": "更新记忆 {{count}} 次",
+      "spawn_one": "派发了子 Agent",
+      "spawn_other": "派发了 {{count}} 个子 Agent",
+      "other_one": "调用了 1 个工具",
+      "other_other": "调用了 {{count}} 个工具"
+    },
     "timeline": {
       "running": "Agent 执行中...",
       "completed": "已完成 {{count}} 个步骤"

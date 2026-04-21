@@ -1774,6 +1774,31 @@
       "usingTools": "Using tools...",
       "toolsDone": "{{count}} tool calls"
     },
+    "beat": {
+      "thinking": "Thinking…",
+      "search_web_one": "searched the web",
+      "search_web_other": "ran {{count}} web searches",
+      "search_kb_one": "searched the knowledge base",
+      "search_kb_other": "searched the knowledge base {{count}} times",
+      "read_file_one": "read 1 file",
+      "read_file_other": "read {{count}} files",
+      "write_file_one": "created a file",
+      "write_file_other": "created {{count}} files",
+      "run_code_one": "ran 1 command",
+      "run_code_other": "ran {{count}} commands",
+      "create_image_one": "generated an image",
+      "create_image_other": "generated {{count}} images",
+      "create_document_one": "generated a document",
+      "create_document_other": "generated {{count}} documents",
+      "fetch_url_one": "fetched a page",
+      "fetch_url_other": "fetched {{count}} pages",
+      "memory_one": "updated memory",
+      "memory_other": "updated memory {{count}} times",
+      "spawn_one": "spawned a subagent",
+      "spawn_other": "spawned {{count}} subagents",
+      "other_one": "used 1 tool",
+      "other_other": "used {{count}} tools"
+    },
     "timeline": {
       "running": "Agent working...",
       "completed": "{{count}} steps completed"
