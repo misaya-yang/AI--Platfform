@@ -105,23 +105,25 @@
 
     --sidebar-bg: 30 6% 9%;
 
-    /* Assistant UI scoped tokens — warm-neutral near-black (dark).
-       Hue 30 (warm, whisper of red) replaces prior cool-green 152.
-       Never pure black; text capped at ~88% to avoid harshness.
-       L-steps widened from a 2% ladder (9/11/13/18) to a ~4-5% ladder
-       so layering reads as depth, not a flat black sheet. */
-    --assistant-canvas-bg: 30 6% 8%;           /* warm near-black, slightly under surface */
-    --assistant-surface-bg: 30 6% 14%;         /* chip / user-bubble inner — clear step */
-    --assistant-surface-soft: 30 5% 17%;       /* code block, hover fill */
-    --assistant-text-primary: 30 6% 90%;
-    --assistant-text-secondary: 30 4% 66%;
-    --assistant-text-tertiary: 30 3% 48%;
-    --assistant-border: 30 5% 24%;             /* hairline visible on canvas */
-    --assistant-border-soft: 30 5% 19%;
-    --assistant-accent: 43 50% 64%;            /* gold, a touch brighter for dark */
-    --assistant-accent-soft: 43 35% 22%;
-    --assistant-chip-bg: 30 5% 15%;
-    --assistant-user-bubble: 30 5% 17%;
+    /* Assistant UI scoped tokens — ALIGNED with global --background /
+       --card / --muted / --border above so assistant page shares the
+       exact same palette as the rest of the app (hue 152 cool-green
+       near-black). Earlier pass introduced a private hue-30 warm-neutral
+       ladder here which read as a color-mismatched graft when users
+       switched between /dashboard and /assistant. Only the accent
+       (gold) is reserved for assistant-specific branding. */
+    --assistant-canvas-bg: 152 12% 6%;         /* = --background */
+    --assistant-surface-bg: 152 8% 11%;        /* = --card */
+    --assistant-surface-soft: 152 6% 15%;      /* = --muted */
+    --assistant-text-primary: 150 5% 92%;
+    --assistant-text-secondary: 150 5% 64%;    /* clearly readable on canvas */
+    --assistant-text-tertiary: 150 4% 45%;
+    --assistant-border: 152 6% 18%;            /* = --border */
+    --assistant-border-soft: 152 6% 14%;
+    --assistant-accent: 43 50% 60%;            /* gold, tuned for L=6 canvas */
+    --assistant-accent-soft: 43 32% 22%;
+    --assistant-chip-bg: 152 6% 13%;
+    --assistant-user-bubble: 152 6% 14%;
     --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
     --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }

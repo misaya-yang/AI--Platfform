@@ -1,12 +1,11 @@
 /**
- * ActivityPill — inline affordance that opens the right-side Activity
- * drawer.
+ * ActivityPill — GPT-style inline text link that opens the right-side
+ * Activity drawer. Pattern reference: GPT's `Thought for 2m 45s ›`.
  *
- * Restrained chrome: a 1px hairline + surface-bg tint at rest — visible
- * enough to read as a control on a near-black canvas, quiet enough to
- * not scream like an AI-flavor filled pill. Earlier iteration went fully
- * transparent and disappeared on dark mode; this tier restores the
- * findability floor without regressing the quiet aesthetic.
+ * Zero chrome at rest: no border, no background, no icon halo. Just
+ * text at text-secondary level + chevron, underlined on hover. Running
+ * state prefixes three animated dots in accent tone so the user knows
+ * thinking is live. Subtitle ("· N steps · XXs") appended in mono.
  */
 
 import { T, ui, ensureActivityStyles } from "./activityTheme";
@@ -31,8 +30,6 @@ export function ActivityPill({
 }: ActivityPillProps) {
   ensureActivityStyles();
 
-  // Subtitle: "· N step(s) · XXs" — English plural handled at call-site
-  // if it ever changes; here we render whatever the caller computed.
   const subtitle =
     durationLabel && steps > 0
       ? `· ${steps} ${steps === 1 ? "step" : "steps"} · ${durationLabel}`
@@ -43,36 +40,33 @@ export function ActivityPill({
           : "";
 
   const isChip = variant === "chip";
-  const fontSize = isChip ? 12.5 : 13;
-  const subtitleSize = isChip ? 11.5 : 12;
+  const fontSize = isChip ? 13 : 14;
+  const subtitleSize = isChip ? 12 : 12.5;
 
   return (
     <button
       type="button"
       onClick={onOpen}
-      className="act-btn act-hover"
+      className="act-pill-link"
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 7,
-        padding: "7px 10px",
-        borderRadius: 6,
-        border: `1px solid ${T.border}`,
-        background: T.panel,
+        gap: 6,
+        padding: "2px 0",
+        border: "none",
+        background: "transparent",
         color: T.textMute,
         fontFamily: ui.sans,
         fontSize,
         cursor: "pointer",
-        lineHeight: 1,
+        lineHeight: 1.3,
       }}
     >
-      {running ? (
+      {running && (
         <span
           style={{
             display: "inline-flex",
             color: T.accent,
-            // Reserve glyph width so layout doesn't jump between running
-            // and idle states.
             width: 14,
             justifyContent: "center",
           }}
@@ -80,20 +74,9 @@ export function ActivityPill({
           <span className="act-dot" />
           <span className="act-dot" />
           <span className="act-dot" />
-        </span>
-      ) : (
-        <span
-          style={{
-            color: T.textMute,
-            display: "inline-flex",
-            width: 14,
-            justifyContent: "center",
-          }}
-        >
-          <Icon name="sparkle" size={13} />
         </span>
       )}
-      <span style={{ fontWeight: 500, color: T.text }}>{label}</span>
+      <span style={{ fontWeight: 500 }}>{label}</span>
       {subtitle && (
         <span
           style={{
@@ -105,7 +88,7 @@ export function ActivityPill({
           {subtitle}
         </span>
       )}
-      <Icon name="chevRight" size={12} />
+      <Icon name="chevRight" size={13} />
     </button>
   );
 }

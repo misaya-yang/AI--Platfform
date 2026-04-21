@@ -351,8 +351,13 @@ export function ChatMessage({ message }: ChatMessageProps) {
     [message, t, isUser],
   );
 
-  const hasActivity =
-    !isUser && (timelineSteps.length > 0 || !!message.isStreaming);
+  // Always surface the activity entry point on assistant turns. Earlier we
+  // gated on `timelineSteps.length > 0 || isStreaming`, but messages reloaded
+  // from history often have empty toolCalls/thinkingContent (the streaming
+  // deltas don't round-trip through persistence). When `hasActivity` went
+  // false the pill disappeared and users lost access to the drawer entirely.
+  // Broad gate + graceful empty state in the drawer is the safer default.
+  const hasActivity = !isUser;
 
   // Show a "thinking" 3-dot placeholder only if nothing else (no activity, no content)
   // has landed yet — i.e. we literally have no signal to show.

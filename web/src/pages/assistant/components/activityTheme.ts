@@ -65,6 +65,9 @@ export function ensureActivityStyles(): void {
     .act-running-dot{width:5px;height:5px;border-radius:3px;background:hsl(var(--assistant-accent));animation:act-dot 1.2s infinite}
     .act-hover:hover{background:hsl(var(--assistant-surface-soft))}
     .act-accent-hover:hover{background:hsl(var(--assistant-accent-soft))}
+    .act-pill-link{transition:color .12s}
+    .act-pill-link:hover{color:hsl(var(--assistant-text-primary))}
+    .act-pill-link:hover > span:not(.act-dot){text-decoration:underline;text-decoration-color:hsl(var(--assistant-text-primary) / .3);text-underline-offset:3px}
   `;
   document.head.appendChild(s);
 }
