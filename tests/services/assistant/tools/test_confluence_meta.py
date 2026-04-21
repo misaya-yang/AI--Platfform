@@ -447,11 +447,29 @@ async def test_write_find_replace_refusal_surfaces_cleanly():
 
 
 def test_meta_tools_registered_via_register():
-    """register_confluence_tools exposes exactly 2 tools with the expected names."""
-    from src.services.assistant.tools.confluence_tool import register_confluence_tools
-    from src.services.assistant.tools.tool_registry import get_tool_registry
+    """register_confluence_tools keeps the 2 meta-tools in the global
+    ToolRegistry (so execution dispatch works) AND claims them on the
+    ConnectorRegistry so the agent loop can hide them from tenants
+    without an active connection. Connector-pattern registration.
+    """
+    import asyncio
 
+    from src.services.assistant.tools.confluence_tool import register_confluence_tools
+    from src.services.assistant.tools.connector_registry import (
+        get_connector_registry,
+        reset_connector_registry_for_tests,
+    )
+    from src.services.assistant.tools.tool_registry import (
+        ToolCallRequest,
+        get_tool_registry,
+    )
+
+    reset_connector_registry_for_tests()
     register_confluence_tools(domain="ex.atlassian.net", email="u@x.com", api_token="t")
+
+    # Tools MUST remain registered in the global ToolRegistry — that's the
+    # execution dispatch path. A popped _tools entry would make every tool
+    # call return "Unknown tool: confluence_read".
     reg = get_tool_registry()
     names = {t.name for t in reg.list_tools()}
     assert "confluence_read" in names
@@ -459,6 +477,67 @@ def test_meta_tools_registered_via_register():
     # Old names MUST be gone — they'd be ambiguous after the refactor.
     assert "search_confluence" not in names
     assert "update_confluence_page" not in names
+
+    # Connector registry claims them and exposes them only when the predicate
+    # passes. With a static client, the predicate is always True.
+    connectors = get_connector_registry()
+    assert "confluence" in connectors.list_connectors()
+    assert {"confluence_read", "confluence_write"} <= connectors.connector_tool_names()
+    req = ToolCallRequest(call_id="c", tool_name="probe", arguments={})
+    visible = asyncio.get_event_loop().run_until_complete(connectors.visible_tools(req))
+    visible_names = {t.name for t in visible}
+    assert "confluence_read" in visible_names
+    assert "confluence_write" in visible_names
+
+
+def test_db_backed_register_only_visible_when_tenant_connected():
+    """DB-backed registration: confluence_read/write show up only when the
+    caller's tenant has an active row in ``confluence_connections``."""
+    import asyncio
+
+    from src.core.auth.user_resolver import UserContext
+    from src.services.assistant.tools.confluence_tool import register_confluence_tools
+    from src.services.assistant.tools.connector_registry import (
+        get_connector_registry,
+        reset_connector_registry_for_tests,
+    )
+    from src.services.assistant.tools.tool_registry import (
+        ToolCallRequest,
+        get_tool_registry,
+    )
+
+    reset_connector_registry_for_tests()
+
+    # Fake DB: tenantA has an active connection; tenantB has none.
+    class _DB:
+        async def list_confluence_connections(self, tenant_id=None, status=None, limit=1):
+            if tenant_id == "tenantA":
+                return [{"domain": "a.atlassian.net", "email": "a@x.com", "api_token": "t"}]
+            return []
+
+    register_confluence_tools(database=_DB())
+
+    # Tools ARE in the global registry — that's where execution dispatch
+    # looks them up when an authorized tenant invokes one.
+    assert "confluence_read" in {t.name for t in get_tool_registry().list_tools()}
+
+    connectors = get_connector_registry()
+    loop = asyncio.get_event_loop()
+
+    req_a = ToolCallRequest(
+        call_id="a", tool_name="probe", arguments={},
+        user=UserContext(user_id="u", tenant_id="tenantA"),
+    )
+    visible_a = loop.run_until_complete(connectors.visible_tools(req_a))
+    assert {t.name for t in visible_a} >= {"confluence_read", "confluence_write"}
+
+    req_b = ToolCallRequest(
+        call_id="b", tool_name="probe", arguments={},
+        user=UserContext(user_id="u", tenant_id="tenantB"),
+    )
+    visible_b = loop.run_until_complete(connectors.visible_tools(req_b))
+    # tenantB sees NOTHING from the confluence connector.
+    assert all(t.name not in {"confluence_read", "confluence_write"} for t in visible_b)
 
 
 def test_meta_tool_action_enums_cover_all_old_operations():

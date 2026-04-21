@@ -102,6 +102,7 @@ from .artifact_persister import (
 from .middleware import AgentMiddleware, MiddlewareChain, ToolVerdict, VerdictKind
 from .middlewares.openclaw_memory import OpenClawMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
+from .middlewares.response_cap import ResponseCapMiddleware
 from .tool_dedup import KB_REUSE_MESSAGE, KBDedupState
 from .tool_result_formatter import (
     compact_context_payload as _fmt_compact_context_payload,
@@ -539,6 +540,10 @@ class AgentLoop:
         # `loop.middleware_chain.add(PermissionMiddleware(my_policy))` or by
         # overriding this method in a subclass.
         chain.add(PermissionMiddleware())
+        # ResponseCapMiddleware: uniform ~25K-token cap on every tool result,
+        # with per-tool overrides available at construction. Sits last so
+        # earlier middlewares see the untruncated payload.
+        chain.add(ResponseCapMiddleware())
         return chain
 
     def _get_subagent_manager(self) -> SubAgentManager:
@@ -1526,6 +1531,41 @@ class AgentLoop:
                 tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
                     context=invocation_context,
                 )
+                # Connector tools (Confluence, future Gmail/Drive/Linear) live
+                # in BOTH the global ToolRegistry (so execution dispatch works
+                # for any inbound call) AND the ConnectorRegistry with a
+                # per-tenant predicate. For the PER-REQUEST model tool list,
+                # we subtract connector-claimed tools and re-add only those
+                # whose predicate says this tenant has an active connection.
+                # Unconnected tenants pay zero context tax.
+                try:
+                    from ..tools.connector_registry import get_connector_registry
+                    from ..tools.tool_registry import ToolCallRequest as _TR
+
+                    registry = get_connector_registry()
+                    claimed = registry.connector_tool_names()
+                    if claimed:
+                        connector_request = _TR(
+                            call_id=ctx.request_id if hasattr(ctx, "request_id") else "agent-tool-list",
+                            tool_name="__connector_visibility_probe__",
+                            arguments={},
+                            user=user or ctx.user,
+                            metadata={
+                                "tenant_id": invocation_context.tenant_id,
+                                "session_id": invocation_context.session_id,
+                            },
+                        )
+                        visible = await registry.visible_tools(connector_request)
+                        # Drop every connector-claimed tool from the base list,
+                        # then add back the predicate-allowed subset.
+                        tool_defs = [t for t in tool_defs if t.name not in claimed]
+                        seen = {t.name for t in tool_defs}
+                        for cd in visible:
+                            if cd.name not in seen:
+                                tool_defs.append(cd)
+                                seen.add(cd.name)
+                except Exception:
+                    logger.exception("Connector-registry tool merge failed; continuing without connectors")
                 tool_defs = _select_tools_for_request(tool_defs, ctx.message)
                 tools = []
                 for t in tool_defs:
@@ -2242,6 +2282,19 @@ class AgentLoop:
                                 tool_name=tool_name,
                                 arguments=tool_args,
                             )
+                            # Thread result through on_tool_result middlewares
+                            # (response cap, future sanitizers). Middlewares
+                            # return None to pass through or a replacement
+                            # ToolCallResult to override.
+                            try:
+                                result = await self.middleware_chain.run_on_tool_result(
+                                    ctx, tool_name, tool_args, result
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "on_tool_result chain raised for %s; using raw result",
+                                    tool_name,
+                                )
                             tool_success = bool(result.success)
                             tool_error = result.error
                             tool_metadata = result.metadata or {}

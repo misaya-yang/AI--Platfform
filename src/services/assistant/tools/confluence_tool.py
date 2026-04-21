@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from ....core.observability.logging import get_logger
+from .connector_registry import get_connector_registry
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -34,7 +35,7 @@ from .tool_registry import (
     ToolExecutor,
     ToolParameter,
     ToolRiskLevel,
-    register_tool,
+    get_tool_registry,
 )
 
 logger = get_logger(__name__)
@@ -2201,6 +2202,53 @@ class ConfluenceWriteExecutor(ToolExecutor):
 
 # ─── Registration ─────────────────────────────────────────────────────
 
+def _confluence_has_active_connection_factory(
+    database: Any,
+    static_client: ConfluenceAPIClient | None,
+) -> Any:
+    """Build the predicate used by the ConnectorRegistry to decide whether
+    the Confluence tools should appear in *this* request's tool list.
+
+    Activation rules (any one is enough):
+      1. The request's tenant has an active row in ``confluence_connections``.
+      2. A static client with real creds was supplied at registration time
+         (legacy single-tenant mode / tests).
+
+    Predicate results are cached 60s per tenant inside the ConnectorRegistry
+    itself — no TTL bookkeeping needed here.
+    """
+
+    async def _predicate(request: ToolCallRequest) -> bool:
+        # Static-client fallback: if credentials were baked in at registration
+        # time, the connector is always visible — that's how the legacy
+        # single-tenant deployment and respx-based tests work.
+        if static_client is not None and static_client.domain:
+            return True
+        if database is None:
+            return False
+        user = getattr(request, "user", None)
+        tenant_id = ""
+        if user is not None:
+            tenant_id = str(getattr(user, "tenant_id", "") or "")
+        if not tenant_id:
+            tenant_id = str((getattr(request, "metadata", None) or {}).get("tenant_id") or "")
+        if not tenant_id:
+            return False
+        try:
+            rows = await database.list_confluence_connections(
+                tenant_id=tenant_id, status="active", limit=1
+            )
+        except Exception:
+            logger.exception(
+                "confluence connector predicate: DB lookup failed for tenant %s",
+                tenant_id,
+            )
+            return False
+        return bool(rows)
+
+    return _predicate
+
+
 def register_confluence_tools(
     domain: str = "",
     email: str = "",
@@ -2210,17 +2258,23 @@ def register_confluence_tools(
 ) -> None:
     """Register the 2 Confluence meta-tools (confluence_read + confluence_write).
 
-    Two modes, picked automatically:
+    Connector-pattern registration (Phase A refactor):
 
-    1. **Multi-tenant (recommended, production)**: pass `database=<Database>`.
-       The executor resolves each call's credentials from
-       `confluence_connections` using `request.user.tenant_id`. Tenants are
-       isolated — one tenant's tool call never hits another's Confluence.
+    - The **executors** still live in the global ToolRegistry so any inbound
+      tool call can be dispatched. (Execution path didn't change.)
+    - The **tool definitions** live in the ConnectorRegistry behind a
+      per-tenant predicate, so the model only sees `confluence_read/write`
+      in its tool list when the caller's tenant has an active Confluence
+      connection. This mirrors how Claude.ai surfaces Gmail/Drive
+      connectors — cost: 0 tokens for tenants who never connected.
 
-    2. **Single-tenant / legacy**: pass `domain/email/api_token` directly.
-       Used by the old per-tenant activate flow (`/connectors/activate`) and
-       by tests that want a static client. The static client is used as a
-       fallback when no `tenant_id` is on the request.
+    Two credential modes, auto-selected:
+
+    1. **Multi-tenant (production)**: pass ``database=<Database>``.
+       Each tool call resolves credentials from ``confluence_connections``
+       via ``request.user.tenant_id`` (no cross-tenant leak).
+    2. **Single-tenant / legacy**: pass ``domain/email/api_token``.
+       Used by ``/connectors/activate`` and by tests with a static client.
 
     Passing both is fine: DB lookup first, static fallback second.
     """
@@ -2234,13 +2288,25 @@ def register_confluence_tools(
             "database — all calls will fail until a connection is provided."
         )
 
-    register_tool(
-        CONFLUENCE_READ_DEFINITION,
-        ConfluenceReadExecutor(client=static_client, database=database),
-    )
-    register_tool(
-        CONFLUENCE_WRITE_DEFINITION,
-        ConfluenceWriteExecutor(client=static_client, database=database),
+    read_executor = ConfluenceReadExecutor(client=static_client, database=database)
+    write_executor = ConfluenceWriteExecutor(client=static_client, database=database)
+
+    # Definitions AND executors both live in the global ToolRegistry so the
+    # runtime dispatch path (`tool_registry.execute(request)`) can always find
+    # and run the tool when an inbound call arrives for an authorized tenant.
+    # The agent loop is responsible for subtracting these tool names from the
+    # per-request model tool-list when the ConnectorRegistry predicate says
+    # "this tenant hasn't connected" — that's the visibility gate, distinct
+    # from the execution gate.
+    tool_registry = get_tool_registry()
+    tool_registry.register(CONFLUENCE_READ_DEFINITION, read_executor)
+    tool_registry.register(CONFLUENCE_WRITE_DEFINITION, write_executor)
+
+    predicate = _confluence_has_active_connection_factory(database, static_client)
+    get_connector_registry().register(
+        connector_id="confluence",
+        tool_defs=[CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION],
+        predicate=predicate,
     )
 
     mode = (
@@ -2248,5 +2314,6 @@ def register_confluence_tools(
         else (f"static ({domain})" if static_client else "uninitialized")
     )
     logger.info(
-        f"Registered 2 Confluence meta-tools (read + write, 11 actions total) — mode: {mode}"
+        f"Registered 2 Confluence meta-tools via ConnectorRegistry "
+        f"(read + write, 11 actions total) — mode: {mode}"
     )

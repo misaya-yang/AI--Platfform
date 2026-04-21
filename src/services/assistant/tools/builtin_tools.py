@@ -600,5 +600,15 @@ def register_builtin_tools(
         register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
         logger.info("Registered memory tool")
 
+    # web_fetch — read a specific URL. Always-on, no env gate. Paired with
+    # search_web (which finds URLs) so the model can actually open the
+    # links it (or the user) has picked. SSRF-guarded; see web_fetch.py.
+    try:
+        from .web_fetch import register_web_fetch_tool
+
+        register_web_fetch_tool()
+    except Exception:
+        logger.exception("Failed to register web_fetch tool")
+
     # Confluence tools are registered dynamically via MCP when user connects.
     # See: ConnectorMCPService.start_confluence_mcp()

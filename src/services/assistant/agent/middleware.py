@@ -14,13 +14,17 @@ Hooks supported this revision:
 - `on_tool_call(ctx, tool_name, arguments)` — run before each tool
   invocation. Returns a `ToolVerdict` (allow / deny / confirm). First
   non-allow verdict wins; the loop skips the call accordingly.
+- `on_tool_result(ctx, tool_name, arguments, result)` — run after a tool
+  returns. Middlewares may return a (possibly mutated) ToolCallResult;
+  returning None leaves the result unchanged. The chain threads the
+  result through every middleware in order so transforms compose
+  (e.g. redact → truncate).
 
 All hooks are optional: middlewares implement only the ones they need.
 The chain calls `getattr(mw, hook, None)` and skips missing hooks.
 
-Future hooks (not yet wired): `on_stream_event`, `on_tool_result`,
-`on_error`. Keep the protocol small; add hooks only when a concrete
-middleware demands one.
+Future hooks (not yet wired): `on_stream_event`, `on_error`. Keep the
+protocol small; add hooks only when a concrete middleware demands one.
 """
 
 from __future__ import annotations
@@ -127,6 +131,35 @@ class MiddlewareChain:
                     "middleware %r before_call raised; skipping",
                     getattr(mw, "name", type(mw).__name__),
                 )
+
+    async def run_on_tool_result(
+        self,
+        ctx: "AgentLoopContext",
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: Any,
+    ) -> Any:
+        """Thread a tool result through every middleware's `on_tool_result`
+        hook in registration order. A middleware may return a new result
+        (e.g. truncated) or `None` to pass through unchanged. Exceptions are
+        logged and skipped — a buggy transform must never swallow the
+        result entirely."""
+        current = result
+        for mw in self._middlewares:
+            hook = getattr(mw, "on_tool_result", None)
+            if hook is None:
+                continue
+            try:
+                replacement = await hook(ctx, tool_name, arguments, current)
+            except Exception:
+                logger.exception(
+                    "middleware %r on_tool_result raised; leaving result unchanged",
+                    getattr(mw, "name", type(mw).__name__),
+                )
+                continue
+            if replacement is not None:
+                current = replacement
+        return current
 
     async def run_on_tool_call(
         self,
