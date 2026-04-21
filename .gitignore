@@ -156,3 +156,4 @@ CLAUDE_CODE_OPTIMIZATION_PROMPT.md
 
 # Test output
 test-results/
+.claude/worktrees/
