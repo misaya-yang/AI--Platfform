@@ -357,6 +357,21 @@ export function buildTimeline(
     const durationMs = tr?.duration_ms;
     if (typeof durationMs === "number") totalToolMs += durationMs;
 
+    // Primary query-ish argument, rendered as a code block under the tool
+    // name in the Claude-style design. search_web.query, web_fetch.url,
+    // fs_read.path, generate_image.prompt — whichever is the salient input.
+    const args = tc.arguments ?? {};
+    const queryArg =
+      asString(args.query) ??
+      asString(args.q) ??
+      asString(args.search_query) ??
+      asString(args.url) ??
+      asString(args.target) ??
+      asString(args.path) ??
+      asString(args.file_path) ??
+      asString(args.filename) ??
+      asString(args.prompt);
+
     let sources: TimelineSource[] | undefined;
     if (icon === "web") {
       const fromResult = tr ? extractSources(tr.result) : [];
@@ -386,6 +401,8 @@ export function buildTimeline(
       sources,
       durationMs,
       status,
+      toolName: tc.name,
+      queryArg: queryArg ?? undefined,
     });
   }
 

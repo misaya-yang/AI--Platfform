@@ -7,6 +7,7 @@
 
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { cn } from "@/lib/utils";
 import type { ChatMessage as ChatMessageType } from "../types";
 import { TimelineStep } from "./TimelineStep";
 import { buildTimeline } from "./buildTimeline";
@@ -31,12 +32,10 @@ export function ActivityTimeline({ message, className }: ActivityTimelineProps) 
   }
 
   return (
-    <div className={className}>
-      <div className="relative border-l border-slate-200 dark:border-slate-700 pl-0">
-        {steps.map((step, idx) => (
-          <TimelineStep key={step.id} step={step} isLast={idx === steps.length - 1} />
-        ))}
-      </div>
+    <div className={cn("divide-y divide-slate-100 dark:divide-slate-800/60", className)}>
+      {steps.map((step, idx) => (
+        <TimelineStep key={step.id} step={step} isLast={idx === steps.length - 1} />
+      ))}
     </div>
   );
 }

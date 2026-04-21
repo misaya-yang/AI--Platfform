@@ -486,6 +486,8 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 onOpenChange={setActivityOpen}
                 message={message}
                 totalDurationMs={totalDurationMs}
+                stepCount={timelineSteps.length}
+                isStreaming={!!message.isStreaming}
               />
             </div>
           )}

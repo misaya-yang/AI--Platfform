@@ -1815,6 +1815,7 @@
       "thinking": "Thinking",
       "thought": "Thought process",
       "running": "Running…",
+      "statusCompleted": "completed",
       "errorFallback": "Step failed",
       "foundResults_one": "{{count}} result",
       "foundResults_other": "{{count}} results",

@@ -1814,6 +1814,7 @@
       "thinking": "思考中",
       "thought": "思考过程",
       "running": "执行中…",
+      "statusCompleted": "已完成",
       "errorFallback": "步骤失败",
       "foundResults_other": "{{count}} 条结果",
       "step": {
