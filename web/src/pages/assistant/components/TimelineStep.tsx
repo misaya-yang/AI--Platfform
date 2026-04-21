@@ -171,11 +171,15 @@ export function TimelineStep({
       : "brain";
 
   // Marker styling per state — mirrors chat.jsx.
-  const markerBg = isRunning ? T.accentSoft : isError ? "oklch(0.97 0.05 25)" : T.panel;
+  const markerBg = isRunning
+    ? T.accentSoft
+    : isError
+      ? "var(--act-errorSoft, oklch(0.97 0.05 25))"
+      : T.panel;
   const markerBorder = isRunning
     ? T.accent
     : isError
-      ? "oklch(0.55 0.2 25)"
+      ? "var(--act-error, oklch(0.55 0.2 25))"
       : T.border;
 
   return (
@@ -343,7 +347,7 @@ export function TimelineStep({
             <div
               style={{
                 fontSize: 11.5,
-                color: "oklch(0.55 0.2 25)",
+                color: "var(--act-error, oklch(0.55 0.2 25))",
                 marginTop: 4,
               }}
             >
