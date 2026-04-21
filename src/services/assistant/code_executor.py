@@ -191,9 +191,37 @@ class CodeExecutionResult:
 
 # Matplotlib backend setup code to inject before user code
 MATPLOTLIB_SETUP = """
-# Setup matplotlib for non-interactive backend (required in container)
+# Setup matplotlib for non-interactive backend (required in container).
+# Also transparently redirect relative savefig paths into ./output/ so that
+# the host-side collector (which scans only the output/ subdirectory) can
+# pick up plots saved with simple `plt.savefig('chart.png')` calls. Absolute
+# paths and paths already under output/ are untouched. Same shim is applied
+# to Figure.savefig (used by object-oriented matplotlib code).
+import os as _os
 import matplotlib
 matplotlib.use('Agg')
+
+def _redirect_relative_to_output(fname):
+    if not isinstance(fname, str):
+        return fname
+    if _os.path.isabs(fname):
+        return fname
+    if fname.startswith('output/') or fname.startswith('./output/'):
+        return fname
+    _os.makedirs('output', exist_ok=True)
+    return _os.path.join('output', fname)
+
+import matplotlib.pyplot as _plt
+_orig_plt_savefig = _plt.savefig
+def _patched_plt_savefig(fname, *a, **kw):
+    return _orig_plt_savefig(_redirect_relative_to_output(fname), *a, **kw)
+_plt.savefig = _patched_plt_savefig
+
+from matplotlib.figure import Figure as _Figure
+_orig_fig_savefig = _Figure.savefig
+def _patched_fig_savefig(self, fname, *a, **kw):
+    return _orig_fig_savefig(self, _redirect_relative_to_output(fname), *a, **kw)
+_Figure.savefig = _patched_fig_savefig
 """
 
 
