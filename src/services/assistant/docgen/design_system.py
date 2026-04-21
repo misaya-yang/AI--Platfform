@@ -211,8 +211,8 @@ def _stripe() -> DesignSystem:
         colors=c,
         type_scale=TypeScale(),
         shapes=ShapeTokens(),
-        font_display="Calibri",
-        font_body="Calibri",
+        font_display="Helvetica Neue",
+        font_body="Helvetica Neue",
     )
 
 
@@ -239,8 +239,8 @@ def _carbon() -> DesignSystem:
         colors=c,
         type_scale=TypeScale(h1_pt=38.0),
         shapes=ShapeTokens(radius_sm=0.04, radius_md=0.04, shadow_blur_emu=30_000),
-        font_display="Calibri",
-        font_body="Calibri",
+        font_display="Helvetica Neue",
+        font_body="Helvetica Neue",
     )
 
 
@@ -267,8 +267,8 @@ def _keynote() -> DesignSystem:
         colors=c,
         type_scale=TypeScale(display_pt=60.0, h1_pt=40.0, lead_pt=22.0),
         shapes=ShapeTokens(shadow_blur_emu=60_000, shadow_alpha_per_mille=12_000),
-        font_display="Calibri",
-        font_body="Calibri",
+        font_display="Helvetica Neue",
+        font_body="Helvetica Neue",
     )
 
 
@@ -295,8 +295,8 @@ def _editorial() -> DesignSystem:
         colors=c,
         type_scale=TypeScale(display_pt=64.0, h1_pt=40.0, body_pt=17.0),
         shapes=ShapeTokens(radius_sm=0.02, radius_md=0.04),
-        font_display="Times New Roman",
-        font_body="Calibri",
+        font_display="Georgia",
+        font_body="Helvetica Neue",
     )
 
 
@@ -323,8 +323,8 @@ def _hejaz() -> DesignSystem:
         colors=c,
         type_scale=TypeScale(),
         shapes=ShapeTokens(),
-        font_display="Calibri",
-        font_body="Calibri",
+        font_display="Helvetica Neue",
+        font_body="Helvetica Neue",
     )
 
 
@@ -388,6 +388,6 @@ def design_system_from_palette(palette_hex: list[str]) -> DesignSystem:
         colors=c,
         type_scale=TypeScale(),
         shapes=ShapeTokens(),
-        font_display="Calibri",
-        font_body="Calibri",
+        font_display="Helvetica Neue",
+        font_body="Helvetica Neue",
     )

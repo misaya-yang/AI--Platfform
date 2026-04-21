@@ -376,26 +376,33 @@ class PptxRenderer(BaseRenderer):
     # ----------------------------------------------------------- layouts
 
     def _draw_title(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        """Title slide — asymmetric split with coloured panel on left.
+
+        The left 38% is a solid coloured band (surface_inverted) carrying
+        brand/kicker/date. The right 62% is the light page surface
+        carrying the big title — dark ink, easy to read. This design
+        survives font substitution and QuickLook previews.
+        """
         c = ctx.c
         t = ctx.t
-        # Gradient hero
-        self._background_gradient(slide, c.surface_inverted, shade(c.surface_inverted, 0.3), angle=135.0)
+        # Page surface
+        self._background(slide, c.surface)
 
-        # Decorative circle bleeding from right
-        circ = self._ellipse(slide, left=SLIDE_W - 4.8, top=SLIDE_H - 5.0, width=8.0, height=8.0, hex_fill=c.accent)
-        set_transparency(circ, alpha_per_mille=28_000)
+        # Left coloured panel
+        panel_w = SLIDE_W * 0.38
+        self._rect(slide, left=0, top=0, width=panel_w, height=SLIDE_H, hex_fill=c.surface_inverted)
 
-        # Small corner accent square
-        self._rect(slide, left=MARGIN, top=MARGIN, width=0.18, height=0.18, hex_fill=c.accent)
+        # Accent rule at top of panel
+        self._rect(slide, left=0, top=0, width=panel_w, height=0.08, hex_fill=c.accent)
 
-        # Eyebrow at top left
+        # Eyebrow on left panel
         self._text(
             slide,
             (s.subtitle or ir.metadata.subtitle or "Keynote").upper(),
-            left=MARGIN + 0.4,
-            top=MARGIN - 0.02,
-            width=8.0,
-            height=0.3,
+            left=0.55,
+            top=0.55,
+            width=panel_w - 1.0,
+            height=0.35,
             size_pt=t.eyebrow_pt,
             bold=True,
             rgb_hex=c.accent,
@@ -403,65 +410,104 @@ class PptxRenderer(BaseRenderer):
             tracking_pct=t.eyebrow_tracking_pct,
         )
 
-        # Big display title
+        # Decorative number on left panel (big, muted) — wide enough for
+        # two digits at 160pt in either serif or sans-serif.
+        self._text(
+            slide,
+            "01",
+            left=0.55,
+            top=SLIDE_H - 4.3,
+            width=panel_w - 1.0,
+            height=3.2,
+            size_pt=160,
+            bold=True,
+            rgb_hex=tint(c.surface_inverted, 0.08),
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
+        )
+
+        # Brand bottom-left of panel
+        self._text(
+            slide,
+            (ctx.brand or "PRESENTATION").upper(),
+            left=0.55,
+            top=SLIDE_H - 0.75,
+            width=panel_w - 1.0,
+            height=0.35,
+            size_pt=10,
+            bold=True,
+            rgb_hex=tint(c.ink_inverted, 0.35),
+            font=ctx.ds.font_body,
+            tracking_pct=0.14,
+        )
+
+        # Right side: title on the light surface
+        right_left = panel_w + 0.6
+        right_w = SLIDE_W - right_left - MARGIN
+
         title_text = s.title or ir.metadata.title
+        # Split the title on the last " — " if present for a 2-line look
+        lines = title_text.split(" — ", 1) if " — " in title_text else [title_text]
+
+        # Top kicker on right (more muted)
+        self._text(
+            slide,
+            (ir.metadata.subtitle or "").upper() or "2026",
+            left=right_left,
+            top=0.7,
+            width=right_w,
+            height=0.35,
+            size_pt=t.eyebrow_pt,
+            bold=True,
+            rgb_hex=c.ink_muted,
+            font=ctx.ds.font_body,
+            tracking_pct=t.eyebrow_tracking_pct,
+        )
+        # Tiny accent dot
+        self._rect(slide, left=right_left, top=1.15, width=0.32, height=0.08, hex_fill=c.accent)
+
+        # Big title
+        display_size = t.display_pt if len(title_text) < 40 else (t.display_pt - 12)
         self._text(
             slide,
             title_text,
-            left=MARGIN,
-            top=SLIDE_H / 2 - 1.4,
-            width=SLIDE_W - 2 * MARGIN,
-            height=3.0,
-            size_pt=t.display_pt,
+            left=right_left,
+            top=SLIDE_H / 2 - 1.8,
+            width=right_w,
+            height=4.0,
+            size_pt=display_size,
             bold=True,
-            rgb_hex=c.ink_inverted,
+            rgb_hex=c.ink_primary,
             font=ctx.ds.font_display,
             line_spacing=1.08,
         )
-        # Accent underscore (short, bright — this is OK, it's on hero only)
-        self._rect(slide, left=MARGIN, top=SLIDE_H / 2 + 1.5, width=1.1, height=0.07, hex_fill=c.accent)
 
-        # Author / date line
+        # Author/date + page number at bottom of right side
         meta_bits = [b for b in (ctx.author, ir.metadata.created_at) if b]
-        meta_line = " · ".join(meta_bits) or ""
+        meta_line = " · ".join(meta_bits)
         if meta_line:
             self._text(
                 slide,
                 meta_line,
-                left=MARGIN,
-                top=SLIDE_H / 2 + 1.85,
-                width=10.0,
-                height=0.5,
-                size_pt=t.body_pt,
-                rgb_hex=tint(c.ink_inverted, 0.2),
+                left=right_left,
+                top=SLIDE_H - 0.9,
+                width=right_w - 1.5,
+                height=0.35,
+                size_pt=t.body_pt - 2,
+                rgb_hex=c.ink_muted,
                 font=ctx.ds.font_body,
             )
-
-        # Bottom brand strip
-        self._text(
-            slide,
-            (ctx.brand or "").upper(),
-            left=MARGIN,
-            top=SLIDE_H - 0.65,
-            width=8.0,
-            height=0.3,
-            size_pt=10,
-            bold=True,
-            rgb_hex=tint(c.ink_inverted, 0.4),
-            font=ctx.ds.font_body,
-            tracking_pct=0.12,
-        )
         self._text(
             slide,
             f"{index:02d} / {ctx.total_slides:02d}",
             left=SLIDE_W - MARGIN - 1.5,
-            top=SLIDE_H - 0.65,
+            top=SLIDE_H - 0.75,
             width=1.5,
-            height=0.3,
+            height=0.35,
             size_pt=10,
             bold=True,
             align="right",
-            rgb_hex=tint(c.ink_inverted, 0.4),
+            rgb_hex=c.ink_muted,
             font=ctx.ds.font_body,
         )
 
@@ -523,25 +569,133 @@ class PptxRenderer(BaseRenderer):
             )
             cursor_top += 0.8
 
-        # Layout upgrade: if body is a single BulletBlock with 2-6 items,
-        # render as a feature-row stack with index chips.
         body = s.body or []
-        simple_bullets = (
-            len(body) == 1
-            and isinstance(body[0], BulletBlock)
-            and 2 <= len(body[0].items) <= 6
-        )
         content_left = MARGIN
         content_width = SLIDE_W - 2 * MARGIN
         content_top = cursor_top + 0.25
         content_height = SLIDE_H - content_top - 0.9
 
-        if simple_bullets:
+        # Content-shape-driven layout upgrades. Priority order:
+        #   1. single short paragraph (< 240 chars) → LEAD paragraph (big)
+        #   2. single BulletBlock 2-6 items        → feature-row stack
+        #   3. otherwise                           → normal block stack
+        simple_bullets = (
+            len(body) == 1
+            and isinstance(body[0], BulletBlock)
+            and 2 <= len(body[0].items) <= 6
+        )
+        single_short_para = (
+            len(body) == 1
+            and isinstance(body[0], ParagraphBlock)
+            and len(body[0].text) <= 240
+        )
+        single_long_para = (
+            len(body) == 1
+            and isinstance(body[0], ParagraphBlock)
+            and len(body[0].text) <= 600
+        )
+
+        if single_short_para:
+            self._draw_lead_paragraph(slide, body[0].text, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx)
+        elif simple_bullets:
             self._draw_feature_rows(slide, body[0].items, ordered=body[0].ordered, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx)
+        elif single_long_para:
+            self._draw_lead_paragraph(slide, body[0].text, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx, size_pt=ctx.t.lead_pt + 4)
         else:
             self._draw_blocks(slide, body, left=content_left, top=content_top, width=content_width, height=content_height, ctx=ctx)
 
         self._footer(slide, ctx=ctx, index=index)
+
+    def _draw_lead_paragraph(self, slide, text: str, *, left: float, top: float, width: float, height: float, ctx: _Ctx, size_pt: Optional[float] = None):
+        """Render a single short paragraph as a HERO-sized lead statement.
+
+        Uses editorial magazine "pull-quote" conventions:
+          * Big left-aligned type (~28-44pt depending on length).
+          * Left-edge accent bar (vertical line, palette.accent).
+          * Decorative oversized initial character in palette.accent_subtle.
+          * Caption row below with a thin muted rule, echoing the footer.
+
+        Occupies the whole content region so the slide reads intentional.
+        """
+        c = ctx.c
+        t = ctx.t
+        n_chars = max(1, len(text))
+        if size_pt is None:
+            if n_chars < 80:
+                size_pt = 44.0
+            elif n_chars < 160:
+                size_pt = 34.0
+            elif n_chars < 240:
+                size_pt = 28.0
+            else:
+                size_pt = 22.0
+
+        # Big ornamental quote glyph (tinted, behind the text)
+        self._text(
+            slide,
+            "\u201C",
+            left=left,
+            top=top - 0.4,
+            width=1.8,
+            height=2.4,
+            size_pt=220,
+            bold=True,
+            rgb_hex=tint(c.accent, 0.72),
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
+        )
+
+        # Vertical accent bar on the left edge of the text column
+        text_indent = 1.2
+        self._rect(
+            slide,
+            left=left + text_indent - 0.25,
+            top=top + 0.4,
+            width=0.06,
+            height=min(height - 0.8, size_pt * 0.05 + 1.6),
+            hex_fill=c.accent,
+        )
+
+        # Lead text (left of centre, line-length cap ≈ 60 chars)
+        self._text(
+            slide,
+            text,
+            left=left + text_indent,
+            top=top + 0.35,
+            width=min(width - text_indent, 10.0),
+            height=max(3.0, size_pt * 0.07 + 2.5),
+            size_pt=size_pt,
+            bold=False,
+            align="left",
+            v_anchor="top",
+            rgb_hex=c.ink_primary,
+            font=ctx.ds.font_display,
+            line_spacing=1.22,
+        )
+
+        # Thin muted divider near bottom of content area + caption
+        caption_top = top + height - 0.75
+        self._rect(
+            slide,
+            left=left + text_indent,
+            top=caption_top,
+            width=2.0,
+            height=0.02,
+            hex_fill=c.border_strong,
+        )
+        self._text(
+            slide,
+            "KEY TAKEAWAY",
+            left=left + text_indent,
+            top=caption_top + 0.12,
+            width=5.0,
+            height=0.35,
+            size_pt=t.caption_pt - 1,
+            bold=True,
+            rgb_hex=c.ink_muted,
+            font=ctx.ds.font_body,
+            tracking_pct=0.14,
+        )
 
     def _draw_two_col(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
         """Asymmetric 38/62 split — hero text left, support column right."""
@@ -636,26 +790,34 @@ class PptxRenderer(BaseRenderer):
         self._footer(slide, ctx=ctx, index=index)
 
     def _draw_quote(self, prs, slide, ir: PptxIR, s: PptxSlide, ctx: _Ctx, index: int):
+        """Dark full-bleed pull-quote slide.
+
+        Composition:
+          * Background: surface_inverted (deep).
+          * Large circle bleeding in from the bottom-right corner,
+            low-alpha accent — subtle, not competing with text.
+          * Content column is centre-vertical: big "❝" glyph in accent,
+            then the quote at 40pt, then an accent rule + author.
+        """
         c = ctx.c
         t = ctx.t
         self._background(slide, c.surface_inverted)
 
-        # Decorative soft gradient behind
-        circ = self._ellipse(slide, left=-2.0, top=-2.0, width=6.0, height=6.0, hex_fill=c.accent)
-        set_transparency(circ, alpha_per_mille=15_000)
-
-        # Big opening quote mark
-        self._text(
-            slide, "\u201C",
-            left=MARGIN, top=MARGIN - 0.2,
-            width=3.0, height=3.0,
-            size_pt=260, bold=True,
-            rgb_hex=c.accent,
-            font=ctx.ds.font_display,
-            line_spacing=1.0,
+        # Corner-bleed decorative circle (bottom-right). Use a shade-blended
+        # accent so it sits naturally on the dark surface (LibreOffice drops
+        # a:alpha transparency on solidFill, so we pre-mix instead).
+        blended = shade(c.accent, 0.55)  # darken accent toward the dark bg
+        self._ellipse(
+            slide,
+            left=SLIDE_W - 3.5, top=SLIDE_H - 3.5,
+            width=6.0, height=6.0,
+            hex_fill=blended,
         )
 
-        # Extract quote + author
+        # Thin top accent rule (brand marker)
+        self._rect(slide, left=MARGIN, top=MARGIN, width=0.8, height=0.06, hex_fill=c.accent)
+
+        # Extract quote + author from body
         quote_text = None
         author = None
         for b in s.body or []:
@@ -668,32 +830,58 @@ class PptxRenderer(BaseRenderer):
         if s.title and not quote_text:
             quote_text = s.title
 
+        # Big opening glyph — centered vertically above the text
+        glyph_top = SLIDE_H / 2 - 2.6
+        self._text(
+            slide, "\u201C",
+            left=MARGIN, top=glyph_top,
+            width=2.4, height=2.4,
+            size_pt=200, bold=True,
+            rgb_hex=c.accent,
+            font=ctx.ds.font_display,
+            line_spacing=1.0,
+        )
+
+        # Quote body — centre vertically, left-aligned (no centred body)
+        quote_top = glyph_top + 1.8
+        text_w = SLIDE_W - 2 * MARGIN
         self._text(
             slide, quote_text or "",
-            left=MARGIN + 0.4, top=SLIDE_H / 2 - 1.5,
-            width=SLIDE_W - 2 * MARGIN - 0.4, height=3.2,
-            size_pt=36, bold=True, italic=False,
+            left=MARGIN, top=quote_top,
+            width=min(text_w, 11.0), height=3.2,
+            size_pt=40, bold=True, italic=False,
             rgb_hex=c.ink_inverted, font=ctx.ds.font_display,
-            line_spacing=1.25,
+            line_spacing=1.22,
         )
+
+        # Accent rule + author line
+        attr_top = quote_top + 3.2
+        self._rect(slide, left=MARGIN, top=attr_top, width=0.7, height=0.06, hex_fill=c.accent)
         if author:
-            # accent rule + author name
-            self._rect(slide, left=MARGIN + 0.45, top=SLIDE_H / 2 + 1.9, width=0.5, height=0.05, hex_fill=c.accent)
             self._text(
                 slide, author.upper(),
-                left=MARGIN + 1.1, top=SLIDE_H / 2 + 1.75,
-                width=8.0, height=0.5,
+                left=MARGIN + 0.9, top=attr_top - 0.1,
+                width=10.0, height=0.4,
                 size_pt=t.eyebrow_pt + 1, bold=True,
                 rgb_hex=c.accent, font=ctx.ds.font_body,
                 tracking_pct=0.14,
             )
 
-        # Page footer (light)
+        # Footer — brand + page
+        self._text(
+            slide, (ctx.brand or "").upper(),
+            left=MARGIN, top=SLIDE_H - 0.5,
+            width=8.0, height=0.3,
+            size_pt=9, bold=True,
+            rgb_hex=tint(c.ink_inverted, 0.45),
+            font=ctx.ds.font_body,
+            tracking_pct=0.12,
+        )
         self._text(
             slide, f"{index:02d} / {ctx.total_slides:02d}",
-            left=SLIDE_W - MARGIN - 1.5, top=SLIDE_H - 0.6,
-            width=1.5, height=0.3, size_pt=10, align="right",
-            bold=True, rgb_hex=tint(c.ink_inverted, 0.4),
+            left=SLIDE_W - MARGIN - 1.5, top=SLIDE_H - 0.5,
+            width=1.5, height=0.3, size_pt=9, align="right",
+            bold=True, rgb_hex=tint(c.ink_inverted, 0.45),
             font=ctx.ds.font_body,
         )
 
@@ -911,13 +1099,13 @@ class PptxRenderer(BaseRenderer):
                 stops=[(0.0, c.accent), (1.0, shade(c.accent, 0.3))],
                 angle=135.0,
             )
-            # Large decorative circle
-            circ = self._ellipse(
+            # Large decorative circle — use a darker accent for natural blend
+            # (LibreOffice drops alpha on solidFill, so we pre-mix).
+            self._ellipse(
                 slide, left=half_w + 0.5, top=SLIDE_H / 2 - 2.3,
                 width=4.6, height=4.6,
-                hex_fill=c.accent_on,
+                hex_fill=tint(c.accent, 0.25),
             )
-            set_transparency(circ, alpha_per_mille=12_000)
             # decorative big numeral
             self._text(
                 slide, f"{index:02d}",
@@ -1027,16 +1215,26 @@ class PptxRenderer(BaseRenderer):
             tr.font.color.rgb = _rgb(c.ink_secondary)
 
     def _draw_feature_rows(self, slide, items: list[str], *, ordered: bool, left: float, top: float, width: float, height: float, ctx: _Ctx):
-        """Rich alternative to bullet list — each item is a numbered row."""
+        """Rich alternative to bullet list — each item is a numbered row.
+
+        Layout per row (row_h tall, textboxes share vertical centering):
+
+            ┌────┐
+            │ 01 │  HEAD
+            └────┘  tail description — small muted
+                    ──── (thin accent rule, sits BETWEEN rows)
+        """
         c = ctx.c
         t = ctx.t
         n = len(items)
-        row_gap = 0.2
-        row_h = min(1.1, max(0.75, (height - row_gap * (n - 1)) / n))
-        chip_w = 1.0
-        chip_h = row_h - 0.12
-        text_left = left + chip_w + 0.4
-        text_w = width - chip_w - 0.5
+        row_gap = 0.25                     # a bit of air between rows
+        row_h = min(1.1, max(0.85, (height - row_gap * (n - 1)) / n))
+        chip_w = 0.95
+        chip_h = row_h - 0.15
+        text_left = left + chip_w + 0.45
+        text_w = width - chip_w - 0.55
+        head_h = 0.5
+        tail_h = max(0.0, row_h - head_h - 0.1)
 
         split_re = re.compile(r"\s+(?:via|—|-)\s+|[:：]\s*")
         chip_colors = [c.accent, c.accent_secondary, c.ink_primary, shade(c.accent, 0.2)]
@@ -1044,9 +1242,9 @@ class PptxRenderer(BaseRenderer):
         for i, raw in enumerate(items):
             ty = top + i * (row_h + row_gap)
             chip_color = chip_colors[i % len(chip_colors)]
-            chip = self._rect(
+            self._rect(
                 slide,
-                left=left, top=ty + 0.06,
+                left=left, top=ty + 0.04,
                 width=chip_w, height=chip_h,
                 hex_fill=chip_color,
                 shadow=True, radius=True,
@@ -1054,9 +1252,9 @@ class PptxRenderer(BaseRenderer):
             self._text(
                 slide,
                 f"{i + 1:02d}" if ordered else f"{i + 1:02d}",
-                left=left, top=ty + 0.06,
+                left=left, top=ty + 0.04,
                 width=chip_w, height=chip_h,
-                size_pt=28, bold=True,
+                size_pt=26, bold=True,
                 align="center", v_anchor="middle",
                 rgb_hex=text_on(chip_color),
                 font=ctx.ds.font_display,
@@ -1066,28 +1264,32 @@ class PptxRenderer(BaseRenderer):
             tail = parts[1].strip() if len(parts) > 1 else ""
             self._text(
                 slide, head,
-                left=text_left, top=ty + 0.04,
-                width=text_w, height=0.55,
+                left=text_left, top=ty + 0.02,
+                width=text_w, height=head_h,
                 size_pt=t.h2_pt - 2, bold=True,
                 rgb_hex=c.ink_primary, font=ctx.ds.font_display,
-                line_spacing=1.15,
+                line_spacing=1.1,
             )
             if tail:
                 self._text(
                     slide, tail,
-                    left=text_left, top=ty + 0.55,
-                    width=text_w, height=row_h - 0.55,
+                    left=text_left, top=ty + 0.02 + head_h,
+                    width=text_w, height=tail_h,
                     size_pt=t.body_pt - 1,
                     rgb_hex=c.ink_muted, font=ctx.ds.font_body,
-                    line_spacing=1.4,
+                    line_spacing=1.35,
                 )
-            # thin rule under each row
-            self._rect(
-                slide,
-                left=text_left, top=ty + row_h,
-                width=1.0, height=0.02,
-                hex_fill=chip_color,
-            )
+            # Divider rule — sits in the GAP BELOW each row, never on text.
+            # Skip the last row so we don't draw a trailing rule.
+            if i < n - 1:
+                self._rect(
+                    slide,
+                    left=text_left,
+                    top=ty + row_h + row_gap / 2 - 0.01,
+                    width=width - chip_w - 0.55,
+                    height=0.02,
+                    hex_fill=c.border_subtle,
+                )
 
     def _draw_blocks(self, slide, blocks, *, left, top, width, height, ctx: _Ctx):
         c = ctx.c

@@ -185,7 +185,8 @@ class PptxPlanner(BasePlanner):
 
         stat = self._looks_like_stat(blocks)
         if stat is not None:
-            label = title if title else "Highlight"
+            # If the section title itself would duplicate, skip the label.
+            label = None if title else "Highlight"
             return PptxSlide(layout="stat_callout", title=title, stat_value=stat, stat_label=label)
 
         # A single bullet list is the most common content case.
@@ -207,28 +208,59 @@ class PptxPlanner(BasePlanner):
 
     def _enforce_layout_variety(self, slides: list[PptxSlide]) -> list[PptxSlide]:
         """If two consecutive slides share a layout, swap the second to an
-        alternative that still matches its content shape."""
+        alternative that still fits the content shape.
+
+        The alternative must be *appropriate* for the body — e.g. a slide
+        with one short paragraph doesn't fit ``two_col`` / ``grid_2x2``
+        (those need list-like content). If no alternative fits, keep the
+        original layout — variety matters less than legibility.
+        """
         if len(slides) <= 2:
             return slides
+
         alternatives = {
-            "title_content": ["two_col", "grid_2x2", "halfbleed_image", "title_content"],
-            "grid_2x2": ["title_content", "icon_row", "grid_2x2"],
+            "title_content": ["halfbleed_image", "two_col", "grid_2x2", "title_content"],
+            "grid_2x2": ["icon_row", "title_content", "grid_2x2"],
             "icon_row": ["grid_2x2", "title_content", "icon_row"],
-            "two_col": ["title_content", "halfbleed_image", "two_col"],
-            "halfbleed_image": ["title_content", "two_col", "halfbleed_image"],
+            "two_col": ["halfbleed_image", "title_content", "two_col"],
+            "halfbleed_image": ["two_col", "title_content", "halfbleed_image"],
         }
         prev = slides[0].layout
         out = [slides[0]]
         for s in slides[1:]:
             if s.layout == prev and s.layout in alternatives:
-                # pick first alternative that differs
                 for alt in alternatives[s.layout]:
-                    if alt != prev:
+                    if alt != prev and self._layout_fits_content(alt, s):
                         s = s.model_copy(update={"layout": alt})
                         break
             out.append(s)
             prev = s.layout
         return out
+
+    def _layout_fits_content(self, layout: str, s: PptxSlide) -> bool:
+        """Return True iff ``layout`` is a reasonable match for ``s.body``.
+
+        Heuristics:
+          * title_content / halfbleed_image: fit any content, incl. empty.
+          * two_col: needs at least 2 blocks OR one with multiple bullets.
+          * grid_2x2: needs a bullet list with ≥ 3 items OR ≥ 3 text blocks.
+          * icon_row: same as grid_2x2.
+        """
+        body = s.body or []
+        if layout in ("title_content", "halfbleed_image"):
+            return True
+        # Count "content units"
+        content_units = 0
+        for b in body:
+            if isinstance(b, BulletBlock):
+                content_units += len(b.items)
+            else:
+                content_units += 1
+        if layout in ("grid_2x2", "icon_row"):
+            return content_units >= 3
+        if layout == "two_col":
+            return content_units >= 2
+        return True
 
     def _attach_eyebrow_hints(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
         """Add ``EYEBROW: ...`` hints to slide notes so the renderer uses
