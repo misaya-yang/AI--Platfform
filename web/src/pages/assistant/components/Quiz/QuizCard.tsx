@@ -5,7 +5,7 @@
  * submits to backend for grading, and displays results.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -34,15 +34,96 @@ interface QuizCardProps {
 
 type ViewMode = "quiz" | "result" | "review";
 
+// --- Local persistence ---
+// TODO: move to backend attempt API when in-progress quiz_attempts are modeled.
+// Keyed on quiz_id only (globally unique); survives page reload within a browser.
+interface PersistedQuizState {
+  v: 1;
+  selectedAnswers: Record<string, string>;
+  currentIndex: number;
+  result?: QuizAttemptResult;
+}
+
+const STORAGE_PREFIX = "assistant:quiz:v1:";
+const storageKey = (quizId: string) => `${STORAGE_PREFIX}${quizId}`;
+
+function readPersisted(quizId: string): PersistedQuizState | null {
+  try {
+    const raw = localStorage.getItem(storageKey(quizId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedQuizState;
+    if (!parsed || parsed.v !== 1) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writePersisted(quizId: string, state: PersistedQuizState): void {
+  try {
+    localStorage.setItem(storageKey(quizId), JSON.stringify(state));
+  } catch {
+    // Quota / disabled storage — silent degrade.
+  }
+}
+
+function clearPersisted(quizId: string): void {
+  try {
+    localStorage.removeItem(storageKey(quizId));
+  } catch {
+    // ignore
+  }
+}
+
 export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) {
   const { t } = useTranslation();
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
+
+  // Hydrate once per quiz_id (guards against re-mount while assistant message streams).
+  const hydratedQuizIdRef = useRef<string | null>(null);
+  const initial = (() => {
+    const persisted = readPersisted(quizData.quiz_id);
+    const restoredResult = existingResult ?? persisted?.result;
+    return {
+      currentIndex: persisted?.currentIndex ?? 0,
+      selectedAnswers: persisted?.selectedAnswers ?? {},
+      result: restoredResult,
+      viewMode: (restoredResult ? "result" : "quiz") as ViewMode,
+    };
+  })();
+
+  const [currentIndex, setCurrentIndex] = useState(initial.currentIndex);
+  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>(
+    initial.selectedAnswers,
+  );
   const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<QuizAttemptResult | undefined>(existingResult);
-  const [viewMode, setViewMode] = useState<ViewMode>(existingResult ? "result" : "quiz");
+  const [result, setResult] = useState<QuizAttemptResult | undefined>(initial.result);
+  const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [showShareDialog, setShowShareDialog] = useState(false);
+
+  // If the quiz_id changes (new quiz in same component instance), re-hydrate.
+  useEffect(() => {
+    if (hydratedQuizIdRef.current === quizData.quiz_id) return;
+    hydratedQuizIdRef.current = quizData.quiz_id;
+    const persisted = readPersisted(quizData.quiz_id);
+    const restoredResult = existingResult ?? persisted?.result;
+    setCurrentIndex(persisted?.currentIndex ?? 0);
+    setSelectedAnswers(persisted?.selectedAnswers ?? {});
+    setResult(restoredResult);
+    setViewMode(restoredResult ? "result" : "quiz");
+    // existingResult is intentionally read as-of-hydration only; see next effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quizData.quiz_id]);
+
+  // Persist state on every change while the quiz is in progress or has a result.
+  useEffect(() => {
+    writePersisted(quizData.quiz_id, {
+      v: 1,
+      selectedAnswers,
+      currentIndex,
+      result,
+    });
+  }, [quizData.quiz_id, selectedAnswers, currentIndex, result]);
 
   const questions = quizData.questions;
   const totalQuestions = questions.length;
@@ -88,11 +169,12 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
   }, []);
 
   const handleRetake = useCallback(() => {
+    clearPersisted(quizData.quiz_id);
     setSelectedAnswers({});
     setCurrentIndex(0);
     setResult(undefined);
     setViewMode("quiz");
-  }, []);
+  }, [quizData.quiz_id]);
 
   // Find per-question result for review mode
   const getQuestionResult = (questionId: string) => {

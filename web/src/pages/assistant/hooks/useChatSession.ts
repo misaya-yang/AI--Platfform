@@ -271,6 +271,67 @@ function hydrateMessageArtifacts(
   });
 }
 
+/**
+ * Rebuild the "Current run" output files for the Artifacts drawer on reload.
+ *
+ * The live streaming path populates `codeExecution.outputFiles` with the tool
+ * result payload. On session reload there is no live tool-call, so the
+ * drawer's "Current run" section would be empty. We recover the most-recent
+ * assistant message's files by intersecting its persisted `_artifactIds`
+ * (message metadata) with the full session artifact list. Old sessions
+ * without `artifact_ids` simply produce an empty list — ArtifactsPanel
+ * already skips the "Current run" header when empty.
+ *
+ * Returns [] when no assistant message carries artifact IDs, so callers can
+ * safely feed the result straight into the code-execution state.
+ */
+function buildLatestRunOutputFilesFromArtifacts(
+  messages: ChatMessageType[],
+  artifacts: ArtifactInfo[],
+): Array<{
+  filename: string;
+  content_base64: string;
+  mime_type: string | null;
+  size_bytes: number;
+  artifact_id?: string;
+  download_url?: string;
+}> {
+  if (!artifacts.length || !messages.length) return [];
+  const artifactMap = new Map<string, ArtifactInfo>();
+  for (const a of artifacts) {
+    artifactMap.set(a.artifact_id, a);
+  }
+  // Find the most-recent assistant message that actually produced artifacts.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    const ids = m._artifactIds;
+    if (!ids || ids.length === 0) continue;
+    const files: Array<{
+      filename: string;
+      content_base64: string;
+      mime_type: string | null;
+      size_bytes: number;
+      artifact_id?: string;
+      download_url?: string;
+    }> = [];
+    for (const id of ids) {
+      const a = artifactMap.get(id);
+      if (!a) continue;
+      files.push({
+        filename: a.filename || a.title || "artifact",
+        content_base64: "",  // Already persisted server-side; stream URL only
+        mime_type: a.mime_type || null,
+        size_bytes: a.size_bytes || 0,
+        artifact_id: a.artifact_id,
+        download_url: a.download_url || getArtifactDownloadUrl(a.artifact_id),
+      });
+    }
+    if (files.length > 0) return files;
+  }
+  return [];
+}
+
 /** Async: load quiz data for messages that have _quizId, then update state */
 async function hydrateQuizData(
   messages: ChatMessageType[],
@@ -518,7 +579,12 @@ export function useChatSession() {
                 source: a.source as any,
               }));
               setArtifacts(loadedArtifacts);
-              setShowArtifacts(loadedArtifacts.length > 0);
+              // Do NOT force-open the drawer on reload. The top-bar
+              // Artifacts chip (gated by artifacts.length +
+              // codeExecution.outputFiles.length) is the user-initiated
+              // entry point; auto-opening covered the chat for sessions
+              // with any past artifact, which was jarring on refresh.
+              setShowArtifacts(false);
 
               // Restore messages with artifact hydration
               let chatMessages = history.map((msg, index) =>
@@ -527,6 +593,25 @@ export function useChatSession() {
               chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
               setMessages(chatMessages);
               hydrateQuizData(chatMessages, setMessages);
+
+              // Rehydrate "Current run" (most-recent assistant message's
+              // code-executor output) so the drawer's split view works
+              // after reload. Without this, sessionArtifacts would show
+              // but the "Current run" section stays empty even for a
+              // session that just finished streaming before refresh.
+              const latestRunFiles = buildLatestRunOutputFilesFromArtifacts(
+                chatMessages,
+                sessionArtifacts,
+              );
+              setCodeExecution({
+                isExecuting: false,
+                executionId: null,
+                code: null,
+                output: "",
+                executionTimeMs: null,
+                status: "idle",
+                outputFiles: latestRunFiles,
+              });
               setHistoryRestoreState("ready");
               trackChatHistoryRestored("assistant", {
                 sessionId: savedSessionId,
@@ -629,7 +714,9 @@ export function useChatSession() {
         source: a.source as any,
       }));
       setArtifacts(loadedArtifacts);
-      setShowArtifacts(loadedArtifacts.length > 0);
+      // Mirror the reload path: keep the drawer closed; the top-bar chip
+      // is the user-initiated open affordance.
+      setShowArtifacts(false);
 
       // Restore messages with artifact hydration
       let chatMessages = history.map((msg, index) =>
@@ -638,6 +725,23 @@ export function useChatSession() {
       chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
       setMessages(chatMessages);
       hydrateQuizData(chatMessages, setMessages);
+
+      // Rehydrate "Current run" from the most-recent assistant message's
+      // persisted artifact IDs so the drawer's split view matches live
+      // streaming behaviour after switching into a historical session.
+      const latestRunFiles = buildLatestRunOutputFilesFromArtifacts(
+        chatMessages,
+        sessionArtifacts,
+      );
+      setCodeExecution({
+        isExecuting: false,
+        executionId: null,
+        code: null,
+        output: "",
+        executionTimeMs: null,
+        status: "idle",
+        outputFiles: latestRunFiles,
+      });
       setActiveSessionId(sessionId);
       setHistoryRestoreState("ready");
       trackChatHistoryRestored("assistant", {

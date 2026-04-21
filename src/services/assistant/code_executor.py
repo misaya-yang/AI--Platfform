@@ -202,6 +202,14 @@ import matplotlib
 matplotlib.use('Agg')
 
 def _redirect_relative_to_output(fname):
+    # Accept pathlib.Path / os.PathLike transparently. BytesIO and other
+    # non-path-like objects pass through unchanged so matplotlib can
+    # handle them directly.
+    if hasattr(fname, '__fspath__'):
+        try:
+            fname = _os.fspath(fname)
+        except TypeError:
+            return fname
     if not isinstance(fname, str):
         return fname
     if _os.path.isabs(fname):
@@ -587,6 +595,88 @@ class CodeExecutorService:
 
         return container, stdout, stderr, exit_code
 
+    # Extensions we consider user-facing artifacts when recovering stray
+    # files written at the workspace root (outside /output). Kept
+    # conservative so we don't slurp up .pyc caches, .lock files, etc.
+    _RECOVERABLE_EXTS: frozenset[str] = frozenset({
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp",
+        ".pdf",
+        ".csv", ".tsv", ".xlsx", ".xls",
+        ".json", ".html", ".htm", ".xml",
+        ".txt", ".md",
+    })
+
+    # Workspace-root directories we never sweep — they either belong to
+    # the caller (input, kb_docs) or are our own scaffolding.
+    _RESERVED_ROOT_NAMES: frozenset[str] = frozenset({
+        "input", "kb_docs", "output",
+    })
+
+    def _recover_root_artifacts(self, workspace_dir: Path) -> list[Path]:
+        """Move artifact-like files written at the workspace root (or in
+        other non-reserved directories) into ``output/`` so the normal
+        collector picks them up.
+
+        This is the safety net for code paths our matplotlib shim does
+        not cover — e.g. ``PIL.Image.save('x.png')``, ``pd.to_csv(
+        'data.csv')``, ``imageio.imwrite(...)``, or any code that writes
+        with a bare filename. Returns the list of recovered paths (in
+        their new ``output/`` location) for diagnostic logging.
+        """
+        output_dir = workspace_dir / "output"
+        output_dir.mkdir(exist_ok=True)
+
+        recovered: list[Path] = []
+        try:
+            root_entries = list(workspace_dir.iterdir())
+        except Exception as e:
+            logger.warning(
+                "[code_executor] failed to scan workspace root %s for "
+                "stray artifacts: %s", workspace_dir, e,
+            )
+            return recovered
+
+        for entry in root_entries:
+            # Skip reserved dirs and our scaffolding (main.py).
+            if entry.name in self._RESERVED_ROOT_NAMES:
+                continue
+            if entry.name == "main.py":
+                continue
+            if entry.is_dir():
+                # Don't descend into unknown subdirectories — user code
+                # shouldn't be creating them at root, and we don't want
+                # to recursively slurp arbitrary structures.
+                continue
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() not in self._RECOVERABLE_EXTS:
+                continue
+
+            # Avoid clobbering if a file of the same name already lives
+            # in output/ (e.g. model wrote both via savefig shim and a
+            # bare PIL call). Suffix with a counter.
+            target = output_dir / entry.name
+            if target.exists():
+                stem, ext = entry.stem, entry.suffix
+                i = 1
+                while True:
+                    alt = output_dir / f"{stem}_{i}{ext}"
+                    if not alt.exists():
+                        target = alt
+                        break
+                    i += 1
+
+            try:
+                shutil.move(str(entry), str(target))
+                recovered.append(target)
+            except Exception as e:
+                logger.warning(
+                    "[code_executor] failed to move stray artifact %s "
+                    "-> %s: %s", entry, target, e,
+                )
+
+        return recovered
+
     async def _collect_output_files(
         self,
         workspace_dir: Path,
@@ -600,6 +690,18 @@ class CodeExecutorService:
         """
         output_files = []
         output_dir = workspace_dir / "output"
+
+        # Fix A: sweep stray artifacts from the workspace root into
+        # output/ before the normal collection pass. Catches code paths
+        # our matplotlib shim doesn't cover (PIL, pandas, imageio, ...).
+        recovered = self._recover_root_artifacts(workspace_dir)
+        if recovered:
+            logger.info(
+                "[code_executor] recovered %d stray artifact(s) from "
+                "workspace root into output/: %s",
+                len(recovered),
+                ", ".join(p.name for p in recovered[:20]),
+            )
 
         if not output_dir.exists():
             logger.warning(
@@ -617,6 +719,34 @@ class CodeExecutorService:
             len(all_entries),
             ", ".join(p.name for p in all_entries[:20]) or "<empty>",
         )
+
+        # Fix C: when output/ is empty, dump the full workspace listing
+        # (minus reserved dirs) so next time we can tell whether the
+        # model wrote files elsewhere, wrote nothing, or the container
+        # couldn't write back. This is defense-in-depth after the
+        # recovery sweep above.
+        if not all_entries:
+            try:
+                root_listing = []
+                for p in workspace_dir.iterdir():
+                    if p.name in self._RESERVED_ROOT_NAMES:
+                        continue
+                    kind = "d" if p.is_dir() else "f"
+                    try:
+                        size = p.stat().st_size if p.is_file() else -1
+                    except Exception:
+                        size = -1
+                    root_listing.append(f"{kind}:{p.name}:{size}")
+                logger.warning(
+                    "[code_executor] output/ empty — workspace root "
+                    "contents (ex reserved): [%s]",
+                    ", ".join(root_listing[:40]) or "<empty>",
+                )
+            except Exception as e:
+                logger.warning(
+                    "[code_executor] failed to enumerate workspace "
+                    "root for diagnostics: %s", e,
+                )
 
         for file_path in all_entries:
             if file_path.is_file():

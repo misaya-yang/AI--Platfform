@@ -542,7 +542,83 @@ class TestOutputFileCollection:
 
         try:
             output_files = await executor._collect_output_files(workspace, config)
+            # Recovery sweep now creates output/ as a side effect so we
+            # may get an empty list rather than a short-circuit, but no
+            # files should be produced either way.
             assert output_files == []
+        finally:
+            import shutil
+
+            shutil.rmtree(workspace)
+
+    @pytest.mark.asyncio
+    async def test_collect_recovers_root_level_png(self):
+        """Stray PNG at workspace root gets swept into output/ so the
+        collector returns it — this is the fix for the matplotlib-shim
+        miss (PIL.Image.save / bare savefig / pathlib.Path etc.)."""
+        executor = CodeExecutorService()
+        config = CodeExecutionConfig()
+
+        workspace = Path(tempfile.mkdtemp(prefix="test_"))
+        # Pretend the sandbox wrote main.py (scaffolding) and a chart at
+        # the workspace root without ever touching output/.
+        (workspace / "main.py").write_text("# user code")
+        (workspace / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\nFAKE")
+
+        # Also create reserved dirs the way _setup_workspace would.
+        (workspace / "input").mkdir()
+        (workspace / "kb_docs").mkdir()
+
+        try:
+            output_files = await executor._collect_output_files(workspace, config)
+
+            names = [f.filename for f in output_files]
+            assert "chart.png" in names, f"expected chart.png, got {names}"
+
+            chart = next(f for f in output_files if f.filename == "chart.png")
+            assert chart.mime_type == "image/png"
+            assert chart.content.startswith(b"\x89PNG")
+
+            # main.py (scaffolding) must NOT be returned as an artifact.
+            assert "main.py" not in names
+
+            # And the file must have actually been moved into output/.
+            assert (workspace / "output" / "chart.png").exists()
+            assert not (workspace / "chart.png").exists()
+        finally:
+            import shutil
+
+            shutil.rmtree(workspace)
+
+    @pytest.mark.asyncio
+    async def test_collect_skips_reserved_dirs_and_non_artifacts(self):
+        """Files under input/ or kb_docs/, and non-artifact extensions
+        at the root (e.g. `.pyc`), must not be swept into output/."""
+        executor = CodeExecutorService()
+        config = CodeExecutionConfig()
+
+        workspace = Path(tempfile.mkdtemp(prefix="test_"))
+        (workspace / "main.py").write_text("# user code")
+        (workspace / "input").mkdir()
+        (workspace / "input" / "upload.csv").write_text("a,b\n1,2\n")
+        (workspace / "kb_docs").mkdir()
+        (workspace / "kb_docs" / "ref.txt").write_text("ref")
+
+        # Stray non-artifact at root: should be left alone.
+        (workspace / "scratch.pyc").write_bytes(b"\x00")
+        # Stray artifact at root: should be recovered.
+        (workspace / "data.csv").write_text("x,y\n1,2\n")
+
+        try:
+            output_files = await executor._collect_output_files(workspace, config)
+            names = [f.filename for f in output_files]
+
+            assert names == ["data.csv"], f"unexpected collection: {names}"
+            # Reserved-dir contents stay put.
+            assert (workspace / "input" / "upload.csv").exists()
+            assert (workspace / "kb_docs" / "ref.txt").exists()
+            # Non-artifact stays put.
+            assert (workspace / "scratch.pyc").exists()
         finally:
             import shutil
 

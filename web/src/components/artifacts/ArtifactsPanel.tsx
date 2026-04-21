@@ -296,8 +296,13 @@ function ImageCard({
 }) {
   const { t } = useTranslation();
   const isOutputFile = "content_base64" in item;
+  // When an OutputFile has no inline content (e.g., rehydrated from the
+  // session artifact list on reload) fall back to its download_url. The
+  // stream-time path still produces content_base64, so this is additive.
   const rawSrc = isOutputFile
-    ? `data:${item.mime_type || "image/png"};base64,${item.content_base64}`
+    ? item.content_base64
+      ? `data:${item.mime_type || "image/png"};base64,${item.content_base64}`
+      : item.download_url
     : (item as Artifact).url;
   const filename = isOutputFile
     ? item.filename
@@ -453,21 +458,39 @@ export function ArtifactsPanel({
     () => outputFiles.filter((f) => !f.mime_type?.startsWith("image/")),
     [outputFiles],
   );
+  // Artifact IDs already shown in "Current run" — used to drop duplicates
+  // from "Session artifacts" below. Live streaming emits the same artifact
+  // on both outputFiles (CODE_EXECUTION_RESULT) and artifacts (ARTIFACT_CREATED),
+  // and the reload path rebuilds outputFiles from the latest message's
+  // artifact IDs, so the de-dupe is required in both regimes.
+  const currentRunArtifactIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const f of outputFiles) {
+      if (f.artifact_id) ids.add(f.artifact_id);
+    }
+    return ids;
+  }, [outputFiles]);
   const sessionImages = React.useMemo(
-    () => artifacts.filter((a) => a.type === "image" || a.mimeType?.startsWith("image/")),
-    [artifacts],
+    () =>
+      artifacts.filter(
+        (a) =>
+          !currentRunArtifactIds.has(a.id) &&
+          (a.type === "image" || a.mimeType?.startsWith("image/")),
+      ),
+    [artifacts, currentRunArtifactIds],
   );
   const sessionDocuments = React.useMemo(
     () =>
       artifacts.filter(
         (a) =>
+          !currentRunArtifactIds.has(a.id) &&
           a.type !== "image" &&
           !a.mimeType?.startsWith("image/") &&
           (a.type === "document" ||
             a.type === "file" ||
             ["docx", "pdf", "md", "xlsx", "csv"].includes(a.format)),
       ),
-    [artifacts],
+    [artifacts, currentRunArtifactIds],
   );
 
   const imageFiles = React.useMemo<(Artifact | OutputFile)[]>(() => {

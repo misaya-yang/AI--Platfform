@@ -137,6 +137,15 @@ than silently substituting placeholder data.
 - KB documents: /workspace/kb_docs/ (reference materials as text files)
 - Output directory: /workspace/output/ (save all generated files here)
 
+## Output file paths — IMPORTANT
+Any file you want the user to see (plots, CSVs, reports) **must be written
+with a relative filename or a path under `/workspace/output/`**. A relative
+filename such as `plt.savefig('chart.png')` or `df.to_csv('data.csv')`
+lands next to your code and is auto-collected into the artifacts panel.
+**Never write to absolute paths outside `/workspace/`** (e.g. `/tmp/foo.png`
+or `/home/user/x.csv`) — those files are discarded when the sandbox exits
+and will not appear as artifacts.
+
 ## Pre-installed Libraries
 numpy, pandas, matplotlib, seaborn, openpyxl, xlrd, scipy, plotly
 
