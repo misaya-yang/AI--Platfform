@@ -2285,7 +2285,19 @@ Please use this web search context to inform your response when relevant."""
                 )
             for _tr in tool_results:
                 _content = _tr.get("content") if isinstance(_tr, dict) else None
-                _stored = _content[:4000] if isinstance(_content, str) else _content
+                # Cap both string and non-string payloads at ~4000 chars.
+                # Non-string values (dicts/lists from some providers) were
+                # previously stored verbatim and could balloon the session
+                # JSONB.
+                if isinstance(_content, str):
+                    _stored = _content[:4000]
+                elif _content is None:
+                    _stored = None
+                else:
+                    try:
+                        _stored = json.dumps(_content, ensure_ascii=False)[:4000]
+                    except (TypeError, ValueError):
+                        _stored = str(_content)[:4000]
                 turn_tool_results.append(
                     {
                         "tool_call_id": _tr.get("tool_call_id") if isinstance(_tr, dict) else None,
@@ -2391,22 +2403,45 @@ Please use this web search context to inform your response when relevant."""
                         else:
                             _persisted_thinking = _stripped
 
+                _metadata = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "model_id": config.model_id,
+                    "usage": usage,
+                    "contexts": contexts_data if contexts_data else None,
+                    "web_search_results": web_search_results_data,
+                    # Activity-drawer restoration fields (None when absent
+                    # so no DB/UX overhead for turns without reasoning/tools).
+                    "thinking_content": _persisted_thinking,
+                    "tool_calls": turn_tool_calls or None,
+                    "tool_results": turn_tool_results or None,
+                }
+
+                # Final safety net mirroring agent_loop.py: shed Activity
+                # fields in priority order if metadata would push the row
+                # past the 1MB JSONB ceiling. Losing a drawer view beats
+                # losing the entire assistant message.
+                _size_ceiling = 800_000
+                for _shed in ("tool_results", "tool_calls", "thinking_content"):
+                    try:
+                        _size = len(json.dumps(_metadata, default=str))
+                    except (TypeError, ValueError):
+                        break
+                    if _size <= _size_ceiling:
+                        break
+                    if _metadata.get(_shed) is not None:
+                        logger.warning(
+                            "[persist] metadata %d bytes over ceiling; "
+                            "shedding %s",
+                            _size,
+                            _shed,
+                        )
+                        _metadata[_shed] = None
+
                 await self.session_manager.add_message(
                     session_id=session_id,
                     role="assistant",
                     content=total_content,
-                    metadata={
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "model_id": config.model_id,
-                        "usage": usage,
-                        "contexts": contexts_data if contexts_data else None,
-                        "web_search_results": web_search_results_data,
-                        # Activity-drawer restoration fields (None when absent
-                        # so no DB/UX overhead for turns without reasoning/tools).
-                        "thinking_content": _persisted_thinking,
-                        "tool_calls": turn_tool_calls or None,
-                        "tool_results": turn_tool_results or None,
-                    },
+                    metadata=_metadata,
                 )
             except Exception as e:
                 logger.warning(f"Failed to persist assistant message: {e}")

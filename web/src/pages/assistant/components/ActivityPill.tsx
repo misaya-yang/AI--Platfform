@@ -64,6 +64,7 @@ export function ActivityPill({
     >
       {running && (
         <span
+          className="act-dot-wrap"
           style={{
             display: "inline-flex",
             color: T.accent,

@@ -206,10 +206,13 @@ def _redirect_relative_to_output(fname):
         return fname
     if _os.path.isabs(fname):
         return fname
-    if fname.startswith('output/') or fname.startswith('./output/'):
-        return fname
+    # Normalize leading `./` so paths like `./chart.png` produce
+    # `output/chart.png` instead of `output/./chart.png`.
+    _cleaned = fname[2:] if fname.startswith('./') else fname
+    if _cleaned.startswith('output/'):
+        return _cleaned
     _os.makedirs('output', exist_ok=True)
-    return _os.path.join('output', fname)
+    return _os.path.join('output', _cleaned)
 
 import matplotlib.pyplot as _plt
 _orig_plt_savefig = _plt.savefig

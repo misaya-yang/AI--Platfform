@@ -3143,27 +3143,52 @@ class AgentLoop:
                             else:
                                 _persisted_thinking = _stripped
 
+                    _metadata = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "model_id": ctx.config.model_id,
+                        "usage": usage_payload,
+                        "contexts": contexts_for_persistence or None,
+                        "web_search_results": web_search_results_for_persistence,
+                        "quiz_id": quiz_id_for_persistence,
+                        "artifact_ids": created_artifact_ids or None,
+                        "engine": "agent_loop",
+                        "mode": "streaming_first",
+                        # Activity-drawer restoration fields. Any of these
+                        # may be None/[] for turns without reasoning/tools;
+                        # the frontend guards on presence.
+                        "thinking_content": _persisted_thinking,
+                        "tool_calls": turn_tool_calls or None,
+                        "tool_results": turn_tool_results or None,
+                    }
+
+                    # Final safety net: if the metadata is about to push the
+                    # row past the 1MB JSONB ceiling, shed activity fields in
+                    # priority order (tool_results first, then tool_calls,
+                    # then thinking). Losing an Activity drawer view is a far
+                    # better failure mode than losing the entire assistant
+                    # message on the hard guard in database_session_manager.
+                    _size_ceiling = 800_000
+                    for _shed in ("tool_results", "tool_calls", "thinking_content"):
+                        try:
+                            _size = len(json.dumps(_metadata, default=str))
+                        except (TypeError, ValueError):
+                            break
+                        if _size <= _size_ceiling:
+                            break
+                        if _metadata.get(_shed) is not None:
+                            logger.warning(
+                                "[persist] metadata %d bytes over ceiling; "
+                                "shedding %s",
+                                _size,
+                                _shed,
+                            )
+                            _metadata[_shed] = None
+
                     await self.session_manager.add_message(
                         session_id=ctx.session_id,
                         role="assistant",
                         content=ctx.generated_content,
-                        metadata={
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "model_id": ctx.config.model_id,
-                            "usage": usage_payload,
-                            "contexts": contexts_for_persistence or None,
-                            "web_search_results": web_search_results_for_persistence,
-                            "quiz_id": quiz_id_for_persistence,
-                            "artifact_ids": created_artifact_ids or None,
-                            "engine": "agent_loop",
-                            "mode": "streaming_first",
-                            # Activity-drawer restoration fields. Any of these
-                            # may be None/[] for turns without reasoning/tools;
-                            # the frontend guards on presence.
-                            "thinking_content": _persisted_thinking,
-                            "tool_calls": turn_tool_calls or None,
-                            "tool_results": turn_tool_results or None,
-                        },
+                        metadata=_metadata,
                     )
                 except Exception as e:
                     logger.exception("Failed to persist assistant message (streaming-first)")

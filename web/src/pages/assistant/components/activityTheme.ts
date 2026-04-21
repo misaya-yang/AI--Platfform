@@ -67,7 +67,7 @@ export function ensureActivityStyles(): void {
     .act-accent-hover:hover{background:hsl(var(--assistant-accent-soft))}
     .act-pill-link{transition:color .12s}
     .act-pill-link:hover{color:hsl(var(--assistant-text-primary))}
-    .act-pill-link:hover > span:not(.act-dot){text-decoration:underline;text-decoration-color:hsl(var(--assistant-text-primary) / .3);text-underline-offset:3px}
+    .act-pill-link:hover > span:not(.act-dot):not(.act-dot-wrap){text-decoration:underline;text-decoration-color:hsl(var(--assistant-text-primary) / .3);text-underline-offset:3px}
   `;
   document.head.appendChild(s);
 }

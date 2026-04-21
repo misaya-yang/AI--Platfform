@@ -164,57 +164,79 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const isBase64 = src?.startsWith("data:");
   const displayAlt = alt || t("common.generatedImage");
 
-  // Download image - supports both base64 and URL images
+  // Resolve src to a URL that can be handed to a detached <a download> or
+  // a <img> in a new tab. For authenticated same-origin routes the raw URL
+  // won't carry the Bearer token, so blob-fetch through axios first.
+  const resolveDownloadableUrl = async (): Promise<string> => {
+    if (!src) throw new Error("no src");
+    if (!needsAuthenticatedFetch(src)) return src;
+    return fetchAsBlobUrl(src);
+  };
+
   const handleDownload = async () => {
     if (!src || isDownloading) return;
-
     const filename = `${displayAlt.replace(/\s+/g, "_")}_${Date.now()}.png`;
 
     if (isBase64) {
-      // Direct download for base64 images
       const link = document.createElement("a");
       link.href = src;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } else {
-      // Fetch and download for URL images
-      setIsDownloading(true);
-      try {
-        const response = await fetch(src);
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-      } catch (error) {
-        console.error("Failed to download image:", error);
-        // Fallback: open in new tab
-        window.open(src, "_blank");
-      } finally {
-        setIsDownloading(false);
-      }
+      return;
+    }
+
+    setIsDownloading(true);
+    let blobUrl: string | null = null;
+    try {
+      const url = await resolveDownloadableUrl();
+      blobUrl = needsAuthenticatedFetch(src) ? url : null;
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (error) {
+      console.error("Failed to download image:", error);
+    } finally {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      setIsDownloading(false);
     }
   };
 
-  // Open in new tab - using DOM API instead of document.write to prevent XSS
-  const handleOpenInNewTab = () => {
+  // Open in new tab — using DOM API to avoid XSS via document.write.
+  // Authenticated URLs are blob-fetched first so the detached window can
+  // load the bytes without a Bearer token.
+  const handleOpenInNewTab = async () => {
     if (!src) return;
+    let urlForWindow: string;
+    let blobUrl: string | null = null;
+    try {
+      urlForWindow = await resolveDownloadableUrl();
+      if (needsAuthenticatedFetch(src)) blobUrl = urlForWindow;
+    } catch {
+      return;
+    }
     const newWindow = window.open("", "_blank");
-    if (newWindow) {
-      const doc = newWindow.document;
-      doc.title = displayAlt;
-      doc.body.style.cssText = "margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;";
-      const img = doc.createElement("img");
-      img.src = src;
-      img.alt = displayAlt;
-      img.style.cssText = "max-width:100%;max-height:100vh;object-fit:contain;";
-      doc.body.appendChild(img);
+    if (!newWindow) {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      return;
+    }
+    const doc = newWindow.document;
+    doc.title = displayAlt;
+    doc.body.style.cssText = "margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#1a1a1a;";
+    const img = doc.createElement("img");
+    img.src = urlForWindow;
+    img.alt = displayAlt;
+    img.style.cssText = "max-width:100%;max-height:100vh;object-fit:contain;";
+    doc.body.appendChild(img);
+    // Revoke once the new window releases the URL (after the image decodes).
+    // Listener on the new window's unload keeps memory tight.
+    if (blobUrl) {
+      const u = blobUrl;
+      newWindow.addEventListener("beforeunload", () => URL.revokeObjectURL(u));
     }
   };
 
@@ -236,21 +258,25 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
         </span>
       )}
 
-      {/* Image */}
-      <img
-        src={resolvedSrc || src}
-        alt={displayAlt}
-        className={`
-          max-w-full rounded-xl shadow-lg border border-slate-200 dark:border-slate-700
-          transition-all duration-300
-          ${isLoading ? "opacity-0 h-[200px]" : "opacity-100"}
-        `}
-        onLoad={() => setIsLoading(false)}
-        onError={() => {
-          setIsLoading(false);
-          setHasError(true);
-        }}
-      />
+      {/* Image — gated on `resolvedSrc`. For authenticated routes this stays
+          undefined until the blob-fetch lands; rendering with the raw src
+          would trigger an unauthenticated GET and log a 401 in DevTools. */}
+      {resolvedSrc && (
+        <img
+          src={resolvedSrc}
+          alt={displayAlt}
+          className={`
+            max-w-full rounded-xl shadow-lg border border-slate-200 dark:border-slate-700
+            transition-all duration-300
+            ${isLoading ? "opacity-0 h-[200px]" : "opacity-100"}
+          `}
+          onLoad={() => setIsLoading(false)}
+          onError={() => {
+            setIsLoading(false);
+            setHasError(true);
+          }}
+        />
+      )}
 
       {/* Hover actions for all images */}
       {!isLoading && !hasError && (
