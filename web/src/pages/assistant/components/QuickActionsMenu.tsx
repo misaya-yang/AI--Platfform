@@ -67,18 +67,18 @@ export function QuickActionsMenu({
           variant="ghost"
           size="icon"
           className={cn(
-            "h-10 w-10 rounded-xl transition-all duration-200",
+            "h-9 w-9 rounded-md transition-colors duration-150",
             open
-              ? "bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400"
-              : "hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400"
+              ? "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-primary))]"
+              : "hover:bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))]"
           )}
           disabled={disabled}
         >
           <motion.div
             animate={{ rotate: open ? 45 : 0 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
           >
-            <Plus className="h-5 w-5" />
+            <Plus className="h-4 w-4" />
           </motion.div>
         </Button>
       </PopoverTrigger>

@@ -7,7 +7,6 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
 import { Settings2, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -46,11 +45,11 @@ export function StyleSelector({
         <Button
           variant="ghost"
           size="sm"
-          className="h-8 px-3 gap-2 rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700"
+          className="h-7 px-2 gap-1.5 rounded-md bg-transparent hover:bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
           disabled={disabled}
         >
-          <Settings2 className="h-3.5 w-3.5 text-slate-500" />
-          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
+          <Settings2 className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />
+          <span className="text-[12.5px] font-medium">
             {currentStyle ? t(currentStyle.nameKey) : ""}
           </span>
         </Button>
@@ -90,30 +89,28 @@ function StyleCard({
 }) {
   const { t } = useTranslation();
   return (
-    <motion.button
-      whileHover={{ scale: 1.01 }}
-      whileTap={{ scale: 0.99 }}
+    <button
       onClick={onClick}
       className={cn(
-        "relative flex items-start gap-3 p-4 rounded-xl border text-left transition-colors",
+        "relative flex items-start gap-3 p-4 rounded-lg border text-left transition-colors duration-150",
         isSelected
-          ? "border-violet-500 bg-violet-50 dark:bg-violet-900/20"
-          : "border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 bg-white dark:bg-slate-800"
+          ? "border-[hsl(var(--assistant-accent))]/50 bg-[hsl(var(--assistant-accent))]/8"
+          : "border-[hsl(var(--assistant-border))] hover:border-[hsl(var(--assistant-border))]/80 bg-[hsl(var(--assistant-surface-bg))] hover:bg-[hsl(var(--assistant-surface-soft))]"
       )}
     >
       {isSelected && (
         <div className="absolute top-3 right-3">
-          <Check className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+          <Check className="h-4 w-4 text-[hsl(var(--assistant-accent))]" />
         </div>
       )}
       <div className="flex-1 pr-6">
-        <div className="font-medium text-slate-800 dark:text-slate-200">
+        <div className="font-medium text-[hsl(var(--assistant-text-primary))]">
           {t(style.nameKey)}
         </div>
-        <div className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+        <div className="text-sm text-[hsl(var(--assistant-text-secondary))] mt-1">
           {t(style.descriptionKey)}
         </div>
       </div>
-    </motion.button>
+    </button>
   );
 }

@@ -45,18 +45,18 @@ export function CompactModelSelector({
         <Button
           variant="ghost"
           size="sm"
-          className="h-auto px-2 py-1 gap-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+          className="h-8 px-2 gap-1.5 rounded-md hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors duration-150"
           disabled={disabled || models.length === 0}
         >
-          <span className="text-base font-semibold text-slate-800 dark:text-slate-100 max-w-[180px] truncate">
+          <span className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))] max-w-[180px] truncate">
             {selectedModelInfo?.name || t("assistant.selectModel", "Select model")}
           </span>
-          <ChevronDown className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+          <ChevronDown className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))]" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="start"
-        className="w-[260px] max-h-[350px] overflow-y-auto rounded-xl"
+        className="w-[260px] max-h-[350px] overflow-y-auto rounded-lg"
       >
         {Object.entries(groupedModels).map(([provider, providerModels], index) => (
           <div key={provider}>
@@ -72,7 +72,7 @@ export function CompactModelSelector({
               >
                 <div className="flex items-center gap-2 min-w-0">
                   {selectedModel === model.id ? (
-                    <Check className="h-4 w-4 shrink-0 text-violet-500" />
+                    <Check className="h-4 w-4 shrink-0 text-[hsl(var(--assistant-accent))]" />
                   ) : (
                     <div className="w-4" />
                   )}

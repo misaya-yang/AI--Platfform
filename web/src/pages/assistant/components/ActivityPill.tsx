@@ -1,16 +1,17 @@
 /**
  * ActivityPill — inline affordance that opens the right-side Activity
- * drawer. Ported verbatim from chat.jsx.
+ * drawer.
  *
- * Two variants:
- *   - "pill"  (default) — bordered rounded rect used inline above the
- *                         assistant's answer.
- *   - "chip"            — compact variant used in the top bar when the
- *                         panel is collapsed.
+ * Visual target (restrained, Linear/Claude.ai style):
+ *   icon + "Activity · N steps · XXs" + chevron   — reads as text, not a button
  *
- * While `running`, shows animated three-dot + "Thinking" label; when
- * idle, shows the sparkle icon + "Activity" label. Subtitle is
- * "· N steps · Ts" in monospace.
+ * At rest: no background, no border, no colored icon halo. Tap target
+ * remains accessible (≥32px via vertical padding). On hover: subtle
+ * bg-soft fade + primary text colour.
+ *
+ * Two variants are kept for API compatibility (pill | chip) but they
+ * now render with the same reduced-chrome style; only typography size
+ * differs.
  */
 
 import { T, ui, ensureActivityStyles } from "./activityTheme";
@@ -35,62 +36,20 @@ export function ActivityPill({
 }: ActivityPillProps) {
   ensureActivityStyles();
 
+  // Subtitle: "· N step(s) · XXs" — English plural handled at call-site
+  // if it ever changes; here we render whatever the caller computed.
   const subtitle =
     durationLabel && steps > 0
-      ? `· ${steps} steps · ${durationLabel}`
+      ? `· ${steps} ${steps === 1 ? "step" : "steps"} · ${durationLabel}`
       : steps > 0
-        ? `· ${steps} steps`
+        ? `· ${steps} ${steps === 1 ? "step" : "steps"}`
         : durationLabel
           ? `· ${durationLabel}`
           : "";
 
-  if (variant === "chip") {
-    return (
-      <button
-        type="button"
-        onClick={onOpen}
-        className="act-btn act-accent-hover"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "5px 10px 5px 8px",
-          borderRadius: 14,
-          border: `1px solid ${T.border}`,
-          background: T.panel,
-          color: T.text,
-          fontFamily: ui.sans,
-          fontSize: 12.5,
-          cursor: "pointer",
-        }}
-      >
-        {running ? (
-          <span style={{ display: "inline-flex", color: T.accent }}>
-            <span className="act-dot" />
-            <span className="act-dot" />
-            <span className="act-dot" />
-          </span>
-        ) : (
-          <span style={{ color: T.accent, display: "inline-flex" }}>
-            <Icon name="sparkle" size={13} />
-          </span>
-        )}
-        <span style={{ fontWeight: 500 }}>{label}</span>
-        {subtitle && (
-          <span
-            style={{
-              color: T.textMute,
-              fontFamily: ui.mono,
-              fontSize: 11.5,
-            }}
-          >
-            {subtitle}
-          </span>
-        )}
-        <Icon name="chevRight" size={12} />
-      </button>
-    );
-  }
+  const isChip = variant === "chip";
+  const fontSize = isChip ? 12.5 : 13;
+  const subtitleSize = isChip ? 11.5 : 12;
 
   return (
     <button
@@ -100,45 +59,60 @@ export function ActivityPill({
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 10,
-        padding: "7px 12px 7px 10px",
-        borderRadius: 10,
-        border: `1px solid ${T.border}`,
-        background: T.panel,
-        color: T.text,
+        gap: 7,
+        // Vertical padding keeps the 32px click target while the visual
+        // at rest reads as plain text.
+        padding: "7px 8px",
+        borderRadius: 6,
+        border: "1px solid transparent",
+        background: "transparent",
+        color: T.textMute,
         fontFamily: ui.sans,
-        fontSize: 13,
+        fontSize,
         cursor: "pointer",
+        lineHeight: 1,
       }}
     >
-      <span
-        style={{
-          width: 22,
-          height: 22,
-          borderRadius: 6,
-          background: T.accentSoft,
-          color: T.accent,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        <Icon name={running ? "brain" : "sparkle"} size={13} />
-      </span>
-      <span style={{ fontWeight: 500 }}>{label}</span>
-      {subtitle && (
+      {running ? (
+        <span
+          style={{
+            display: "inline-flex",
+            color: T.accent,
+            // Reserve glyph width so layout doesn't jump between running
+            // and idle states.
+            width: 14,
+            justifyContent: "center",
+          }}
+        >
+          <span className="act-dot" />
+          <span className="act-dot" />
+          <span className="act-dot" />
+        </span>
+      ) : (
         <span
           style={{
             color: T.textMute,
+            display: "inline-flex",
+            width: 14,
+            justifyContent: "center",
+          }}
+        >
+          <Icon name="sparkle" size={13} />
+        </span>
+      )}
+      <span style={{ fontWeight: 500, color: T.text }}>{label}</span>
+      {subtitle && (
+        <span
+          style={{
+            color: T.textDim,
             fontFamily: ui.mono,
-            fontSize: 12,
+            fontSize: subtitleSize,
           }}
         >
           {subtitle}
         </span>
       )}
-      <Icon name="chevRight" size={13} />
+      <Icon name="chevRight" size={12} />
     </button>
   );
 }

@@ -185,8 +185,10 @@ export function ChatInputArea({
 
       <div className="p-4">
         <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
-          {/* Input container */}
-          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] shadow-sm focus-within:border-[hsl(var(--assistant-accent))]/40 focus-within:shadow-lg focus-within:shadow-[hsl(var(--assistant-accent))]/5 transition-all duration-200">
+          {/* Input container — restrained: 10px radius, hairline border,
+              no drop-shadow at rest; focus-within swaps to accent-tinted
+              ring without elevating the card. */}
+          <div className="relative flex items-end gap-2 p-2 rounded-[10px] bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] focus-within:border-[hsl(var(--assistant-accent))]/40 transition-colors duration-150">
             {/* Quick actions menu */}
             <QuickActionsMenu
               onFileUpload={() => fileInputRef.current?.click()}
@@ -247,37 +249,36 @@ export function ChatInputArea({
               rows={1}
             />
 
-            {/* Send/Stop button */}
+            {/* Send/Stop button — the ONE primary action on the page.
+                Accent-tinted fill, 6px radius, no glow, no scale wiggle. */}
             {isStreaming ? (
               <Button
                 size="icon"
-                className="h-10 w-10 shrink-0 rounded-xl bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/20"
+                className="h-9 w-9 shrink-0 rounded-md bg-[hsl(var(--destructive))]/90 hover:bg-[hsl(var(--destructive))] text-white transition-colors duration-150"
                 onClick={onStop}
                 aria-keyshortcuts="Escape"
               >
-                <X className="h-5 w-5" />
+                <X className="h-4 w-4" />
               </Button>
             ) : (
               <Button
                 size="icon"
                 className={cn(
-                  "h-10 w-10 shrink-0 rounded-xl transition-all duration-200",
+                  "h-9 w-9 shrink-0 rounded-md transition-colors duration-150",
                   canSend
-                    ? isImageMode
-                      ? "bg-pink-500 hover:bg-pink-600 shadow-sm hover:shadow-md hover:scale-105"
-                      : "bg-primary hover:bg-primary/90 shadow-sm hover:shadow-md hover:scale-105"
-                    : "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-tertiary))] cursor-not-allowed"
+                    ? "bg-[hsl(var(--assistant-accent))]/15 hover:bg-[hsl(var(--assistant-accent))]/25 text-[hsl(var(--assistant-accent))] border border-[hsl(var(--assistant-accent))]/20"
+                    : "bg-transparent text-[hsl(var(--assistant-text-tertiary))] cursor-not-allowed"
                 )}
                 onClick={onSend}
                 disabled={!canSend}
                 aria-keyshortcuts="Enter,Control+Enter,Meta+Enter"
               >
                 {isUploading || isGeneratingImage ? (
-                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 ) : isImageMode ? (
-                  <ImageIcon className="h-5 w-5" />
+                  <ImageIcon className="h-4 w-4" />
                 ) : (
-                  <Send className="h-5 w-5" />
+                  <Send className="h-4 w-4" />
                 )}
               </Button>
             )}

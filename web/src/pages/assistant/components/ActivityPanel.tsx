@@ -108,19 +108,18 @@ export function ActivityPanel({
             flexShrink: 0,
           }}
         >
+          {/* Monochrome glyph — restrained, no colored halo at rest. */}
           <span
             style={{
-              width: 22,
-              height: 22,
-              borderRadius: 6,
-              background: T.accentSoft,
-              color: T.accent,
+              width: 16,
+              height: 16,
+              color: T.textMute,
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
             }}
           >
-            <Icon name={running ? "brain" : "sparkle"} size={13} />
+            <Icon name={running ? "brain" : "sparkle"} size={14} />
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>

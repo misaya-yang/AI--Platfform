@@ -486,7 +486,7 @@ export function AssistantPage() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-9 w-9 rounded-xl hover:bg-[hsl(var(--assistant-surface-soft))]"
+                    className="h-8 w-8 rounded-md hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors duration-150"
                     onClick={() => setShowLeftPanel(!showLeftPanel)}
                     aria-label={
                       showLeftPanel
@@ -507,11 +507,11 @@ export function AssistantPage() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      className="h-9 w-9 rounded-xl hover:bg-[hsl(var(--assistant-surface-soft))]"
+                      className="h-8 w-8 rounded-md hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors duration-150"
                       onClick={() => setShowShareDialog(true)}
                       aria-label={t("assistant.share", "Share")}
                     >
-                      <Share2 className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
+                      <Share2 className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-secondary))]" />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom">{t("assistant.shareConversation", "Share Conversation")}</TooltipContent>
