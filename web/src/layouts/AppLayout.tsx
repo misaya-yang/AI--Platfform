@@ -122,7 +122,7 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const SIDER_WIDTH = 208;
+  const SIDER_WIDTH = 176;
   const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
   const pageTitleKey = getPageTitleKey(location.pathname);
@@ -147,9 +147,10 @@ export function AppLayout() {
             <Logo collapsed={collapsed} />
           </div>
 
-          {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto px-2.5 pt-2 pb-2 scrollbar-hide">
-            <div className="space-y-0.5">
+          {/* Navigation — vertically centered within the flex-1 region so
+              the nav block doesn't cling to the top of a tall sider. */}
+          <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide flex flex-col justify-center">
+            <div className="space-y-0.5 py-4">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
@@ -178,7 +179,7 @@ export function AppLayout() {
                           style={{
                             fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
                             fontSize: '13.5px',
-                            fontWeight: isActive ? 500 : 450,
+                            fontWeight: isActive ? 450 : 400,
                             letterSpacing: 0,
                             color: isActive ? 'hsl(var(--assistant-accent))' : undefined,
                           }}
@@ -213,7 +214,7 @@ export function AppLayout() {
                   style={{
                     fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
                     fontSize: '13.5px',
-                    fontWeight: 450,
+                    fontWeight: 400,
                     letterSpacing: 0,
                   }}
                 >
@@ -234,7 +235,7 @@ export function AppLayout() {
                   style={{
                     fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
                     fontSize: '13.5px',
-                    fontWeight: 450,
+                    fontWeight: 400,
                     letterSpacing: 0,
                   }}
                 >
