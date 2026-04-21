@@ -36,15 +36,17 @@ import { languages } from "@/i18n";
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
 
+const NAV_ICON_SIZE = 18;
+
 const navItems = [
-  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={22} />, permission: "console:dashboard:view" },
-  { key: "/services", labelKey: "nav.services", icon: <Server size={22} />, permission: "console:services:view" },
-  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={22} />, permission: "knowledge:dataset:view" },
-  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={22} />, permission: "conversation:playground:access" },
-  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={22} />, permission: "conversation:playground:access" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={22} />, permission: null },
-  { key: "/users", labelKey: "nav.users", icon: <Users size={22} />, permission: "user:list" },
-  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={22} />, permission: "console:settings:view" },
+  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:dashboard:view" },
+  { key: "/services", labelKey: "nav.services", icon: <Server size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:services:view" },
+  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "knowledge:dataset:view" },
+  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "conversation:playground:access" },
+  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "conversation:playground:access" },
+  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={NAV_ICON_SIZE} strokeWidth={2} />, permission: null },
+  { key: "/users", labelKey: "nav.users", icon: <Users size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "user:list" },
+  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:settings:view" },
 ];
 
 function getPageTitleKey(pathname: string): string {
@@ -120,8 +122,9 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const siderOffset = isMobile ? (collapsed ? -230 : 0) : 0;
-  const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : 230;
+  const SIDER_WIDTH = 208;
+  const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
+  const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
   const pageTitleKey = getPageTitleKey(location.pathname);
   const userInitials = getInitials(user?.display_name || user?.user_id);
 
@@ -129,11 +132,11 @@ export function AppLayout() {
     <Layout style={{ minHeight: '100vh' }}>
       <Sider
         collapsible collapsed={collapsed} onCollapse={setCollapsed} trigger={null}
-        width={230} collapsedWidth={isMobile ? 0 : 64}
+        width={SIDER_WIDTH} collapsedWidth={isMobile ? 0 : 64}
         style={{
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
-          borderRight: darkMode ? '1px solid #2e3830' : '1px solid #dde1de',
-          background: darkMode ? '#0c100d' : '#ffffff',
+          borderRight: darkMode ? '1px solid hsl(var(--border))' : '1px solid #dde1de',
+          background: 'hsl(var(--sidebar-bg))',
           transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
         theme={resolvedTheme}
@@ -145,29 +148,43 @@ export function AppLayout() {
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-2 scrollbar-hide">
+          <nav className="flex-1 overflow-y-auto px-2.5 pt-2 pb-2 scrollbar-hide">
             <div className="space-y-0.5">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
-                    `relative group flex items-center gap-3 rounded-lg transition-colors duration-150 ${
-                      collapsed ? 'justify-center px-0 py-2.5' : 'px-4 py-2.5'
+                    `relative group flex items-center gap-3 rounded-md transition-colors duration-150 ease-out ${
+                      collapsed ? 'justify-center px-0 py-2' : 'px-3 py-2'
                     } ${
                       isActive
-                        ? 'text-primary bg-primary/[0.06] dark:bg-primary/[0.08]'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                        ? 'app-nav-item-active'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
                     }`
                   }
                 >
                   {({ isActive }) => (
                     <>
-                      <span className={`flex-shrink-0 ${isActive ? 'text-primary' : ''}`}>
+                      <span
+                        className="flex-shrink-0"
+                        style={isActive ? { color: 'hsl(var(--assistant-accent))' } : undefined}
+                      >
                         {item.icon}
                       </span>
                       {!collapsed && (
-                        <span className="text-[14px] truncate">{t(item.labelKey)}</span>
+                        <span
+                          className="truncate"
+                          style={{
+                            fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
+                            fontSize: '13.5px',
+                            fontWeight: isActive ? 500 : 450,
+                            letterSpacing: 0,
+                            color: isActive ? 'hsl(var(--assistant-accent))' : undefined,
+                          }}
+                        >
+                          {t(item.labelKey)}
+                        </span>
                       )}
                       {collapsed && (
                         <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
@@ -182,26 +199,48 @@ export function AppLayout() {
           </nav>
 
           {/* Footer */}
-          <div className={`border-t px-3 py-2 space-y-1 ${darkMode ? 'border-[#2e3830]' : 'border-[#dde1de]'}`}>
+          <div className={`border-t px-2.5 py-2 space-y-0.5 ${darkMode ? 'border-[hsl(var(--border))]' : 'border-[#dde1de]'}`}>
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-accent ${
-                collapsed ? 'justify-center py-3' : 'gap-3 px-4 py-2.5'
+              className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
+                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
               }`}
             >
-              {darkMode ? <Moon size={20} /> : <Sun size={20} />}
-              {!collapsed && <span className="text-[14px]">{darkMode ? t("theme.mode.dark") : t("theme.mode.light")}</span>}
+              {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
+              {!collapsed && (
+                <span
+                  style={{
+                    fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
+                    fontSize: '13.5px',
+                    fontWeight: 450,
+                    letterSpacing: 0,
+                  }}
+                >
+                  {darkMode ? t("theme.mode.dark") : t("theme.mode.light")}
+                </span>
+              )}
             </button>
             <button
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 text-muted-foreground hover:text-foreground hover:bg-accent ${
-                collapsed ? 'justify-center py-3' : 'gap-3 px-4 py-2.5'
+              className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
+                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
               }`}
             >
-              {collapsed ? <PanelLeft size={20} /> : <PanelLeftClose size={20} />}
-              {!collapsed && <span className="text-[14px]">{t('nav.collapseSidebar')}</span>}
+              {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
+              {!collapsed && (
+                <span
+                  style={{
+                    fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
+                    fontSize: '13.5px',
+                    fontWeight: 450,
+                    letterSpacing: 0,
+                  }}
+                >
+                  {t('nav.collapseSidebar')}
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -252,6 +291,8 @@ export function AppLayout() {
         .ant-layout-sider-children { box-shadow: none !important; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .app-nav-item-active { background: hsl(var(--muted) / 0.65); }
+        .dark .app-nav-item-active { background: hsl(var(--muted) / 0.7); }
       `}</style>
     </Layout>
   );

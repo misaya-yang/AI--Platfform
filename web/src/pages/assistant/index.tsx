@@ -12,9 +12,9 @@ import {
   PanelLeftClose,
   PanelLeft,
   FileText,
-  PanelRightOpen,
   AlertCircle,
   Share2,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,6 +53,7 @@ import {
   type RightPanel,
   type RightPanelState,
 } from "./components/rightPanelContext";
+import { buildTimeline } from "./components/buildTimeline";
 import { useChatSession } from "./hooks/useChatSession";
 import { useFileHandler } from "./hooks/useFileHandler";
 import { useImageGeneration } from "./hooks/useImageGeneration";
@@ -64,6 +65,67 @@ import { trackChatHistoryEmptyState } from "@/features/chat/telemetry";
 
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
+
+/**
+ * Top-bar chip for toggling a right-side panel (Activity / Artifacts).
+ * Active state shows a 1.5px gold underline stripe; rest state has no
+ * background. Shares the `act-btn` motion treatment so the whole bar
+ * feels coherent with the Activity panel's controls.
+ */
+function RightPanelChip({
+  icon,
+  label,
+  count,
+  active,
+  disabled,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  count?: number;
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={cn(
+        "act-btn relative inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md",
+        "text-[12.5px] transition-colors",
+        "disabled:opacity-40 disabled:cursor-not-allowed",
+        active
+          ? "text-[hsl(var(--assistant-text-primary))]"
+          : "text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] hover:bg-[hsl(var(--assistant-surface-soft))]",
+      )}
+    >
+      <span
+        className={cn(
+          active
+            ? "text-[hsl(var(--assistant-accent))]"
+            : "text-[hsl(var(--assistant-text-tertiary))]",
+        )}
+      >
+        {icon}
+      </span>
+      <span>{label}</span>
+      {typeof count === "number" && count > 0 && (
+        <span className="font-mono tabular-nums text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
+          {count}
+        </span>
+      )}
+      {active && (
+        <span
+          aria-hidden
+          className="absolute left-2.5 right-2.5 bottom-[2px] h-[1.5px] rounded-sm bg-[hsl(var(--assistant-accent))]"
+        />
+      )}
+    </button>
+  );
+}
 
 // Error Boundary for ChatMessage rendering failures
 interface ErrorBoundaryProps {
@@ -210,6 +272,36 @@ export function AssistantPage() {
     () => (activityMessageId ? messages.find((m) => m.id === activityMessageId) ?? null : null),
     [messages, activityMessageId],
   );
+
+  // Most recent assistant message — the default target for the top-bar
+  // Activity chip when the drawer is closed. We don't need step content
+  // here, only whether a non-empty timeline exists so the chip can gate
+  // its disabled state.
+  const latestActivityMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      if (m.isStreaming) return m.id;
+      const hasSignal =
+        (m.toolCalls && m.toolCalls.length > 0) ||
+        (m.searchStatus && m.searchStatus.length > 0) ||
+        (m.thinkingContent && m.thinkingContent.length > 0);
+      if (hasSignal) return m.id;
+    }
+    return null;
+  }, [messages]);
+
+  const latestActivitySteps = useMemo(() => {
+    if (!latestActivityMessageId) return 0;
+    const m = messages.find((msg) => msg.id === latestActivityMessageId);
+    if (!m) return 0;
+    try {
+      const { steps } = buildTimeline(m, t);
+      return steps.length;
+    } catch {
+      return 0;
+    }
+  }, [latestActivityMessageId, messages, t]);
 
   const rightPanelState: RightPanelState = useMemo(
     () => ({
@@ -517,27 +609,52 @@ export function AssistantPage() {
                   <TooltipContent side="bottom">{t("assistant.shareConversation", "Share Conversation")}</TooltipContent>
                 </Tooltip>
               )}
-              {/* Spacer pushes Artifacts chip to the far right of the top bar */}
+              {/* Spacer pushes right-side chips to the far right of the top bar */}
               <div className="flex-1" />
-              {/* Inline Artifacts indicator — replaces the old floating button.
-                  Only appears when there are artifacts in the current session,
-                  and only when the Artifacts panel isn't already open. */}
-              {!isMobile && !showArtifacts && (artifacts.length + codeExecution.outputFiles.length) > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActivityMessageId(null);
-                    setShowArtifacts(true);
-                  }}
-                  aria-label={t("assistant.showArtifacts", "Show generated files")}
-                  className="group inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[12.5px] text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors"
-                >
-                  <FileText className="h-3.5 w-3.5 text-[hsl(var(--assistant-text-tertiary))] group-hover:text-[hsl(var(--assistant-text-primary))]" />
-                  <span>{t("assistant.artifacts", "Artifacts")}</span>
-                  <span className="font-mono tabular-nums text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
-                    {artifacts.length + codeExecution.outputFiles.length}
-                  </span>
-                </button>
+              {/* Right-panel chips: Activity + Artifacts. Mutex is enforced
+                  at the state level (rightPanel = "activity" | "artifacts" | null).
+                  Each chip toggles its own panel; opening one auto-closes the
+                  other via useEffect. A chip shows a subtle gold underline
+                  stripe when its panel is open.
+
+                  We intentionally do NOT restore a floating Artifacts popup.
+                  Multi-file, multi-view artifact content scales poorly as a
+                  modal; the right-side drawer keeps parity with Activity and
+                  avoids covering the chat. */}
+              {!isMobile && (
+                <div className="flex items-center gap-0.5">
+                  <RightPanelChip
+                    icon={<Sparkles className="h-3.5 w-3.5" />}
+                    label={t("playground.activity.title", "Activity")}
+                    count={latestActivitySteps}
+                    active={rightPanel === "activity"}
+                    disabled={latestActivityMessageId == null}
+                    onClick={() => {
+                      if (!latestActivityMessageId) return;
+                      if (rightPanel === "activity") {
+                        closeActivity();
+                      } else {
+                        openActivity(latestActivityMessageId);
+                      }
+                    }}
+                  />
+                  {(artifacts.length + codeExecution.outputFiles.length) > 0 && (
+                    <RightPanelChip
+                      icon={<FileText className="h-3.5 w-3.5" />}
+                      label={t("assistant.artifacts", "Artifacts")}
+                      count={artifacts.length + codeExecution.outputFiles.length}
+                      active={rightPanel === "artifacts"}
+                      onClick={() => {
+                        if (rightPanel === "artifacts") {
+                          setShowArtifacts(false);
+                        } else {
+                          setActivityMessageId(null);
+                          setShowArtifacts(true);
+                        }
+                      }}
+                    />
+                  )}
+                </div>
               )}
             </div>
 
@@ -730,11 +847,12 @@ export function AssistantPage() {
             />
           )}
 
-          {/* Artifacts Panel */}
+          {/* Artifacts Panel — same 380px width as ActivityPanel so the
+              right lane feels uniform when switching chips. */}
           <AnimatePresence>
             {showArtifacts && !isMobile && rightPanel === "artifacts" && (
-              <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 400, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden flex-shrink-0">
-                <div className="h-full w-[400px]">
+              <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden flex-shrink-0">
+                <div className="h-full w-[380px]">
                   <ArtifactsPanel
                     isOpen={showArtifacts}
                     onClose={() => setShowArtifacts(false)}

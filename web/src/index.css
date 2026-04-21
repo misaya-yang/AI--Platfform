@@ -103,7 +103,7 @@
     --input: 152 6% 18%;
     --ring: 153 38% 42%;
 
-    --sidebar-bg: 30 6% 9%;
+    --sidebar-bg: 152 12% 6%;
 
     /* Assistant UI scoped tokens — ALIGNED with global --background /
        --card / --muted / --border above so assistant page shares the
