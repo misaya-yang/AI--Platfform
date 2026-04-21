@@ -33,7 +33,8 @@ import {
   RefreshCw,
   Send,
 } from "lucide-react";
-import { submitQuiz } from "@/api/quiz";
+import { submitQuiz, submitSharedQuiz } from "@/api/quiz";
+import { useAuthStore } from "@/store/useAuthStore";
 import type { QuizData, QuizAttemptResult } from "../../types";
 import { QuizIdle } from "./QuizIdle";
 import { QuizQuestion } from "./QuizQuestion";
@@ -54,6 +55,20 @@ interface QuizCardProps {
   onResult?: (result: QuizAttemptResult) => void;
   /** Pre-existing result (if already submitted) */
   existingResult?: QuizAttemptResult;
+  /**
+   * Render scope. "main" = authed user in the main app; "share" = anonymous
+   * viewer on `/share/:shareCode`. Scope decides both the submit endpoint
+   * AND the localStorage namespace so an author's in-progress state never
+   * leaks into a share viewer's session (and vice versa).
+   */
+  scope?: "main" | "share";
+  /** Required when scope="share". Short share code from the URL. */
+  shareCode?: string;
+  /**
+   * Optional explicit user-scope override for scope="main". When omitted
+   * we derive from the auth store. Falls back to "user" if no user loaded.
+   */
+  userScopeId?: string;
 }
 
 type ReviewFilter = "all" | "wrong" | "unanswered";
@@ -62,16 +77,32 @@ type ReviewFilter = "all" | "wrong" | "unanswered";
 // Component
 // ---------------------------------------------------------------------------
 
-export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) {
+export function QuizCard({
+  quizData,
+  onResult,
+  existingResult,
+  scope = "main",
+  shareCode,
+  userScopeId,
+}: QuizCardProps) {
   const { t } = useTranslation();
+  const authUserId = useAuthStore((s) => s.user?.user_id);
 
   const questions = quizData.questions;
   const totalQuestions = questions.length;
 
+  // Resolve the localStorage namespace for this viewing context.
+  // Stable across re-renders so writePersisted / readPersisted / clearPersisted
+  // all use the same key.
+  const scopeId =
+    scope === "share"
+      ? shareCode || "share-unknown"
+      : userScopeId || authUserId || "user";
+
   // --- hydrate -----------------------------------------------------------
   const hydratedQuizIdRef = useRef<string | null>(null);
   const initial = useMemo(() => {
-    const persisted = readPersisted(quizData.quiz_id, questions);
+    const persisted = readPersisted(scopeId, quizData.quiz_id, questions);
     const restoredResult = existingResult ?? persisted?.result;
 
     // Server truth wins.
@@ -131,7 +162,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
     if (hydratedQuizIdRef.current === quizData.quiz_id) return;
     hydratedQuizIdRef.current = quizData.quiz_id;
 
-    const persisted = readPersisted(quizData.quiz_id, questions);
+    const persisted = readPersisted(scopeId, quizData.quiz_id, questions);
     const restoredResult = existingResult ?? persisted?.result;
 
     if (restoredResult) {
@@ -193,7 +224,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
       return;
     }
     const phase = viewMode as PersistedPhase;
-    writePersisted(quizData.quiz_id, {
+    writePersisted(scopeId, quizData.quiz_id, {
       v: 2,
       phase,
       selectedAnswers,
@@ -284,7 +315,14 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
       .map((q) => q.id);
     setUnansweredAtSubmit(unanswered);
     try {
-      const res = await submitQuiz(quizData.quiz_id, selectedAnswers);
+      const res =
+        scope === "share"
+          ? await submitSharedQuiz(
+              shareCode || "",
+              quizData.quiz_id,
+              selectedAnswers,
+            )
+          : await submitQuiz(quizData.quiz_id, selectedAnswers);
       setResult(res);
       setViewMode("result");
       onResult?.(res);
@@ -297,7 +335,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
       setSubmitError(msg);
       setViewMode("submit-error");
     }
-  }, [quizData.quiz_id, selectedAnswers, questions, onResult, t]);
+  }, [scope, shareCode, quizData.quiz_id, selectedAnswers, questions, onResult, t]);
 
   const handleSubmit = useCallback(() => {
     if (!allAnswered) return;
@@ -335,7 +373,7 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
   }, []);
 
   const handleRetake = useCallback(() => {
-    clearPersisted(quizData.quiz_id);
+    clearPersisted(scopeId, quizData.quiz_id);
     setSelectedAnswers({});
     setCurrentIndex(0);
     setResult(undefined);

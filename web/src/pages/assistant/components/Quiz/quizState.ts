@@ -44,7 +44,19 @@ export interface PersistedQuizStateV2 {
 }
 
 const STORAGE_PREFIX = "assistant:quiz:v1:";
-export const storageKey = (quizId: string) => `${STORAGE_PREFIX}${quizId}`;
+
+/**
+ * Scope-aware storage key. The author (in the main app) and an anonymous
+ * viewer of the public share link must NEVER share localStorage rows for
+ * the same quiz_id — their progress and results are independent. We namespace
+ * by a caller-supplied scopeId:
+ *   - main app:  scopeId = user id (fallback: "user")
+ *   - share link: scopeId = shareCode
+ *
+ * Format: `assistant:quiz:v1:<scopeId>:<quizId>`.
+ */
+export const storageKey = (scopeId: string, quizId: string) =>
+  `${STORAGE_PREFIX}${scopeId}:${quizId}`;
 
 // ---------------------------------------------------------------------------
 // Phase inference & migration
@@ -88,11 +100,12 @@ export function migrateV1toV2(
 // ---------------------------------------------------------------------------
 
 export function readPersisted(
+  scopeId: string,
   quizId: string,
   questions: { id: string }[],
 ): PersistedQuizStateV2 | null {
   try {
-    const raw = localStorage.getItem(storageKey(quizId));
+    const raw = localStorage.getItem(storageKey(scopeId, quizId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as
       | (Partial<PersistedQuizStateV2> & Partial<PersistedQuizStateV1>)
@@ -111,19 +124,20 @@ export function readPersisted(
 }
 
 export function writePersisted(
+  scopeId: string,
   quizId: string,
   state: PersistedQuizStateV2,
 ): void {
   try {
-    localStorage.setItem(storageKey(quizId), JSON.stringify(state));
+    localStorage.setItem(storageKey(scopeId, quizId), JSON.stringify(state));
   } catch {
     // Quota / disabled storage — silent degrade.
   }
 }
 
-export function clearPersisted(quizId: string): void {
+export function clearPersisted(scopeId: string, quizId: string): void {
   try {
-    localStorage.removeItem(storageKey(quizId));
+    localStorage.removeItem(storageKey(scopeId, quizId));
   } catch {
     // ignore
   }
