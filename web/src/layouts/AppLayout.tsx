@@ -150,14 +150,14 @@ export function AppLayout() {
           {/* Navigation — vertically centered within the flex-1 region so
               the nav block doesn't cling to the top of a tall sider. */}
           <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide flex flex-col justify-center">
-            <div className="space-y-0.5 py-4">
+            <div className="space-y-1.5 py-4">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
                     `relative group flex items-center gap-3 rounded-md transition-colors duration-150 ease-out ${
-                      collapsed ? 'justify-center px-0 py-2' : 'px-3 py-2'
+                      collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'
                     } ${
                       isActive
                         ? 'app-nav-item-active'
@@ -177,9 +177,16 @@ export function AppLayout() {
                         <span
                           className="truncate"
                           style={{
-                            fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
-                            fontSize: '13.5px',
-                            fontWeight: isActive ? 450 : 400,
+                            // Stack the CJK light face FIRST so Chinese
+                            // characters actually pick up weight 300 (Inter
+                            // alone ignores sub-400 for CJK glyphs because
+                            // it has no Han coverage and falls back to the
+                            // OS font). PingFang SC Light / Source Han Sans
+                            // Light / Noto Sans CJK SC Light are the Han
+                            // faces that carry a true Light cut.
+                            fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
+                            fontSize: '14px',
+                            fontWeight: isActive ? 400 : 300,
                             letterSpacing: 0,
                             color: isActive ? 'hsl(var(--assistant-accent))' : undefined,
                           }}
@@ -205,16 +212,16 @@ export function AppLayout() {
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
               className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
-                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2.5'
               }`}
             >
               {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
               {!collapsed && (
                 <span
                   style={{
-                    fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
-                    fontSize: '13.5px',
-                    fontWeight: 400,
+                    fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
+                    fontSize: '14px',
+                    fontWeight: 300,
                     letterSpacing: 0,
                   }}
                 >
@@ -226,16 +233,16 @@ export function AppLayout() {
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
               className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
-                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2.5'
               }`}
             >
               {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
               {!collapsed && (
                 <span
                   style={{
-                    fontFamily: 'Inter, var(--font-sans, system-ui), sans-serif',
-                    fontSize: '13.5px',
-                    fontWeight: 400,
+                    fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
+                    fontSize: '14px',
+                    fontWeight: 300,
                     letterSpacing: 0,
                   }}
                 >
