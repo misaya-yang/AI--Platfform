@@ -1,28 +1,52 @@
 /**
  * QuizCard — Main quiz container rendered within the chat stream.
  *
- * Shows quiz questions one at a time, handles answer selection,
- * submits to backend for grading, and displays results.
+ * 7-state machine:
+ *   idle → quiz → quiz-all-answered → submitting → result → review
+ *                              │          │
+ *                              │          └─► submit-error → (retry → submitting)
+ *                              └◄── back-to-quiz from quiz-all-answered ──┘
+ *   retake (from result) → clears state → idle
+ *
+ * Phase 3 retheme: single-accent (gold) palette. Gold is used sparingly —
+ * ONLY on progress bar fill, selected option border, active tab indicator
+ * in review, primary CTA tinted fill, and the correct-answer check glyph.
+ * All other chrome lives on the neutral --assistant-* token family.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import {
+  AlertTriangle,
   BookOpen,
   ChevronLeft,
   ChevronRight,
   Link2,
   Loader2,
+  RefreshCw,
   Send,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { submitQuiz } from "@/api/quiz";
 import type { QuizData, QuizAttemptResult } from "../../types";
+import { QuizIdle } from "./QuizIdle";
 import { QuizQuestion } from "./QuizQuestion";
 import { QuizResult } from "./QuizResult";
 import { QuizShareDialog } from "./QuizShareDialog";
+import {
+  clearPersisted,
+  inferPhase,
+  readPersisted,
+  writePersisted,
+  type PersistedPhase,
+  type ViewMode,
+} from "./quizState";
 
 interface QuizCardProps {
   quizData: QuizData;
@@ -32,121 +56,233 @@ interface QuizCardProps {
   existingResult?: QuizAttemptResult;
 }
 
-type ViewMode = "quiz" | "result" | "review";
+type ReviewFilter = "all" | "wrong" | "unanswered";
 
-// --- Local persistence ---
-// TODO: move to backend attempt API when in-progress quiz_attempts are modeled.
-// Keyed on quiz_id only (globally unique); survives page reload within a browser.
-interface PersistedQuizState {
-  v: 1;
-  selectedAnswers: Record<string, string>;
-  currentIndex: number;
-  result?: QuizAttemptResult;
-}
-
-const STORAGE_PREFIX = "assistant:quiz:v1:";
-const storageKey = (quizId: string) => `${STORAGE_PREFIX}${quizId}`;
-
-function readPersisted(quizId: string): PersistedQuizState | null {
-  try {
-    const raw = localStorage.getItem(storageKey(quizId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PersistedQuizState;
-    if (!parsed || parsed.v !== 1) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function writePersisted(quizId: string, state: PersistedQuizState): void {
-  try {
-    localStorage.setItem(storageKey(quizId), JSON.stringify(state));
-  } catch {
-    // Quota / disabled storage — silent degrade.
-  }
-}
-
-function clearPersisted(quizId: string): void {
-  try {
-    localStorage.removeItem(storageKey(quizId));
-  } catch {
-    // ignore
-  }
-}
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) {
   const { t } = useTranslation();
 
-  // Hydrate once per quiz_id (guards against re-mount while assistant message streams).
+  const questions = quizData.questions;
+  const totalQuestions = questions.length;
+
+  // --- hydrate -----------------------------------------------------------
   const hydratedQuizIdRef = useRef<string | null>(null);
-  const initial = (() => {
-    const persisted = readPersisted(quizData.quiz_id);
+  const initial = useMemo(() => {
+    const persisted = readPersisted(quizData.quiz_id, questions);
     const restoredResult = existingResult ?? persisted?.result;
+
+    // Server truth wins.
+    if (restoredResult) {
+      return {
+        currentIndex: persisted?.currentIndex ?? 0,
+        selectedAnswers: persisted?.selectedAnswers ?? {},
+        result: restoredResult,
+        viewMode: "result" as ViewMode,
+      };
+    }
+
+    // No persisted state → idle.
+    if (!persisted) {
+      return {
+        currentIndex: 0,
+        selectedAnswers: {},
+        result: undefined as QuizAttemptResult | undefined,
+        viewMode: "idle" as ViewMode,
+      };
+    }
+
+    // Legacy idle + progress → re-infer.
+    let phase: PersistedPhase = persisted.phase ?? "quiz";
+    if (phase === "idle") {
+      phase = inferPhase(persisted.selectedAnswers, questions, undefined);
+    }
     return {
-      currentIndex: persisted?.currentIndex ?? 0,
-      selectedAnswers: persisted?.selectedAnswers ?? {},
-      result: restoredResult,
-      viewMode: (restoredResult ? "result" : "quiz") as ViewMode,
+      currentIndex: persisted.currentIndex ?? 0,
+      selectedAnswers: persisted.selectedAnswers ?? {},
+      result: undefined as QuizAttemptResult | undefined,
+      viewMode: phase as ViewMode,
     };
-  })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [currentIndex, setCurrentIndex] = useState(initial.currentIndex);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>(
     initial.selectedAnswers,
   );
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState<QuizAttemptResult | undefined>(initial.result);
+  const [result, setResult] = useState<QuizAttemptResult | undefined>(
+    initial.result,
+  );
   const [viewMode, setViewMode] = useState<ViewMode>(initial.viewMode);
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  /** Snapshot of which question ids were empty at submission time. */
+  const [unansweredAtSubmit, setUnansweredAtSubmit] = useState<string[]>([]);
   const [showShareDialog, setShowShareDialog] = useState(false);
+  const [submitError, setSubmitError] = useState<string | undefined>();
+  const [saveFlash, setSaveFlash] = useState(false);
+  const lastSaveFlashRef = useRef(0);
+  const saveFlashTimerRef = useRef<number | null>(null);
 
-  // If the quiz_id changes (new quiz in same component instance), re-hydrate.
+  // Re-hydrate when quiz id changes.
   useEffect(() => {
     if (hydratedQuizIdRef.current === quizData.quiz_id) return;
     hydratedQuizIdRef.current = quizData.quiz_id;
-    const persisted = readPersisted(quizData.quiz_id);
+
+    const persisted = readPersisted(quizData.quiz_id, questions);
     const restoredResult = existingResult ?? persisted?.result;
-    setCurrentIndex(persisted?.currentIndex ?? 0);
-    setSelectedAnswers(persisted?.selectedAnswers ?? {});
-    setResult(restoredResult);
-    setViewMode(restoredResult ? "result" : "quiz");
-    // existingResult is intentionally read as-of-hydration only; see next effect.
+
+    if (restoredResult) {
+      setCurrentIndex(persisted?.currentIndex ?? 0);
+      setSelectedAnswers(persisted?.selectedAnswers ?? {});
+      setResult(restoredResult);
+      setViewMode("result");
+      return;
+    }
+    if (!persisted) {
+      setCurrentIndex(0);
+      setSelectedAnswers({});
+      setResult(undefined);
+      setViewMode("idle");
+      return;
+    }
+
+    let phase: PersistedPhase = persisted.phase ?? "quiz";
+    if (phase === "idle") {
+      phase = inferPhase(persisted.selectedAnswers, questions, undefined);
+    }
+    setCurrentIndex(persisted.currentIndex ?? 0);
+    setSelectedAnswers(persisted.selectedAnswers ?? {});
+    setResult(undefined);
+    setViewMode(phase as ViewMode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quizData.quiz_id]);
 
-  // Persist state on every change while the quiz is in progress or has a result.
+  // --- save-flash helper -------------------------------------------------
+  const triggerSaveFlash = useCallback(() => {
+    const now = Date.now();
+    if (now - lastSaveFlashRef.current < 1500) return;
+    lastSaveFlashRef.current = now;
+    setSaveFlash(true);
+    if (saveFlashTimerRef.current != null) {
+      window.clearTimeout(saveFlashTimerRef.current);
+    }
+    saveFlashTimerRef.current = window.setTimeout(() => {
+      setSaveFlash(false);
+      saveFlashTimerRef.current = null;
+    }, 3000);
+  }, []);
+
   useEffect(() => {
+    return () => {
+      if (saveFlashTimerRef.current != null) {
+        window.clearTimeout(saveFlashTimerRef.current);
+      }
+    };
+  }, []);
+
+  // --- persistence write -------------------------------------------------
+  useEffect(() => {
+    if (
+      viewMode === "submitting" ||
+      viewMode === "submit-error" ||
+      viewMode === "idle"
+    ) {
+      return;
+    }
+    const phase = viewMode as PersistedPhase;
     writePersisted(quizData.quiz_id, {
-      v: 1,
+      v: 2,
+      phase,
       selectedAnswers,
       currentIndex,
       result,
+      submittedAt: result ? Date.now() : undefined,
     });
-  }, [quizData.quiz_id, selectedAnswers, currentIndex, result]);
+    if (phase === "quiz" || phase === "quiz-all-answered") {
+      triggerSaveFlash();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    quizData.quiz_id,
+    selectedAnswers,
+    currentIndex,
+    result,
+    viewMode,
+  ]);
 
-  const questions = quizData.questions;
-  const totalQuestions = questions.length;
-  const currentQuestion = questions[viewMode === "review" ? reviewIndex : currentIndex];
-  const allAnswered = questions.every((q) => {
-    const a = selectedAnswers[q.id];
-    return a != null && a.trim() !== "";
-  });
+  // --- derived -----------------------------------------------------------
+  const allAnswered = useMemo(
+    () =>
+      questions.length > 0 &&
+      questions.every((q) => {
+        const a = selectedAnswers[q.id];
+        return a != null && a.trim() !== "";
+      }),
+    [questions, selectedAnswers],
+  );
 
+  const reviewList = useMemo(() => {
+    if (!result) return questions;
+    if (reviewFilter === "wrong") {
+      const wrongIds = new Set(
+        result.per_question
+          .filter((pq) => !pq.correct)
+          .map((pq) => pq.question_id),
+      );
+      return questions.filter((q) => wrongIds.has(q.id));
+    }
+    if (reviewFilter === "unanswered") {
+      const set = new Set(unansweredAtSubmit);
+      return questions.filter((q) => set.has(q.id));
+    }
+    return questions;
+  }, [result, reviewFilter, questions, unansweredAtSubmit]);
+
+  const currentQuestion = questions[currentIndex];
+  const wrongCount = result
+    ? result.per_question.filter((pq) => !pq.correct).length
+    : 0;
+  const unansweredCount = unansweredAtSubmit.length;
+
+  // --- handlers ----------------------------------------------------------
   const handleSelect = useCallback(
     (label: string) => {
       if (result) return;
-      setSelectedAnswers((prev) => ({
-        ...prev,
-        [currentQuestion.id]: label,
-      }));
+      if (viewMode !== "quiz" && viewMode !== "quiz-all-answered") return;
+      const q = questions[currentIndex];
+      if (!q) return;
+      setSelectedAnswers((prev) => {
+        const next = { ...prev, [q.id]: label };
+        const done =
+          questions.length > 0 &&
+          questions.every((qq) => {
+            const a = next[qq.id];
+            return a != null && a.trim() !== "";
+          });
+        if (done && viewMode === "quiz") {
+          setViewMode("quiz-all-answered");
+        } else if (!done && viewMode === "quiz-all-answered") {
+          setViewMode("quiz");
+        }
+        return next;
+      });
     },
-    [currentQuestion, result],
+    [result, viewMode, questions, currentIndex],
   );
 
-  const handleSubmit = useCallback(async () => {
-    if (submitting || !allAnswered) return;
-    setSubmitting(true);
+  const doSubmit = useCallback(async () => {
+    setSubmitError(undefined);
+    setViewMode("submitting");
+    const unanswered = questions
+      .filter((q) => {
+        const a = selectedAnswers[q.id];
+        return !(a != null && a.trim() !== "");
+      })
+      .map((q) => q.id);
+    setUnansweredAtSubmit(unanswered);
     try {
       const res = await submitQuiz(quizData.quiz_id, selectedAnswers);
       setResult(res);
@@ -154,13 +290,43 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
       onResult?.(res);
     } catch (err) {
       console.error("Quiz submit failed:", err);
-    } finally {
-      setSubmitting(false);
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : t("assistant.quiz.submitErrorGeneric", "提交时发生未知错误，请重试");
+      setSubmitError(msg);
+      setViewMode("submit-error");
     }
-  }, [submitting, allAnswered, quizData.quiz_id, selectedAnswers, onResult]);
+  }, [quizData.quiz_id, selectedAnswers, questions, onResult, t]);
+
+  const handleSubmit = useCallback(() => {
+    if (!allAnswered) return;
+    void doSubmit();
+  }, [allAnswered, doSubmit]);
+
+  const handleRetry = useCallback(() => {
+    void doSubmit();
+  }, [doSubmit]);
+
+  const handleBackToEdit = useCallback(() => {
+    setSubmitError(undefined);
+    setViewMode("quiz-all-answered");
+  }, []);
+
+  const handleStart = useCallback(() => {
+    setViewMode("quiz");
+    setCurrentIndex(0);
+  }, []);
 
   const handleReview = useCallback(() => {
     setReviewIndex(0);
+    setReviewFilter("all");
+    setViewMode("review");
+  }, []);
+
+  const handleReviewIncorrect = useCallback(() => {
+    setReviewIndex(0);
+    setReviewFilter("wrong");
     setViewMode("review");
   }, []);
 
@@ -173,47 +339,135 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
     setSelectedAnswers({});
     setCurrentIndex(0);
     setResult(undefined);
-    setViewMode("quiz");
+    setSubmitError(undefined);
+    setUnansweredAtSubmit([]);
+    setReviewFilter("all");
+    setReviewIndex(0);
+    setViewMode("idle");
   }, [quizData.quiz_id]);
 
-  // Find per-question result for review mode
   const getQuestionResult = (questionId: string) => {
     if (!result) return undefined;
-    return result.per_question.find((pq) => pq.question_id === questionId);
+    const pq = result.per_question.find((x) => x.question_id === questionId);
+    if (!pq) return undefined;
+    return {
+      correct: pq.correct,
+      correct_answer: pq.correct_answer,
+      explanation: pq.explanation,
+    };
   };
 
+  // --- keyboard ----------------------------------------------------------
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (viewMode !== "quiz" && viewMode !== "quiz-all-answered") return;
+      if (result) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable) {
+          return;
+        }
+      }
+      const q = questions[currentIndex];
+      if (!q) return;
+      const qType = q.question_type || "mc_single";
+
+      if (e.key === "ArrowRight") {
+        if (currentIndex < totalQuestions - 1 && selectedAnswers[q.id]) {
+          setCurrentIndex((i) => i + 1);
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        if (currentIndex > 0) {
+          setCurrentIndex((i) => i - 1);
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === "Enter") {
+        if (allAnswered) {
+          handleSubmit();
+          e.preventDefault();
+        }
+        return;
+      }
+      if (["1", "2", "3", "4"].includes(e.key)) {
+        if (qType === "short_answer") return;
+        const idx = parseInt(e.key, 10) - 1;
+        const opt = q.options?.[idx];
+        if (opt) {
+          handleSelect(opt.label);
+          e.preventDefault();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    viewMode,
+    result,
+    questions,
+    currentIndex,
+    totalQuestions,
+    selectedAnswers,
+    allAnswered,
+    handleSelect,
+    handleSubmit,
+  ]);
+
+  // --- render helpers ----------------------------------------------------
+  const secondaryBtn =
+    "act-btn act-hover inline-flex items-center gap-1 h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] disabled:opacity-40 disabled:pointer-events-none";
+  const primaryBtn =
+    "act-btn inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[13px] font-medium bg-[hsl(var(--assistant-accent)/0.15)] text-[hsl(var(--assistant-accent))] hover:bg-[hsl(var(--assistant-accent)/0.25)] disabled:opacity-40 disabled:pointer-events-none";
+
   return (
-    <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden max-w-lg">
+    <div
+      className="relative rounded-[10px] border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-bg))] overflow-hidden w-full"
+      style={{ maxWidth: "36rem" }}
+    >
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-3 bg-muted/30 border-b border-border">
-        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-          <BookOpen className="w-4 h-4 text-primary" />
-        </div>
+      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[hsl(var(--assistant-border))]">
+        <BookOpen className="w-[14px] h-[14px] text-[hsl(var(--assistant-text-secondary))] flex-shrink-0" />
         <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-semibold text-foreground truncate">
+          <h3 className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))] truncate leading-snug">
             {quizData.title}
           </h3>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] mt-0.5">
             {totalQuestions} {t("assistant.quiz.questions", "questions")}
             {quizData.difficulty && ` · ${quizData.difficulty}`}
           </p>
         </div>
       </div>
 
-      <div className="p-5">
+      <div className="p-4">
         <AnimatePresence mode="wait">
-          {/* Quiz mode: one question at a time */}
+          {/* Idle */}
+          {viewMode === "idle" && (
+            <QuizIdle
+              key="idle"
+              quizData={quizData}
+              onStart={handleStart}
+            />
+          )}
+
+          {/* Quiz — one question at a time */}
           {viewMode === "quiz" && currentQuestion && (
             <motion.div key={`q-${currentIndex}`}>
               {/* Progress */}
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-xs font-medium text-muted-foreground">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] tabular-nums">
                   {currentIndex + 1} / {totalQuestions}
                 </span>
-                <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
+                <div className="flex-1 h-1 rounded-full bg-[hsl(var(--assistant-border)/0.5)] overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-primary transition-all duration-300"
-                    style={{ width: `${((currentIndex + 1) / totalQuestions) * 100}%` }}
+                    className="h-full bg-[hsl(var(--assistant-accent))] transition-all duration-300 ease-out"
+                    style={{
+                      width: `${((currentIndex + 1) / totalQuestions) * 100}%`,
+                    }}
                   />
                 </div>
               </div>
@@ -225,116 +479,371 @@ export function QuizCard({ quizData, onResult, existingResult }: QuizCardProps) 
               />
 
               {/* Navigation */}
-              <div className="flex items-center justify-between mt-5 pt-4 border-t border-border">
-                <Button
-                  variant="ghost"
-                  size="sm"
+              <div className="flex items-center justify-between mt-5 pt-4 border-t border-[hsl(var(--assistant-border))]">
+                <button
+                  type="button"
                   disabled={currentIndex === 0}
                   onClick={() => setCurrentIndex((i) => i - 1)}
-                  className="gap-1"
+                  className={secondaryBtn}
                 >
-                  <ChevronLeft className="w-4 h-4" />
+                  <ChevronLeft className="w-[14px] h-[14px]" />
                   {t("assistant.quiz.prev", "Previous")}
-                </Button>
+                </button>
 
                 {currentIndex < totalQuestions - 1 ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <button
+                    type="button"
                     disabled={!selectedAnswers[currentQuestion.id]}
                     onClick={() => setCurrentIndex((i) => i + 1)}
-                    className="gap-1"
+                    className={secondaryBtn}
                   >
                     {t("assistant.quiz.next", "Next")}
-                    <ChevronRight className="w-4 h-4" />
-                  </Button>
+                    <ChevronRight className="w-[14px] h-[14px]" />
+                  </button>
                 ) : (
-                  <Button
-                    size="sm"
-                    disabled={!allAnswered || submitting}
-                    onClick={handleSubmit}
-                    className="gap-1.5"
+                  <button
+                    type="button"
+                    disabled={!allAnswered}
+                    onClick={() => {
+                      if (allAnswered) setViewMode("quiz-all-answered");
+                    }}
+                    className={primaryBtn}
                   >
-                    {submitting ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <Send className="w-4 h-4" />
-                    )}
+                    <Send className="w-[14px] h-[14px]" />
                     {t("assistant.quiz.submit", "Submit")}
-                  </Button>
+                  </button>
                 )}
               </div>
+
+              <p className="mt-3 text-[10px] font-mono text-[hsl(var(--assistant-text-tertiary))] text-center">
+                <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-border)/0.3)] text-[9px]">
+                  1-4
+                </kbd>
+                {" "}{t("assistant.quiz.kbdSelect", "选择")} · {" "}
+                <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-border)/0.3)] text-[9px]">
+                  ←
+                </kbd>{" "}
+                <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-border)/0.3)] text-[9px]">
+                  →
+                </kbd>
+                {" "}{t("assistant.quiz.kbdNav", "翻页")} · {" "}
+                <kbd className="px-1 py-0.5 rounded border border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-border)/0.3)] text-[9px]">
+                  Enter
+                </kbd>
+                {" "}{t("assistant.quiz.kbdSubmit", "提交")}
+              </p>
             </motion.div>
           )}
 
-          {/* Result mode */}
-          {viewMode === "result" && result && (
-            <motion.div key="result">
-              <QuizResult result={result} quizId={quizData.quiz_id} onReview={handleReview} onRetake={handleRetake} />
-              <div className="mt-3 flex justify-center">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowShareDialog(true)}
-                  className="gap-1.5"
+          {/* All-answered confirm */}
+          {viewMode === "quiz-all-answered" && (
+            <motion.div
+              key="all-answered"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="space-y-4"
+            >
+              <div className="space-y-1">
+                <h4 className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))]">
+                  {t("assistant.quiz.allAnsweredTitle", "你已完成")} {totalQuestions}/
+                  {totalQuestions} {t("assistant.quiz.questions", "题")}
+                </h4>
+                <p className="text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
+                  {t(
+                    "assistant.quiz.allAnsweredHint",
+                    "可点击下方任意题号跳回检查，或直接提交。",
+                  )}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-8 sm:grid-cols-10 gap-1.5">
+                {questions.map((q, idx) => {
+                  const answered =
+                    selectedAnswers[q.id] != null &&
+                    selectedAnswers[q.id].trim() !== "";
+                  return (
+                    <button
+                      key={q.id}
+                      type="button"
+                      onClick={() => {
+                        setCurrentIndex(idx);
+                        setViewMode("quiz");
+                      }}
+                      className={
+                        "aspect-square rounded-md text-[11px] font-mono font-semibold border transition-colors tabular-nums " +
+                        (answered
+                          ? "border-[hsl(var(--assistant-accent)/0.4)] bg-[hsl(var(--assistant-accent)/0.12)] text-[hsl(var(--assistant-accent))] hover:bg-[hsl(var(--assistant-accent)/0.2)]"
+                          : "border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-border)/0.2)] text-[hsl(var(--assistant-text-tertiary))] hover:bg-[hsl(var(--assistant-border)/0.4)]")
+                      }
+                      title={`Q${idx + 1}`}
+                    >
+                      {idx + 1}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center justify-between pt-4 border-t border-[hsl(var(--assistant-border))]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCurrentIndex(0);
+                    setViewMode("quiz");
+                  }}
+                  className={secondaryBtn}
                 >
-                  <Link2 className="w-3.5 h-3.5" />
-                  {t("assistant.quiz.shareQuiz", "Share Quiz")}
-                </Button>
+                  <ChevronLeft className="w-[14px] h-[14px]" />
+                  {t("assistant.quiz.reviewAnswers", "复查")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  className={primaryBtn}
+                >
+                  <Send className="w-[14px] h-[14px]" />
+                  {t("assistant.quiz.submit", "提交")}
+                </button>
               </div>
             </motion.div>
           )}
 
-          {/* Review mode: browse questions with answers */}
-          {viewMode === "review" && currentQuestion && result && (
-            <motion.div key={`review-${reviewIndex}`}>
-              <div className="flex items-center gap-2 mb-4">
-                <span className="text-xs font-medium text-muted-foreground">
-                  Review {reviewIndex + 1} / {totalQuestions}
-                </span>
+          {/* Submitting */}
+          {viewMode === "submitting" && (
+            <motion.div
+              key="submitting"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col items-center justify-center py-12 gap-3"
+            >
+              <Loader2 className="w-5 h-5 text-[hsl(var(--assistant-accent))] animate-spin" />
+              <p className="font-mono text-[11px] text-[hsl(var(--assistant-text-tertiary))]">
+                Submitting…
+              </p>
+            </motion.div>
+          )}
+
+          {/* Submit error */}
+          {viewMode === "submit-error" && (
+            <motion.div
+              key="submit-error"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="space-y-4"
+            >
+              <div
+                className="flex items-start gap-3 rounded-[10px] border p-4"
+                style={{
+                  borderColor: "hsl(var(--destructive) / 0.4)",
+                  backgroundColor: "hsl(var(--destructive) / 0.08)",
+                }}
+              >
+                <div
+                  className="flex-shrink-0 w-8 h-8 rounded-md flex items-center justify-center"
+                  style={{
+                    backgroundColor: "hsl(var(--destructive) / 0.15)",
+                  }}
+                >
+                  <AlertTriangle
+                    className="w-[16px] h-[16px]"
+                    style={{ color: "hsl(var(--destructive))" }}
+                  />
+                </div>
+                <div className="flex-1 min-w-0 space-y-1">
+                  <h4
+                    className="text-[13px] font-medium"
+                    style={{ color: "hsl(var(--destructive))" }}
+                  >
+                    {t("assistant.quiz.submitErrorTitle", "提交失败")}
+                  </h4>
+                  <p className="text-[11px] text-[hsl(var(--assistant-text-secondary))] break-words leading-relaxed">
+                    {submitError ??
+                      t(
+                        "assistant.quiz.submitErrorGeneric",
+                        "提交时发生未知错误，请重试",
+                      )}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={handleBackToEdit}
+                  className={secondaryBtn}
+                >
+                  <ChevronLeft className="w-[14px] h-[14px]" />
+                  {t("assistant.quiz.backToEdit", "返回修改")}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  className={primaryBtn}
+                >
+                  <RefreshCw className="w-[14px] h-[14px]" />
+                  {t("assistant.quiz.retry", "重试")}
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Result */}
+          {viewMode === "result" && result && (
+            <motion.div key="result">
+              <QuizResult
+                result={result}
+                quizId={quizData.quiz_id}
+                onReview={handleReview}
+                onRetake={handleRetake}
+                onReviewIncorrect={
+                  wrongCount > 0 ? handleReviewIncorrect : undefined
+                }
+              />
+              <div className="mt-3 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setShowShareDialog(true)}
+                  className="act-btn act-hover inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
+                >
+                  <Link2 className="w-[14px] h-[14px]" />
+                  {t("assistant.quiz.shareQuiz", "Share Quiz")}
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Review */}
+          {viewMode === "review" && result && (
+            <motion.div key={`review-${reviewFilter}-${reviewIndex}`}>
+              {/* Filter tabs */}
+              <div className="flex items-center gap-0.5 mb-4 border-b border-[hsl(var(--assistant-border))]">
+                {(
+                  [
+                    {
+                      id: "all" as ReviewFilter,
+                      label: t("assistant.quiz.reviewAll", "全部"),
+                      count: totalQuestions,
+                      enabled: totalQuestions > 0,
+                    },
+                    {
+                      id: "wrong" as ReviewFilter,
+                      label: t("assistant.quiz.reviewWrong", "仅错题"),
+                      count: wrongCount,
+                      enabled: wrongCount > 0,
+                    },
+                    {
+                      id: "unanswered" as ReviewFilter,
+                      label: t("assistant.quiz.reviewUnanswered", "仅未答"),
+                      count: unansweredCount,
+                      enabled: unansweredCount > 0,
+                    },
+                  ] as const
+                )
+                  .filter((tab) => tab.enabled)
+                  .map((tab) => {
+                    const active = reviewFilter === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => {
+                          setReviewFilter(tab.id);
+                          setReviewIndex(0);
+                        }}
+                        className={
+                          "px-2.5 py-1.5 text-[12px] font-medium border-b-2 -mb-px transition-colors " +
+                          (active
+                            ? "border-[hsl(var(--assistant-accent))] text-[hsl(var(--assistant-text-primary))]"
+                            : "border-transparent text-[hsl(var(--assistant-text-tertiary))] hover:text-[hsl(var(--assistant-text-secondary))]")
+                        }
+                      >
+                        {tab.label}
+                        <span className="ml-1 text-[10px] font-mono opacity-70 tabular-nums">
+                          {tab.count}
+                        </span>
+                      </button>
+                    );
+                  })}
+
                 <button
                   type="button"
                   onClick={handleBackToResult}
-                  className="ml-auto text-xs text-primary hover:underline"
+                  className="act-btn act-hover ml-auto inline-flex items-center h-7 px-2 rounded-md text-[12px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
                 >
                   {t("assistant.quiz.backToResults", "Back to results")}
                 </button>
               </div>
 
-              <QuizQuestion
-                question={currentQuestion}
-                selectedAnswer={selectedAnswers[currentQuestion.id]}
-                onSelect={() => {}}
-                disabled
-                result={getQuestionResult(currentQuestion.id)}
-              />
+              {reviewList.length === 0 ? (
+                <div className="py-10 text-center text-[12px] text-[hsl(var(--assistant-text-tertiary))]">
+                  {t("assistant.quiz.reviewEmpty", "该筛选下没有题目。")}
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] tabular-nums">
+                      Review {reviewIndex + 1} / {reviewList.length}
+                    </span>
+                  </div>
 
-              <div className="flex items-center justify-between mt-5 pt-4 border-t border-border">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={reviewIndex === 0}
-                  onClick={() => setReviewIndex((i) => i - 1)}
-                  className="gap-1"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                  {t("assistant.quiz.prev", "Previous")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={reviewIndex >= totalQuestions - 1}
-                  onClick={() => setReviewIndex((i) => i + 1)}
-                  className="gap-1"
-                >
-                  {t("assistant.quiz.next", "Next")}
-                  <ChevronRight className="w-4 h-4" />
-                </Button>
-              </div>
+                  {(() => {
+                    const q = reviewList[reviewIndex];
+                    if (!q) return null;
+                    return (
+                      <QuizQuestion
+                        question={q}
+                        selectedAnswer={selectedAnswers[q.id]}
+                        onSelect={() => {}}
+                        disabled
+                        result={getQuestionResult(q.id)}
+                      />
+                    );
+                  })()}
+
+                  <div className="flex items-center justify-between mt-5 pt-4 border-t border-[hsl(var(--assistant-border))]">
+                    <button
+                      type="button"
+                      disabled={reviewIndex === 0}
+                      onClick={() => setReviewIndex((i) => i - 1)}
+                      className={secondaryBtn}
+                    >
+                      <ChevronLeft className="w-[14px] h-[14px]" />
+                      {t("assistant.quiz.prev", "Previous")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={reviewIndex >= reviewList.length - 1}
+                      onClick={() => setReviewIndex((i) => i + 1)}
+                      className={secondaryBtn}
+                    >
+                      {t("assistant.quiz.next", "Next")}
+                      <ChevronRight className="w-[14px] h-[14px]" />
+                    </button>
+                  </div>
+                </>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
       </div>
+
+      {/* Save indicator */}
+      <AnimatePresence>
+        {saveFlash && (
+          <motion.div
+            key="save-flash"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 4 }}
+            transition={{ duration: 0.2 }}
+            className="pointer-events-none absolute bottom-2 right-3 text-[10px] font-mono text-[hsl(var(--assistant-text-tertiary))]"
+          >
+            ✓ {t("assistant.quiz.draftSaved", "已保存草稿")}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Share dialog */}
       <QuizShareDialog

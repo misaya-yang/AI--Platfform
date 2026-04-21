@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import string
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -14,10 +15,14 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.observability.logging import get_logger
-from ..deps import get_user_context
+from ...services.assistant.quiz.quiz_grader import QuizGrader
+from ..deps import enforce_rate_limit, get_user_context
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/assistant", tags=["conversation-shares"])
+
+# Cookie used by the front-end to correlate anonymous viewers to their attempts.
+ANON_COOKIE_NAME = "ag_anon_id"
 
 
 # ── Models ───────────────────────────────────────────────────────────
@@ -55,6 +60,117 @@ def _get_db(request: Request):
 
 def _get_artifact_storage(request: Request):
     return getattr(request.app.state, "artifact_storage", None)
+
+
+async def _collect_quiz_payloads(
+    db,
+    messages: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Freeze quiz content referenced by ``metadata.quiz_id`` on assistant messages.
+
+    Returns a ``(public_quizzes, answer_keys)`` tuple:
+
+    * ``public_quizzes`` — ``quiz_id → quiz payload`` safe to expose to anonymous
+      viewers (questions + options, no answers). Embedded onto the snapshot
+      messages so the share page can render the quiz even if the original quiz
+      row is later deleted.
+    * ``answer_keys`` — ``quiz_id → {questions: [...]}`` containing
+      ``correct_answer`` + ``explanation``. Stored separately in the snapshot;
+      **never returned by the public GET**. Used purely for grading anon
+      submissions server-side.
+    """
+    quiz_ids: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        meta = msg.get("metadata")
+        if not isinstance(meta, dict):
+            continue
+        qid = meta.get("quiz_id")
+        if qid and isinstance(qid, str) and qid not in seen:
+            seen.add(qid)
+            quiz_ids.append(qid)
+
+    public_quizzes: dict[str, dict[str, Any]] = {}
+    answer_keys: dict[str, dict[str, Any]] = {}
+
+    for quiz_id in quiz_ids:
+        try:
+            quiz_uuid = uuid.UUID(quiz_id)
+        except (ValueError, TypeError):
+            continue
+        quiz_row = await db.fetchrow(
+            "SELECT id, title, description, topic, difficulty, question_count FROM quizzes WHERE id = $1",
+            quiz_uuid,
+        )
+        if not quiz_row:
+            continue
+        q_rows = await db.fetch(
+            "SELECT id, question_num, question_type, question_text, options, correct_answer, explanation "
+            "FROM quiz_questions WHERE quiz_id = $1 ORDER BY question_num",
+            quiz_uuid,
+        )
+        if not q_rows:
+            continue
+
+        public_questions: list[dict[str, Any]] = []
+        grading_questions: list[dict[str, Any]] = []
+        for qr in q_rows:
+            options = qr["options"]
+            if isinstance(options, str):
+                try:
+                    options = json.loads(options)
+                except (ValueError, TypeError):
+                    options = []
+            correct = qr["correct_answer"]
+            if isinstance(correct, str):
+                try:
+                    correct = json.loads(correct)
+                except (ValueError, TypeError):
+                    correct = []
+            qid_str = str(qr["id"])
+            public_questions.append({
+                "id": qid_str,
+                "question_num": qr["question_num"],
+                "question_type": qr["question_type"],
+                "question_text": qr["question_text"],
+                "options": options or [],
+            })
+            grading_questions.append({
+                "id": qid_str,
+                "question_num": qr["question_num"],
+                "question_type": qr["question_type"],
+                "correct_answer": correct,
+                "explanation": qr["explanation"] or "",
+            })
+
+        public_quizzes[quiz_id] = {
+            "quiz_id": quiz_id,
+            "title": quiz_row["title"],
+            "description": quiz_row["description"],
+            "topic": quiz_row["topic"],
+            "difficulty": quiz_row["difficulty"],
+            "question_count": quiz_row["question_count"],
+            "questions": public_questions,
+        }
+        answer_keys[quiz_id] = {"questions": grading_questions}
+
+    return public_quizzes, answer_keys
+
+
+def _strip_snapshot_for_public(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``snapshot`` safe for anonymous GET.
+
+    Specifically removes the ``quiz_answer_keys`` field which contains grading
+    secrets. The ``messages[].quiz_data`` embedded at snapshot time has already
+    been stripped of answers, so it is safe to return as-is.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    public = dict(snapshot)
+    public.pop("quiz_answer_keys", None)
+    return public
 
 
 # ── Create Share ─────────────────────────────────────────────────────
@@ -105,12 +221,29 @@ async def create_share(
             model_id = msg["metadata"]["model_id"]
             break
 
-    snapshot = {
+    # Freeze quiz content so the share page can render quizzes even if the
+    # underlying quiz rows are later edited or deleted. Public quiz payload is
+    # attached to the owning assistant message; grading answer keys are kept
+    # separately on the snapshot root and stripped before public GET.
+    public_quizzes, answer_keys = await _collect_quiz_payloads(db, history)
+    if public_quizzes:
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else None
+            qid = meta.get("quiz_id") if meta else None
+            if qid and qid in public_quizzes:
+                msg["quiz_data"] = public_quizzes[qid]
+
+    snapshot: dict[str, Any] = {
         "messages": history,
         "artifacts": artifacts_data,
         "model_id": model_id,
         "shared_at": datetime.now(timezone.utc).isoformat(),
     }
+    if answer_keys:
+        # Grading-only; never returned by the public GET.
+        snapshot["quiz_answer_keys"] = answer_keys
 
     share_code = _generate_share_code()
     for _ in range(5):
@@ -184,6 +317,7 @@ async def get_share(share_code: str, request: Request):
         pass
 
     snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
+    snapshot = _strip_snapshot_for_public(snapshot)
 
     return {
         "share_code": share_code,
@@ -195,6 +329,127 @@ async def get_share(share_code: str, request: Request):
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
     }
+
+
+# ── Public: Submit Anonymous Quiz Attempt ────────────────────────────
+
+
+class SharedQuizSubmitRequest(BaseModel):
+    answers: dict[str, str] = Field(
+        ...,
+        description="question_id → selected option label (or free text for short_answer)",
+    )
+
+
+def _resolve_anon_id(request: Request) -> str:
+    """Best-effort stable identifier for an anonymous share viewer.
+
+    Priority: ``ag_anon_id`` cookie → ``X-Anon-Id`` header → client IP.
+    """
+    cookie = request.cookies.get(ANON_COOKIE_NAME)
+    if cookie:
+        return cookie[:128]
+    header = request.headers.get("x-anon-id")
+    if header:
+        return header[:128]
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()[:128]
+    if request.client and request.client.host:
+        return request.client.host[:128]
+    return "anonymous"
+
+
+@router.post("/shares/{share_code}/quiz/{quiz_id}/submit")
+async def submit_shared_quiz(
+    share_code: str,
+    quiz_id: str,
+    body: SharedQuizSubmitRequest,
+    request: Request,
+):
+    """Grade an anonymous viewer's answers against the frozen quiz snapshot.
+
+    * No auth required. Rate-limited by IP via ``enforce_rate_limit``.
+    * Keyed by ``(share_code, anon_id, quiz_id)`` — one attempt per anon
+      viewer per quiz; resubmits return the cached result rather than
+      re-grading.
+    * Grades against the **frozen** answer key embedded in the share's
+      snapshot, so even if the original quiz row is deleted the share still
+      functions.
+    """
+    await enforce_rate_limit(request, user=None, operation="quiz_submit_public")
+    db = _get_db(request)
+
+    row = await db.fetchrow(
+        "SELECT snapshot, expires_at, is_active FROM conversation_shares WHERE share_code = $1",
+        share_code,
+    )
+    if not row or not row["is_active"]:
+        raise HTTPException(404, "Share not found")
+    if row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(410, "Share has expired")
+
+    snapshot = row["snapshot"] if isinstance(row["snapshot"], dict) else json.loads(row["snapshot"])
+    answer_keys = snapshot.get("quiz_answer_keys") if isinstance(snapshot, dict) else None
+    if not isinstance(answer_keys, dict) or quiz_id not in answer_keys:
+        raise HTTPException(404, "Quiz not found in this share")
+
+    anon_id = _resolve_anon_id(request)
+
+    # Replay cached attempt if this anon viewer already submitted.
+    try:
+        quiz_uuid = uuid.UUID(quiz_id)
+    except (ValueError, TypeError):
+        raise HTTPException(404, "Quiz not found in this share")
+    prior = await db.fetchrow(
+        "SELECT result FROM conversation_share_quiz_attempts "
+        "WHERE share_code = $1 AND anon_id = $2 AND quiz_id = $3",
+        share_code,
+        anon_id,
+        quiz_uuid,
+    )
+    if prior:
+        cached = prior["result"] if isinstance(prior["result"], dict) else json.loads(prior["result"])
+        cached["cached"] = True
+        return cached
+
+    grader = QuizGrader()
+    grading_questions = answer_keys[quiz_id].get("questions", [])
+    result = grader.grade(grading_questions, body.answers)
+
+    attempt_id = str(uuid.uuid4())
+    result_payload: dict[str, Any] = {"attempt_id": attempt_id, **result}
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO conversation_share_quiz_attempts
+                (id, share_code, anon_id, quiz_id, result)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            """,
+            uuid.UUID(attempt_id),
+            share_code,
+            anon_id,
+            quiz_uuid,
+            json.dumps(result_payload, default=str),
+        )
+    except Exception as e:
+        # Likely a race — another parallel submit already inserted. Replay.
+        logger.warning(f"Insert share quiz attempt failed ({e!r}); re-reading cached result")
+        replay = await db.fetchrow(
+            "SELECT result FROM conversation_share_quiz_attempts "
+            "WHERE share_code = $1 AND anon_id = $2 AND quiz_id = $3",
+            share_code,
+            anon_id,
+            quiz_uuid,
+        )
+        if replay:
+            cached = replay["result"] if isinstance(replay["result"], dict) else json.loads(replay["result"])
+            cached["cached"] = True
+            return cached
+        raise HTTPException(500, "Failed to record attempt")
+
+    return result_payload
 
 
 # ── Public: Download Shared Artifact ─────────────────────────────────

@@ -1,11 +1,17 @@
 /**
  * QuizResult — Score summary, per-question review, retake, and attempts history.
+ *
+ * Phase 3 retheme: single-accent (gold) palette.
+ * The score carries weight through typography (large tabular numeral in
+ * primary ink), not color. Correct/incorrect pills use semantic
+ * --success / --destructive at ~12% alpha. Gold is reserved here for the
+ * primary CTA (Retake) — one authorized use.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { CheckCircle2, Clock, RefreshCw, Trophy, Users, XCircle } from "lucide-react";
+import { CheckCircle2, Clock, RefreshCw, Users, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listAttempts, type QuizAttemptSummary } from "@/api/quiz";
 import type { QuizAttemptResult } from "../../types";
@@ -15,15 +21,48 @@ interface QuizResultProps {
   quizId?: string;
   onReview?: () => void;
   onRetake?: () => void;
+  /** Optional: jump into review mode already filtered to incorrect questions. */
+  onReviewIncorrect?: () => void;
 }
 
-export function QuizResult({ result, quizId, onReview, onRetake }: QuizResultProps) {
+/**
+ * Runs a 0 → target counter over ~300ms (ease-out cubic). Single-shot per mount.
+ */
+function useCountUp(target: number, durationMs = 300) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / durationMs);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - t, 3);
+      setValue(target * eased);
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return value;
+}
+
+export function QuizResult({
+  result,
+  quizId,
+  onReview,
+  onRetake,
+  onReviewIncorrect,
+}: QuizResultProps) {
   const { t } = useTranslation();
   const pct = Math.round(result.total_score * 100);
-  const isGood = pct >= 70;
   const [showHistory, setShowHistory] = useState(false);
   const [attempts, setAttempts] = useState<QuizAttemptSummary[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  const animatedPct = useCountUp(pct, 300);
+  const animatedCorrect = useCountUp(result.correct_count, 300);
+  const incorrectCount = result.per_question.filter((pq) => !pq.correct).length;
 
   const fetchHistory = useCallback(async () => {
     if (!quizId || loadingHistory) return;
@@ -41,97 +80,93 @@ export function QuizResult({ result, quizId, onReview, onRetake }: QuizResultPro
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.3 }}
-      className="space-y-4"
+      initial={{ opacity: 0, y: 6 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+      className="space-y-5"
     >
-      {/* Score header */}
-      <div className="flex items-center gap-4 p-4 rounded-xl bg-muted/40 border border-border">
-        <div
-          className={cn(
-            "flex items-center justify-center w-14 h-14 rounded-2xl",
-            isGood
-              ? "bg-emerald-100 dark:bg-emerald-950/40"
-              : "bg-amber-100 dark:bg-amber-950/40",
-          )}
-        >
-          <Trophy
-            className={cn(
-              "w-7 h-7",
-              isGood
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-amber-600 dark:text-amber-400",
-            )}
-          />
+      {/* Score counter — large tabular numeral, centered, no chrome */}
+      <div className="flex flex-col items-center py-2">
+        <div className="flex items-baseline gap-1">
+          <span className="text-5xl font-semibold tabular-nums text-[hsl(var(--assistant-text-primary))] leading-none">
+            {Math.round(animatedPct)}
+          </span>
+          <span className="text-2xl font-medium text-[hsl(var(--assistant-text-secondary))]">
+            %
+          </span>
         </div>
-        <div className="flex-1">
-          <div className="text-2xl font-bold text-foreground">
-            {result.correct_count}/{result.total_count}
-          </div>
-          <div className="text-sm text-muted-foreground">
-            {pct}% correct
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
-          <motion.div
-            initial={{ width: 0 }}
-            animate={{ width: `${pct}%` }}
-            transition={{ duration: 0.6, delay: 0.2 }}
-            className={cn(
-              "h-full rounded-full",
-              isGood ? "bg-emerald-500" : "bg-amber-500",
-            )}
-          />
-        </div>
+        <p className="mt-2 text-[13px] text-[hsl(var(--assistant-text-secondary))] tabular-nums">
+          {t("assistant.quiz.correctOf", {
+            defaultValue: "答对 {{correct}}/{{total}} 题",
+            correct: Math.round(animatedCorrect),
+            total: result.total_count,
+          })}
+        </p>
       </div>
 
       {/* Per-question summary */}
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {result.per_question.map((pq) => (
           <div
             key={pq.question_id}
             className={cn(
-              "flex items-center gap-2 px-3 py-2 rounded-lg text-sm",
+              "flex items-center gap-2 px-3 py-1.5 rounded-md text-[12px]",
               pq.correct
-                ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300"
-                : "bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300",
+                ? "bg-[hsl(var(--success)/0.12)] text-[hsl(var(--success))]"
+                : "bg-[hsl(var(--destructive)/0.12)] text-[hsl(var(--destructive))]",
             )}
           >
             {pq.correct ? (
-              <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+              <CheckCircle2 className="w-[14px] h-[14px] flex-shrink-0" />
             ) : (
-              <XCircle className="w-4 h-4 flex-shrink-0" />
+              <XCircle className="w-[14px] h-[14px] flex-shrink-0" />
             )}
-            <span className="font-medium">Q{pq.question_num}</span>
-            <span className="text-xs opacity-70 truncate flex-1">
-              {pq.correct ? "Correct" : `Wrong (you: ${pq.user_answer}, answer: ${pq.correct_answer})`}
+            <span className="font-medium font-mono tabular-nums">Q{pq.question_num}</span>
+            <span className="text-[11px] opacity-80 truncate flex-1">
+              {pq.correct
+                ? t("assistant.quiz.correct", "Correct")
+                : t("assistant.quiz.wrongDetail", {
+                    defaultValue: "Wrong (you: {{user}}, answer: {{correct}})",
+                    user: pq.user_answer,
+                    correct: pq.correct_answer,
+                  })}
             </span>
           </div>
         ))}
       </div>
 
+      {/* Incorrect-count jump chip — muted destructive tint, hairline only */}
+      {incorrectCount > 0 && onReviewIncorrect && (
+        <button
+          type="button"
+          onClick={onReviewIncorrect}
+          className="inline-flex items-center gap-1.5 rounded-md border border-[hsl(var(--destructive)/0.4)] bg-[hsl(var(--destructive)/0.06)] px-2.5 py-1 text-[12px] font-medium text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.12)] transition-colors duration-150"
+        >
+          <XCircle className="w-[13px] h-[13px]" />
+          {t("assistant.quiz.wrongCountChip", "错题")}：{incorrectCount}{" "}
+          {t("assistant.quiz.countQ", "道")}
+        </button>
+      )}
+
       {/* Action buttons */}
-      <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-1.5 flex-wrap">
         {onReview && (
           <button
             type="button"
             onClick={onReview}
-            className="text-sm text-primary hover:underline"
+            className="act-btn act-hover inline-flex items-center h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
           >
-            {t("assistant.quiz.reviewAnswers", "Review Answers")}
+            {t("assistant.quiz.reviewAnswers", "复查")}
           </button>
         )}
         {onRetake && (
           <button
             type="button"
             onClick={onRetake}
-            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+            className="act-btn inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px] font-medium bg-[hsl(var(--assistant-accent)/0.15)] text-[hsl(var(--assistant-accent))] hover:bg-[hsl(var(--assistant-accent)/0.25)] transition-colors duration-150"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            {t("assistant.quiz.retake", "Retake Quiz")}
+            <RefreshCw className="w-[13px] h-[13px]" />
+            {t("assistant.quiz.retake", "重做")}
           </button>
         )}
         {quizId && (
@@ -139,9 +174,9 @@ export function QuizResult({ result, quizId, onReview, onRetake }: QuizResultPro
             type="button"
             onClick={fetchHistory}
             disabled={loadingHistory}
-            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground ml-auto"
+            className="act-btn act-hover ml-auto inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] disabled:opacity-40 disabled:pointer-events-none"
           >
-            <Users className="w-3.5 h-3.5" />
+            <Users className="w-[13px] h-[13px]" />
             {t("assistant.quiz.viewHistory", "History")}
           </button>
         )}
@@ -152,42 +187,49 @@ export function QuizResult({ result, quizId, onReview, onRetake }: QuizResultPro
         <motion.div
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
-          className="rounded-xl border border-border overflow-hidden"
+          transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+          className="rounded-[10px] border border-[hsl(var(--assistant-border))] overflow-hidden"
         >
-          <div className="px-4 py-2 bg-muted/30 border-b border-border">
-            <span className="text-xs font-medium text-muted-foreground">
+          <div className="px-3.5 py-2 border-b border-[hsl(var(--assistant-border))]">
+            <span className="text-[11px] font-mono uppercase tracking-wider text-[hsl(var(--assistant-text-tertiary))]">
               {t("assistant.quiz.attemptHistory", "Attempt History")} ({attempts.length})
             </span>
           </div>
-          <div className="divide-y divide-border">
-            {attempts.map((a) => (
-              <div key={a.attempt_id} className="flex items-center gap-3 px-4 py-2 text-xs">
-                <span className="font-medium text-foreground">
-                  {a.display_name || a.user_id || "Anonymous"}
-                </span>
-                <span
-                  className={cn(
-                    "font-bold",
-                    (a.total_score ?? 0) >= 0.7
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : "text-amber-600 dark:text-amber-400",
-                  )}
+          <div className="divide-y divide-[hsl(var(--assistant-border))]">
+            {attempts.map((a) => {
+              const good = (a.total_score ?? 0) >= 0.7;
+              return (
+                <div
+                  key={a.attempt_id}
+                  className="flex items-center gap-3 px-3.5 py-2 text-[12px]"
                 >
-                  {a.correct_count}/{a.total_count} ({Math.round((a.total_score ?? 0) * 100)}%)
-                </span>
-                <span className="text-muted-foreground ml-auto flex items-center gap-1">
-                  <Clock className="w-3 h-3" />
-                  {a.completed_at
-                    ? new Date(a.completed_at).toLocaleDateString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })
-                    : "In progress"}
-                </span>
-              </div>
-            ))}
+                  <span className="font-medium text-[hsl(var(--assistant-text-primary))] truncate">
+                    {a.display_name || a.user_id || "Anonymous"}
+                  </span>
+                  <span
+                    className={cn(
+                      "font-semibold font-mono tabular-nums",
+                      good
+                        ? "text-[hsl(var(--success))]"
+                        : "text-[hsl(var(--assistant-text-secondary))]",
+                    )}
+                  >
+                    {a.correct_count}/{a.total_count} ({Math.round((a.total_score ?? 0) * 100)}%)
+                  </span>
+                  <span className="text-[hsl(var(--assistant-text-tertiary))] ml-auto flex items-center gap-1 font-mono">
+                    <Clock className="w-3 h-3" />
+                    {a.completed_at
+                      ? new Date(a.completed_at).toLocaleDateString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })
+                      : "In progress"}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </motion.div>
       )}

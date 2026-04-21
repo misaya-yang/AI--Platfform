@@ -2,10 +2,16 @@
  * QuizQuestion — Renders a single question based on its type.
  *
  * Supports: mc_single, mc_multi, true_false, short_answer
+ *
+ * Phase 3 retheme: single-accent (gold) palette.
+ * Gold appears ONLY on the selected-option border and the correct-answer
+ * Check glyph (the two authorized uses in this file). Hover, default
+ * and incorrect states all use neutral / semantic tokens.
  */
 
 import { useCallback } from "react";
 import { motion } from "framer-motion";
+import { Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { QuizQuestionData } from "../../types";
 
@@ -33,15 +39,17 @@ export function QuizQuestion({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 12 }}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25 }}
-      className="space-y-4"
+      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+      className="space-y-3.5"
     >
-      <p className="text-sm font-medium text-foreground leading-relaxed">
+      <p className="text-[14px] font-medium text-[hsl(var(--assistant-text-primary))] leading-relaxed">
         {question.question_text}
         {qType === "mc_multi" && (
-          <span className="ml-1 text-xs text-muted-foreground">(Select all that apply)</span>
+          <span className="ml-1.5 text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
+            (Select all that apply)
+          </span>
         )}
       </p>
 
@@ -67,10 +75,15 @@ export function QuizQuestion({
         <motion.div
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
-          className="rounded-lg bg-muted/50 border border-border px-4 py-3"
+          transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+          className="rounded-md bg-[hsl(var(--assistant-surface-soft))] border border-[hsl(var(--assistant-border))] px-3.5 py-2.5"
         >
-          <p className="text-xs font-medium text-muted-foreground mb-1">Explanation</p>
-          <p className="text-sm text-foreground/80">{result.explanation}</p>
+          <p className="text-[11px] font-mono uppercase tracking-wider text-[hsl(var(--assistant-text-tertiary))] mb-1">
+            Explanation
+          </p>
+          <p className="text-[13px] text-[hsl(var(--assistant-text-primary))] leading-relaxed">
+            {result.explanation}
+          </p>
         </motion.div>
       )}
     </motion.div>
@@ -127,7 +140,7 @@ function OptionList({
     : new Set<string>();
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1.5">
       {options.map((option) => {
         const label = option.label;
         const labelUp = label.toUpperCase();
@@ -135,43 +148,80 @@ function OptionList({
         const isCorrectOption = showResult && correctSet.has(labelUp);
         const isWrong = showResult && isSelected && !isCorrectOption;
 
+        // Base class tokens. Border thickness is handled inline so the
+        // selected state can go 1.5px without fighting Tailwind's utilities.
+        const baseClass =
+          "w-full flex items-start gap-2.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-150 ease-out";
+
+        let stateClass = "";
+        const style: React.CSSProperties = {};
+        if (!showResult) {
+          if (isSelected) {
+            // Authorized gold use: selected option border (thicker) + soft tint.
+            stateClass =
+              "bg-[hsl(var(--assistant-accent)/0.08)] text-[hsl(var(--assistant-text-primary))]";
+            style.border = "1.5px solid hsl(var(--assistant-accent))";
+          } else {
+            stateClass =
+              "border border-[hsl(var(--assistant-border))] bg-transparent text-[hsl(var(--assistant-text-primary))] hover:bg-[hsl(var(--assistant-surface-soft))]";
+          }
+        } else if (isCorrectOption) {
+          stateClass =
+            "border border-[hsl(var(--success))] bg-[hsl(var(--success)/0.07)] text-[hsl(var(--assistant-text-primary))]";
+        } else if (isWrong) {
+          stateClass =
+            "border border-[hsl(var(--destructive))] bg-[hsl(var(--destructive)/0.07)] text-[hsl(var(--assistant-text-primary))]";
+        } else {
+          stateClass =
+            "border border-[hsl(var(--assistant-border))] bg-transparent text-[hsl(var(--assistant-text-primary))] opacity-60";
+        }
+
         return (
           <button
             key={label}
             type="button"
             disabled={disabled}
             onClick={() => handleClick(label)}
+            style={style}
             className={cn(
-              "w-full flex items-start gap-3 rounded-xl px-4 py-3 text-left text-sm transition-all duration-150 border",
-              !isSelected && !showResult && "border-border bg-card hover:bg-muted/50",
-              isSelected && !showResult && "border-primary bg-primary/10 ring-1 ring-primary/30",
-              showResult && isCorrectOption && "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30",
-              isWrong && "border-red-400 bg-red-50 dark:bg-red-950/30",
-              showResult && !isCorrectOption && !isWrong && "border-border bg-card opacity-60",
+              baseClass,
+              stateClass,
               disabled && "cursor-default",
             )}
           >
-            {/* Badge */}
+            {/* Label prefix: mono, tertiary — no filled bubble, just a character */}
             <span
               className={cn(
-                "flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold",
-                !isSelected && !showResult && "bg-muted text-muted-foreground",
-                isSelected && !showResult && "bg-primary text-primary-foreground",
-                showResult && isCorrectOption && "bg-emerald-500 text-white",
-                isWrong && "bg-red-500 text-white",
-                showResult && !isCorrectOption && !isWrong && "bg-muted text-muted-foreground",
+                "flex-shrink-0 w-5 pt-[1px] text-[11px] font-mono font-medium tabular-nums",
+                isSelected && !showResult
+                  ? "text-[hsl(var(--assistant-accent))]"
+                  : "text-[hsl(var(--assistant-text-tertiary))]",
               )}
             >
-              {isMulti ? (isSelected ? "✓" : "") : label}
+              {isMulti
+                ? (isSelected ? (
+                    <Check className="w-3.5 h-3.5" />
+                  ) : (
+                    label
+                  ))
+                : label}
             </span>
 
-            <span className="flex-1 pt-0.5">{option.text}</span>
+            <span className="flex-1 text-[hsl(var(--assistant-text-primary))]">
+              {option.text}
+            </span>
 
             {showResult && isCorrectOption && (
-              <span className="text-emerald-600 dark:text-emerald-400 text-xs font-medium pt-1">Correct</span>
+              <Check
+                className="w-[14px] h-[14px] mt-[2px] flex-shrink-0 text-[hsl(var(--assistant-accent))]"
+                aria-label="Correct"
+              />
             )}
             {isWrong && (
-              <span className="text-red-500 text-xs font-medium pt-1">Wrong</span>
+              <X
+                className="w-[14px] h-[14px] mt-[2px] flex-shrink-0 text-[hsl(var(--destructive))]"
+                aria-label="Incorrect"
+              />
             )}
           </button>
         );
@@ -193,6 +243,17 @@ function ShortAnswerInput({
 }) {
   const showResult = result != null;
 
+  const borderColor = !showResult
+    ? "hsl(var(--assistant-border))"
+    : result.correct
+    ? "hsl(var(--success))"
+    : "hsl(var(--destructive))";
+  const bgColor = !showResult
+    ? "hsl(var(--assistant-surface-bg))"
+    : result.correct
+    ? "hsl(var(--success) / 0.07)"
+    : "hsl(var(--destructive) / 0.07)";
+
   return (
     <div className="space-y-2">
       <textarea
@@ -201,26 +262,29 @@ function ShortAnswerInput({
         disabled={disabled}
         rows={3}
         placeholder="Type your answer..."
+        style={{
+          borderColor,
+          background: bgColor,
+        }}
         className={cn(
-          "w-full rounded-xl border px-4 py-3 text-sm bg-card focus:outline-none focus:ring-2 focus:ring-primary/30 resize-none transition-colors",
-          !showResult && "border-border",
-          showResult && result.correct && "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/20",
-          showResult && !result.correct && "border-red-400 bg-red-50 dark:bg-red-950/20",
+          "w-full rounded-md border px-3 py-2.5 text-[13px] text-[hsl(var(--assistant-text-primary))] placeholder:text-[hsl(var(--assistant-text-tertiary))] focus:outline-none focus:border-[hsl(var(--assistant-accent))] resize-none transition-colors duration-150",
           disabled && "cursor-default opacity-80",
         )}
       />
       {showResult && (
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-2 text-[12px]">
           <span
             className={cn(
               "font-medium",
-              result.correct ? "text-emerald-600 dark:text-emerald-400" : "text-red-500",
+              result.correct
+                ? "text-[hsl(var(--success))]"
+                : "text-[hsl(var(--destructive))]",
             )}
           >
             {result.correct ? "Correct" : "Incorrect"}
           </span>
           {!result.correct && result.correct_answer && (
-            <span className="text-muted-foreground">
+            <span className="text-[hsl(var(--assistant-text-secondary))]">
               Expected: {result.correct_answer}
             </span>
           )}

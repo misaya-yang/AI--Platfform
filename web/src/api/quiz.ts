@@ -35,6 +35,32 @@ export async function submitQuiz(
   return data;
 }
 
+/**
+ * Anonymous quiz submit for the public /share/:shareCode page.
+ * No auth required — rate-limited server-side by IP + ag_anon_id cookie.
+ * Repeat submissions for the same (shareCode, anon, quizId) return the
+ * cached first attempt with `cached: true` appended.
+ */
+export async function submitSharedQuiz(
+  shareCode: string,
+  quizId: string,
+  answers: Record<string, string>,
+): Promise<QuizAttemptResult & { cached?: boolean }> {
+  const resp = await fetch(
+    `/api/v1/assistant/shares/${encodeURIComponent(shareCode)}/quiz/${encodeURIComponent(quizId)}/submit`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include", // send ag_anon_id cookie
+      body: JSON.stringify({ answers }),
+    },
+  );
+  if (!resp.ok) {
+    throw new Error(`Share quiz submit failed: ${resp.status}`);
+  }
+  return resp.json();
+}
+
 export async function listQuizzes(params?: {
   limit?: number;
   offset?: number;
