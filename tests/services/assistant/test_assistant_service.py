@@ -34,8 +34,8 @@ class TestAssistantServiceInit:
 
     def test_init_with_required_args(self):
         """Should initialize with just model_registry."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
 
@@ -47,8 +47,8 @@ class TestAssistantServiceInit:
 
     def test_init_with_kb_service(self):
         """Should initialize with knowledge service."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
         from src.services.knowledge.knowledge_service import KnowledgeService
 
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -63,8 +63,8 @@ class TestAssistantServiceInit:
 
     def test_init_with_session_manager(self):
         """Should initialize with session manager."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
         from src.services.session.database_session_manager import DatabaseSessionManager
 
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -79,8 +79,8 @@ class TestAssistantServiceInit:
 
     def test_init_creates_context_manager(self):
         """Should create context manager during init."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
 
@@ -90,8 +90,8 @@ class TestAssistantServiceInit:
 
     def test_builtin_domain_policy_disabled_by_default(self):
         """Built-in domain policy should be off for generic assistant by default."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         mock_registry = MagicMock(spec=ModelRegistry)
         service = AssistantService(model_registry=mock_registry)
@@ -101,8 +101,8 @@ class TestAssistantServiceInit:
 
     def test_builtin_domain_policy_can_be_enabled_by_env(self, monkeypatch):
         """Emergency rollback switch can re-enable built-in domain policy."""
-        from src.services.assistant.assistant_service import AssistantService
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.assistant_service import AssistantService
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         monkeypatch.setenv("ASSISTANT_BUILTIN_DOMAIN_POLICY_ENABLED", "true")
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -117,7 +117,7 @@ class TestAssistantConfig:
 
     def test_default_values(self):
         """AssistantConfig should have sensible defaults."""
-        from src.services.assistant.assistant_service import AssistantConfig
+        from assistant_service.core.assistant_service import AssistantConfig
 
         config = AssistantConfig()
 
@@ -136,7 +136,7 @@ class TestAssistantConfig:
 
     def test_custom_values(self):
         """Should accept custom configuration."""
-        from src.services.assistant.assistant_service import AssistantConfig
+        from assistant_service.core.assistant_service import AssistantConfig
 
         config = AssistantConfig(
             model_id="gpt-4",
@@ -161,7 +161,7 @@ class TestAssistantServiceChatStream:
     @pytest.fixture
     def mock_model_registry(self):
         """Create mock model registry."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = MagicMock(spec=ModelRegistry)
         registry.get_model = MagicMock(
@@ -194,7 +194,7 @@ class TestAssistantServiceChatStream:
     @pytest.fixture
     def service(self, mock_model_registry, mock_session_manager):
         """Create AssistantService with mocks."""
-        from src.services.assistant.assistant_service import AssistantService
+        from assistant_service.core.assistant_service import AssistantService
 
         return AssistantService(
             model_registry=mock_model_registry,
@@ -204,7 +204,7 @@ class TestAssistantServiceChatStream:
     @pytest.mark.asyncio
     async def test_chat_stream_yields_status_first(self, service, mock_model_registry):
         """chat_stream should yield status or run_started event first."""
-        from src.services.assistant.assistant_service import (
+        from assistant_service.core.assistant_service import (
             AssistantConfig,
             StreamEventType,
         )
@@ -219,7 +219,7 @@ class TestAssistantServiceChatStream:
 
         # Create async generator that yields text
         async def mock_stream(*args, **kwargs):
-            from src.services.assistant.model_registry import StreamDelta
+            from assistant_service.core.model_registry import StreamDelta
 
             yield StreamDelta(text="Hello")
 
@@ -255,7 +255,7 @@ class TestRAGMode:
 
     def test_rag_modes(self):
         """RAGMode should have expected values."""
-        from src.services.assistant.assistant_service import RAGMode
+        from assistant_service.core.assistant_service import RAGMode
 
         assert RAGMode.AUTO == "auto"
         assert RAGMode.TOOL == "tool"
@@ -267,7 +267,7 @@ class TestStreamEventType:
 
     def test_core_event_types_exist(self):
         """Core event types should be defined."""
-        from src.services.assistant.assistant_service import StreamEventType
+        from assistant_service.core.assistant_service import StreamEventType
 
         # Core streaming
         assert StreamEventType.TEXT_DELTA == "text_delta"
@@ -283,7 +283,7 @@ class TestStreamEventType:
 
     def test_rag_event_types_exist(self):
         """RAG-related event types should be defined."""
-        from src.services.assistant.assistant_service import StreamEventType
+        from assistant_service.core.assistant_service import StreamEventType
 
         assert StreamEventType.CONTEXT_RETRIEVED == "context_retrieved"
         assert StreamEventType.WEB_SEARCH_RESULTS == "web_search_results"
@@ -295,7 +295,7 @@ class TestAssistantStreamEvent:
 
     def test_create_event(self):
         """Should create stream event with data."""
-        from src.services.assistant.assistant_service import (
+        from assistant_service.core.assistant_service import (
             AssistantStreamEvent,
             StreamEventType,
         )
@@ -310,7 +310,7 @@ class TestAssistantStreamEvent:
 
     def test_event_has_timestamp(self):
         """Event should have timestamp."""
-        from src.services.assistant.assistant_service import (
+        from assistant_service.core.assistant_service import (
             AssistantStreamEvent,
             StreamEventType,
         )

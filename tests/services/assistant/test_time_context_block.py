@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from src.services.assistant.prompts.system_prompt_v2 import get_time_context_block
+from assistant_service.core.prompts.system_prompt_v2 import get_time_context_block
 
 
 def test_time_block_contains_iso_date_for_today() -> None:

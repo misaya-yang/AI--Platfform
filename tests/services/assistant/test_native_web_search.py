@@ -15,7 +15,7 @@ pytest.importorskip("tiktoken", reason="tiktoken required for model registry tes
 
 
 def _get_mod():
-    from src.services.assistant.models import model_registry as mod
+    from assistant_service.core.models import model_registry as mod
 
     return mod
 

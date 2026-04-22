@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.assistant.agent.middlewares.response_cap import (
+from assistant_service.core.agent.middlewares.response_cap import (
     ResponseCapMiddleware,
 )
-from src.services.assistant.tools.tool_registry import ToolCallResult
+from assistant_service.core.tools.tool_registry import ToolCallResult
 
 
 def _result(payload) -> ToolCallResult:

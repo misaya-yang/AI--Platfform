@@ -19,7 +19,7 @@ import os
 
 import pytest
 
-from src.services.assistant.models.model_registry import (
+from assistant_service.core.models.model_registry import (
     ModelConfig,
     ModelProvider,
     ModelRegistry,

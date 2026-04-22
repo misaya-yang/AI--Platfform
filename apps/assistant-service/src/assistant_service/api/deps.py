@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
-from src.services.assistant import AssistantService
+from ..core import AssistantService
 
 
 def get_assistant_service(request: Request) -> AssistantService:

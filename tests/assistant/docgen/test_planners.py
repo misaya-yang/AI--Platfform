@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     HeadingBlock,
     ParagraphBlock,
 )
-from src.services.assistant.docgen.ir.root import DocxIR, PptxIR, XlsxIR, PdfIR
-from src.services.assistant.docgen.planners import (
+from assistant_service.core.docgen.ir.root import DocxIR, PptxIR, XlsxIR, PdfIR
+from assistant_service.core.docgen.planners import (
     Brief,
     DocxPlanner,
     PdfPlanner,
     PptxPlanner,
     XlsxPlanner,
 )
-from src.services.assistant.docgen.pipeline import DocgenPipeline
-from src.services.assistant.docgen.style_guide import PALETTES, FONT_PAIRS, prompt_style_block
+from assistant_service.core.docgen.pipeline import DocgenPipeline
+from assistant_service.core.docgen.style_guide import PALETTES, FONT_PAIRS, prompt_style_block
 
 
 # -------- style guide
@@ -290,7 +290,7 @@ async def test_pptx_planner_chinese_section_dividers():
 @pytest.mark.asyncio
 async def test_pptx_planner_custom_rules_list():
     """PptxPlanner accepts a custom rules list for extension."""
-    from src.services.assistant.docgen.planners.layout_rules import EyebrowHintRule
+    from assistant_service.core.docgen.planners.layout_rules import EyebrowHintRule
 
     payload = {
         "doc_type": "pptx",

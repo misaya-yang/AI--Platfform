@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.assistant.memory.memory_manager import (
+from assistant_service.core.memory.memory_manager import (
     LongTermMemoryLayer,
     MemoryManager,
     SessionMemoryLayer,

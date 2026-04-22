@@ -2,7 +2,7 @@
 Office scenario detection tests.
 """
 
-from src.services.assistant.office.scenario import OfficeScenario, detect_scenario
+from assistant_service.core.office.scenario import OfficeScenario, detect_scenario
 
 
 def test_detect_meeting_minutes():

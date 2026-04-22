@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.services.assistant.domain_policies import ImamPolicy
+from assistant_service.core.domain_policies import ImamPolicy
 
 
 def test_imam_policy_flags_duplicate_consultation_reminder() -> None:

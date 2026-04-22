@@ -22,8 +22,8 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_context_compact_stamps_metadata_signal():
-    from src.services.assistant.tools.context_tools import ContextCompactExecutor
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.context_tools import ContextCompactExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     req = ToolCallRequest(
         call_id="c1",
@@ -42,8 +42,8 @@ async def test_context_compact_stamps_metadata_signal():
 @pytest.mark.asyncio
 async def test_context_compact_clamps_out_of_range_turns():
     """Negative/zero clamps to 1; huge values clamp to 10."""
-    from src.services.assistant.tools.context_tools import ContextCompactExecutor
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.context_tools import ContextCompactExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     exec_ = ContextCompactExecutor()
     low = await exec_.execute(
@@ -58,8 +58,8 @@ async def test_context_compact_clamps_out_of_range_turns():
 
 @pytest.mark.asyncio
 async def test_context_compact_rejects_non_integer_turns():
-    from src.services.assistant.tools.context_tools import ContextCompactExecutor
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.context_tools import ContextCompactExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     res = await ContextCompactExecutor().execute(
         ToolCallRequest(
@@ -74,8 +74,8 @@ async def test_context_compact_rejects_non_integer_turns():
 
 @pytest.mark.asyncio
 async def test_context_compact_default_keep_turns_is_three():
-    from src.services.assistant.tools.context_tools import ContextCompactExecutor
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.context_tools import ContextCompactExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     res = await ContextCompactExecutor().execute(
         ToolCallRequest(call_id="c", tool_name="context_compact", arguments={})
@@ -116,7 +116,7 @@ class _NoopModelRegistry:
 @pytest.mark.asyncio
 async def test_compact_no_op_when_not_enough_turns():
     """Only 2 user turns, keep_recent_turns=3 → nothing to compact."""
-    from src.services.assistant.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.agent_loop import AgentLoop
 
     loop = AgentLoop.__new__(AgentLoop)
     loop.model_registry = None
@@ -136,7 +136,7 @@ async def test_compact_no_op_when_not_enough_turns():
 @pytest.mark.asyncio
 async def test_compact_preserves_recent_turns_and_system_head():
     """6 user turns, keep=2 → summary replaces turns 0-3, turns 4-5 intact."""
-    from src.services.assistant.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.agent_loop import AgentLoop
 
     loop = AgentLoop.__new__(AgentLoop)
     loop.model_registry = None  # forces no-compressor path; summary is synthetic
@@ -167,7 +167,7 @@ async def test_compact_preserves_recent_turns_and_system_head():
 async def test_compact_preserves_multiple_system_messages():
     """If the conversation starts with multiple system messages, they all stay
     at the head exactly as-is."""
-    from src.services.assistant.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.agent_loop import AgentLoop
 
     loop = AgentLoop.__new__(AgentLoop)
     loop.model_registry = None
@@ -187,7 +187,7 @@ async def test_compact_preserves_multiple_system_messages():
 
 @pytest.mark.asyncio
 async def test_compact_emits_token_stats():
-    from src.services.assistant.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.agent_loop import AgentLoop
 
     loop = AgentLoop.__new__(AgentLoop)
     loop.model_registry = None

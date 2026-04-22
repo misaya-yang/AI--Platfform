@@ -16,7 +16,7 @@ import pytest
 @pytest.fixture
 async def populated_session():
     """Spin up a TaskManager session so the tools have a working_memory to write to."""
-    from src.services.assistant.tasks.task_manager import init_task_manager, shutdown_task_manager
+    from assistant_service.core.tasks.task_manager import init_task_manager, shutdown_task_manager
 
     manager = await init_task_manager()
     tenant, user_id, session_id = "acme", "u1", "sess-todo"
@@ -31,7 +31,7 @@ async def populated_session():
 
 
 def _make_request(tool_name: str, arguments: dict[str, Any], session_id: str):
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     return ToolCallRequest(
         call_id=f"call_{tool_name}",
@@ -43,7 +43,7 @@ def _make_request(tool_name: str, arguments: dict[str, Any], session_id: str):
 
 @pytest.mark.asyncio
 async def test_todo_write_then_read_round_trip(populated_session):
-    from src.services.assistant.tools.todo_tools import TodoReadExecutor, TodoWriteExecutor
+    from assistant_service.core.tools.todo_tools import TodoReadExecutor, TodoWriteExecutor
 
     write_res = await TodoWriteExecutor().execute(
         _make_request(
@@ -74,7 +74,7 @@ async def test_todo_write_then_read_round_trip(populated_session):
 
 @pytest.mark.asyncio
 async def test_todo_write_overwrites(populated_session):
-    from src.services.assistant.tools.todo_tools import TodoWriteExecutor
+    from assistant_service.core.tools.todo_tools import TodoWriteExecutor
 
     await TodoWriteExecutor().execute(
         _make_request(
@@ -98,7 +98,7 @@ async def test_todo_write_overwrites(populated_session):
 
 @pytest.mark.asyncio
 async def test_todo_write_rejects_invalid_status(populated_session):
-    from src.services.assistant.tools.todo_tools import TodoWriteExecutor
+    from assistant_service.core.tools.todo_tools import TodoWriteExecutor
 
     res = await TodoWriteExecutor().execute(
         _make_request(
@@ -113,7 +113,7 @@ async def test_todo_write_rejects_invalid_status(populated_session):
 
 @pytest.mark.asyncio
 async def test_todo_write_rejects_empty_description(populated_session):
-    from src.services.assistant.tools.todo_tools import TodoWriteExecutor
+    from assistant_service.core.tools.todo_tools import TodoWriteExecutor
 
     res = await TodoWriteExecutor().execute(
         _make_request(
@@ -128,7 +128,7 @@ async def test_todo_write_rejects_empty_description(populated_session):
 
 @pytest.mark.asyncio
 async def test_todo_write_requires_items_array(populated_session):
-    from src.services.assistant.tools.todo_tools import TodoWriteExecutor
+    from assistant_service.core.tools.todo_tools import TodoWriteExecutor
 
     res = await TodoWriteExecutor().execute(
         _make_request("todo_write", {"items": "not a list"}, populated_session)
@@ -138,8 +138,8 @@ async def test_todo_write_requires_items_array(populated_session):
 
 @pytest.mark.asyncio
 async def test_missing_session_metadata_errors():
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
-    from src.services.assistant.tools.todo_tools import TodoReadExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.todo_tools import TodoReadExecutor
 
     res = await TodoReadExecutor().execute(
         ToolCallRequest(call_id="x", tool_name="todo_read", arguments={}, metadata={})
@@ -152,7 +152,7 @@ async def test_missing_session_metadata_errors():
 async def test_todo_read_no_session_returns_empty():
     """An unknown session_id should return (no tasks), not an error — the
     model's control flow is simpler if reads never fail for missing state."""
-    from src.services.assistant.tools.todo_tools import TodoReadExecutor
+    from assistant_service.core.tools.todo_tools import TodoReadExecutor
 
     res = await TodoReadExecutor().execute(
         _make_request("todo_read", {}, "nonexistent-session")
@@ -162,8 +162,8 @@ async def test_todo_read_no_session_returns_empty():
 
 
 def test_register_todo_tools():
-    from src.services.assistant.tools.todo_tools import register_todo_tools
-    from src.services.assistant.tools.tool_registry import get_tool_registry
+    from assistant_service.core.tools.todo_tools import register_todo_tools
+    from assistant_service.core.tools.tool_registry import get_tool_registry
 
     register_todo_tools()
     registry = get_tool_registry()

@@ -37,8 +37,8 @@ import asyncio
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from src.services.assistant.tools.quiz_tool import QuizGeneratorExecutor
-from src.services.assistant.tools.tool_registry import ToolCallRequest
+from assistant_service.core.tools.quiz_tool import QuizGeneratorExecutor
+from assistant_service.core.tools.tool_registry import ToolCallRequest
 
 
 # Standard 4-option multiple choice used by most cases.

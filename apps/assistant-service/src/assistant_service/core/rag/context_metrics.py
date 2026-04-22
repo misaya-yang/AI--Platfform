@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from ....persistence.database import DatabaseStorage
+    from src.persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)
 

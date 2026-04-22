@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from ....persistence.database import DatabaseStorage
+from src.persistence.database import DatabaseStorage
 from .quiz_share_manager import QuizShareManager
 
 logger = logging.getLogger(__name__)

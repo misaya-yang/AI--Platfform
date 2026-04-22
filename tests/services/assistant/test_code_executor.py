@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from src.services.assistant.code_executor import (
+from assistant_service.core.code_executor import (
     MATPLOTLIB_SETUP,
     CodeExecutionConfig,
     CodeExecutionResult,
@@ -306,7 +306,7 @@ class TestDockerAvailability:
         assert executor.is_docker_available() is True
 
     @patch(
-        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
         new_callable=PropertyMock,
     )
     def test_is_docker_available_when_docker_works(self, mock_client_prop):
@@ -322,7 +322,7 @@ class TestDockerAvailability:
         mock_client.ping.assert_called()
 
     @patch(
-        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
         new_callable=PropertyMock,
     )
     def test_is_docker_available_when_docker_fails(self, mock_client_prop):
@@ -337,7 +337,7 @@ class TestDockerAvailability:
         assert result is False
 
     @patch(
-        "src.services.assistant.code_executor.CodeExecutorService.docker_client",
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
         new_callable=PropertyMock,
     )
     def test_is_docker_available_when_client_is_none(self, mock_client_prop):
@@ -747,7 +747,7 @@ class TestFactoryFunction:
     def test_get_code_executor_singleton(self):
         """Test that get_code_executor returns singleton."""
         # Reset global
-        import src.services.assistant.code_executor as module
+        import assistant_service.core.code_executor as module
 
         module._code_executor = None
 
@@ -761,7 +761,7 @@ class TestFactoryFunction:
 
     def test_get_code_executor_with_config(self):
         """Test get_code_executor with custom config."""
-        import src.services.assistant.code_executor as module
+        import assistant_service.core.code_executor as module
 
         module._code_executor = None
 

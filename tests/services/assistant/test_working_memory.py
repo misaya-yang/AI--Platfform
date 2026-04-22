@@ -10,7 +10,7 @@ Tests for WorkingMemory class and related components:
 
 from datetime import datetime
 
-from src.services.assistant.working_memory import (
+from assistant_service.core.working_memory import (
     CollectedInfo,
     TaskItem,
     TaskStatus,

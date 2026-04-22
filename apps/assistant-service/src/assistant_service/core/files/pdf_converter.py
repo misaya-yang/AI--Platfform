@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ai_gateway_core.logging import get_logger
-from ...knowledge.common import import_pymupdf
+from src.services.knowledge.common import import_pymupdf
 
 logger = get_logger(__name__)
 

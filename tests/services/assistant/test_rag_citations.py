@@ -1,6 +1,6 @@
 """RAG citation enforcement tests."""
 
-from src.services.assistant.assistant_service import AssistantService
+from assistant_service.core.assistant_service import AssistantService
 
 
 def test_missing_citations_emits_warning():

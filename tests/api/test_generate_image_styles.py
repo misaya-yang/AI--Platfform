@@ -22,11 +22,11 @@ from src.api.schemas.assistant import (
 )
 from src.api.v1.assistant import generate_image
 from src.core.auth.user_resolver import UserContext
-from src.services.assistant.tools.gemini_image_tool import GeminiImageResult
-from src.services.assistant.tools.smart_image_generator import (
+from assistant_service.core.tools.gemini_image_tool import GeminiImageResult
+from assistant_service.core.tools.smart_image_generator import (
     SmartImageGenerationResult,
 )
-from src.services.assistant.tools.style_presets import StylePreset
+from assistant_service.core.tools.style_presets import StylePreset
 
 
 # =============================================================================

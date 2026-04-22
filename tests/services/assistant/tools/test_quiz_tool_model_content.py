@@ -22,8 +22,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from src.services.assistant.tools.quiz_tool import QuizGeneratorExecutor
-from src.services.assistant.tools.tool_registry import ToolCallRequest
+from assistant_service.core.tools.quiz_tool import QuizGeneratorExecutor
+from assistant_service.core.tools.tool_registry import ToolCallRequest
 
 
 def _transformer_quiz_questions() -> list[dict]:

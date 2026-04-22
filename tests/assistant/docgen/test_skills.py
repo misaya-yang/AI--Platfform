@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from src.services.assistant.docgen.skills import (
+from assistant_service.core.docgen.skills import (
     SkillLoader,
     SkillRegistry,
     SkillRouter,
 )
-from src.services.assistant.docgen.skills.router import Intent
+from assistant_service.core.docgen.skills.router import Intent
 
 
 _SKILLS_DIR = Path(__file__).resolve().parents[3] / "src/services/assistant/skills"

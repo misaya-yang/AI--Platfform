@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.assistant.agent.tool_result_formatter import (
+from assistant_service.core.agent.tool_result_formatter import (
     _retrieval_quality_label,
     compact_tool_result_for_model,
 )

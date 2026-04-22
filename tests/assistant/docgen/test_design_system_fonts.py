@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.services.assistant.docgen import design_system as ds
+from assistant_service.core.docgen import design_system as ds
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ def test_missing_fc_list_returns_empty_set_without_subprocess():
 def test_probe_timeout_logs_warning_and_caches_empty(caplog):
     with patch("shutil.which", return_value="/usr/bin/fc-list"):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="fc-list", timeout=2)) as run:
-            with caplog.at_level("WARNING", logger="src.services.assistant.docgen.design_system"):
+            with caplog.at_level("WARNING", logger="assistant_service.core.docgen.design_system"):
                 result = ds._probe_installed_fonts()
             assert result == set()
             # Warning about the timeout was emitted.
@@ -54,7 +54,7 @@ def test_probe_timeout_logs_warning_and_caches_empty(caplog):
 def test_probe_generic_exception_logs_warning_and_caches_empty(caplog):
     with patch("shutil.which", return_value="/usr/bin/fc-list"):
         with patch("subprocess.run", side_effect=OSError("boom")) as run:
-            with caplog.at_level("WARNING", logger="src.services.assistant.docgen.design_system"):
+            with caplog.at_level("WARNING", logger="assistant_service.core.docgen.design_system"):
                 result = ds._probe_installed_fonts()
             assert result == set()
             assert any("fc-list probe failed" in r.message for r in caplog.records)

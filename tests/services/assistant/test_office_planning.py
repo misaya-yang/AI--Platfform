@@ -1,7 +1,7 @@
 """Office workflow planning tests."""
 
-from src.services.assistant.office.planner import build_plan_for_scenario
-from src.services.assistant.office.scenario import OfficeScenario
+from assistant_service.core.office.planner import build_plan_for_scenario
+from assistant_service.core.office.scenario import OfficeScenario
 
 
 def test_meeting_minutes_plan_has_tasks():

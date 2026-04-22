@@ -7,7 +7,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     ChartBlock,
     ChartSpec,

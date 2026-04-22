@@ -15,7 +15,7 @@ class TestModelProvider:
 
     def test_provider_values(self):
         """ModelProvider should have expected values."""
-        from src.services.assistant.models.model_registry import ModelProvider
+        from assistant_service.core.models.model_registry import ModelProvider
 
         assert ModelProvider.OPENAI == "openai"
         assert ModelProvider.ANTHROPIC == "anthropic"
@@ -29,7 +29,7 @@ class TestModelAccessLevel:
 
     def test_access_levels(self):
         """ModelAccessLevel should have expected values."""
-        from src.services.assistant.models.model_registry import ModelAccessLevel
+        from assistant_service.core.models.model_registry import ModelAccessLevel
 
         assert ModelAccessLevel.PUBLIC == "public"
         assert ModelAccessLevel.PREMIUM == "premium"
@@ -41,7 +41,7 @@ class TestModelInfo:
 
     def test_create_model_info(self):
         """Should create ModelInfo with required fields."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             ModelAccessLevel,
             ModelInfo,
             ModelProvider,
@@ -64,7 +64,7 @@ class TestModelInfo:
 
     def test_model_info_with_custom_values(self):
         """Should accept custom configuration."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             ModelAccessLevel,
             ModelInfo,
             ModelProvider,
@@ -95,7 +95,7 @@ class TestModelRegistryInit:
 
     def test_init_with_default_models(self):
         """Should initialize with default model catalog."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = ModelRegistry(use_default_models=True)
 
@@ -104,7 +104,7 @@ class TestModelRegistryInit:
 
     def test_init_without_default_models(self):
         """Should initialize empty when default models disabled."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -120,7 +120,7 @@ class TestDefaultCatalogPricing:
     def test_qwen36_plus_nonzero_price(self):
         """Qwen 3.6 Plus must have nonzero price — the 0/0 entry in the
         earlier catalog broke cost tracking for the default Assistant model."""
-        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+        from assistant_service.core.models.model_registry import DEFAULT_MODELS, ModelProvider
 
         qwen36 = next(
             (m for m in DEFAULT_MODELS[ModelProvider.DASHSCOPE] if m.id == "qwen3.6-plus"),
@@ -132,7 +132,7 @@ class TestDefaultCatalogPricing:
 
     def test_claude_opus_4_5_pricing_corrected(self):
         """Opus 4.5 list price is $5/$25 per 1M (not $15/$75 of Opus 4.1)."""
-        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+        from assistant_service.core.models.model_registry import DEFAULT_MODELS, ModelProvider
 
         opus45 = next(
             (m for m in DEFAULT_MODELS[ModelProvider.ANTHROPIC] if m.id == "claude-opus-4-5"),
@@ -145,7 +145,7 @@ class TestDefaultCatalogPricing:
     def test_gemini_3_1_family_present(self):
         """Gemini 3.1 Pro + 3.1 Flash Lite must be in the Google catalog —
         user-facing head models as of 2026-04."""
-        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+        from assistant_service.core.models.model_registry import DEFAULT_MODELS, ModelProvider
 
         google_ids = {m.id for m in DEFAULT_MODELS[ModelProvider.GOOGLE]}
         assert "gemini-3.1-pro-preview" in google_ids
@@ -156,7 +156,7 @@ class TestDefaultCatalogPricing:
         populated by ``__post_init__`` from the ``NATIVE_SEARCH_CAPABLE``
         map — they are derived, so the Model Management UI must not
         expose them as editable fields. This test pins the invariant."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             NATIVE_SEARCH_CAPABLE,
             ModelInfo,
             ModelProvider,
@@ -180,7 +180,7 @@ class TestModelRegistryProviderConfig:
 
     def test_configure_provider(self):
         """Should configure provider with API key."""
-        from src.services.assistant.models.model_registry import ModelProvider, ModelRegistry
+        from assistant_service.core.models.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -194,7 +194,7 @@ class TestModelRegistryProviderConfig:
 
     def test_configure_provider_with_custom_base_url(self):
         """Should allow custom base URL."""
-        from src.services.assistant.models.model_registry import ModelProvider, ModelRegistry
+        from assistant_service.core.models.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -210,7 +210,7 @@ class TestModelRegistryProviderConfig:
 
     def test_unconfigured_provider(self):
         """Unconfigured provider should return False."""
-        from src.services.assistant.models.model_registry import ModelProvider, ModelRegistry
+        from assistant_service.core.models.model_registry import ModelProvider, ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -222,7 +222,7 @@ class TestModelRegistryModelManagement:
 
     def test_get_model(self):
         """Should retrieve model by ID."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             ModelInfo,
             ModelProvider,
             ModelRegistry,
@@ -246,7 +246,7 @@ class TestModelRegistryModelManagement:
 
     def test_get_nonexistent_model(self):
         """Should return None for nonexistent model."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = ModelRegistry(use_default_models=False)
 
@@ -255,7 +255,7 @@ class TestModelRegistryModelManagement:
 
     def test_add_custom_model(self):
         """Should add custom model to registry."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             ModelInfo,
             ModelProvider,
             ModelRegistry,
@@ -276,7 +276,7 @@ class TestModelRegistryModelManagement:
 
     def test_clear_models(self):
         """Should clear all models from registry."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = ModelRegistry(use_default_models=True)
         initial_count = len(registry._models)
@@ -293,7 +293,7 @@ class TestModelRegistryAvailableModels:
 
     def test_get_available_models_configured_provider(self):
         """Should return models only from configured providers."""
-        from src.services.assistant.models.model_registry import (
+        from assistant_service.core.models.model_registry import (
             ModelInfo,
             ModelProvider,
             ModelRegistry,
@@ -332,7 +332,7 @@ class TestModelRegistryAvailableModels:
 
     def test_get_available_models_no_configured_providers(self):
         """Should return empty list if no providers configured."""
-        from src.services.assistant.models.model_registry import ModelRegistry
+        from assistant_service.core.models.model_registry import ModelRegistry
 
         registry = ModelRegistry(use_default_models=True)
 
@@ -347,7 +347,7 @@ class TestSanitizeUsage:
 
     def test_sanitize_basic_usage(self):
         """Should pass through integer values."""
-        from src.services.assistant.models.model_registry import _sanitize_usage
+        from assistant_service.core.models.model_registry import _sanitize_usage
 
         raw = {"input_tokens": 100, "output_tokens": 50}
         result = _sanitize_usage(raw)
@@ -357,7 +357,7 @@ class TestSanitizeUsage:
 
     def test_sanitize_openai_format(self):
         """Should normalize OpenAI-style keys."""
-        from src.services.assistant.models.model_registry import _sanitize_usage
+        from assistant_service.core.models.model_registry import _sanitize_usage
 
         raw = {"prompt_tokens": 100, "completion_tokens": 50}
         result = _sanitize_usage(raw)
@@ -367,7 +367,7 @@ class TestSanitizeUsage:
 
     def test_sanitize_filters_nested_dicts(self):
         """Should filter out nested dictionaries."""
-        from src.services.assistant.models.model_registry import _sanitize_usage
+        from assistant_service.core.models.model_registry import _sanitize_usage
 
         raw = {
             "prompt_tokens": 100,
@@ -386,7 +386,7 @@ class TestStreamDelta:
 
     def test_create_stream_delta(self):
         """Should create StreamDelta with defaults."""
-        from src.services.assistant.models.model_registry import StreamDelta
+        from assistant_service.core.models.model_registry import StreamDelta
 
         delta = StreamDelta()
 
@@ -397,7 +397,7 @@ class TestStreamDelta:
 
     def test_stream_delta_with_content(self):
         """Should create StreamDelta with content."""
-        from src.services.assistant.models.model_registry import StreamDelta
+        from assistant_service.core.models.model_registry import StreamDelta
 
         delta = StreamDelta(
             content="Hello, world!",
@@ -415,7 +415,7 @@ class TestChatMessage:
 
     def test_create_chat_message(self):
         """Should create ChatMessage with required fields."""
-        from src.services.assistant.models.model_registry import ChatMessage
+        from assistant_service.core.models.model_registry import ChatMessage
 
         message = ChatMessage(role="user", content="Hello")
 
@@ -427,7 +427,7 @@ class TestChatMessage:
 
     def test_chat_message_with_images(self):
         """Should support vision input."""
-        from src.services.assistant.models.model_registry import ChatMessage
+        from assistant_service.core.models.model_registry import ChatMessage
 
         message = ChatMessage(
             role="user",
@@ -439,7 +439,7 @@ class TestChatMessage:
 
     def test_chat_message_with_tool_calls(self):
         """Should support tool calls."""
-        from src.services.assistant.models.model_registry import ChatMessage
+        from assistant_service.core.models.model_registry import ChatMessage
 
         message = ChatMessage(
             role="assistant",

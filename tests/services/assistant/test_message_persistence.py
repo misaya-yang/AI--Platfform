@@ -165,7 +165,7 @@ async def test_agent_loop_turn_persists_activity_fields_via_live_save_path():
     """
     import importlib
     agent_loop_mod = importlib.import_module(
-        "src.services.assistant.agent.agent_loop"
+        "assistant_service.core.agent.agent_loop"
     )
 
     # The real AgentLoop has heavy dependencies. We only need to verify
@@ -198,7 +198,7 @@ async def test_legacy_chat_stream_persists_activity_fields_source_contract():
     import importlib
     import inspect
 
-    svc_mod = importlib.import_module("src.services.assistant.assistant_service")
+    svc_mod = importlib.import_module("assistant_service.core.assistant_service")
     source = inspect.getsource(svc_mod)
     # The legacy path accumulates into these names and emits them in the
     # Step-5 persistence block. Losing either half breaks the drawer.

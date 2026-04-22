@@ -11,19 +11,10 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-# ── Compatibility shim: make gateway `src` importable ──
-# This allows reusing the existing AssistantService, tools, RAG, etc.
-# without duplicating thousands of lines of code.
-# The proper long-term fix is to extract a shared `ai-gateway-core` package.
-_gateway_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-if os.path.isdir(os.path.join(_gateway_root, "src")):
-    sys.path.insert(0, _gateway_root)
 
 from .config import get_settings
 
@@ -68,7 +59,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Redis init failed: {e}")
 
     # ── Model Registry ──
-    from src.services.assistant.models.model_registry import ModelRegistry, ModelProvider
+    from .core.models.model_registry import ModelRegistry, ModelProvider
     model_registry = ModelRegistry()
 
     providers_config = {
@@ -95,7 +86,7 @@ async def lifespan(app: FastAPI):
     # Load models from database
     if database and getattr(database, "_pool", None):
         try:
-            from src.services.assistant.models.model_registry import ModelInfo
+            from .core.models.model_registry import ModelInfo
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT model_id, display_name, provider_id, context_window, max_output_tokens "
@@ -133,7 +124,7 @@ async def lifespan(app: FastAPI):
     memory_service = None
     if database:
         try:
-            from src.services.assistant.memory_service import MemoryService
+            from .core.memory_service import MemoryService
             memory_service = MemoryService(database)
         except Exception as e:
             logger.warning(f"Memory service init failed: {e}")
@@ -148,11 +139,11 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Session manager init failed: {e}")
 
     # ── Tool Registry ──
-    from src.services.assistant.tools import (
+    from .core.tools import (
         TavilySearchTool, get_tool_registry, register_builtin_tools,
         register_document_generation_tool, register_pptx_generation_tool,
     )
-    from src.services.assistant.tools.image_generator_tool import register_image_generation_tool
+    from .core.tools.image_generator_tool import register_image_generation_tool
 
     tavily_key = os.environ.get("TAVILY_API_KEY", "")
     tavily_tool = TavilySearchTool(api_key=tavily_key or None)
@@ -170,12 +161,12 @@ async def lifespan(app: FastAPI):
 
     # ── Todo tools (Phase 5) — always on; exposes the per-session
     # WorkingMemory to the model for long-horizon task tracking.
-    from src.services.assistant.tools.todo_tools import register_todo_tools
+    from .core.tools.todo_tools import register_todo_tools
     register_todo_tools()
 
     # ── Context management tool — always on; lets the model (or a user
     # /compact slash command) explicitly request history compression.
-    from src.services.assistant.tools.context_tools import register_context_tools
+    from .core.tools.context_tools import register_context_tools
     register_context_tools()
 
     # ── Primitive tools (Phase 4) — env-gated opt-in ──
@@ -184,12 +175,12 @@ async def lifespan(app: FastAPI):
     # ASSISTANT_WORKSPACE_ROOT). Off by default to keep legacy deployments
     # unchanged.
     if os.environ.get("ASSISTANT_ENABLE_PRIMITIVES", "").lower() in {"1", "true", "yes"}:
-        from src.services.assistant.tools.primitives import register_primitive_tools
+        from .core.tools.primitives import register_primitive_tools
         register_primitive_tools()
         logger.info("Primitive tools enabled (fs_read/fs_write/fs_glob/fs_grep)")
 
     # ── AssistantService ──
-    from src.services.assistant import AssistantService
+    from .core import AssistantService
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=None,
@@ -216,7 +207,7 @@ async def lifespan(app: FastAPI):
     # empty state loudly (separate from working auto-registration).
     if database:
         try:
-            from src.services.assistant.tools.confluence_tool import register_confluence_tools
+            from .core.tools.confluence_tool import register_confluence_tools
 
             register_confluence_tools(database=database)
             # Sanity count with a single retry — the DB pool may still be

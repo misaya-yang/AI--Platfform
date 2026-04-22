@@ -75,7 +75,7 @@ class CapturingModelRegistry:
         return self._model_info
 
     async def chat_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        from src.services.assistant.models.model_registry import StreamDelta
+        from assistant_service.core.models.model_registry import StreamDelta
 
         # Record the call so the test can inspect tools + native_search_config.
         self.calls.append(
@@ -112,7 +112,7 @@ def _tool_names(tools: list[dict[str, Any]] | None) -> list[str]:
 @pytest.mark.asyncio
 async def test_native_search_model_drops_search_web_and_forwards_config() -> None:
     """Capable model: search_web stripped, native_search_config propagated."""
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     # Script: one iteration that returns plain text and finishes.
     registry = CapturingModelRegistry(
@@ -164,7 +164,7 @@ async def test_native_search_model_drops_search_web_and_forwards_config() -> Non
 @pytest.mark.asyncio
 async def test_non_native_model_keeps_search_web_and_no_config() -> None:
     """Non-capable model: search_web stays; no native_search_config sent."""
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     registry = CapturingModelRegistry(
         model_info=FakeNonNativeModelInfo(),
@@ -226,7 +226,7 @@ async def test_native_search_missing_model_info_falls_back_safely() -> None:
     tool schema passes through untouched. This guards the `if _model_info`
     guard at agent_loop.py:1930.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     registry = CapturingModelRegistry(
         model_info=None,  # get_model returns None
@@ -272,7 +272,7 @@ async def test_gemini_with_function_tools_suppresses_native_search() -> None:
     Contract: when provider == google AND function tools are present, the
     loop must NOT forward native_search_config and must NOT drop search_web.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     registry = CapturingModelRegistry(
         model_info=FakeGeminiModelInfo(),

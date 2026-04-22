@@ -25,7 +25,7 @@ import respx
 
 
 def test_filter_and_rank_prioritizes_name_match():
-    from src.services.assistant.tools.confluence_tool import _filter_and_rank_spaces
+    from assistant_service.core.tools.confluence_tool import _filter_and_rank_spaces
 
     spaces = [
         {"name": "Engineering", "key": "ENG", "description": ""},
@@ -42,7 +42,7 @@ def test_filter_and_rank_prioritizes_name_match():
 
 
 def test_filter_and_rank_empty_query_passes_through():
-    from src.services.assistant.tools.confluence_tool import _filter_and_rank_spaces
+    from assistant_service.core.tools.confluence_tool import _filter_and_rank_spaces
 
     spaces = [{"name": "A", "key": "A", "description": ""}]
     assert _filter_and_rank_spaces(spaces, "") == spaces
@@ -50,7 +50,7 @@ def test_filter_and_rank_empty_query_passes_through():
 
 def test_filter_and_rank_multi_token_query():
     """A query like 'sales qa' should match spaces that hit EITHER token."""
-    from src.services.assistant.tools.confluence_tool import _filter_and_rank_spaces
+    from assistant_service.core.tools.confluence_tool import _filter_and_rank_spaces
 
     spaces = [
         {"name": "Sales QA", "key": "SALESQA", "description": ""},
@@ -72,7 +72,7 @@ def test_filter_and_rank_multi_token_query():
 @pytest.mark.asyncio
 @respx.mock
 async def test_list_spaces_normalizes_v2_response():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/api/v2/spaces").mock(
         return_value=httpx.Response(
@@ -109,7 +109,7 @@ async def test_list_spaces_normalizes_v2_response():
 @pytest.mark.asyncio
 @respx.mock
 async def test_list_spaces_applies_query_filter_client_side():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/api/v2/spaces").mock(
         return_value=httpx.Response(
@@ -136,7 +136,7 @@ async def test_list_spaces_applies_query_filter_client_side():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_space_by_id_v2():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/api/v2/spaces/42").mock(
         return_value=httpx.Response(
@@ -163,7 +163,7 @@ async def test_get_space_by_id_v2():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_space_returns_none_on_404():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/api/v2/spaces/999").mock(
         return_value=httpx.Response(404, json={"message": "not found"})
@@ -177,7 +177,7 @@ async def test_get_space_returns_none_on_404():
 @pytest.mark.asyncio
 @respx.mock
 async def test_get_space_by_key_uses_list_endpoint():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     # get_space(space_key=...) should hit the LIST endpoint with keys=...,
     # not the item endpoint (which needs numeric id).
@@ -213,14 +213,14 @@ async def test_get_space_by_key_uses_list_endpoint():
 
 
 def _read_req(arguments: dict) -> "ToolCallRequest":  # type: ignore[name-defined]
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     return ToolCallRequest(
         call_id="c", tool_name="confluence_read", arguments=arguments
     )
 
 
 def _write_req(arguments: dict) -> "ToolCallRequest":  # type: ignore[name-defined]
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     return ToolCallRequest(
         call_id="c", tool_name="confluence_write", arguments=arguments
     )
@@ -230,7 +230,7 @@ def _write_req(arguments: dict) -> "ToolCallRequest":  # type: ignore[name-defin
 @respx.mock
 async def test_read_list_spaces_accepts_comma_string_keys():
     """Model often serializes arrays as comma-strings; executor must cope."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )
@@ -250,7 +250,7 @@ async def test_read_list_spaces_accepts_comma_string_keys():
 @pytest.mark.asyncio
 @respx.mock
 async def test_read_list_spaces_empty_gives_helpful_message():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )
@@ -268,7 +268,7 @@ async def test_read_list_spaces_empty_gives_helpful_message():
 @pytest.mark.asyncio
 @respx.mock
 async def test_read_list_spaces_caps_shown_at_25():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )
@@ -297,7 +297,7 @@ async def test_read_list_spaces_caps_shown_at_25():
 
 @pytest.mark.asyncio
 async def test_read_get_space_requires_id_or_key():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )
@@ -311,7 +311,7 @@ async def test_read_get_space_requires_id_or_key():
 
 @pytest.mark.asyncio
 async def test_read_rejects_unknown_action():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )
@@ -328,7 +328,7 @@ async def test_read_rejects_unknown_action():
 async def test_search_escapes_cql_injection_attempts():
     """A query with a quote must be escaped so it can't inject additional
     CQL clauses (e.g. `foo" OR space="ADMIN`)."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -346,7 +346,7 @@ async def test_search_escapes_cql_injection_attempts():
 @pytest.mark.asyncio
 async def test_search_rejects_bad_space_key():
     """A space_key must match `[A-Za-z0-9]+` — anything else is a CQL injection attempt."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     client = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="invalid space_key"):
@@ -357,7 +357,7 @@ async def test_search_rejects_bad_space_key():
 @respx.mock
 async def test_read_http_error_clean_surface():
     """A 500 from the server should become a clean tool error — not a traceback."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient,
         ConfluenceReadExecutor,
     )

@@ -54,7 +54,7 @@ class FakeModelRegistry:
         return FakeModelInfo()
 
     async def chat_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        from src.services.assistant.models.model_registry import StreamDelta
+        from assistant_service.core.models.model_registry import StreamDelta
 
         # Capture the prompt/messages passed by AgentLoop for assertions.
         self.last_messages = kwargs.get("messages")
@@ -107,7 +107,7 @@ class FakeToolInvoker:
     async def invoke(
         self, tool_name: str, arguments: dict[str, Any], context: Any, cancel_event: Any = None
     ) -> Any:
-        from src.services.assistant.tools.tool_registry import ToolCallResult
+        from assistant_service.core.tools.tool_registry import ToolCallResult
 
         self.invocation_count += 1
         self.invocations.append((tool_name, arguments))
@@ -139,7 +139,7 @@ class FakeArtifactStorage:
 
 @pytest.mark.asyncio
 async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     # One iteration, direct text, no tools.
     model = FakeModelRegistry(
@@ -174,7 +174,7 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
     Regression: frontend may send a style-only system_prompt.
     Streaming-first must keep the base tool/KR instructions and append extra.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     model = FakeModelRegistry(
         scripted=[
@@ -211,7 +211,7 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_tool_artifact_semantic_events() -> None:
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     # Iteration 1: model requests a generate_image tool call (no text).
     # Iteration 2: model responds with final text.
@@ -294,7 +294,7 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_kb_web_panel_events() -> None:
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     tool_calls = [
         {
@@ -367,7 +367,7 @@ async def test_streaming_first_kb_web_panel_events() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     duplicate_kb_calls = [
         {
@@ -431,7 +431,7 @@ async def test_streaming_first_skips_duplicate_kb_calls_in_same_turn() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_first_merges_chunked_tool_calls_before_execute() -> None:
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     chunked_tool_calls = [
         {
@@ -511,7 +511,7 @@ async def test_streaming_first_dedups_batch_level_duplicate_tool_calls() -> None
       * the tool runs exactly once
       * exactly one `step_started` / `tool_call_started` pair is emitted
     """
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     quiz_args = (
         '{"title":"Quiz","questions":[{"question_num":1,'
@@ -591,7 +591,7 @@ async def test_streaming_first_batch_dedup_preserves_distinct_tool_calls() -> No
     """Guardrail: the batch-level dedup must NOT collapse genuinely
     different tool calls. Same tool name with different args is legitimate
     (e.g. two search_web queries, or two generate_image prompts)."""
-    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     tool_calls = [
         {

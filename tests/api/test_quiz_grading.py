@@ -14,7 +14,7 @@ fix:
 
 from __future__ import annotations
 
-from src.services.assistant.quiz.quiz_grader import QuizGrader
+from assistant_service.core.quiz.quiz_grader import QuizGrader
 
 
 def _q(qid: str, qtype: str, correct):

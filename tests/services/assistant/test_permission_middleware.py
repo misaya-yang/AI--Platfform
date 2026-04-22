@@ -12,12 +12,12 @@ from typing import Any
 
 import pytest
 
-from src.services.assistant.agent.middleware import (
+from assistant_service.core.agent.middleware import (
     MiddlewareChain,
     ToolVerdict,
     VerdictKind,
 )
-from src.services.assistant.agent.middlewares.permission import (
+from assistant_service.core.agent.middlewares.permission import (
     PermissionMiddleware,
     allow_all,
     policy_from_sets,

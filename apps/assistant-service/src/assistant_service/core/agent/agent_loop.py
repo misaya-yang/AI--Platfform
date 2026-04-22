@@ -130,8 +130,8 @@ from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from ..working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
-    from ....core.auth.user_resolver import UserContext
-    from ...knowledge.knowledge_service import KnowledgeService
+    from src.core.auth.user_resolver import UserContext
+    from src.services.knowledge.knowledge_service import KnowledgeService
     from ..models.model_registry import ModelRegistry
     from ..memory_service import MemoryService
 

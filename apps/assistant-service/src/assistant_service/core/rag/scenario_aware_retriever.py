@@ -28,8 +28,8 @@ from ai_gateway_core.logging import get_logger
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
-    from ....core.auth.user_resolver import UserContext
-    from ...knowledge.knowledge_service import KnowledgeService
+    from src.core.auth.user_resolver import UserContext
+    from src.services.knowledge.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
 

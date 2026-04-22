@@ -14,15 +14,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from src.services.assistant.assistant_service import (
+from assistant_service.core.assistant_service import (
     AssistantConfig,
     AssistantService,
     StreamEventType,
 )
-from src.services.assistant.task_planner import (
+from assistant_service.core.task_planner import (
     TaskPlanner,
 )
-from src.services.assistant.tool_orchestrator import (
+from assistant_service.core.tool_orchestrator import (
     ToolExecutionResult,
     ToolOrchestrator,
 )
@@ -84,11 +84,11 @@ def mock_context_manager():
 @pytest.fixture
 def assistant_service(mock_model_registry, mock_context_manager):
     """Create an AssistantService instance for testing."""
-    with patch("src.services.assistant.assistant_service.get_context_manager") as mock_get_ctx:
+    with patch("assistant_service.core.assistant_service.get_context_manager") as mock_get_ctx:
         mock_get_ctx.return_value = mock_context_manager
-        with patch("src.services.assistant.assistant_service.get_rag_evaluator"):
-            with patch("src.services.assistant.assistant_service.get_artifact_storage"):
-                with patch("src.services.assistant.assistant_service.create_file_processor"):
+        with patch("assistant_service.core.assistant_service.get_rag_evaluator"):
+            with patch("assistant_service.core.assistant_service.get_artifact_storage"):
+                with patch("assistant_service.core.assistant_service.create_file_processor"):
                     service = AssistantService(
                         model_registry=mock_model_registry,
                         kb_service=None,
@@ -161,10 +161,10 @@ class TestAssistantServiceProperties:
         """Test that injected task planner is used."""
         custom_planner = TaskPlanner()
 
-        with patch("src.services.assistant.assistant_service.get_context_manager"):
-            with patch("src.services.assistant.assistant_service.get_rag_evaluator"):
-                with patch("src.services.assistant.assistant_service.get_artifact_storage"):
-                    with patch("src.services.assistant.assistant_service.create_file_processor"):
+        with patch("assistant_service.core.assistant_service.get_context_manager"):
+            with patch("assistant_service.core.assistant_service.get_rag_evaluator"):
+                with patch("assistant_service.core.assistant_service.get_artifact_storage"):
+                    with patch("assistant_service.core.assistant_service.create_file_processor"):
                         service = AssistantService(
                             model_registry=mock_model_registry,
                             task_planner=custom_planner,
@@ -178,7 +178,7 @@ class TestAssistantServiceProperties:
         """Test that get_tool_orchestrator creates instance on demand."""
         assert assistant_service._tool_orchestrator is None
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_get_registry.return_value = mock_registry
 
@@ -190,7 +190,7 @@ class TestAssistantServiceProperties:
 
     def test_get_tool_orchestrator_returns_cached(self, assistant_service):
         """Test that orchestrator is cached after first creation."""
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_get_registry.return_value = mock_registry
 
@@ -216,7 +216,7 @@ class TestExecuteWithPlanning:
         config = AssistantConfig(enable_task_planning=True)
 
         # Mock the tool registry
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_get_registry.return_value = mock_registry
@@ -245,7 +245,7 @@ class TestExecuteWithPlanning:
         """Test that WORKING_MEMORY_UPDATE events are yielded."""
         config = AssistantConfig(enable_task_planning=True)
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_get_registry.return_value = mock_registry
@@ -275,7 +275,7 @@ class TestExecuteWithPlanning:
         config = AssistantConfig(enable_task_planning=True)
         message = "Generate a comparison report"
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_get_registry.return_value = mock_registry
@@ -307,7 +307,7 @@ class TestExecuteWithPlanning:
         mock_planner.create_plan = AsyncMock(side_effect=Exception("Planning failed"))
         assistant_service._task_planner = mock_planner
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_get_registry.return_value = mock_registry
@@ -441,7 +441,7 @@ class TestChatStreamWithPlanning:
 
         mock_model_registry.chat_stream = mock_stream
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_registry.get_openai_schemas.return_value = []
@@ -492,7 +492,7 @@ class TestChatStreamWithPlanning:
 
         mock_model_registry.chat_stream = mock_stream
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_registry.get_openai_schemas.return_value = []
@@ -549,7 +549,7 @@ class TestChatStreamWithPlanning:
 
         mock_model_registry.chat_stream = mock_stream
 
-        with patch("src.services.assistant.tools.get_tool_registry") as mock_get_registry:
+        with patch("assistant_service.core.tools.get_tool_registry") as mock_get_registry:
             mock_registry = MagicMock()
             mock_registry.list_tools.return_value = []
             mock_registry.get_openai_schemas.return_value = []

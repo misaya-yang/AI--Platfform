@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 def test_list_items_become_markdown_bullets():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = "<ul><li>alpha</li><li>beta</li><li>gamma</li></ul>"
     out = _html_to_structured_text(html)
@@ -21,7 +21,7 @@ def test_list_items_become_markdown_bullets():
 
 
 def test_links_preserved_as_markdown():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = '<p>See <a href="https://example.com/x">the page</a> for details.</p>'
     out = _html_to_structured_text(html)
@@ -29,7 +29,7 @@ def test_links_preserved_as_markdown():
 
 
 def test_headings_become_markdown_headings():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = "<h2>First Round</h2><ul><li>item1</li></ul><h2>Second Round</h2>"
     out = _html_to_structured_text(html)
@@ -40,7 +40,7 @@ def test_headings_become_markdown_headings():
 def test_excerpt_truncates_on_line_boundary():
     """A 800-char cap shouldn't chop a bullet mid-word — prefer the last
     newline before the cap so the excerpt ends cleanly."""
-    from src.services.assistant.tools.confluence_tool import _excerpt_from_html
+    from assistant_service.core.tools.confluence_tool import _excerpt_from_html
 
     items = "\n".join(f"<li>item {i} with some content</li>" for i in range(50))
     html = f"<ul>{items}</ul>"
@@ -55,7 +55,7 @@ def test_excerpt_truncates_on_line_boundary():
 def test_excerpt_signals_truncation():
     """When truncated, the excerpt MUST say so — the model uses this signal
     to decide whether to escalate to read_confluence_page."""
-    from src.services.assistant.tools.confluence_tool import _excerpt_from_html
+    from assistant_service.core.tools.confluence_tool import _excerpt_from_html
 
     html = "<p>" + ("x" * 5000) + "</p>"
     excerpt = _excerpt_from_html(html, max_chars=300)
@@ -64,7 +64,7 @@ def test_excerpt_signals_truncation():
 
 
 def test_full_content_under_cap_untouched():
-    from src.services.assistant.tools.confluence_tool import _excerpt_from_html
+    from assistant_service.core.tools.confluence_tool import _excerpt_from_html
 
     html = "<p>short page</p>"
     excerpt = _excerpt_from_html(html, max_chars=800)
@@ -73,7 +73,7 @@ def test_full_content_under_cap_untouched():
 
 
 def test_html_entities_decoded():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = "<p>A &amp; B &lt; C, see &quot;docs&quot;.</p>"
     out = _html_to_structured_text(html)
@@ -82,7 +82,7 @@ def test_html_entities_decoded():
 
 
 def test_br_and_p_become_line_breaks():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = "<p>line one</p><p>line two</p>line three<br/>line four"
     out = _html_to_structured_text(html)
@@ -91,7 +91,7 @@ def test_br_and_p_become_line_breaks():
 
 
 def test_nested_tags_stripped_but_text_kept():
-    from src.services.assistant.tools.confluence_tool import _html_to_structured_text
+    from assistant_service.core.tools.confluence_tool import _html_to_structured_text
 
     html = "<div><span><strong>bold</strong> and <em>italic</em></span></div>"
     out = _html_to_structured_text(html)

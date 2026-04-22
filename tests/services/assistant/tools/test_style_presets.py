@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.assistant.tools.style_presets import (
+from assistant_service.core.tools.style_presets import (
     STYLE_PRESETS,
     StyleDefinition,
     StylePreset,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.services.assistant.guardrails import (
+from assistant_service.core.guardrails import (
     BANNED_PHRASES,
     QUALITY_THRESHOLDS,
     TOOL_CONSTRAINTS,

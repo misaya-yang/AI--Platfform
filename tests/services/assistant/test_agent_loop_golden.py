@@ -105,7 +105,7 @@ EXPECTED_STREAM_EVENT_TYPES: frozenset[str] = frozenset(
 def test_stream_event_type_vocabulary_is_frozen() -> None:
     """Adding/removing an event type is an external contract change — update both
     this snapshot and the frontend (web/src/lib/sse.ts) in the same PR."""
-    from src.services.assistant.assistant_service import StreamEventType
+    from assistant_service.core.assistant_service import StreamEventType
 
     actual = frozenset(e.value for e in StreamEventType)
     removed = EXPECTED_STREAM_EVENT_TYPES - actual
@@ -180,7 +180,7 @@ def test_assistant_config_fields_are_frozen() -> None:
     """Frontend (web/src/pages/playground) sends these fields verbatim through the
     HTTP /chat route (apps/assistant-service/.../api/routes/chat.py). Removing any
     breaks the playground request build."""
-    from src.services.assistant.assistant_service import AssistantConfig
+    from assistant_service.core.assistant_service import AssistantConfig
 
     actual = frozenset(AssistantConfig.__dataclass_fields__.keys())
     removed = EXPECTED_ASSISTANT_CONFIG_FIELDS - actual
@@ -251,7 +251,7 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
 def test_agent_loop_config_fields_are_frozen() -> None:
     """Refactor barrier: any AgentLoopConfig field change should be intentional
     and land alongside an update to this snapshot."""
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     actual = frozenset(AgentLoopConfig.__dataclass_fields__.keys())
     removed = EXPECTED_AGENT_LOOP_CONFIG_FIELDS - actual
@@ -272,7 +272,7 @@ def test_agent_loop_config_fields_are_frozen() -> None:
 def test_assistant_stream_event_shape_is_frozen() -> None:
     """The SSE route serializes these three fields verbatim; any rename breaks the
     wire protocol with the frontend SSE parser."""
-    from src.services.assistant.assistant_service import AssistantStreamEvent
+    from assistant_service.core.assistant_service import AssistantStreamEvent
 
     fields = set(AssistantStreamEvent.__dataclass_fields__.keys())
     assert fields == {"event_type", "data", "timestamp"}, (
@@ -309,7 +309,7 @@ def test_event_payload_contracts_documented() -> None:
     a paired frontend change note. It intentionally does not invoke the loop;
     shape verification under a fake model happens in integration tests."""
     # Sanity: every event in this contract must be a known StreamEventType.
-    from src.services.assistant.assistant_service import StreamEventType
+    from assistant_service.core.assistant_service import StreamEventType
 
     known = {e.value for e in StreamEventType}
     unknown = set(EXPECTED_EVENT_DATA_KEYS.keys()) - known

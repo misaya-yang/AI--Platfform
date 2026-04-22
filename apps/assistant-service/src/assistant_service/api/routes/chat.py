@@ -51,8 +51,8 @@ class ChatRequest(BaseModel):
 
 def _build_config(body: ChatRequest, model_registry):
     """Build AssistantConfig from request body."""
-    from src.services.assistant.assistant_service import AssistantConfig, RAGMode
-    from src.services.assistant.models.model_registry import ModelProvider
+    from ...core.assistant_service import AssistantConfig, RAGMode
+    from ...core.models.model_registry import ModelProvider
 
     kb_mode = RAGMode.AUTO
     if body.kb_mode == "tool":

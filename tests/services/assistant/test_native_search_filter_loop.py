@@ -98,7 +98,7 @@ class CapturingModelRegistry:
         return self._model_infos.get(model_id)
 
     async def chat_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        from src.services.assistant.models.model_registry import StreamDelta
+        from assistant_service.core.models.model_registry import StreamDelta
 
         # Capture everything the loop passes — we assert on ``tools`` and
         # ``native_search_config`` below.
@@ -180,7 +180,7 @@ def _build_loop(
     model_infos: dict[str, FakeModelInfo],
     tool_names: list[str],
 ) -> tuple[Any, CapturingModelRegistry]:
-    from src.services.assistant.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.agent_loop import AgentLoop
 
     registry = CapturingModelRegistry(model_infos=model_infos)
     invoker = FakeToolInvoker(tool_names=tool_names)
@@ -205,7 +205,7 @@ async def test_native_capable_model_drops_search_web_from_tools() -> None:
 
     This is the exact regression: Qwen + Tavily leaking through.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     loop, registry = _build_loop(
         model_infos={
@@ -249,7 +249,7 @@ async def test_non_native_model_keeps_search_web_in_tools() -> None:
 
     This is the negative case — ensures the filter isn't over-aggressive.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     loop, registry = _build_loop(
         model_infos={
@@ -297,7 +297,7 @@ async def test_native_search_config_passthrough_for_capable_model() -> None:
     skip injection and the bug becomes asymptomatic — no search_web tool,
     but also no enable_search flag. This asserts the full wiring.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     loop, registry = _build_loop(
         model_infos={
@@ -338,7 +338,7 @@ async def test_native_capable_model_preserves_other_tools() -> None:
     This guards against a regression where someone nukes the whole tool
     list instead of filtering by name.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     loop, registry = _build_loop(
         model_infos={
@@ -392,7 +392,7 @@ async def test_gemini_keeps_search_web_and_suppresses_native() -> None:
     returns 400. The assistant always has function tools in scope, so the
     policy is to unconditionally suppress native-search for Google provider.
     """
-    from src.services.assistant.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
 
     loop, registry = _build_loop(
         model_infos={

@@ -12,7 +12,7 @@ router = APIRouter()
 @router.get("/tools")
 async def list_tools(request: Request, user: UserContext = Depends(get_user_context)):
     """List available tools."""
-    from src.services.assistant.tools import get_tool_registry
+    from ...core.tools import get_tool_registry
     registry = get_tool_registry()
     tools = registry.list_tools()
     return {

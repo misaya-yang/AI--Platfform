@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.assistant.task_planner import (
+from assistant_service.core.task_planner import (
     CircularDependencyError,
     ExecutionPlan,
     PlannedTask,

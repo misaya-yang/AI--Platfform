@@ -29,7 +29,7 @@ fails loudly.
 
 from __future__ import annotations
 
-from src.services.assistant.tools.quiz_tool import QUIZ_GENERATION_DEFINITION
+from assistant_service.core.tools.quiz_tool import QUIZ_GENERATION_DEFINITION
 
 
 def _questions_schema() -> dict:
@@ -110,7 +110,7 @@ def test_gemini_body_carries_nested_schema_through():
     import importlib
 
     mod = importlib.import_module(
-        "src.services.assistant.models.model_registry"
+        "assistant_service.core.models.model_registry"
     )
     reg = mod.ModelRegistry(use_default_models=True)
     openai_schema = QUIZ_GENERATION_DEFINITION.to_openai_schema()

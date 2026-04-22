@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     ChartBlock,
     ChartSpec,
@@ -41,7 +41,7 @@ from src.services.assistant.docgen.ir import (
     XlsxRow,
     XlsxSheet,
 )
-from src.services.assistant.docgen.renderers import (
+from assistant_service.core.docgen.renderers import (
     DocxRenderer,
     PdfRenderer,
     PptxRenderer,

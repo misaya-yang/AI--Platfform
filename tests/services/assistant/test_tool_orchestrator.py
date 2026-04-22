@@ -15,18 +15,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.assistant.task_planner import (
+from assistant_service.core.task_planner import (
     ExecutionPlan,
     PlannedTask,
     TaskType,
 )
-from src.services.assistant.tool_invoker import ToolInvocationContext
-from src.services.assistant.tool_orchestrator import (
+from assistant_service.core.tool_invoker import ToolInvocationContext
+from assistant_service.core.tool_orchestrator import (
     ToolExecutionResult,
     ToolOrchestrator,
     create_tool_orchestrator,
 )
-from src.services.assistant.working_memory import (
+from assistant_service.core.working_memory import (
     TaskStatus,
     WorkingMemory,
 )

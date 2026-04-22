@@ -1,6 +1,6 @@
 """Preference extraction tests."""
 
-from src.services.assistant.memory.preference_extractor import extract_preferences
+from assistant_service.core.memory.preference_extractor import extract_preferences
 
 
 def test_extract_language_preference():

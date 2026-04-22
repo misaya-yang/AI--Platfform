@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from src.models.session import SessionMessage
-from src.services.assistant.assistant_service import (
+from assistant_service.core.assistant_service import (
     _append_tool_results_block,
     _session_history_to_messages,
 )

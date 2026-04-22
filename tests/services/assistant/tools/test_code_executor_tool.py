@@ -9,18 +9,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.assistant.code_executor import (
+from assistant_service.core.code_executor import (
     CodeExecutionResult,
     CodeExecutorService,
     ExecutionStatus,
     OutputFile,
 )
-from src.services.assistant.tools.code_executor_tool import (
+from assistant_service.core.tools.code_executor_tool import (
     CODE_EXECUTOR_TOOL,
     CodeExecutorToolExecutor,
     register_code_executor_tool,
 )
-from src.services.assistant.tools.tool_registry import (
+from assistant_service.core.tools.tool_registry import (
     ToolCallRequest,
     ToolCategory,
     ToolRegistry,
@@ -334,7 +334,7 @@ class TestToolRegistration:
 
         # Patch the register_tool function
         with patch(
-            "src.services.assistant.tools.code_executor_tool.register_tool"
+            "assistant_service.core.tools.code_executor_tool.register_tool"
         ) as mock_register:
             register_code_executor_tool(mock_executor)
 
@@ -347,7 +347,7 @@ class TestToolRegistration:
     def test_register_code_executor_tool_without_service(self):
         """Test that registration is skipped when no service is provided."""
         with patch(
-            "src.services.assistant.tools.code_executor_tool.register_tool"
+            "assistant_service.core.tools.code_executor_tool.register_tool"
         ) as mock_register:
             register_code_executor_tool(None)
 
@@ -360,7 +360,7 @@ class TestToolRegistration:
         mock_executor.is_docker_available.return_value = False
 
         with patch(
-            "src.services.assistant.tools.code_executor_tool.register_tool"
+            "assistant_service.core.tools.code_executor_tool.register_tool"
         ) as mock_register:
             register_code_executor_tool(mock_executor)
 

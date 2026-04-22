@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     HeadingBlock,
     ParagraphBlock,
     PptxSlide,
     QuoteBlock,
 )
-from src.services.assistant.docgen.planners.base import Brief
-from src.services.assistant.docgen.planners.layout_rules import (
+from assistant_service.core.docgen.planners.base import Brief
+from assistant_service.core.docgen.planners.layout_rules import (
     BigStatRule,
     ComparisonTableRule,
     DarkCardInterleaveRule,

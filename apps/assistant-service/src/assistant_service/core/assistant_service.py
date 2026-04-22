@@ -38,17 +38,17 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from ..session.database_session_manager import DatabaseSessionManager
+    from src.services.session.database_session_manager import DatabaseSessionManager
     from .code_executor import InputFile, KBDocument
     from .memory_service import MemoryService
 
 from cachetools import TTLCache
-from ...core.auth.user_resolver import UserContext
+from src.core.auth.user_resolver import UserContext
 from ai_gateway_core.exceptions import PermissionDeniedError
-from ..knowledge.knowledge_service import KnowledgeService
-from ..metrics.realtime_metrics import get_realtime_metrics
-from ..metrics.usage_recorder import get_usage_recorder
-from ..storage import get_artifact_storage, get_file_storage
+from src.services.knowledge.knowledge_service import KnowledgeService
+from src.services.metrics.realtime_metrics import get_realtime_metrics
+from src.services.metrics.usage_recorder import get_usage_recorder
+from src.services.storage import get_artifact_storage, get_file_storage
 from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
 from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
@@ -4434,7 +4434,7 @@ Please use this web search context to inform your response when relevant."""
             chunks = list(ctx.chunks)
             if authority_sort:
                 try:
-                    from ..knowledge.islamic_metadata import get_authority_order
+                    from src.services.knowledge.islamic_metadata import get_authority_order
 
                     def _authority_key(ch: dict[str, Any]) -> int:
                         meta = ch.get("metadata") or {}

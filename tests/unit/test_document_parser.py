@@ -30,7 +30,7 @@ def temp_storage():
 @pytest.fixture
 def parser(temp_storage):
     """Create a DocumentParser instance with temporary storage."""
-    from src.services.assistant.document_parser import DocumentParser
+    from assistant_service.core.document_parser import DocumentParser
 
     return DocumentParser(storage_base_path=temp_storage)
 
@@ -66,14 +66,14 @@ class TestDocumentParser:
 
     def test_init_default_storage_path(self):
         """Test initialization with default storage path."""
-        from src.services.assistant.document_parser import FILE_STORAGE_PATH, DocumentParser
+        from assistant_service.core.document_parser import FILE_STORAGE_PATH, DocumentParser
 
         parser = DocumentParser()
         assert parser.storage_base_path == FILE_STORAGE_PATH
 
     def test_init_custom_storage_path(self, temp_storage):
         """Test initialization with custom storage path."""
-        from src.services.assistant.document_parser import DocumentParser
+        from assistant_service.core.document_parser import DocumentParser
 
         parser = DocumentParser(storage_base_path=temp_storage)
         assert parser.storage_base_path == temp_storage
@@ -139,7 +139,7 @@ class TestPathResolution:
 
     def test_resolve_path_file_not_found(self, parser):
         """Test that non-existent file raises DocumentParseError."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         with pytest.raises(DocumentParseError) as exc_info:
             parser._resolve_path("/uploads/test_user/nonexistent.txt")
@@ -148,7 +148,7 @@ class TestPathResolution:
 
     def test_resolve_path_traversal_attack(self, parser, temp_storage):
         """Test that path traversal attempts are blocked."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         # Create a file outside the storage directory
         outside_file = temp_storage.parent / "outside_file.txt"
@@ -166,7 +166,7 @@ class TestPathResolution:
 
     def test_resolve_path_directory_not_file(self, parser, temp_storage):
         """Test that directory paths raise DocumentParseError."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         # Create a directory where a file would be expected
         dir_path = temp_storage / "uploads" / "test_user" / "not_a_file"
@@ -199,7 +199,7 @@ class TestValidateExtension:
 
     def test_validate_extension_invalid(self, parser, temp_storage):
         """Test validation fails for unsupported extensions."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         user_dir = temp_storage / "uploads" / "test_user"
         user_dir.mkdir(parents=True, exist_ok=True)
@@ -220,7 +220,7 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_txt_file(self, parser, sample_txt_file):
         """Test parsing a text file."""
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             # Mock unstructured elements
             mock_element1 = MagicMock()
             mock_element1.text = "This is a test document."
@@ -241,7 +241,7 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_md_file(self, parser, sample_md_file):
         """Test parsing a markdown file."""
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_element = MagicMock()
             mock_element.text = "# Heading\nThis is bold text."
             mock_partition.return_value = [mock_element]
@@ -259,7 +259,7 @@ class TestParsing:
         empty_file = user_dir / "empty.txt"
         empty_file.write_text("")
 
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_partition.return_value = []
 
             result = await parser.parse("/uploads/test_user/empty.txt")
@@ -269,7 +269,7 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_element_without_text(self, parser, sample_txt_file):
         """Test parsing handles elements without text attribute."""
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_element1 = MagicMock()
             mock_element1.text = "Has text"
             mock_element2 = MagicMock(spec=[])  # No text attribute
@@ -292,11 +292,11 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_unstructured_import_error(self, parser, sample_txt_file):
         """Test handling when unstructured library is not installed."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         with patch.dict("sys.modules", {"unstructured.partition.auto": None}):
             with patch(
-                "src.services.assistant.document_parser.partition",
+                "assistant_service.core.document_parser.partition",
                 side_effect=ImportError("No module"),
             ):
                 with pytest.raises(DocumentParseError) as exc_info:
@@ -307,9 +307,9 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_generic_error(self, parser, sample_txt_file):
         """Test handling generic parsing errors."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_partition.side_effect = Exception("Parsing failed unexpectedly")
 
             with pytest.raises(DocumentParseError) as exc_info:
@@ -320,7 +320,7 @@ class TestParsing:
     @pytest.mark.asyncio
     async def test_parse_to_text_alias(self, parser, sample_txt_file):
         """Test that parse_to_text is an alias for parse."""
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_element = MagicMock()
             mock_element.text = "Test content"
             mock_partition.return_value = [mock_element]
@@ -335,7 +335,7 @@ class TestDocumentParseError:
 
     def test_error_attributes(self):
         """Test DocumentParseError attributes."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         original = ValueError("Original error")
         error = DocumentParseError(
@@ -350,7 +350,7 @@ class TestDocumentParseError:
 
     def test_error_without_original(self):
         """Test DocumentParseError without original error."""
-        from src.services.assistant.document_parser import DocumentParseError
+        from assistant_service.core.document_parser import DocumentParseError
 
         error = DocumentParseError(
             "Test error message",
@@ -366,7 +366,7 @@ class TestConvenienceFunction:
     @pytest.mark.asyncio
     async def test_parse_document_function(self, temp_storage):
         """Test the parse_document convenience function."""
-        from src.services.assistant.document_parser import parse_document
+        from assistant_service.core.document_parser import parse_document
 
         # Create a test file
         user_dir = temp_storage / "uploads" / "test_user"
@@ -374,7 +374,7 @@ class TestConvenienceFunction:
         test_file = user_dir / "test.txt"
         test_file.write_text("Convenience function test")
 
-        with patch("src.services.assistant.document_parser.partition") as mock_partition:
+        with patch("assistant_service.core.document_parser.partition") as mock_partition:
             mock_element = MagicMock()
             mock_element.text = "Convenience function test"
             mock_partition.return_value = [mock_element]

@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from src.services.assistant.docgen.storage import (
+from assistant_service.core.docgen.storage import (
     LocalArtifactStore,
     MemoryArtifactStore,
 )
-from src.services.assistant.docgen.storage.base import compute_sha256
-from src.services.assistant.docgen.storage.signing import sign_url, verify_url
-from src.services.assistant.docgen.templates import (
+from assistant_service.core.docgen.storage.base import compute_sha256
+from assistant_service.core.docgen.storage.signing import sign_url, verify_url
+from assistant_service.core.docgen.templates import (
     Template,
     TemplateRegistry,
     default_registry,
@@ -167,7 +167,7 @@ def test_tenant_template_overrides_isolated():
 
 @pytest.mark.asyncio
 async def test_docgen_service_end_to_end(tmp_path):
-    from src.services.assistant.docgen.service import DocgenService, GenerateRequest
+    from assistant_service.core.docgen.service import DocgenService, GenerateRequest
 
     store = LocalArtifactStore(tmp_path / "artifacts")
     svc = DocgenService(artifact_store=store, verify=True, max_fix_rounds=1)
@@ -189,7 +189,7 @@ async def test_docgen_service_end_to_end(tmp_path):
 
 @pytest.mark.asyncio
 async def test_docgen_service_stream_events_and_artifact(tmp_path):
-    from src.services.assistant.docgen.service import DocgenService, GenerateRequest
+    from assistant_service.core.docgen.service import DocgenService, GenerateRequest
 
     store = LocalArtifactStore(tmp_path / "artifacts")
     svc = DocgenService(artifact_store=store, verify=False)  # faster
@@ -215,7 +215,7 @@ async def test_docgen_service_stream_events_and_artifact(tmp_path):
 
 
 def test_docgen_service_exposes_skills_system_prompt_stub():
-    from src.services.assistant.docgen.service import DocgenService
+    from assistant_service.core.docgen.service import DocgenService
 
     svc = DocgenService()
     stub = svc.system_prompt_stub()
@@ -224,7 +224,7 @@ def test_docgen_service_exposes_skills_system_prompt_stub():
 
 
 def test_docgen_service_expand_skill_for_format():
-    from src.services.assistant.docgen.service import DocgenService
+    from assistant_service.core.docgen.service import DocgenService
 
     svc = DocgenService()
     expanded = svc.expand_skill("pptx", resources=["editing"])

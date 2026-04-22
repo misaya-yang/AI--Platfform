@@ -51,7 +51,7 @@ class _SilentMiddleware:
 
 @pytest.mark.asyncio
 async def test_chain_runs_middlewares_in_registration_order() -> None:
-    from src.services.assistant.agent.middleware import MiddlewareChain
+    from assistant_service.core.agent.middleware import MiddlewareChain
 
     chain = MiddlewareChain()
     chain.add(_AppendMiddleware("first"))
@@ -69,7 +69,7 @@ async def test_chain_runs_middlewares_in_registration_order() -> None:
 
 @pytest.mark.asyncio
 async def test_chain_handles_silent_middleware() -> None:
-    from src.services.assistant.agent.middleware import MiddlewareChain
+    from assistant_service.core.agent.middleware import MiddlewareChain
 
     chain = MiddlewareChain([_SilentMiddleware(), _AppendMiddleware("x")])
 
@@ -84,7 +84,7 @@ async def test_chain_handles_silent_middleware() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_chain_is_noop() -> None:
-    from src.services.assistant.agent.middleware import MiddlewareChain
+    from assistant_service.core.agent.middleware import MiddlewareChain
 
     chain = MiddlewareChain()
     messages: list[dict[str, Any]] = []
@@ -97,7 +97,7 @@ async def test_empty_chain_is_noop() -> None:
 def test_middleware_protocol_runtime_checkable() -> None:
     """A registered-checkable Protocol accepts any object with `name` +
     `before_call`. This guards against accidental Protocol → ABC drift."""
-    from src.services.assistant.agent.middleware import AgentMiddleware
+    from assistant_service.core.agent.middleware import AgentMiddleware
 
     assert isinstance(_SilentMiddleware(), AgentMiddleware)
     assert isinstance(_AppendMiddleware("a"), AgentMiddleware)

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     DocxContent,
     DocxIR,
@@ -26,10 +26,10 @@ from src.services.assistant.docgen.ir import (
     XlsxRow,
     XlsxSheet,
 )
-from src.services.assistant.docgen.ir.base import DocMetadata
-from src.services.assistant.docgen.planners import Brief
-from src.services.assistant.docgen.pipeline import DocgenPipeline
-from src.services.assistant.docgen.quality import (
+from assistant_service.core.docgen.ir.base import DocMetadata
+from assistant_service.core.docgen.planners import Brief
+from assistant_service.core.docgen.pipeline import DocgenPipeline
+from assistant_service.core.docgen.quality import (
     DocxXmlVerifier,
     FreshContextVisionCritic,
     PptxPdfVisualVerifier,
@@ -38,8 +38,8 @@ from src.services.assistant.docgen.quality import (
     XlsxFormulaVerifier,
     default_vision_critic,
 )
-from src.services.assistant.docgen.quality.types import IssueSeverity
-from src.services.assistant.docgen.renderers import RendererDispatcher
+from assistant_service.core.docgen.quality.types import IssueSeverity
+from assistant_service.core.docgen.renderers import RendererDispatcher
 
 
 GOLDEN = Path(__file__).parent / "golden" / "prompts.yaml"

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from src.services.assistant.docgen.sandbox import (
+from assistant_service.core.docgen.sandbox import (
     LocalSubprocessSandbox,
     SandboxTimeout,
 )

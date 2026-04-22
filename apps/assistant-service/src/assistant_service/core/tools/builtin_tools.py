@@ -27,7 +27,7 @@ from .tool_registry import (
 )
 
 if TYPE_CHECKING:
-    from ....services.knowledge.knowledge_service import KnowledgeService
+    from src.services.knowledge.knowledge_service import KnowledgeService
     from ..memory_service import MemoryService
 
 logger = get_logger(__name__)

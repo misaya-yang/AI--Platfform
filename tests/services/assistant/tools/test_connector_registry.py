@@ -15,12 +15,12 @@ from __future__ import annotations
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from src.services.assistant.tools.connector_registry import (
+from assistant_service.core.tools.connector_registry import (
     ConnectorRegistry,
     get_connector_registry,
     reset_connector_registry_for_tests,
 )
-from src.services.assistant.tools.tool_registry import (
+from assistant_service.core.tools.tool_registry import (
     ToolCallRequest,
     ToolCategory,
     ToolDefinition,
@@ -93,7 +93,7 @@ async def test_predicate_is_cached_within_ttl():
 @pytest.mark.asyncio
 async def test_cache_expires_after_ttl(monkeypatch):
     """After the TTL, the predicate is re-evaluated."""
-    import src.services.assistant.tools.connector_registry as cr
+    import assistant_service.core.tools.connector_registry as cr
 
     reg = ConnectorRegistry()
     calls = {"count": 0}

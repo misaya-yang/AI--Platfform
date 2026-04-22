@@ -25,7 +25,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from src.services.assistant.models.model_registry import (
+from assistant_service.core.models.model_registry import (
     DEFAULT_MODELS,
     ModelProvider,
     ModelRegistry,
@@ -191,7 +191,7 @@ async def test_chat_routes_vertex_model_to_vertex_endpoint(
     """When the registered model is tagged GOOGLE_VERTEX, ``chat`` must
     POST to the aiplatform host — not the AI Studio host — even if
     GOOGLE is also configured with its own (different) host."""
-    from src.services.assistant.models.model_registry import (
+    from assistant_service.core.models.model_registry import (
         ChatMessage,
         ModelInfo,
     )

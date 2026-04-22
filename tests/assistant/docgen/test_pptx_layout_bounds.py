@@ -30,7 +30,7 @@ import pytest
 from pptx import Presentation
 from pptx.util import Inches
 
-from src.services.assistant.docgen.ir import (
+from assistant_service.core.docgen.ir import (
     BulletBlock,
     ParagraphBlock,
     PptxContent,
@@ -38,8 +38,8 @@ from src.services.assistant.docgen.ir import (
     PptxSlide,
     Theme,
 )
-from src.services.assistant.docgen.ir.base import DocMetadata
-from src.services.assistant.docgen.renderers.pptx_renderer import PptxRenderer
+from assistant_service.core.docgen.ir.base import DocMetadata
+from assistant_service.core.docgen.renderers.pptx_renderer import PptxRenderer
 
 
 SLIDE_W_EMU = int(13.333 * 914400)
@@ -207,7 +207,7 @@ def test_anchor_word_handles_cjk_title() -> None:
     """B2 regression: a CJK title like ``第三层:护栏`` used to produce empty
     output because the old logic stripped non-ASCII then took the longest
     word. Expect a short (≤ 6-char) CJK anchor instead."""
-    from src.services.assistant.docgen.renderers.layouts.helpers import anchor_word
+    from assistant_service.core.docgen.renderers.layouts.helpers import anchor_word
 
     # Prefix stripped, CJK tail returned
     assert anchor_word("第三层:护栏") == "护栏"
@@ -231,7 +231,7 @@ def test_split_head_tail_preserves_urls() -> None:
     """B3 regression: a label containing a URL used to mis-split on the
     ``:`` inside ``https://``. After the fix, URL-scheme colons are
     skipped."""
-    from src.services.assistant.docgen.renderers.layouts.helpers import split_head_tail
+    from assistant_service.core.docgen.renderers.layouts.helpers import split_head_tail
 
     # URL inside tail — split on the LABEL colon, not the URL scheme
     assert split_head_tail("Docs: https://example.com") == (

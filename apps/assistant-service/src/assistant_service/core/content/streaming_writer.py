@@ -13,7 +13,7 @@ Key Features:
 - Buffer-based streaming for efficient output
 
 Usage:
-    from src.services.assistant.content.streaming_writer import StreamingWriter, StreamChunk
+    from assistant_service.core.content.streaming_writer import StreamingWriter, StreamChunk
 
     writer = StreamingWriter(kb_service=kb_service, assistant_service=assistant_service)
 
@@ -38,8 +38,8 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from ....core.auth.user_resolver import UserContext
-    from ...knowledge.knowledge_service import KnowledgeService
+    from src.core.auth.user_resolver import UserContext
+    from src.services.knowledge.knowledge_service import KnowledgeService
     from .assistant_service import AssistantService
 
 logger = get_logger(__name__)
@@ -707,7 +707,7 @@ def create_streaming_writer(
         Configured StreamingWriter instance
 
     Example:
-        >>> from src.services.assistant import create_streaming_writer
+        >>> from assistant_service.core import create_streaming_writer
         >>> writer = create_streaming_writer(kb_service, assistant_service)
     """
     return StreamingWriter(

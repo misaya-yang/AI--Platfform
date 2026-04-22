@@ -17,10 +17,10 @@ import pytest
 # Load the compressor module directly without going through __init__.py
 # This avoids importing the entire assistant package which has many dependencies
 _spec = importlib.util.spec_from_file_location(
-    "src.services.assistant.memory.compressor", "src/services/assistant/memory/compressor.py"
+    "assistant_service.core.memory.compressor", "src/services/assistant/memory/compressor.py"
 )
 _compressor_module = importlib.util.module_from_spec(_spec)
-sys.modules["src.services.assistant.memory.compressor"] = _compressor_module
+sys.modules["assistant_service.core.memory.compressor"] = _compressor_module
 _spec.loader.exec_module(_compressor_module)
 
 CompressedContext = _compressor_module.CompressedContext

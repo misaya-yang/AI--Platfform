@@ -155,7 +155,7 @@ class ToolOrchestrator:
     Usage:
         ```python
         # Recommended: Using ToolInvoker for unified execution
-        from src.services.assistant.tool_invoker import create_tool_invoker
+        from assistant_service.core.tool_invoker import create_tool_invoker
 
         orchestrator = ToolOrchestrator(
             tool_invoker=create_tool_invoker(),
@@ -163,7 +163,7 @@ class ToolOrchestrator:
         )
 
         # Backward compatible: Using ToolRegistry directly
-        from src.services.assistant.tools.tool_registry import get_tool_registry
+        from assistant_service.core.tools.tool_registry import get_tool_registry
 
         orchestrator = ToolOrchestrator(
             tool_registry=get_tool_registry(),
@@ -742,7 +742,7 @@ def create_tool_orchestrator(
     Example:
         ```python
         # Recommended: Using ToolInvoker
-        from src.services.assistant.tool_invoker import create_tool_invoker
+        from assistant_service.core.tool_invoker import create_tool_invoker
         orchestrator = create_tool_orchestrator(
             tool_invoker=create_tool_invoker(),
             max_parallel=10

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.assistant.streaming_writer import (
+from assistant_service.core.streaming_writer import (
     DEFAULT_VERIFICATION_TRIGGERS,
     StreamChunk,
     StreamingWriter,

@@ -19,12 +19,12 @@ import respx
 
 
 def _read_req(arguments: dict):
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     return ToolCallRequest(call_id="c", tool_name="confluence_read", arguments=arguments)
 
 
 def _write_req(arguments: dict):
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     return ToolCallRequest(call_id="c", tool_name="confluence_write", arguments=arguments)
 
 
@@ -34,14 +34,14 @@ def _write_req(arguments: dict):
 
 
 def test_resolve_url_pages_slash_form():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     url = "https://ex.atlassian.net/wiki/spaces/SALES/pages/1038712833/Q1-Plan"
     assert c.resolve_url_to_page_id(url) == "1038712833"
 
 
 def test_resolve_url_query_param_form():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     url = "https://ex.atlassian.net/wiki/pages/viewpage.action?pageId=987654"
     assert c.resolve_url_to_page_id(url) == "987654"
@@ -49,13 +49,13 @@ def test_resolve_url_query_param_form():
 
 def test_resolve_url_short_form_returns_none():
     """Short URLs need an API round-trip — not resolvable purely from the string."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     assert c.resolve_url_to_page_id("https://ex.atlassian.net/wiki/x/ABCDEF") is None
 
 
 def test_resolve_url_handles_trailing_slash_and_hash():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     assert c.resolve_url_to_page_id("https://x/wiki/spaces/S/pages/42/") == "42"
     assert c.resolve_url_to_page_id("https://x/wiki/spaces/S/pages/42?foo=bar") == "42"
@@ -67,7 +67,7 @@ def test_resolve_url_handles_trailing_slash_and_hash():
 
 
 def test_md_headings():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("# Title\n\n## Section\n\n### Sub")
     assert "<h1>Title</h1>" in out
     assert "<h2>Section</h2>" in out
@@ -75,14 +75,14 @@ def test_md_headings():
 
 
 def test_md_bullets_and_ordered_lists():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("- a\n- b\n\n1. first\n2. second")
     assert "<ul><li>a</li><li>b</li></ul>" in out
     assert "<ol><li>first</li><li>second</li></ol>" in out
 
 
 def test_md_inline_formatting():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("text with **bold** and *italic* and `code`.")
     assert "<strong>bold</strong>" in out
     assert "<em>italic</em>" in out
@@ -90,7 +90,7 @@ def test_md_inline_formatting():
 
 
 def test_md_fenced_code_becomes_macro():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("```python\nprint('hi')\n```")
     assert 'ac:name="code"' in out
     assert 'ac:name="language">python' in out
@@ -98,34 +98,34 @@ def test_md_fenced_code_becomes_macro():
 
 
 def test_md_link():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("see [docs](https://example.com) for details")
     assert '<a href="https://example.com">docs</a>' in out
 
 
 def test_md_html_passthrough():
     """If caller supplies raw HTML, don't re-escape it."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     raw = "<p>Already <strong>formatted</strong> HTML</p>"
     assert _markdown_to_storage(raw) == raw
 
 
 def test_md_paragraphs_on_blank_lines():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("para one\n\npara two")
     assert out == "<p>para one</p><p>para two</p>"
 
 
 def test_md_html_in_text_is_escaped():
     """Plain-text `<script>` must not become a real tag."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("beware <script>alert(1)</script>")
     assert "<script>" not in out
     assert "&lt;script&gt;" in out
 
 
 def test_md_empty_input():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     assert _markdown_to_storage("") == "<p></p>"
 
 
@@ -137,7 +137,7 @@ def test_md_empty_input():
 @pytest.mark.asyncio
 @respx.mock
 async def test_find_replace_happy_path():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     page_id = "123"
     respx.get(f"https://ex.atlassian.net/wiki/rest/api/content/{page_id}").mock(
@@ -177,7 +177,7 @@ async def test_find_replace_happy_path():
 @pytest.mark.asyncio
 @respx.mock
 async def test_find_replace_refuses_zero_match():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
         return_value=httpx.Response(
@@ -196,7 +196,7 @@ async def test_find_replace_refuses_zero_match():
 @pytest.mark.asyncio
 @respx.mock
 async def test_find_replace_refuses_multiple_matches():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
         return_value=httpx.Response(
@@ -214,7 +214,7 @@ async def test_find_replace_refuses_multiple_matches():
 
 @pytest.mark.asyncio
 async def test_find_replace_refuses_empty_find():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="non-empty"):
         await c.find_and_replace_in_page("123", "", "x")
@@ -228,7 +228,7 @@ async def test_find_replace_refuses_empty_find():
 @pytest.mark.asyncio
 @respx.mock
 async def test_list_children_normalizes_output():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/100/child/page").mock(
         return_value=httpx.Response(
@@ -264,7 +264,7 @@ async def test_list_children_normalizes_output():
 
 @pytest.mark.asyncio
 async def test_read_missing_action_is_rejected():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -275,7 +275,7 @@ async def test_read_missing_action_is_rejected():
 
 @pytest.mark.asyncio
 async def test_read_action_read_page_requires_identifier():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -290,7 +290,7 @@ async def test_read_action_read_page_requires_identifier():
 @respx.mock
 async def test_read_action_read_page_via_url():
     """URL → page_id auto-resolution then fetches that page."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
@@ -316,7 +316,7 @@ async def test_read_action_read_page_via_url():
 
 @pytest.mark.asyncio
 async def test_read_action_read_page_bad_url():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -330,7 +330,7 @@ async def test_read_action_read_page_bad_url():
 @pytest.mark.asyncio
 @respx.mock
 async def test_read_action_list_children():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/100/child/page").mock(
@@ -360,7 +360,7 @@ async def test_read_action_list_children():
 
 @pytest.mark.asyncio
 async def test_write_missing_action_is_rejected():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -370,7 +370,7 @@ async def test_write_missing_action_is_rejected():
 
 @pytest.mark.asyncio
 async def test_write_find_replace_requires_all_params():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -384,7 +384,7 @@ async def test_write_find_replace_requires_all_params():
 @pytest.mark.asyncio
 @respx.mock
 async def test_write_find_replace_end_to_end():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceWriteExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
@@ -419,7 +419,7 @@ async def test_write_find_replace_end_to_end():
 async def test_write_find_replace_refusal_surfaces_cleanly():
     """When the library raises ValueError for 0-match, executor turns it
     into a clean tool error (not an uncaught exception)."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceWriteExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
@@ -454,12 +454,12 @@ def test_meta_tools_registered_via_register():
     """
     import asyncio
 
-    from src.services.assistant.tools.confluence_tool import register_confluence_tools
-    from src.services.assistant.tools.connector_registry import (
+    from assistant_service.core.tools.confluence_tool import register_confluence_tools
+    from assistant_service.core.tools.connector_registry import (
         get_connector_registry,
         reset_connector_registry_for_tests,
     )
-    from src.services.assistant.tools.tool_registry import (
+    from assistant_service.core.tools.tool_registry import (
         ToolCallRequest,
         get_tool_registry,
     )
@@ -496,12 +496,12 @@ def test_db_backed_register_only_visible_when_tenant_connected():
     import asyncio
 
     from src.core.auth.user_resolver import UserContext
-    from src.services.assistant.tools.confluence_tool import register_confluence_tools
-    from src.services.assistant.tools.connector_registry import (
+    from assistant_service.core.tools.confluence_tool import register_confluence_tools
+    from assistant_service.core.tools.connector_registry import (
         get_connector_registry,
         reset_connector_registry_for_tests,
     )
-    from src.services.assistant.tools.tool_registry import (
+    from assistant_service.core.tools.tool_registry import (
         ToolCallRequest,
         get_tool_registry,
     )
@@ -542,7 +542,7 @@ def test_db_backed_register_only_visible_when_tenant_connected():
 
 def test_meta_tool_action_enums_cover_all_old_operations():
     """Verifies the two meta tools between them expose all 11 old operations."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
     )
 
@@ -562,7 +562,7 @@ def test_meta_tool_action_enums_cover_all_old_operations():
 
 def test_write_tool_requires_confirmation():
     """Permission middleware gates confluence_write via this flag."""
-    from src.services.assistant.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
+    from assistant_service.core.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
     assert CONFLUENCE_WRITE_DEFINITION.requires_confirmation is True
 
 
@@ -575,7 +575,7 @@ def test_md_html_wrapped_markdown_converts_not_passthrough():
     """The critical production bug: model emits `<p># Heading</p><p>- item</p>`
     thinking Confluence wants HTML. Old passthrough heuristic sent this verbatim
     and Confluence rendered literal `#` and `-`. Must now convert."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("<p># 会议纪要</p><p>- 决定 A</p><p>- 决定 B</p>")
     # Heading must become <h1>, not stay as literal # in a <p>
     assert "<h1>会议纪要</h1>" in out
@@ -588,7 +588,7 @@ def test_md_html_wrapped_markdown_converts_not_passthrough():
 def test_md_pure_html_with_confluence_macros_still_passthrough():
     """Passthrough must still work for pure XHTML (no markdown markers),
     e.g. when the caller supplies Confluence storage-format macros directly."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     macro = (
         '<ac:structured-macro ac:name="info">'
         '<ac:rich-text-body><p>Hello</p></ac:rich-text-body>'
@@ -599,7 +599,7 @@ def test_md_pure_html_with_confluence_macros_still_passthrough():
 
 def test_md_realistic_meeting_notes_convert_cleanly():
     """Typical model output for 'create a meeting-notes page'."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     content = (
         "# 2026-04-21 Sync\n\n"
         "## Decisions\n\n"
@@ -627,7 +627,7 @@ def test_md_realistic_meeting_notes_convert_cleanly():
 async def test_read_page_exposes_ancestors_and_parent_id():
     """After reading a page, the response must include parent_id so the
     model can create a sibling page at the same tree level."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
@@ -666,7 +666,7 @@ async def test_read_page_exposes_ancestors_and_parent_id():
 async def test_read_page_no_ancestors_shows_homepage_hint():
     """For a space homepage (no ancestors), the formatter should explain
     why no parent is available so the model doesn't hallucinate one."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/1").mock(
@@ -697,7 +697,7 @@ def test_create_page_description_teaches_sibling_pattern():
     model sees. Compact schema uses `description`; full schema/docs use
     `when_to_use`. We accept either so the guidance can migrate between
     the two without silently disappearing."""
-    from src.services.assistant.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
+    from assistant_service.core.tools.confluence_tool import CONFLUENCE_WRITE_DEFINITION
     combined = (
         (CONFLUENCE_WRITE_DEFINITION.description or "")
         + " "
@@ -719,7 +719,7 @@ async def test_search_returns_parent_and_space_key():
     """Every search hit must include parent_id, parent_title, ancestors,
     and space_key so the model can plan create-sibling / move_page without
     a second read_page per hit."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
@@ -757,7 +757,7 @@ async def test_search_returns_parent_and_space_key():
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_top_level_page_shows_no_parent():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
@@ -794,7 +794,7 @@ async def test_search_top_level_page_shows_no_parent():
 @pytest.mark.asyncio
 @respx.mock
 async def test_move_page_happy_path():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     # Current page — in space SALES, currently under parent 100.
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
@@ -839,7 +839,7 @@ async def test_move_page_happy_path():
 @pytest.mark.asyncio
 @respx.mock
 async def test_move_page_rejects_same_parent_noop():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
             200,
@@ -859,7 +859,7 @@ async def test_move_page_rejects_same_parent_noop():
 @pytest.mark.asyncio
 @respx.mock
 async def test_move_page_rejects_missing_target():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
             200,
@@ -881,7 +881,7 @@ async def test_move_page_rejects_missing_target():
 @pytest.mark.asyncio
 @respx.mock
 async def test_move_page_rejects_cross_space():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
             200,
@@ -905,7 +905,7 @@ async def test_move_page_rejects_cross_space():
 
 @pytest.mark.asyncio
 async def test_move_page_rejects_self_parent():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="under itself"):
         await c.move_page("42", "42")
@@ -913,7 +913,7 @@ async def test_move_page_rejects_self_parent():
 
 @pytest.mark.asyncio
 async def test_write_action_move_page_needs_both_ids():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
@@ -930,7 +930,7 @@ async def test_write_action_move_page_needs_both_ids():
 
 
 def test_classify_http_errors_distinguishes_401_403_404_409():
-    from src.services.assistant.tools.confluence_tool import _classify_http_error
+    from assistant_service.core.tools.confluence_tool import _classify_http_error
     msg_401 = _classify_http_error(401, "read_page")
     msg_403 = _classify_http_error(403, "read_page")
     msg_404 = _classify_http_error(404, "read_page")
@@ -952,7 +952,7 @@ def test_classify_http_errors_distinguishes_401_403_404_409():
 @pytest.mark.asyncio
 @respx.mock
 async def test_read_404_surfaces_distinct_message():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/99999").mock(
@@ -970,7 +970,7 @@ async def test_read_404_surfaces_distinct_message():
 @pytest.mark.asyncio
 @respx.mock
 async def test_read_401_distinct_auth_message():
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
@@ -988,7 +988,7 @@ async def test_read_401_distinct_auth_message():
 def test_system_prompt_has_anti_tool_hallucination_rule():
     """Guard that the explicit tool-execution hallucination rule is in
     the system prompt. If someone strips it, this test catches it."""
-    from src.services.assistant.prompts.system_prompt_v2 import ANTI_HALLUCINATION
+    from assistant_service.core.prompts.system_prompt_v2 import ANTI_HALLUCINATION
     assert "NEVER Fabricate Tool Execution Results" in ANTI_HALLUCINATION
     assert "I have created" in ANTI_HALLUCINATION  # quoted example
     assert "success=true" in ANTI_HALLUCINATION or "success" in ANTI_HALLUCINATION
@@ -1001,7 +1001,7 @@ async def test_search_matches_both_title_and_text():
     (body is a table / card). CQL `text~` alone misses those — we must
     also query `title~`. Regression: 【第一轮】技术分享排期 was undiscoverable
     by search_confluence because brackets + title-only hit."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1023,7 +1023,7 @@ async def test_search_strips_cjk_brackets_from_title_query():
     """Literal 【】「」 confuses Lucene's tokenizer — the title-side of the
     CQL should receive a cleaned query without those chars. The text-side
     keeps the original query so exact phrases still hit."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1043,7 +1043,7 @@ async def test_search_strips_cjk_brackets_from_title_query():
 @respx.mock
 async def test_search_returns_structured_dict_with_cql_and_diagnostics():
     """search returns a dict with hits + cql_used + diagnostics.hint on empty."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1062,7 +1062,7 @@ async def test_search_returns_structured_dict_with_cql_and_diagnostics():
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_fields_title_only_skips_text_clause():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1078,7 +1078,7 @@ async def test_search_fields_title_only_skips_text_clause():
 
 @pytest.mark.asyncio
 async def test_search_rejects_unknown_field():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="unknown fields"):
         await c.search("hi", fields=["title", "body"])  # 'body' is not valid
@@ -1087,7 +1087,7 @@ async def test_search_rejects_unknown_field():
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_under_page_id_adds_ancestor_clause():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1101,7 +1101,7 @@ async def test_search_under_page_id_adds_ancestor_clause():
 
 @pytest.mark.asyncio
 async def test_search_rejects_non_numeric_under_page_id():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="numeric"):
         await c.search("hi", under_page_id="not-a-number")
@@ -1110,7 +1110,7 @@ async def test_search_rejects_non_numeric_under_page_id():
 @pytest.mark.asyncio
 @respx.mock
 async def test_search_updated_since_and_author():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1125,7 +1125,7 @@ async def test_search_updated_since_and_author():
 
 @pytest.mark.asyncio
 async def test_search_rejects_bad_updated_since():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="ISO date"):
         await c.search("hi", updated_since="yesterday")
@@ -1135,7 +1135,7 @@ async def test_search_rejects_bad_updated_since():
 @respx.mock
 async def test_search_raw_cql_overrides_everything():
     """When `cql` is supplied, space_key/query/fields all get ignored."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1154,7 +1154,7 @@ async def test_search_raw_cql_overrides_everything():
 
 @pytest.mark.asyncio
 async def test_search_raw_cql_rejects_newlines():
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="single-line"):
         await c.search(cql="type=page\nAND malicious")
@@ -1163,7 +1163,7 @@ async def test_search_raw_cql_rejects_newlines():
 @pytest.mark.asyncio
 async def test_search_requires_at_least_one_input():
     """Empty everything must error — otherwise we'd silently query all pages."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     with pytest.raises(ValueError, match="at least one"):
         await c.search()
@@ -1174,7 +1174,7 @@ async def test_search_requires_at_least_one_input():
 async def test_search_executor_surfaces_cql_to_model():
     """The formatter must include the CQL used and the diagnostic hint in
     the text the model sees — that's the whole agentic point."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
 
@@ -1202,7 +1202,7 @@ async def test_search_still_escapes_quotes_after_cql_change():
     """CQL-injection guard must still work with the new title+text clause.
     An injected `"` must become backslash-escaped so it stays INSIDE the
     string literal rather than ending it and starting a new CQL clause."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     route = respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1245,7 +1245,7 @@ class _FakeDB:
 
 def _build_user_request(tenant_id: str, action: str, **args):
     """ToolCallRequest with a UserContext carrying the given tenant_id."""
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     from src.core.auth.user_resolver import UserContext
     user = UserContext(user_id="u", tenant_id=tenant_id)
     return ToolCallRequest(
@@ -1263,7 +1263,7 @@ async def test_per_tenant_client_resolution_isolates_credentials():
     `confluence_read(action='list_spaces')` must each reach THEIR OWN
     domain, not a shared last-registered one. This is the fix for the
     cross-tenant credential leak."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceReadExecutor
+    from assistant_service.core.tools.confluence_tool import ConfluenceReadExecutor
 
     db = _FakeDB({
         "tenantA": [{
@@ -1307,7 +1307,7 @@ async def test_request_with_unknown_tenant_rejects_cleanly():
     """If the DB has no row for the request's tenant, the executor must
     surface a clean error instead of hitting the wrong workspace or
     using empty credentials."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceReadExecutor
+    from assistant_service.core.tools.confluence_tool import ConfluenceReadExecutor
 
     db = _FakeDB({})  # no tenants
     execr = ConfluenceReadExecutor(database=db)
@@ -1322,7 +1322,7 @@ async def test_static_client_fallback_still_works_for_tests():
     """Backwards-compat: tests constructing `ConfluenceReadExecutor(client=...)`
     keep working — the static client is used when no tenant_id is on the
     request OR when the DB has no row."""
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         ConfluenceAPIClient, ConfluenceReadExecutor,
     )
     respx.get("https://legacy.atlassian.net/wiki/api/v2/spaces").mock(
@@ -1331,7 +1331,7 @@ async def test_static_client_fallback_still_works_for_tests():
     client = ConfluenceAPIClient("legacy.atlassian.net", "u@x.com", "legacy-tok")
     execr = ConfluenceReadExecutor(client=client)  # no DB
     # No tenant_id on request — fallback kicks in.
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
     res = await execr.execute(ToolCallRequest(
         call_id="c", tool_name="confluence_read",
         arguments={"action": "list_spaces"},
@@ -1345,7 +1345,7 @@ async def test_static_client_fallback_still_works_for_tests():
 
 
 def test_escape_for_storage_handles_bare_specials():
-    from src.services.assistant.tools.confluence_tool import _escape_for_storage
+    from assistant_service.core.tools.confluence_tool import _escape_for_storage
     assert _escape_for_storage("A & B") == "A &amp; B"
     assert _escape_for_storage("x < y > z") == "x &lt; y &gt; z"
     # Already-escaped entities pass through — idempotent.
@@ -1363,7 +1363,7 @@ def test_escape_for_storage_handles_bare_specials():
 async def test_find_replace_auto_escapes_plain_text_replacement():
     """Regression: replacing with plain text that contains bare `&` must
     NOT corrupt Confluence storage format. Must escape by default."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
@@ -1394,7 +1394,7 @@ async def test_find_replace_auto_escapes_plain_text_replacement():
 async def test_find_replace_raw_html_passes_through():
     """Opt-out: when raw_html=True, replacement is used verbatim — allows
     inserting actual XHTML (e.g. <strong>) without double-escaping."""
-    from src.services.assistant.tools.confluence_tool import ConfluenceAPIClient
+    from assistant_service.core.tools.confluence_tool import ConfluenceAPIClient
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
@@ -1427,7 +1427,7 @@ async def test_find_replace_raw_html_passes_through():
 def test_markdown_converter_merges_adjacent_ul_lists():
     """`<p>- A</p><p>- B</p>` used to become two separate <ul> blocks. After
     the merge pass they should be one list."""
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("<p>- item 1</p><p>- item 2</p><p>- item 3</p>")
     # Before M3: <ul><li>item 1</li></ul><ul><li>item 2</li></ul>...
     # After M3: one <ul> containing all.
@@ -1437,7 +1437,7 @@ def test_markdown_converter_merges_adjacent_ul_lists():
 
 
 def test_markdown_converter_merges_adjacent_ol_lists():
-    from src.services.assistant.tools.confluence_tool import _markdown_to_storage
+    from assistant_service.core.tools.confluence_tool import _markdown_to_storage
     out = _markdown_to_storage("<p>1. one</p><p>2. two</p>")
     # The HTML-wrapper strip produces "- " / "1. " prefixed lines; verify
     # adjacent <ol> blocks collapse.
@@ -1451,7 +1451,7 @@ def test_meta_tool_schemas_are_smaller_than_old_eight():
     """The whole point of the refactor — 2 tool schemas must be materially
     smaller than the 8 old ones would have been."""
     import json
-    from src.services.assistant.tools.confluence_tool import (
+    from assistant_service.core.tools.confluence_tool import (
         CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
     )
     read_schema = json.dumps(CONFLUENCE_READ_DEFINITION.to_openai_schema(compact=True))

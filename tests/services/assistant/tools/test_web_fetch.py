@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from src.services.assistant.tools.tool_registry import ToolCallRequest
-from src.services.assistant.tools.web_fetch import (
+from assistant_service.core.tools.tool_registry import ToolCallRequest
+from assistant_service.core.tools.web_fetch import (
     SSRFError,
     WebFetchExecutor,
     _validate_url,
@@ -87,7 +87,7 @@ def test_validate_url_accepts_public_ip_literal() -> None:
 
 def test_validate_url_rejects_hostname_resolving_to_private_ip() -> None:
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("10.0.0.7"),
     ):
         with pytest.raises(SSRFError, match="blocked IP"):
@@ -96,7 +96,7 @@ def test_validate_url_rejects_hostname_resolving_to_private_ip() -> None:
 
 def test_validate_url_accepts_hostname_resolving_to_public_ip() -> None:
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ):
         assert _validate_url("https://example.com/") == "https://example.com/"
@@ -118,7 +118,7 @@ async def test_web_fetch_happy_path_returns_extracted_markdown() -> None:
     fake_resp = _fake_response(body=html, url="https://example.com/")
 
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
         "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
@@ -142,7 +142,7 @@ async def test_web_fetch_text_mode_strips_all_tags() -> None:
     fake_resp = _fake_response(body=html, url="https://example.com/")
 
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
         "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
@@ -163,7 +163,7 @@ async def test_web_fetch_text_mode_strips_all_tags() -> None:
 @pytest.mark.asyncio
 async def test_executor_returns_clean_error_on_timeout() -> None:
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
         "httpx.AsyncClient.get",
@@ -199,7 +199,7 @@ async def test_web_fetch_truncates_to_max_chars() -> None:
     )
 
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
         "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
@@ -237,7 +237,7 @@ async def test_web_fetch_rejects_redirect_to_private_ip() -> None:
         return [(2, 1, 6, "", (ip, 0))]
 
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo,
     ), patch(
         "httpx.AsyncClient.get",
@@ -268,7 +268,7 @@ async def test_executor_success_returns_payload_dict() -> None:
     fake_resp = _fake_response(body=html, url="https://example.com/")
 
     with patch(
-        "src.services.assistant.tools.web_fetch.socket.getaddrinfo",
+        "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
         "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)

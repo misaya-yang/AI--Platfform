@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.assistant.agent.tool_dedup import (
+from assistant_service.core.agent.tool_dedup import (
     KB_REUSE_MESSAGE,
     KBDedupState,
     WEB_SEARCH_REUSE_MESSAGE,

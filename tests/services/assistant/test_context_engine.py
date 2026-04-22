@@ -9,7 +9,7 @@ Tests for ContextStructure dataclass and ContextEngine class:
 - Edge cases and empty values handling
 """
 
-from src.services.assistant.context_engine import (
+from assistant_service.core.context_engine import (
     ContextEngine,
     ContextStructure,
     create_context_engine,

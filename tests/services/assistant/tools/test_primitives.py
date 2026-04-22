@@ -30,7 +30,7 @@ def workspace_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def make_request():
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     def _make(
         tool_name: str,
@@ -55,7 +55,7 @@ def make_request():
 
 
 def test_resolve_under_rejects_absolute(workspace_root):
-    from src.services.assistant.tools.workspace import (
+    from assistant_service.core.tools.workspace import (
         WorkspaceEscapeError,
         resolve_under,
         tenant_workspace,
@@ -67,7 +67,7 @@ def test_resolve_under_rejects_absolute(workspace_root):
 
 
 def test_resolve_under_rejects_parent_traversal(workspace_root):
-    from src.services.assistant.tools.workspace import (
+    from assistant_service.core.tools.workspace import (
         WorkspaceEscapeError,
         resolve_under,
         tenant_workspace,
@@ -79,7 +79,7 @@ def test_resolve_under_rejects_parent_traversal(workspace_root):
 
 
 def test_resolve_under_accepts_nested_paths(workspace_root):
-    from src.services.assistant.tools.workspace import resolve_under, tenant_workspace
+    from assistant_service.core.tools.workspace import resolve_under, tenant_workspace
 
     ws = tenant_workspace("acme", "s1")
     resolved = resolve_under(ws, "notes/drafts/todo.md")
@@ -87,7 +87,7 @@ def test_resolve_under_accepts_nested_paths(workspace_root):
 
 
 def test_tenant_workspace_rejects_path_separators(workspace_root):
-    from src.services.assistant.tools.workspace import WorkspaceEscapeError, tenant_workspace
+    from assistant_service.core.tools.workspace import WorkspaceEscapeError, tenant_workspace
 
     with pytest.raises(WorkspaceEscapeError):
         tenant_workspace("../evil", "s1")
@@ -96,7 +96,7 @@ def test_tenant_workspace_rejects_path_separators(workspace_root):
 
 
 def test_resolve_under_rejects_null_byte(workspace_root):
-    from src.services.assistant.tools.workspace import (
+    from assistant_service.core.tools.workspace import (
         WorkspaceEscapeError,
         resolve_under,
         tenant_workspace,
@@ -111,7 +111,7 @@ def test_resolve_under_rejects_symlink_escape(workspace_root, tmp_path):
     """A symlink inside the workspace pointing at an outside directory must
     not let fs_read / fs_write reach the target. `resolve()` follows the
     symlink; the containment check then rejects it."""
-    from src.services.assistant.tools.workspace import (
+    from assistant_service.core.tools.workspace import (
         WorkspaceEscapeError,
         resolve_under,
         tenant_workspace,
@@ -132,7 +132,7 @@ def test_resolve_under_rejects_symlink_escape(workspace_root, tmp_path):
 def test_resolve_under_rejects_symlink_to_parent_dir(workspace_root, tmp_path):
     """Symlink pointing at a directory outside the workspace — any nested
     access through it must still be rejected."""
-    from src.services.assistant.tools.workspace import (
+    from assistant_service.core.tools.workspace import (
         WorkspaceEscapeError,
         resolve_under,
         tenant_workspace,
@@ -156,7 +156,7 @@ def test_resolve_under_rejects_symlink_to_parent_dir(workspace_root, tmp_path):
 
 @pytest.mark.asyncio
 async def test_fs_write_then_read(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsReadExecutor, FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsReadExecutor, FsWriteExecutor
 
     write_res = await FsWriteExecutor().execute(
         make_request("fs_write", {"path": "hello.txt", "content": "Hello, world!\nSecond line."})
@@ -172,7 +172,7 @@ async def test_fs_write_then_read(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_fs_read_offset_limit(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsReadExecutor, FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsReadExecutor, FsWriteExecutor
 
     content = "\n".join(f"line {i}" for i in range(10))
     await FsWriteExecutor().execute(
@@ -190,7 +190,7 @@ async def test_fs_read_offset_limit(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_fs_write_rejects_path_escape(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsWriteExecutor
 
     res = await FsWriteExecutor().execute(
         make_request("fs_write", {"path": "../sneaky.txt", "content": "x"})
@@ -206,7 +206,7 @@ async def test_fs_write_rejects_path_escape(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_fs_glob_finds_nested_files(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsGlobExecutor, FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsGlobExecutor, FsWriteExecutor
 
     for path in ("a.md", "dir/b.md", "dir/nested/c.md", "dir/other.txt"):
         await FsWriteExecutor().execute(
@@ -229,7 +229,7 @@ async def test_fs_glob_finds_nested_files(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_fs_grep_finds_pattern(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsGrepExecutor, FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsGrepExecutor, FsWriteExecutor
 
     await FsWriteExecutor().execute(
         make_request(
@@ -248,7 +248,7 @@ async def test_fs_grep_finds_pattern(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_fs_grep_case_sensitive(workspace_root, make_request):
-    from src.services.assistant.tools.primitives import FsGrepExecutor, FsWriteExecutor
+    from assistant_service.core.tools.primitives import FsGrepExecutor, FsWriteExecutor
 
     await FsWriteExecutor().execute(
         make_request("fs_write", {"path": "case.txt", "content": "TODO\ntodo\nTodo"})
@@ -272,8 +272,8 @@ async def test_fs_grep_case_sensitive(workspace_root, make_request):
 
 @pytest.mark.asyncio
 async def test_missing_tenant_metadata_errors_cleanly(workspace_root):
-    from src.services.assistant.tools.primitives import FsReadExecutor
-    from src.services.assistant.tools.tool_registry import ToolCallRequest
+    from assistant_service.core.tools.primitives import FsReadExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     req = ToolCallRequest(
         call_id="x", tool_name="fs_read", arguments={"path": "hello.txt"}, metadata={}
@@ -289,8 +289,8 @@ async def test_missing_tenant_metadata_errors_cleanly(workspace_root):
 
 
 def test_register_primitive_tools():
-    from src.services.assistant.tools.primitives import register_primitive_tools
-    from src.services.assistant.tools.tool_registry import get_tool_registry
+    from assistant_service.core.tools.primitives import register_primitive_tools
+    from assistant_service.core.tools.tool_registry import get_tool_registry
 
     register_primitive_tools()
     registry = get_tool_registry()
