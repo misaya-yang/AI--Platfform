@@ -364,13 +364,17 @@ class HadithRepository:
     ) -> dict[str, Any]:
         rows = await self.db.fetch(
             """
-            SELECT hi.id, hi.collection_name, hi.book_number, hi.chapter_id, hi.hadith_number,
-                   COALESCE(hi.chapter_title, hb.title) AS section_title,
+            SELECT hi.id, hi.collection_name, hi.book_number, hi.hadith_number,
+                   hb.title AS book_title,
+                   hc.chapter_order, hc.title_en AS ch_title_en,
+                   hc.title_ar AS ch_title_ar,
                    en.body_text AS en_body,
                    ar.body_text AS ar_body
             FROM hadith_items hi
             LEFT JOIN hadith_books hb
                 ON hb.collection_name = hi.collection_name AND hb.book_number = hi.book_number
+            LEFT JOIN hadith_chapters hc
+                ON hc.id = hi.chapter_ref_id
             LEFT JOIN hadith_localizations en
                 ON en.hadith_item_id = hi.id AND en.language = 'en'
             LEFT JOIN hadith_localizations ar
@@ -390,10 +394,15 @@ class HadithRepository:
                     "collection": row["collection_name"],
                     "book_number": row["book_number"],
                     "section_number": row["book_number"],
-                    "section_title": row["section_title"],
-                    "chapter_id": row["chapter_id"] or row["book_number"],
+                    "section_title": row["book_title"],
+                    "chapter_id": (
+                        str(row["chapter_order"])
+                        if row["chapter_order"] is not None
+                        else None
+                    ),
+                    "chapter_title": row["ch_title_en"] or row["ch_title_ar"],
                     "hadith_number": row["hadith_number"],
-                    "title": row["section_title"],
+                    "title": row["ch_title_en"] or row["book_title"],
                     "preview_text": (row["en_body"] or "")[:280],
                     "arabic_preview_text": (row["ar_body"] or "")[:280],
                 }
@@ -410,27 +419,43 @@ class HadithRepository:
     async def get_chapters(
         self, collection_name: str, book_number: str
     ) -> list[dict[str, Any]]:
-        row = await self.db.fetchrow(
+        rows = await self.db.fetch(
             """
-            SELECT hb.book_number AS chapter_id, hb.title AS chapter_title, COUNT(hi.id) AS hadith_count
-            FROM hadith_books hb
-            LEFT JOIN hadith_items hi
-                ON hi.collection_name = hb.collection_name AND hi.book_number = hb.book_number
-            WHERE hb.collection_name = $1 AND hb.book_number = $2
-            GROUP BY hb.book_number, hb.title
+            SELECT chapter_order, chapter_id_raw, title_en, title_ar,
+                   intro_en, intro_ar, hadith_count
+            FROM hadith_chapters
+            WHERE collection_name = $1 AND book_number = $2
+            ORDER BY chapter_order
             """,
             collection_name,
             book_number,
         )
-        return [dict(row)] if row else []
+        return [
+            {
+                "chapter_id": str(row["chapter_order"]),
+                "chapter_number": row["chapter_order"],
+                "chapter_id_raw": row["chapter_id_raw"],
+                "chapter_title": row["title_en"] or row["title_ar"] or "",
+                "title_en": row["title_en"],
+                "title_ar": row["title_ar"],
+                "intro_en": row["intro_en"],
+                "intro_ar": row["intro_ar"],
+                "hadith_count": row["hadith_count"] or 0,
+            }
+            for row in rows
+        ]
 
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any] | None:
         row = await self.db.fetchrow(
             """
-            SELECT hi.*, COALESCE(hi.chapter_title, hb.title) AS section_title
+            SELECT hi.*, hb.title AS book_title,
+                   hc.chapter_order, hc.title_en AS ch_title_en,
+                   hc.title_ar AS ch_title_ar
             FROM hadith_items hi
             LEFT JOIN hadith_books hb
                 ON hb.collection_name = hi.collection_name AND hb.book_number = hi.book_number
+            LEFT JOIN hadith_chapters hc
+                ON hc.id = hi.chapter_ref_id
             WHERE hi.collection_name = $1 AND hi.hadith_number = $2
             """,
             collection_name,
@@ -474,10 +499,14 @@ class HadithRepository:
             "collection": row["collection_name"],
             "book_number": row["book_number"],
             "section_number": row["book_number"],
-            "section_title": row["section_title"],
-            "chapter_id": row["chapter_id"] or row["book_number"],
+            "section_title": row["book_title"],
+            "chapter_id": (
+                str(row["chapter_order"])
+                if row["chapter_order"] is not None
+                else None
+            ),
             "hadith_number": row["hadith_number"],
-            "chapter_title": row["section_title"],
+            "chapter_title": row["ch_title_en"] or row["ch_title_ar"] or row["book_title"],
             "translation_text": (text_by_language.get("en") or {}).get("body_text", ""),
             "arabic_text": (text_by_language.get("ar") or {}).get("body_text", ""),
             "grades": grades_by_language,

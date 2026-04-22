@@ -111,10 +111,6 @@ class HadithQueryService:
             collection, _ = await self.repository.get_books(collection_name)
             if collection is None:
                 raise NotReadyError(f"No Hadith collection found for {collection_name}")
-            if collection.get("has_chapters") is False:
-                raise NotReadyError(
-                    f"Canonical Hadith CDN exposes sections/books only; nested chapters are not available for {collection_name}"
-                )
             chapters = await self.repository.get_chapters(collection_name, book_number)
             if not chapters:
                 raise NotReadyError(

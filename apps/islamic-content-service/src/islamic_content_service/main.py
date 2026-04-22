@@ -78,6 +78,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         await db.migrate(migrations_dir / "003_wahda_features.sql")
         await db.migrate(migrations_dir / "004_share_conversations.sql")
         await db.migrate(migrations_dir / "005_recommended_questions.sql")
+        await db.migrate(migrations_dir / "007_hadith_chapters.sql")
     cache = RedisCache(settings.cache)
     await cache.connect()
 

@@ -27,6 +27,7 @@ class HadithSummarySchema(BaseModel):
     section_number: str | None = None
     section_title: str | None = None
     chapter_id: str | None = None
+    chapter_title: str | None = None
     hadith_number: str
     title: str | None = None
     preview_text: str = ""
@@ -73,7 +74,13 @@ class HadithBookItemsResponse(BaseModel):
 
 class HadithChapterSchema(BaseModel):
     chapter_id: str
+    chapter_number: int | None = None
+    chapter_id_raw: str | None = None
     chapter_title: str
+    title_en: str | None = None
+    title_ar: str | None = None
+    intro_en: str | None = None
+    intro_ar: str | None = None
     hadith_count: int
 
 

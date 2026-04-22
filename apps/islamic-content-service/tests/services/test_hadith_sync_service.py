@@ -67,7 +67,8 @@ async def test_hadith_sync_service_maps_sections_into_books_and_items():
     repository.replace_collection.assert_awaited_once()
     collection, books, hadiths = repository.replace_collection.await_args.args
     assert collection["name"] == "bukhari"
-    assert collection["has_chapters"] is False
+    # bukhari now carries real chapters (populated out-of-band from sunnah.com)
+    assert collection["has_chapters"] is True
     assert books == [
         {
             "book_number": "1",

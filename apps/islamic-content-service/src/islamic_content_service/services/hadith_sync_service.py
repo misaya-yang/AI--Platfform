@@ -213,12 +213,18 @@ class HadithSyncService:
                 len(duplicate_hadith_numbers),
             )
 
+        # Nested chapter hierarchy (collection → book → chapter → hadith) is
+        # populated out-of-band by scripts/sync_hadith_chapters_sunnah.py from
+        # sunnah.com. nawawi's 40 Hadith is flat on sunnah.com (no book/chapter
+        # layer), so we mark it explicitly; every other collection we sync is
+        # known to have real chapter data.
+        has_chapters = collection_name != "nawawi"
         collection = {
             "name": collection_name,
             "title": metadata.get("name") or catalog_entry.get("name") or collection_name,
             "short_intro": catalog_entry.get("comments") or "",
             "has_books": True,
-            "has_chapters": False,
+            "has_chapters": has_chapters,
             "total_books": len(books),
             "total_hadith": len(normalized_hadiths),
             "source_api": HADITH_SOURCE_API,
