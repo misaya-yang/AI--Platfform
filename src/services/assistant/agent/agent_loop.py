@@ -1433,10 +1433,20 @@ class AgentLoop:
                     # Always keep at least the latest turn, then enforce the budget.
                     if selected and projected > max_chars:
                         break
+                    # Messages carrying a prior-turn tool-results block (quiz
+                    # questions, web-search hits, …) need a larger per-message
+                    # cap; 2500 chars would amputate the block mid-list and
+                    # cause cross-model follow-ups to hallucinate (see
+                    # _session_history_to_messages in assistant_service.py).
+                    per_msg_cap = (
+                        8000
+                        if "[Previous tool results" in content_text
+                        else 2500
+                    )
                     selected.append(
                         {
                             "role": role,
-                            "content": _truncate_text(content_text, 2500),
+                            "content": _truncate_text(content_text, per_msg_cap),
                         }
                     )
                     running_chars = projected
