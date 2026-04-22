@@ -50,7 +50,6 @@ class GeminiImageGenerator:
 
     BASE_URL = "https://generativelanguage.googleapis.com"
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
-    FALLBACK_MODEL = "gemini-3.1-flash-image-preview"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -159,10 +158,6 @@ class GeminiImageGenerator:
             if response.status_code != 200:
                 error_text = response.text
                 logger.error("Gemini image API error: %s - %s", response.status_code, error_text[:500])
-                if response.status_code == 404 and self.model != self.FALLBACK_MODEL:
-                    logger.info("Retrying with fallback model: %s", self.FALLBACK_MODEL)
-                    self.model = self.FALLBACK_MODEL
-                    return await self._call_api(contents, n, aspect_ratio, image_size)
                 try:
                     error_msg = response.json().get("error", {}).get("message", error_text[:200])
                 except Exception:

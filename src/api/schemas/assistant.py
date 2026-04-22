@@ -541,12 +541,15 @@ class ImageGenerationRequest(BaseModel):
     )
     reference_image: str | None = Field(
         default=None,
+        max_length=6_000_000,
         description=(
             "Previous image to edit (base64 or data URL). When provided, the backend "
             "sends it to Gemini along with the prompt so the model edits that image "
             "instead of generating a new one. Use this for app-managed multi-turn "
             "editing — the app keeps the prior turn's image and re-submits it each "
-            "request. Gemini-only; ignored for DashScope/Doubao."
+            "request. Gemini-only; ignored for DashScope/Doubao. "
+            "Max 6,000,000 chars (~4.5 MiB decoded); compress JPEG quality 90% "
+            "and ≤ 2 MB before sending."
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
@@ -603,11 +606,14 @@ class AsyncImageGenerationRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Session ID for artifact storage")
     reference_image: str | None = Field(
         default=None,
+        max_length=6_000_000,
         description=(
             "Previous image to edit (base64 or data URL). When provided, the backend "
             "sends it to Gemini with the prompt so the model edits that image. Use "
             "this for app-managed multi-turn editing (app keeps the prior turn's "
-            "image and re-submits it each request). Gemini-only."
+            "image and re-submits it each request). Gemini-only. "
+            "Max 6,000,000 chars (~4.5 MiB decoded); compress JPEG quality 90% "
+            "and ≤ 2 MB before sending."
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")

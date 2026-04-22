@@ -1440,6 +1440,13 @@ async def generate_image(
             body.model_id, selected_provider,
         )
 
+        if body.reference_image and not prefer_gemini:
+            logger.warning(
+                "reference_image ignored: image edit requires Gemini "
+                "(model=%s provider=%s). Falling through to fresh generation.",
+                body.model_id, selected_provider,
+            )
+
         width, height, aspect_ratio = parse_image_size(body.size)
 
         async def _build_data_url(img: dict) -> str:
@@ -1707,6 +1714,14 @@ async def _run_image_generation_task(
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
             body.model_id, selected_provider,
         )
+
+        if body.reference_image and not prefer_gemini:
+            logger.warning(
+                "Async: reference_image ignored: image edit requires Gemini "
+                "(model=%s provider=%s). Falling through to fresh generation.",
+                body.model_id, selected_provider,
+            )
+
         width, height, aspect_ratio = parse_image_size(body.size)
 
         task["progress"] = 30
