@@ -776,12 +776,21 @@ class ModelRegistry:
         because the whole point of making Vertex its own provider is that
         operators configure it through the Service Management UI — the DB
         row is the source of truth.
+
+        ``model_id`` may carry a ``-vertex`` suffix that's a DB-only
+        disambiguator used to let the same underlying Gemini model coexist
+        under both the ``google`` (AI Studio) provider and ``google-vertex``
+        without colliding on the old 2-column PK. The suffix is stripped
+        here — Google's Vertex API only knows the bare id (e.g.
+        ``gemini-3-flash-preview``). Safe no-op when a row already uses
+        a canonical id.
         """
         config = self._configs.get(ModelProvider.GOOGLE_VERTEX)
         api_key = config.api_key if config else ""
         base = (config.base_url if config else None) or self.VERTEX_BASE_URL
+        upstream_id = model_id[:-len("-vertex")] if model_id.endswith("-vertex") else model_id
         action = "streamGenerateContent" if stream else "generateContent"
-        path = f"/v1/publishers/google/models/{model_id}:{action}?key={api_key}"
+        path = f"/v1/publishers/google/models/{upstream_id}:{action}?key={api_key}"
         if stream:
             path += "&alt=sse"
         return f"{base}{path}"
