@@ -177,6 +177,12 @@ async def _run_generate(
         await progress_cb("render", 0.9)
 
     artifact = resp.artifact
+    # ``used_llm`` is the single most useful signal for the caller: when
+    # false the planner silently fell back to the deterministic template
+    # (timeout, auth, schema drift — see the warning log for the real
+    # reason) and the artifact is a skeleton. Surfacing it here lets the
+    # agent loop tell the user "the LLM planner wasn't available, here's
+    # the best we could do" rather than pretending the output is good.
     return {
         "artifact_id": artifact.artifact_id,
         "download_url": resp.download_url,
@@ -185,6 +191,7 @@ async def _run_generate(
         "sha256": artifact.sha256,
         "plan_outline": resp.plan_text or "",
         "critic_passed": bool(resp.passed),
+        "used_llm": bool(resp.used_llm),
     }
 
 
@@ -210,9 +217,16 @@ def build_server(service: Any) -> Any:
             mcp_types.Tool(
                 name="generate_document",
                 description=(
-                    "Plan + render a document (docx / pptx / xlsx / pdf). "
-                    "Returns a download URL plus artifact metadata. "
-                    "Inspect docgen://design-systems for palette options."
+                    "Generate a docx / pptx / xlsx / pdf file. USE THIS TOOL "
+                    "for any document/deck/spreadsheet request — do NOT write "
+                    "Python with python-pptx, openpyxl, or similar libraries; "
+                    "this tool handles rendering, critic review, and signed "
+                    "download URLs end-to-end. BEFORE calling: write the full "
+                    "content outline (headings + bullets + paragraphs) in "
+                    "markdown, then pass it as ``body_markdown`` so the "
+                    "planner produces a rich deck instead of a 3-slide "
+                    "skeleton. Inspect docgen://design-systems for palette "
+                    "options."
                 ),
                 inputSchema=input_json_schema(),
             )
@@ -446,8 +460,16 @@ async def main_http() -> None:
                     {
                         "name": "generate_document",
                         "description": (
-                            "Plan + render a document (docx / pptx / xlsx / pdf). "
-                            "Returns a download URL plus artifact metadata."
+                            "Generate a docx / pptx / xlsx / pdf file. USE "
+                            "THIS TOOL for any document/deck/spreadsheet "
+                            "request — do NOT write Python with python-pptx, "
+                            "openpyxl, or similar libraries; this tool "
+                            "handles rendering, critic review, and signed "
+                            "download URLs end-to-end. BEFORE calling: write "
+                            "the full content outline (headings + bullets + "
+                            "paragraphs) in markdown, then pass it as "
+                            "``body_markdown`` so the planner produces a "
+                            "rich deck instead of a 3-slide skeleton."
                         ),
                         "inputSchema": input_json_schema(),
                     }

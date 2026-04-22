@@ -52,11 +52,22 @@ class DashScopeLLMCaller:
         *,
         model: Optional[str] = None,
         endpoint: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: float = 180.0,
     ) -> None:
         self._api_key = api_key
         self._model = model or os.environ.get("DOCGEN_LLM_MODEL") or self.DEFAULT_MODEL
         self._endpoint = endpoint or os.environ.get("DOCGEN_LLM_ENDPOINT") or self.DEFAULT_ENDPOINT
+        # 180s default because PPTX planning for 10-15 slides with rich
+        # content routinely takes 60-120s on DashScope. The old 60s cap
+        # silently fell back to the deterministic 3-slide template — users
+        # saw a "successful" tool call that actually degraded content.
+        # Honour DOCGEN_LLM_TIMEOUT env override for fine-tuning per deploy.
+        env_timeout = os.environ.get("DOCGEN_LLM_TIMEOUT")
+        if env_timeout:
+            try:
+                timeout = float(env_timeout)
+            except ValueError:
+                pass
         self._timeout = timeout
 
     async def generate_json(
