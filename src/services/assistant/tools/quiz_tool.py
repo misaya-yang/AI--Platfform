@@ -264,73 +264,191 @@ class QuizGeneratorExecutor(ToolExecutor):
                         ),
                     )
 
-                # Normalize correct_answer: convert text values to labels
-                # LLM may return ["2.5%"] instead of ["C"] — map text back to label
-                if normalized_opts and q.get("correct_answer"):
-                    text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
-                    normalized_answers = []
-                    # Map numeric indices to labels — LLMs may return 0-indexed or 1-indexed
-                    idx0_to_label = {str(i): opt["label"] for i, opt in enumerate(normalized_opts)}      # 0→A, 1→B, 2→C
-                    idx1_to_label = {str(i + 1): opt["label"] for i, opt in enumerate(normalized_opts)}  # 1→A, 2→B, 3→C
-                    label_set = {o["label"].upper() for o in normalized_opts}
-                    explanation = q.get("explanation", "").lower()
+                # Normalize correct_answer: convert text values to labels.
+                # LLM may return ["2.5%"] instead of ["C"] — map text back to label.
+                #
+                # CRITICAL (regression fix): every branch below MUST either
+                # produce a valid label from label_set / {"true","false"} or
+                # return an error. Silent fallback on empty/garbage values
+                # produced the "all-A uniform quiz" bug: an empty string
+                # satisfied `"" in <any option text>` and collapsed every
+                # question onto the first option's label (A). The tool now
+                # rejects with a clear error so the LLM can retry properly.
+                q_type = q.get("question_type", "mc_single")
+                raw_answers = q.get("correct_answer") or []
 
-                    for ans in q["correct_answer"]:
-                        ans_str = str(ans).strip()
-                        ans_lower = ans_str.lower()
-                        # Already a label (A/B/C/D/true/false)?
-                        if ans_str.upper() in label_set or ans_lower in ("true", "false"):
-                            normalized_answers.append(ans_str.upper() if len(ans_str) == 1 else ans_str.lower())
-                        # Numeric index — try 0-indexed first (more common for LLMs)
-                        elif ans_str in idx0_to_label:
-                            # Validate against explanation if available
-                            label_0 = idx0_to_label[ans_str]
+                if q_type != "true_false" and not normalized_opts:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=f"Question {i + 1}: options are required for {q_type} questions.",
+                    )
+
+                label_set = {o["label"].upper() for o in normalized_opts}
+                text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
+                idx0_to_label = {str(k): opt["label"] for k, opt in enumerate(normalized_opts)}
+                idx1_to_label = {str(k + 1): opt["label"] for k, opt in enumerate(normalized_opts)}
+                explanation = q.get("explanation", "").lower()
+
+                normalized_answers: list[str] = []
+                for ans in raw_answers:
+                    ans_str = str(ans).strip() if ans is not None else ""
+                    ans_lower = ans_str.lower()
+
+                    # Empty / None / whitespace-only → reject immediately.
+                    # The prior code fell through to `"" in text` which matched
+                    # every option and collapsed all questions onto label A.
+                    if not ans_str:
+                        return ToolCallResult(
+                            call_id=request.call_id,
+                            tool_name=request.tool_name,
+                            success=False,
+                            error=(
+                                f"Question {i + 1}: correct_answer contains an empty value. "
+                                f"Each entry must be a valid option label (e.g. 'B'). "
+                                f"Retry with the correct letter for each question."
+                            ),
+                        )
+
+                    # Valid label (A/B/C/D) or true/false?
+                    if q_type == "true_false" and ans_lower in ("true", "false"):
+                        normalized_answers.append(ans_lower)
+                        continue
+                    if ans_str.upper() in label_set:
+                        normalized_answers.append(ans_str.upper())
+                        continue
+
+                    # Numeric index — LLMs may return 0- or 1-indexed.
+                    if ans_str in idx0_to_label:
+                        label_0 = idx0_to_label[ans_str]
+                        if ans_str in idx1_to_label:
+                            label_1 = idx1_to_label[ans_str]
                             opt_0_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_0), "")
-                            if ans_str in idx1_to_label:
-                                label_1 = idx1_to_label[ans_str]
-                                opt_1_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_1), "")
-                                # Pick whichever option text appears in the explanation
-                                if explanation and opt_0_text and any(w in explanation for w in opt_0_text.split()[:3]):
-                                    normalized_answers.append(label_0)
-                                elif explanation and opt_1_text and any(w in explanation for w in opt_1_text.split()[:3]):
-                                    normalized_answers.append(label_1)
-                                else:
-                                    normalized_answers.append(label_0)  # default 0-indexed
+                            opt_1_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_1), "")
+                            if explanation and opt_0_text and any(w in explanation for w in opt_0_text.split()[:3]):
+                                normalized_answers.append(label_0)
+                            elif explanation and opt_1_text and any(w in explanation for w in opt_1_text.split()[:3]):
+                                normalized_answers.append(label_1)
                             else:
                                 normalized_answers.append(label_0)
-                        elif ans_str in idx1_to_label:
-                            normalized_answers.append(idx1_to_label[ans_str])
-                        # Text content — find matching label
-                        elif ans_lower in text_to_label:
-                            normalized_answers.append(text_to_label[ans_lower])
                         else:
-                            # Partial match
-                            matched = False
-                            for text, label in text_to_label.items():
-                                if ans_lower in text or text in ans_lower:
-                                    normalized_answers.append(label)
-                                    matched = True
-                                    break
-                            if not matched:
-                                normalized_answers.append(ans_str)
+                            normalized_answers.append(label_0)
+                        continue
+                    if ans_str in idx1_to_label:
+                        normalized_answers.append(idx1_to_label[ans_str])
+                        continue
 
-                    # For mc_single the grader only scores against the first
-                    # label, but the frontend highlights EVERY label in
-                    # correct_answer as "correct". If the LLM emitted 2+
-                    # labels (a known failure mode), the user sees multiple
-                    # green options while the backend silently grades only
-                    # the first — classic "why is my correct answer wrong?"
-                    # bug. Collapse to exactly one label for mc_single so the
-                    # UI and grader always agree.
-                    q_type = q.get("question_type", "mc_single")
-                    if q_type == "mc_single" and len(normalized_answers) > 1:
-                        logger.warning(
-                            f"Question {i + 1}: mc_single received "
-                            f"{len(normalized_answers)} correct answers "
-                            f"{normalized_answers!r}; keeping first only"
-                        )
-                        normalized_answers = [normalized_answers[0]]
-                    q["correct_answer"] = normalized_answers
+                    # Exact text match.
+                    if ans_lower in text_to_label:
+                        normalized_answers.append(text_to_label[ans_lower])
+                        continue
+
+                    # Substring match — guarded. Require needle length >=3 so
+                    # an empty / single-char answer can never match every
+                    # option, AND require unambiguous match (exactly one hit)
+                    # so "a" doesn't match 3 options and silently pick one.
+                    if len(ans_lower) >= 3:
+                        matches = [
+                            label for text, label in text_to_label.items()
+                            if text and (ans_lower in text or text in ans_lower)
+                        ]
+                        if len(matches) == 1:
+                            normalized_answers.append(matches[0])
+                            continue
+
+                    # Prose with a leading label — "B) Self-attention",
+                    # "B. ...", "B: ..." — salvage the letter.
+                    if len(ans_str) >= 2 and ans_str[0].upper() in label_set and ans_str[1] in ").: -":
+                        normalized_answers.append(ans_str[0].upper())
+                        continue
+
+                    # Nothing matched → reject. Don't store garbage that
+                    # silently mis-grades.
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=(
+                            f"Question {i + 1}: correct_answer {ans_str!r} does not "
+                            f"match any option label {sorted(label_set)}. "
+                            f"Use the letter (e.g. 'B') that matches one of "
+                            f"the options you provided."
+                        ),
+                    )
+
+                if not normalized_answers:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=(
+                            f"Question {i + 1}: correct_answer is empty. "
+                            f"Provide the letter of the correct option (e.g. ['B'])."
+                        ),
+                    )
+
+                # For mc_single the grader only scores against the first
+                # label, but the frontend highlights EVERY label in
+                # correct_answer as "correct". If the LLM emitted 2+
+                # labels (a known failure mode), the user sees multiple
+                # green options while the backend silently grades only
+                # the first — classic "why is my correct answer wrong?"
+                # bug. Collapse to exactly one label for mc_single so the
+                # UI and grader always agree.
+                #
+                # NOTE: this squash is NOT the root cause of the all-A bug
+                # we just fixed above — it only fires when 2+ labels are
+                # already present, and the symptom case started with only
+                # ["A"] / [""] / [] so this branch never ran. The squash
+                # remains intentional for the separate "ghost-green-wrong"
+                # mc_single failure mode it was introduced for.
+                if q_type == "mc_single" and len(normalized_answers) > 1:
+                    logger.warning(
+                        f"Question {i + 1}: mc_single received "
+                        f"{len(normalized_answers)} correct answers "
+                        f"{normalized_answers!r}; keeping first only"
+                    )
+                    normalized_answers = [normalized_answers[0]]
+                q["correct_answer"] = normalized_answers
+
+            # Cross-question sanity: reject quizzes where every objective
+            # question has IDENTICAL correct_answer and the batch is big
+            # enough that uniformity is overwhelmingly more likely to be an
+            # LLM failure than a legitimate quiz. Observed failure mode:
+            # Gemini 3 emitted ["A"] for all 5 questions after a
+            # retry-after-error (question → question_text arg-name fix-up).
+            # The resulting quiz grades every non-A pick as wrong and is
+            # useless. Catching this here forces the model to regenerate.
+            _UNIFORM_MIN_QUESTIONS = 3
+            objective_qs = [
+                q for q in questions
+                if q.get("question_type", "mc_single")
+                in ("mc_single", "mc_multi", "true_false")
+            ]
+            if len(objective_qs) >= _UNIFORM_MIN_QUESTIONS:
+                first_ans = tuple(objective_qs[0].get("correct_answer") or [])
+                if first_ans and all(
+                    tuple(q.get("correct_answer") or []) == first_ans
+                    for q in objective_qs
+                ):
+                    logger.warning(
+                        f"Rejecting uniform-answer quiz: all "
+                        f"{len(objective_qs)} objective questions have "
+                        f"correct_answer={list(first_ans)!r}"
+                    )
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error=(
+                            f"All {len(objective_qs)} questions have the "
+                            f"same correct_answer {list(first_ans)!r}. "
+                            f"This is almost always an LLM failure mode, "
+                            f"not a real quiz. Regenerate with varied "
+                            f"correct answers distributed across A/B/C/D."
+                        ),
+                    )
 
             # Persist to DB
             quiz_id = str(uuid.uuid4())
@@ -407,11 +525,52 @@ class QuizGeneratorExecutor(ToolExecutor):
                 ],
             }
 
+            # Build a model-facing `result` that contains the actual question
+            # content — NOT just a summary sentence. Previously this tool
+            # returned only "Quiz 'X' created with N questions…", so a
+            # follow-up turn (especially after a model switch that clears
+            # provider-side state) had no visibility into the questions and
+            # would hallucinate a brand-new set when asked "explain those 5
+            # questions above".
+            #
+            # Head-cap to 20 questions to keep long quizzes from blowing up
+            # the context window on the next turn. The frontend QuizCard
+            # always renders the full set from `metadata.quiz_data`.
+            _MODEL_HEAD_CAP = 20
+            _model_qs = questions[:_MODEL_HEAD_CAP]
+            _lines: list[str] = [
+                f"Quiz '{title}' created (id={quiz_id}, {len(questions)} questions, "
+                f"difficulty={difficulty}). The interactive card is rendered for the user.",
+                "",
+                "Question content (for follow-up reference — do NOT re-list to the user):",
+            ]
+            for q in _model_qs:
+                q_num = q.get("question_num")
+                q_text = str(q.get("question_text") or "").strip()
+                _lines.append(f"Q{q_num}. {q_text}")
+                for opt in q.get("options") or []:
+                    if isinstance(opt, dict):
+                        label = opt.get("label", "?")
+                        text = str(opt.get("text") or "").strip()
+                        _lines.append(f"  {label}) {text}")
+                correct = q.get("correct_answer") or []
+                if correct:
+                    _lines.append(f"  correct: {', '.join(str(c) for c in correct)}")
+                expl = str(q.get("explanation") or "").strip()
+                if expl:
+                    _lines.append(f"  explanation: {expl}")
+            if len(questions) > _MODEL_HEAD_CAP:
+                _lines.append(
+                    f"... [{len(questions) - _MODEL_HEAD_CAP} more questions truncated; "
+                    f"full set in the card]"
+                )
+            model_result = "\n".join(_lines)
+
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
-                result=f"Quiz '{title}' created with {len(questions)} questions. Interactive quiz card is now displayed.",
+                result=model_result,
                 metadata={"quiz_data": quiz_data},
             )
 
