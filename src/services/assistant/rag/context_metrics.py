@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ....core.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ...persistence.database import DatabaseStorage
+    from ....persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)
 
