@@ -56,8 +56,13 @@ class GenerateDocumentInput(BaseModel):
         default=None,
         max_length=20000,
         description=(
-            "Optional markdown body. If present the planner uses it as "
-            "ground-truth content instead of generating from scratch."
+            "STRONGLY RECOMMENDED. Full markdown body — headings + bullets "
+            "+ paragraphs. The planner uses this as ground truth content; "
+            "call quality drops severely (template skeleton only) when "
+            "this is missing, because the MCP transport does not currently "
+            "expose a sampling round-trip back to the caller. Write the "
+            "complete document in your response first, then pass that "
+            "exact markdown as ``body_markdown``."
         ),
     )
     locale: str = Field(

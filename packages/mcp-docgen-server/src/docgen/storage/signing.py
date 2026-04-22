@@ -25,15 +25,19 @@ def _signature(message: str) -> str:
 
 
 def _normalise(url: str) -> str:
-    """Round-trip through urlparse so sign + verify see identical bytes.
+    """Canonical form used for HMAC — **path only**, no scheme or host.
 
-    Without this, ``"file:/a/b"`` and ``"file:///a/b"`` parse to the same
-    ParseResult but unparse to a canonical form with three slashes —
-    which breaks signature equality if the caller hands the non-canonical
-    form in.
+    Originally this kept scheme+host so ``file:/a/b`` vs ``file:///a/b``
+    stayed consistent. But when the signer (docgen service wiring a
+    public ``DOCGEN_PUBLIC_URL`` like ``https://gw.example.com/docgen``)
+    and the verifier (the starlette app, which sees whatever scheme/host
+    the reverse proxy hands it — often ``http://mcp-docgen-server:8765``)
+    disagree on scheme+host, every URL fails verification. Signing only
+    the path fixes that: the tenant/expiry/path is what's actually
+    security-relevant, and the host is a deployment detail.
     """
     u = urlparse(url)
-    return urlunparse(u._replace(query=""))
+    return u.path or "/"
 
 
 def sign_url(base_url: str, *, ttl_seconds: int, tenant_id: str) -> str:

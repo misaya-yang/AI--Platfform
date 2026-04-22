@@ -30,6 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from .llm_caller import build_default_llm
 from .resource_provider import (
     DESIGN_SYSTEMS_URI,
     SKILLS_URI_PREFIX,
@@ -119,16 +120,21 @@ def _tmp_artifact_root() -> Path:
 
 
 def _default_service(base_download_url: str = "file://") -> Any:
-    """Build a DocgenService wired to a LocalArtifactStore.
+    """Build a DocgenService wired to a LocalArtifactStore + default LLM.
 
     Imports are local so ``import mcp_docgen_server`` works even when
     docgen hasn't been installed yet (Agent A territory).
+
+    ``llm`` is pulled from the environment (``DASHSCOPE_API_KEY``); when
+    absent we fall back to ``None`` so the deterministic planner still
+    produces *something* — but output quality drops to template-level.
+    See ``build_default_llm`` for the full env contract.
     """
     from docgen.service import DocgenService  # type: ignore
     from docgen.storage import LocalArtifactStore  # type: ignore
 
     store = LocalArtifactStore(_tmp_artifact_root(), base_download_url=base_download_url)
-    return DocgenService(artifact_store=store, llm=None)
+    return DocgenService(artifact_store=store, llm=build_default_llm())
 
 
 async def _run_generate(
@@ -407,7 +413,7 @@ async def main_http() -> None:
         store_root,
         base_download_url=f"{public_base}/artifacts",
     )
-    service = DocgenService(artifact_store=store, llm=None)
+    service = DocgenService(artifact_store=store, llm=build_default_llm())
 
     # JSON-RPC dispatch ------------------------------------------------------
 

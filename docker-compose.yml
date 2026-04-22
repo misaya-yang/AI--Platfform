@@ -337,7 +337,23 @@ services:
       PORT: "8765"
       LOG_LEVEL: INFO
       DOCGEN_ARTIFACT_ROOT: /var/lib/docgen/artifacts
-      DOCGEN_PUBLIC_URL: http://mcp-docgen-server:8765
+      # Signed-URL base must match the **public** host the browser will
+      # call, since we want users to be able to click the returned
+      # download_url. Signatures are path-only (see docgen/storage/signing.py)
+      # so the internal vs public host mismatch at verify time is fine.
+      DOCGEN_PUBLIC_URL: ${DOCGEN_PUBLIC_URL:-http://mcp-docgen-server.internal:8765}
+      # Fed into docgen's planner — without it the pipeline falls back to
+      # a near-empty deterministic template and every deck/doc/sheet is a
+      # skeleton. See 2026-04-22 incident.
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DOCGEN_LLM_MODEL: ${DOCGEN_LLM_MODEL:-}
+      DOCGEN_ARTIFACT_SIGN_KEY: ${DOCGEN_ARTIFACT_SIGN_KEY:-}
+    ports:
+      # Bind to loopback only — nginx on the host proxies public
+      # ``/docgen/artifacts/*`` requests here so users can actually
+      # download the signed URLs. Container-to-container traffic still
+      # uses the ``mcp-docgen-server.internal`` network alias.
+      - "127.0.0.1:8765:8765"
     volumes:
       - docgen-artifacts:/var/lib/docgen/artifacts
     networks:
