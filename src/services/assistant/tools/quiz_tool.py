@@ -317,6 +317,21 @@ class QuizGeneratorExecutor(ToolExecutor):
                         error=f"Question {i + 1}: options are required for {q_type} questions.",
                     )
 
+                # For true_false, if the LLM omitted options (observed on
+                # Gemini 3.1 Pro via Vertex — the model treats the
+                # statement itself as the question and considers
+                # True/False implicit) synthesize the canonical
+                # ``[{true, True}, {false, False}]`` pair so the UI
+                # renders clickable buttons and the grader can label-match.
+                # The label_set / text_to_label / idx maps a few lines
+                # below will pick up these synthesized entries.
+                if q_type == "true_false" and not normalized_opts:
+                    normalized_opts = [
+                        {"label": "true", "text": "True"},
+                        {"label": "false", "text": "False"},
+                    ]
+                    q["options"] = normalized_opts
+
                 label_set = {o["label"].upper() for o in normalized_opts}
                 text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
                 idx0_to_label = {str(k): opt["label"] for k, opt in enumerate(normalized_opts)}
