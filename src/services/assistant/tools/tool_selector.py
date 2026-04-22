@@ -98,6 +98,23 @@ _MCP_SERVER_KEYWORDS: dict[str, list[str]] = {
     "wahda": ["wahda", "post", "message", "social", "社交", "帖子", "消息"],
     "halalmoney": ["halal", "haram", "investment", "portfolio", "stock", "finance",
                    "清真", "投资", "股票", "金融", "bitcoin", "btc", "aapl"],
+    # docgen exposes a single ``generate_document`` tool that plans + renders
+    # docx / pptx / xlsx / pdf via an isolated MCP server. Keywords cover the
+    # common verbs and nouns users reach for when asking for a document —
+    # without them, the tool_selector's fallback only fires if the user
+    # literally types "docgen", which nobody does.
+    "docgen": [
+        "document", "doc", "docx", "word",
+        "pdf",
+        "pptx", "ppt", "powerpoint", "slides", "slide", "deck", "presentation",
+        "xlsx", "excel", "spreadsheet", "workbook",
+        "report", "memo", "letter", "brief",
+        "generate", "create", "export", "render", "produce",
+        "文档", "报告", "备忘录",
+        "幻灯片", "演示", "演示文稿", "ppt", "报告",
+        "电子表格", "表格", "excel",
+        "生成", "创建", "导出", "制作",
+    ],
 }
 
 
@@ -130,6 +147,32 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
     if name in ALWAYS_INCLUDE:
         return 1.0
 
+    # MCP tools are scored against their *server's* keyword list first.
+    # Must come BEFORE the name_tokens path below — MCP tool names like
+    # ``mcp_docgen__generate_document`` tokenize to ['mcp','docgen',
+    # 'generate','document'], which would match generic words ("generate")
+    # in almost every message and yield a misleading 0.5 baseline. That
+    # crowds the per-tenant MCP budget and can still be too low to beat
+    # other high-score builtins. By keying off the server id we only
+    # surface the tool when the message is actually about that server.
+    if name.startswith("mcp_"):
+        for server, kws in _MCP_SERVER_KEYWORDS.items():
+            if name.startswith(f"mcp_{server}__"):
+                hits = sum(1 for kw in kws if kw in message_lower)
+                if hits:
+                    return min(0.4 + hits * 0.2, 1.0)
+                return 0.0  # MCP tool but no relevance signal — exclude
+        # Fallback for unknown MCP servers: match server name or tool
+        # action against message.
+        parts = name.split("__", 1)
+        server_part = parts[0].replace("mcp_", "") if parts else ""
+        action_part = parts[1] if len(parts) > 1 else ""
+        if server_part and server_part in message_lower:
+            return 0.6
+        if action_part and action_part.replace("_", " ") in message_lower:
+            return 0.5
+        return 0.0
+
     # 1) Tool-declared keywords take precedence.
     declared = list(getattr(tool_def, "relevance_keywords", []) or [])
     # 2) Central dict adds to the pool (backwards-compatible with existing tools).
@@ -145,7 +188,9 @@ def _score_tool(tool_def: ToolDefinition, message_lower: str) -> float:
             return min(0.3 + hits * 0.2, 1.0)  # 0.5 for 1 hit, 0.7 for 2, etc.
         return 0.1  # Builtin but no keyword match — low baseline
 
-    # MCP tools: check server-specific keywords
+    # Deprecated: this branch is unreachable now that MCP tools are scored
+    # above, but kept as defensive no-op in case the mcp_ prefix convention
+    # ever changes.
     if name.startswith("mcp_"):
         for server, kws in _MCP_SERVER_KEYWORDS.items():
             if name.startswith(f"mcp_{server}__"):
@@ -212,8 +257,14 @@ def select_tools(
         tokens = _estimate_tool_tokens(tool)
         scored.append((tool, score, tier, tokens))
 
-    # Sort: tier ASC, score DESC
-    scored.sort(key=lambda x: (x[2], -x[1]))
+    # Sort: ALWAYS-tier tools first, then everything else by score DESC.
+    # The earlier ``(tier ASC, score DESC)`` put MCP tools dead last, so a
+    # perfectly-relevant MCP tool (score=1.0) could be starved of budget by
+    # weakly-relevant builtins (score=0.5) that merely happened to tier
+    # higher. For builtins vs skills vs MCP, a user's actual intent —
+    # captured in the score — is a better budget heuristic than a static
+    # tier preference.
+    scored.sort(key=lambda x: (0 if x[2] == TIER_ALWAYS else 1, -x[1]))
 
     # Select within budget
     selected: list[ToolDefinition] = []

@@ -11,6 +11,8 @@ mcp_servers:
     # ``.internal`` suffix matches the gateway's MCPClient trusted-hostname
     # rule so http:// across the docker network passes the SSRF guard.
     # The alias is declared on the mcp-docgen-server service in docker-compose.yml.
+    # For local (non-docker) testing, point this at ``http://localhost:8765``
+    # and run the server directly with ``MCP_TRANSPORT=http``.
     url: http://mcp-docgen-server.internal:8765
     transport: http
     description: "Generate docx / pptx / xlsx / pdf — design-system driven, returns signed download URL"
