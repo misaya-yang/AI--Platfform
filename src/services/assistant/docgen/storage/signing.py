@@ -64,4 +64,10 @@ def verify_url(url: str) -> bool:
     normalised = _normalise(base_url)
     payload = f"{normalised}|{tenant}|{exp}"
     expected = _signature(payload)
-    return hmac.compare_digest(expected, sig)
+    # Timing-safe compare — must be same type on both sides. Encode both
+    # to bytes explicitly so we never fall back to Python's short-circuiting
+    # str ``==`` which would leak timing information per character.
+    try:
+        return hmac.compare_digest(expected.encode("ascii"), sig.encode("ascii"))
+    except UnicodeEncodeError:
+        return False

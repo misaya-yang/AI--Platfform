@@ -121,6 +121,29 @@ _CATEGORY = {c.value: c for c in IssueCategory}
 _SEVERITY = {s.value: s for s in IssueSeverity}
 
 
+def default_vision_critic() -> "VisionCritic":
+    """Return the production vision critic.
+
+    If ``ANTHROPIC_API_KEY`` is set AND the ``anthropic`` SDK is importable,
+    returns a :class:`FreshContextVisionCritic` that hands rendered pages to
+    a fresh Anthropic client each call. Otherwise returns the deterministic
+    :class:`StructuralVisionCritic` so CI / offline dev boxes keep working.
+    """
+    import os
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from anthropic import AsyncAnthropic  # type: ignore  # local, lazy
+        except ImportError:
+            return StructuralVisionCritic()
+
+        def factory():
+            return AsyncAnthropic()
+
+        return FreshContextVisionCritic(client_factory=factory)
+    return StructuralVisionCritic()
+
+
 # --------------------------------------------------------------------------
 # StructuralVisionCritic — a heuristic critic that works without any LLM.
 # This exists so the fix-and-verify loop can be exercised in unit tests

@@ -19,6 +19,13 @@ PptxLayout = Literal[
     "halfbleed_image",
     "chart",
     "blank",
+    # Claude-artifact additions
+    "section_divider",       # dark mode, huge numeral, section label
+    "big_stat",              # single monumental stat (−80%, 5×, 1300)
+    "comparison_table",      # real table (L1..L5 maturity, before/after)
+    "pull_quote_card",       # quote + attribution in a structured card
+    "dark_card",             # content slide on a dark surface (interleave)
+    "numbered_flow",         # vertical big-numeral list, long labels OK
 ]
 
 

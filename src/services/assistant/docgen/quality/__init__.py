@@ -24,7 +24,13 @@ from .types import (
     IssueSeverity,
     IssueCategory,
 )
-from .visual_verifier import PptxPdfVisualVerifier, VisionCritic, FreshContextVisionCritic
+from .visual_verifier import (
+    FreshContextVisionCritic,
+    PptxPdfVisualVerifier,
+    StructuralVisionCritic,
+    VisionCritic,
+    default_vision_critic,
+)
 from .xlsx_verifier import XlsxFormulaVerifier
 from .docx_verifier import DocxXmlVerifier
 from .verifier_pipeline import VerifierPipeline
@@ -37,6 +43,8 @@ __all__ = [
     "PptxPdfVisualVerifier",
     "VisionCritic",
     "FreshContextVisionCritic",
+    "StructuralVisionCritic",
+    "default_vision_critic",
     "XlsxFormulaVerifier",
     "DocxXmlVerifier",
     "VerifierPipeline",

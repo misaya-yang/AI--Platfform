@@ -43,6 +43,31 @@ def test_sign_url_expired_fails():
     assert not verify_url(signed)
 
 
+def test_sign_url_tampered_signature_rejected_timing_safe():
+    """Flip a char in the sig — verify must reject via hmac.compare_digest."""
+    url = "file:///tmp/foo/bar.docx"
+    signed = sign_url(url, ttl_seconds=60, tenant_id="acme")
+    # Locate the sig= param and flip one hex char.
+    import re
+    m = re.search(r"sig=([0-9a-f]+)", signed)
+    assert m is not None
+    sig = m.group(1)
+    # Flip first char: 'a' <-> 'b', else toggle low bit.
+    flipped_first = "b" if sig[0] != "b" else "a"
+    tampered_sig = flipped_first + sig[1:]
+    tampered = signed.replace(f"sig={sig}", f"sig={tampered_sig}")
+    assert not verify_url(tampered)
+
+
+def test_sign_url_nonascii_signature_rejected():
+    """Attacker-controlled non-ASCII sig must not raise — just fail."""
+    url = "file:///tmp/foo/bar.docx"
+    signed = sign_url(url, ttl_seconds=60, tenant_id="acme")
+    import re
+    tampered = re.sub(r"sig=[0-9a-f]+", "sig=ééé", signed)
+    assert verify_url(tampered) is False
+
+
 # -------- LocalArtifactStore --------
 
 

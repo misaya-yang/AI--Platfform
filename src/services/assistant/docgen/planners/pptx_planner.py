@@ -2,7 +2,9 @@
 
 Deterministic fallback produces a reasonable 5-slide deck (title,
 agenda, 2-col content, chart if ``style_hints`` mentions one, close).
-The LLM path generates a richer layout-aware IR.
+The LLM path generates a richer layout-aware IR and then runs a
+`layout_rules` pipeline for content-driven uplifts, variety, section
+dividers, dark-card interleave, and eyebrow hints.
 """
 
 from __future__ import annotations
@@ -24,15 +26,25 @@ from ..ir import (
     VisualSpec,
 )
 from ..ir.base import DocMetadata
+from pydantic import ValidationError
+
 from .base import (
     BasePlanner,
     Brief,
     PlannerResult,
     metadata_for_brief,
+    normalise_pptx_ir,
     parse_markdown_to_blocks,
     theme_for_brief,
 )
 from .docx_planner import LLMCaller
+from .layout_rules import (
+    DEFAULT_RULES,
+    EyebrowHintRule,
+    LayoutRule,
+    LayoutVarietyRule,
+    apply_rules,
+)
 
 
 SYSTEM_PROMPT = """You are a presentation designer producing a slide deck.
@@ -70,17 +82,39 @@ Absolute rules:
 class PptxPlanner(BasePlanner):
     doc_type = "pptx"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(
+        self,
+        llm: Optional[LLMCaller] = None,
+        *,
+        rules: Optional[list[LayoutRule]] = None,
+    ) -> None:
         self._llm = llm
+        self._rules = rules if rules is not None else DEFAULT_RULES
 
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
+        used_llm = False
+        ir: Optional[PptxIR] = None
         if self._llm is not None:
-            ir = await self._plan_with_llm(brief)
-            used_llm = True
-        else:
+            try:
+                ir = await self._plan_with_llm(brief)
+                used_llm = True
+            except Exception as exc:  # noqa: BLE001 — broad catch is intentional
+                # Covers:
+                #   * LLM-protocol shape errors (ValidationError, ValueError,
+                #     KeyError, TypeError) that survive normalise_pptx_ir
+                #   * Transport errors (httpx.HTTPError, ConnectionError,
+                #     RemoteProtocolError) from any LLMCaller implementation
+                #   * Timeouts (asyncio.TimeoutError)
+                # We never want a hard 500 in front of the user — fall through
+                # to the deterministic path and log with stack trace for debug.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "PptxPlanner LLM path failed (%s: %s); falling back to deterministic",
+                    type(exc).__name__, exc, exc_info=True,
+                )
+        if ir is None:
             ir = self._plan_deterministic(brief)
-            used_llm = False
         outline = self._outline(ir)
         return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
 
@@ -99,8 +133,18 @@ class PptxPlanner(BasePlanner):
         data = await self._llm.generate_json(system=SYSTEM_PROMPT, user=user, max_tokens=6000)
         data.setdefault("doc_type", "pptx")
         data.setdefault("metadata", {"title": brief.title, "page_size": "Widescreen16x9", "locale": brief.locale})
+        # Respect caller-supplied design_system hint (propagate from brief.style_hints).
+        if brief.style_hints.get("design_system"):
+            data["metadata"].setdefault("design_system", brief.style_hints["design_system"])
         data.setdefault("theme", theme_for_brief(brief).model_dump())
-        return PptxIR.model_validate(data)
+        # Repair any LLM schema drift (``type`` → ``kind``, list shapes,
+        # nested content tables) before pydantic validation.
+        data = normalise_pptx_ir(data)
+        ir = PptxIR.model_validate(data)
+        # Delegate all post-LLM uplifts to the rule engine.
+        slides = apply_rules(list(ir.content.slides), brief, self._rules)
+        ir = ir.model_copy(update={"content": ir.content.model_copy(update={"slides": slides})})
+        return ir
 
     # --------------------------------------------------------- deterministic
 
@@ -148,11 +192,11 @@ class PptxPlanner(BasePlanner):
             body=[QuoteBlock(text=f"Questions? — {brief.title}", author=None)],
         ))
 
-        # Enforce layout variety: no two consecutive slides with the same
-        # layout (the first = "title" is fixed). Assign eyebrow kickers in
-        # notes so the renderer can pick them up.
-        slides = self._enforce_layout_variety(slides)
-        slides = self._attach_eyebrow_hints(slides, brief)
+        # Deterministic path only needs variety + eyebrow (no LLM drift to fix,
+        # no Layer-1/Maturity boundary story, no dark-card interleave desired
+        # to keep the fallback minimal and stable under golden tests).
+        slides = LayoutVarietyRule().apply(slides, brief)
+        slides = EyebrowHintRule().apply(slides, brief)
 
         meta_kwargs: dict = {
             "title": brief.title,
@@ -205,126 +249,6 @@ class PptxPlanner(BasePlanner):
 
         # Default
         return PptxSlide(layout="title_content", title=title, body=blocks[:6])
-
-    def _enforce_layout_variety(self, slides: list[PptxSlide]) -> list[PptxSlide]:
-        """If two consecutive slides share a layout, swap the second to an
-        alternative that still fits the content shape.
-
-        The alternative must be *appropriate* for the body — e.g. a slide
-        with one short paragraph doesn't fit ``two_col`` / ``grid_2x2``
-        (those need list-like content). If no alternative fits, keep the
-        original layout — variety matters less than legibility.
-        """
-        if len(slides) <= 2:
-            return slides
-
-        alternatives = {
-            "title_content": ["halfbleed_image", "two_col", "grid_2x2", "title_content"],
-            "grid_2x2": ["icon_row", "title_content", "grid_2x2"],
-            "icon_row": ["grid_2x2", "title_content", "icon_row"],
-            "two_col": ["halfbleed_image", "title_content", "two_col"],
-            "halfbleed_image": ["two_col", "title_content", "halfbleed_image"],
-        }
-        prev = slides[0].layout
-        out = [slides[0]]
-        for s in slides[1:]:
-            if s.layout == prev and s.layout in alternatives:
-                for alt in alternatives[s.layout]:
-                    if alt != prev and self._layout_fits_content(alt, s):
-                        s = s.model_copy(update={"layout": alt})
-                        break
-            out.append(s)
-            prev = s.layout
-        return out
-
-    def _layout_fits_content(self, layout: str, s: PptxSlide) -> bool:
-        """Return True iff ``layout`` is a reasonable match for ``s.body``.
-
-        Heuristics:
-          * title_content / halfbleed_image: fit any content, incl. empty.
-          * two_col: needs at least 2 blocks OR one with multiple bullets.
-          * grid_2x2: needs a bullet list with ≥ 3 items OR ≥ 3 text blocks.
-          * icon_row: same as grid_2x2.
-        """
-        body = s.body or []
-        if layout in ("title_content", "halfbleed_image"):
-            return True
-        # Count "content units"
-        content_units = 0
-        for b in body:
-            if isinstance(b, BulletBlock):
-                content_units += len(b.items)
-            else:
-                content_units += 1
-        if layout in ("grid_2x2", "icon_row"):
-            return content_units >= 3
-        if layout == "two_col":
-            return content_units >= 2
-        return True
-
-    def _attach_eyebrow_hints(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
-        """Add ``EYEBROW: ...`` hints to slide notes so the renderer uses
-        them as kicker text above each H1. The eyebrow is meant to be a
-        *running header* (same across content slides) that names the deck
-        context — e.g. "2026-Q2 QUARTERLY REVIEW" or "PRODUCT · DESIGN".
-
-        Priority:
-          1. ``brief.style_hints["eyebrow"]`` — explicit override.
-          2. Derived from brief.goal: drop filler words, take first 3-4
-             content words, upper-case.
-          3. Derived from brief.title: last "significant" segment.
-        """
-        kicker_default = brief.style_hints.get("eyebrow") or self._derive_eyebrow(brief)
-        out = []
-        for i, s in enumerate(slides):
-            if s.layout == "title":
-                out.append(s)
-                continue
-            existing_notes = s.notes or ""
-            # If this slide already has an explicit EYEBROW in notes, keep it.
-            if "EYEBROW:" in existing_notes:
-                out.append(s)
-                continue
-            eyebrow = kicker_default
-            if not eyebrow:
-                out.append(s)
-                continue
-            new_notes = f"EYEBROW: {eyebrow}\n{existing_notes}".strip()
-            out.append(s.model_copy(update={"notes": new_notes}))
-        return out
-
-    _FILLER_WORDS = {
-        "a", "an", "the", "and", "or", "of", "for", "to", "with",
-        "on", "in", "at", "by", "from", "is", "are", "was", "be",
-        "this", "that", "these", "those", "its", "deck", "slide",
-        "slides", "presentation",
-    }
-
-    def _derive_eyebrow(self, brief: Brief) -> str:
-        """Pick a short running-header label from the brief.
-
-        Strategy: start from goal, strip filler words, take up to 4 tokens,
-        normalise to UPPER, cap at 28 chars. Fallback to title tail.
-        """
-        import re as _re
-
-        def _pick(text: str) -> str:
-            tokens = _re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", text)
-            kept = [t for t in tokens if t.lower() not in self._FILLER_WORDS]
-            # Prefer the first 3-4 "content words" (nouns/adj tend to come first)
-            if not kept:
-                return ""
-            candidate = " ".join(kept[:4])
-            if len(candidate) > 28:
-                candidate = " ".join(kept[:3])
-            if len(candidate) > 28:
-                candidate = candidate[:28].rstrip()
-            return candidate.upper()
-
-        goal_eyebrow = _pick(brief.goal)
-        if goal_eyebrow:
-            return goal_eyebrow
-        return _pick(brief.title) or "SECTION"
 
     def _looks_like_stat(self, blocks) -> Optional[str]:
         for b in blocks:

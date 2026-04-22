@@ -18,7 +18,9 @@ from ..ir import (
     ParagraphBlock,
 )
 from ..ir.docx import DocxHeaderFooter
-from .base import Brief, BasePlanner, PlannerResult, metadata_for_brief, parse_markdown_to_blocks, theme_for_brief
+from pydantic import ValidationError
+
+from .base import Brief, BasePlanner, PlannerResult, metadata_for_brief, normalise_docx_ir, parse_markdown_to_blocks, theme_for_brief
 
 
 class LLMCaller(Protocol):
@@ -62,12 +64,20 @@ class DocxPlanner(BasePlanner):
 
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
+        used_llm = False
+        ir: Optional[DocxIR] = None
         if self._llm is not None:
-            ir = await self._plan_with_llm(brief)
-            used_llm = True
-        else:
+            try:
+                ir = await self._plan_with_llm(brief)
+                used_llm = True
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning(
+                    "DocxPlanner LLM path failed (%s: %s); falling back to deterministic",
+                    type(exc).__name__, exc, exc_info=True,
+                )
+        if ir is None:
             ir = self._plan_deterministic(brief)
-            used_llm = False
         outline = self._outline(ir)
         return PlannerResult(ir=ir, plan_text=outline, used_llm=used_llm, duration_ms=int((time.perf_counter() - started) * 1000))
 
@@ -83,6 +93,7 @@ class DocxPlanner(BasePlanner):
         data.setdefault("doc_type", "docx")
         data.setdefault("metadata", {"title": brief.title, "locale": brief.locale})
         data.setdefault("theme", theme_for_brief(brief).model_dump())
+        data = normalise_docx_ir(data)
         return DocxIR.model_validate(data)
 
     # --------------------------------------------------------- deterministic

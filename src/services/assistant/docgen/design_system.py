@@ -328,19 +328,194 @@ def _hejaz() -> DesignSystem:
     )
 
 
+def _claude() -> DesignSystem:
+    """Claude artifact aesthetic — warm off-white, deep chocolate ink,
+    terracotta/orange accent, serif display with sans body.
+
+    Key departures from the blue/corporate family:
+      * Surface is creamy (FAF9F5) not pure white — feels editorial.
+      * Ink is near-black with a brown tint (1A1612), not neutral gray.
+      * Accent is Claude's signature orange (CC785C) — no blue, no cyan.
+      * Display font is serif (Tiempos Headline → Georgia fallback).
+      * Dramatic type scale — display 84pt, h1 44pt for hero headlines.
+    """
+    c = ColorTokens(
+        surface="FAF9F5",
+        surface_elevated="FFFFFF",
+        surface_inverted="1A1612",
+        surface_tint="F0EBDF",
+        ink_primary="1A1612",
+        ink_secondary="3D3229",
+        ink_muted="7A6F65",
+        ink_inverted="FAF9F5",
+        border_subtle="E8E3D7",
+        border_strong="B8AE9D",
+        accent="CC785C",
+        accent_subtle="F3E3DB",
+        accent_on="FAF9F5",
+        accent_secondary="5A7B8A",
+    )
+    return DesignSystem(
+        name="claude",
+        description="Claude artifact aesthetic — warm cream, chocolate ink, terracotta orange, serif display.",
+        colors=c,
+        type_scale=TypeScale(
+            display_pt=84.0,
+            h1_pt=44.0,
+            h2_pt=26.0,
+            lead_pt=22.0,
+            body_pt=16.0,
+            caption_pt=11.0,
+            eyebrow_pt=10.0,
+            eyebrow_tracking_pct=0.16,
+            section_numeral_pt=280.0,
+            stat_numeral_pt=220.0,
+        ),
+        shapes=ShapeTokens(radius_sm=0.03, radius_md=0.06, shadow_blur_emu=50_000, shadow_alpha_per_mille=10_000),
+        font_display="Georgia",
+        font_body="Helvetica Neue",
+    )
+
+
 _REGISTRY: dict[str, DesignSystem] = {
     "stripe": _stripe(),
     "carbon": _carbon(),
     "keynote": _keynote(),
     "editorial": _editorial(),
     "hejaz": _hejaz(),
+    "claude": _claude(),
 }
 
 
 def get_design_system(name: str) -> DesignSystem:
     if name not in _REGISTRY:
         raise KeyError(f"unknown design system: {name!r}; options: {sorted(_REGISTRY)}")
-    return _REGISTRY[name]
+    return _with_font_fallback(_REGISTRY[name])
+
+
+# ---------------------------------------------------------------------------
+# font fallback
+#
+# PowerPoint / OOXML does NOT support CSS-style font fallback chains.
+# A single ``a:rFont val="..."`` is embedded per run, and if the target
+# machine lacks that font, the host app (PowerPoint / LibreOffice /
+# Keynote) silently substitutes a default — usually Calibri.
+#
+# To get consistent output on Linux servers (where Georgia / Helvetica
+# Neue are *not* installed), we probe which fonts actually exist and
+# swap the design system's ``font_display`` / ``font_body`` for a
+# safe-for-this-machine alternative.
+
+import logging
+import threading
+
+_log = logging.getLogger(__name__)
+
+_PROBED_FONTS: Optional[set[str]] = None
+_PROBE_LOCK = threading.Lock()
+
+
+def _probe_installed_fonts() -> set[str]:
+    """Return lower-cased family names known to the current machine.
+
+    Uses ``fc-list`` (present on any box with fontconfig — Linux, macOS
+    with homebrew, Docker images that apt-installed fonts-*). Falls back
+    to an empty set if fontconfig is missing, which makes the later
+    substitution logic behave as "use the design system as-written".
+
+    Thread-safety: the probe is guarded by a module-level lock so concurrent
+    first-callers don't race to spawn N ``fc-list`` subprocesses. The cached
+    result (including the empty-set failure case) means we never re-probe
+    on subsequent calls.
+
+    Laziness: this is never invoked at import time — only from
+    :func:`_pick_font`, which itself is only called when a design system
+    is actually requested.
+    """
+    global _PROBED_FONTS
+    # Fast-path without the lock for the common case (already probed).
+    if _PROBED_FONTS is not None:
+        return _PROBED_FONTS
+
+    with _PROBE_LOCK:
+        # Double-check: another thread may have populated while we waited.
+        if _PROBED_FONTS is not None:
+            return _PROBED_FONTS
+
+        import shutil
+        import subprocess
+        if not shutil.which("fc-list"):
+            _PROBED_FONTS = set()
+            return _PROBED_FONTS
+        try:
+            out = subprocess.run(
+                ["fc-list", ":", "family"],
+                capture_output=True, text=True, timeout=2,
+            )
+            families: set[str] = set()
+            for line in out.stdout.splitlines():
+                for name in line.split(","):
+                    families.add(name.strip().lower())
+            _PROBED_FONTS = families
+        except subprocess.TimeoutExpired:
+            _log.warning("fc-list timed out after 2s; caching empty font set")
+            _PROBED_FONTS = set()
+        except Exception as e:
+            _log.warning("fc-list probe failed (%s); caching empty font set", e)
+            _PROBED_FONTS = set()
+        return _PROBED_FONTS
+
+
+# Preferred → ordered fallback chain. First font found on this machine wins.
+_SERIF_CHAIN = (
+    "Tiempos Headline", "Georgia", "Charter", "Noto Serif",
+    "DejaVu Serif", "Liberation Serif", "Times New Roman",
+)
+_SANS_CHAIN = (
+    "Inter", "Helvetica Neue", "Helvetica", "Arial",
+    "Noto Sans", "DejaVu Sans", "Liberation Sans",
+)
+
+
+def _pick_font(preferred: str, chain: tuple[str, ...]) -> str:
+    installed = _probe_installed_fonts()
+    if not installed:
+        # No fontconfig — trust the design system (macOS dev box usually has Georgia).
+        return preferred
+    if preferred.lower() in installed:
+        return preferred
+    for candidate in chain:
+        if candidate.lower() in installed:
+            return candidate
+    # Final fallback — Calibri is the PowerPoint default on Windows and gets
+    # substituted on most platforms too.
+    return "Calibri"
+
+
+def _with_font_fallback(ds: DesignSystem) -> DesignSystem:
+    """Return a variant of ``ds`` whose fonts are guaranteed to exist.
+
+    Probes ``fc-list`` once, then picks the nearest available serif/sans
+    for the declared display/body fonts.
+    """
+    # Heuristic: classify as serif if the stated family is a known serif.
+    serif_names = {"georgia", "tiempos headline", "charter", "noto serif",
+                   "times", "times new roman"}
+    display_is_serif = ds.font_display.lower() in serif_names
+    body_is_serif = ds.font_body.lower() in serif_names
+    new_display = _pick_font(
+        ds.font_display,
+        _SERIF_CHAIN if display_is_serif else _SANS_CHAIN,
+    )
+    new_body = _pick_font(
+        ds.font_body,
+        _SERIF_CHAIN if body_is_serif else _SANS_CHAIN,
+    )
+    if new_display == ds.font_display and new_body == ds.font_body:
+        return ds
+    # Frozen dataclass — use dataclasses.replace
+    from dataclasses import replace
+    return replace(ds, font_display=new_display, font_body=new_body)
 
 
 def available_systems() -> list[str]:
@@ -348,7 +523,7 @@ def available_systems() -> list[str]:
 
 
 def default_design_system() -> DesignSystem:
-    return _REGISTRY["stripe"]
+    return _with_font_fallback(_REGISTRY["stripe"])
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +557,7 @@ def design_system_from_palette(palette_hex: list[str]) -> DesignSystem:
         accent_on=text_on(primary),
         accent_secondary=accent,
     )
-    return DesignSystem(
+    return _with_font_fallback(DesignSystem(
         name="custom",
         description="Ad-hoc system built from a 5-colour palette.",
         colors=c,
@@ -390,4 +565,4 @@ def design_system_from_palette(palette_hex: list[str]) -> DesignSystem:
         shapes=ShapeTokens(),
         font_display="Helvetica Neue",
         font_body="Helvetica Neue",
-    )
+    ))
