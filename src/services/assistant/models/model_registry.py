@@ -11,6 +11,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
@@ -214,6 +215,25 @@ class ModelConfig:
     base_url: str | None = None
     timeout: float = 300.0
     max_retries: int = 2
+    #: Backend flavor for Google provider only — ``"ai_studio"`` (default,
+    #: ``generativelanguage.googleapis.com/v1beta``) or ``"vertex"``
+    #: (``aiplatform.googleapis.com/v1/publishers/google``). Ignored for
+    #: other providers. Express Mode Vertex keys (``AQ.xxx``) work as
+    #: drop-in replacements — no OAuth / project / location required,
+    #: which is why we only support Express Mode for now.
+    backend: str = "ai_studio"
+
+
+# Env-driven routing for the Google provider:
+#   ``GOOGLE_API_BACKEND``     — global default, ``ai_studio`` (default) | ``vertex``
+#   ``GOOGLE_VERTEX_MODELS``   — comma-separated model IDs that should always
+#                                go to Vertex regardless of global default.
+#                                Handy for A/B testing one model at a time.
+#   ``VERTEX_API_KEY``         — Express-Mode key (``AQ.xxx``). Falls back to
+#                                ``GOOGLE_API_KEY`` / ``GEMINI_API_KEY`` if unset.
+# These are read in ``main.py`` at provider-configuration time and applied
+# via ``configure_provider(backend=...)``. Per-model overrides are resolved
+# inside ``_google_endpoint`` so they don't require reconfiguring anything.
 
 
 # Default model catalog
@@ -447,6 +467,11 @@ class ModelRegistry:
         ModelProvider.GOOGLE: "https://generativelanguage.googleapis.com",
     }
 
+    #: Base URL used when a Google provider is configured with ``backend="vertex"``.
+    #: Separate from ``DEFAULT_BASE_URLS`` because the same ``ModelProvider.GOOGLE``
+    #: enum value routes to two completely different hosts depending on backend.
+    VERTEX_BASE_URL = "https://aiplatform.googleapis.com"
+
     def __init__(self, use_default_models: bool = True):
         self._configs: dict[ModelProvider, ModelConfig] = {}
         self._models: dict[str, ModelInfo] = {}
@@ -539,12 +564,28 @@ class ModelRegistry:
         api_key: str,
         base_url: str | None = None,
         timeout: float = 120.0,
+        backend: str = "ai_studio",
     ) -> None:
-        """Configure a provider with API credentials."""
+        """Configure a provider with API credentials.
+
+        ``backend`` is meaningful only for ``ModelProvider.GOOGLE`` — either
+        ``"ai_studio"`` (default, ``generativelanguage.googleapis.com``) or
+        ``"vertex"`` (``aiplatform.googleapis.com``). When ``"vertex"`` and
+        no explicit ``base_url`` is passed, the Vertex base URL is selected
+        automatically so callers don't have to know the host format.
+        """
+        resolved_base = base_url
+        if resolved_base is None:
+            if provider == ModelProvider.GOOGLE and backend == "vertex":
+                resolved_base = self.VERTEX_BASE_URL
+            else:
+                resolved_base = self.DEFAULT_BASE_URLS.get(provider)
+
         self._configs[provider] = ModelConfig(
             api_key=api_key,
-            base_url=base_url or self.DEFAULT_BASE_URLS.get(provider),
+            base_url=resolved_base,
             timeout=timeout,
+            backend=backend if provider == ModelProvider.GOOGLE else "ai_studio",
         )
         # Reset client if exists
         if provider in self._clients:
@@ -554,6 +595,53 @@ class ModelRegistry:
     def is_provider_configured(self, provider: ModelProvider) -> bool:
         """Check if a provider is configured."""
         return provider in self._configs and bool(self._configs[provider].api_key)
+
+    def _google_backend_for_model(self, model_id: str) -> str:
+        """Resolve the effective Google backend for one model.
+
+        Precedence (first match wins):
+          1. ``GOOGLE_VERTEX_MODELS`` env — comma-separated list; if
+             ``model_id`` is in it, force ``vertex``.
+          2. ``ModelConfig.backend`` on the Google provider config — set at
+             startup from ``GOOGLE_API_BACKEND`` in ``main.py``.
+          3. Default: ``ai_studio``.
+        """
+        vertex_models_env = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
+        if vertex_models_env:
+            if model_id in {m.strip() for m in vertex_models_env.split(",") if m.strip()}:
+                return "vertex"
+        cfg = self._configs.get(ModelProvider.GOOGLE)
+        return cfg.backend if cfg else "ai_studio"
+
+    def _google_endpoint(self, model_id: str, *, stream: bool) -> str:
+        """Build the **absolute** endpoint URL for a Google call.
+
+        Returns a full URL (not a path) so that per-model backend overrides
+        via ``GOOGLE_VERTEX_MODELS`` work even when the provider's global
+        client has a different base_url — httpx treats absolute URLs as
+        overrides, so we can route individual models without recreating
+        the HTTP client.
+
+        Supports two endpoints:
+          * AI Studio: ``https://generativelanguage.googleapis.com/v1beta/models/{m}:{action}``
+          * Vertex Express Mode: ``https://aiplatform.googleapis.com/v1/publishers/google/models/{m}:{action}``
+
+        Vertex Express Mode accepts the same ``?key=`` query param as AI
+        Studio, so we don't need OAuth / service-account flow here.
+        """
+        config = self._configs.get(ModelProvider.GOOGLE)
+        api_key = config.api_key if config else ""
+        backend = self._google_backend_for_model(model_id)
+        action = "streamGenerateContent" if stream else "generateContent"
+        if backend == "vertex":
+            base = self.VERTEX_BASE_URL
+            path = f"/v1/publishers/google/models/{model_id}:{action}?key={api_key}"
+        else:
+            base = self.DEFAULT_BASE_URLS[ModelProvider.GOOGLE]
+            path = f"/v1beta/models/{model_id}:{action}?key={api_key}"
+        if stream:
+            path += "&alt=sse"
+        return f"{base}{path}"
 
     def get_available_models(self) -> list[ModelInfo]:
         """Get all models from configured providers."""
@@ -1135,9 +1223,8 @@ class ModelRegistry:
         )
 
         if model.provider == ModelProvider.GOOGLE:
-            # Google API uses different endpoint format
-            config = self._configs.get(model.provider)
-            endpoint = f"/v1beta/models/{model_id}:generateContent?key={config.api_key}"
+            # Path differs between AI Studio and Vertex; key comes in as a query param.
+            endpoint = self._google_endpoint(model_id, stream=False)
         elif model.provider == ModelProvider.ANTHROPIC:
             endpoint = "/v1/messages"
         else:
@@ -1211,10 +1298,7 @@ class ModelRegistry:
         )
 
         if model.provider == ModelProvider.GOOGLE:
-            config = self._configs.get(model.provider)
-            endpoint = (
-                f"/v1beta/models/{model_id}:streamGenerateContent?key={config.api_key}&alt=sse"
-            )
+            endpoint = self._google_endpoint(model_id, stream=True)
             async for delta in self._stream_google(client, endpoint, body):
                 yield delta
         elif model.provider == ModelProvider.ANTHROPIC:

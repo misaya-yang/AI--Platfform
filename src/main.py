@@ -1095,22 +1095,71 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         if provider_id == "google" and not api_key:
             api_key = os.environ.get("GOOGLE_API_KEY", "")
 
+        # Google Vertex routing. Two orthogonal knobs:
+        #   GOOGLE_API_BACKEND=vertex   — flip the global default for all
+        #                                 Google models.
+        #   VERTEX_API_KEY=AQ.xxx       — Express-Mode key; when present
+        #                                 (and backend is vertex) it wins
+        #                                 over GOOGLE_API_KEY / GEMINI_API_KEY,
+        #                                 because the two are different
+        #                                 token formats.
+        # Per-model A/B routing via GOOGLE_VERTEX_MODELS is handled inside
+        # ModelRegistry at request time, so we just seed the client config
+        # with whichever backend should be the *default*.
+        google_backend = "ai_studio"
+        if provider_id == "google":
+            google_backend = os.environ.get("GOOGLE_API_BACKEND", "ai_studio").strip().lower()
+            if google_backend not in {"ai_studio", "vertex"}:
+                logger.warning(
+                    f"Unknown GOOGLE_API_BACKEND={google_backend!r}, "
+                    "falling back to ai_studio"
+                )
+                google_backend = "ai_studio"
+            if google_backend == "vertex":
+                vertex_key = os.environ.get("VERTEX_API_KEY", "").strip()
+                if vertex_key:
+                    api_key = vertex_key
+
         # 获取自定义 base_url
         base_url = None
         if config.get("env_base_url"):
             base_url = os.environ.get(config["env_base_url"])
         if not base_url:
             base_url = config["base_url"]
+        # When running Google against Vertex, swap the default host so the
+        # pre-configured HTTP client points at aiplatform.googleapis.com.
+        # Per-model overrides (GOOGLE_VERTEX_MODELS) use absolute URLs at
+        # request time so they work regardless of this default.
+        if provider_id == "google" and google_backend == "vertex" and base_url == config["base_url"]:
+            base_url = None  # Let configure_provider pick VERTEX_BASE_URL.
 
         # 配置 ModelRegistry（内存中）
         if api_key:
             try:
-                model_registry.configure_provider(
-                    ModelProvider(provider_id),
+                configure_kwargs = dict(
                     api_key=api_key,
                     base_url=base_url,
                 )
+                if provider_id == "google":
+                    configure_kwargs["backend"] = google_backend
+                model_registry.configure_provider(
+                    ModelProvider(provider_id),
+                    **configure_kwargs,
+                )
                 configured_providers.append(provider_id)
+                if provider_id == "google" and google_backend == "vertex":
+                    vertex_overrides = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
+                    if vertex_overrides:
+                        logger.info(
+                            f"Google provider on Vertex (default) + per-model overrides: {vertex_overrides}"
+                        )
+                    else:
+                        logger.info("Google provider routed to Vertex (all models)")
+                elif provider_id == "google" and os.environ.get("GOOGLE_VERTEX_MODELS", "").strip():
+                    logger.info(
+                        f"Google provider on AI Studio (default), Vertex overrides: "
+                        f"{os.environ['GOOGLE_VERTEX_MODELS']}"
+                    )
             except ValueError:
                 logger.warning(f"Unknown provider enum: {provider_id}")
 
