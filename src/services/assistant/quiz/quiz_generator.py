@@ -47,6 +47,11 @@ _PROMPT_RULES = """
 1. Questions MUST be answerable from the source content only.
 2. Each explanation: 1-2 sentences max, cite the key fact.
 3. Cover different aspects, order easy→hard.
+4. correct_answer MUST contain ONLY the option letter(s) from the options you
+   emit — never prose, never the option text. For mc_single it MUST be exactly
+   one letter (e.g. ["B"]), never multiple, never combined like ["B) text"].
+   The letter in correct_answer MUST exactly match one of the option "label"
+   values you wrote above it.
 {type_rules}
 
 ## Output: valid JSON only, no markdown fences.

@@ -153,8 +153,17 @@ class QuizGrader:
             return user_labels == correct_labels
 
         # mc_single (default)
-        correct_label = str(correct_raw[0]).upper().strip() if correct_raw else ""
-        return user_answer.upper().strip() == correct_label
+        # Defense-in-depth: if correct_raw contains multiple labels (a known
+        # LLM failure mode for legacy rows written before the quiz_tool squash),
+        # accept ANY of them. This keeps the grader consistent with the UI,
+        # which highlights every label in correct_answer as correct.
+        if not correct_raw:
+            return False
+        user_label = user_answer.upper().strip()
+        for ans in correct_raw:
+            if user_label == str(ans).upper().strip():
+                return True
+        return False
 
     async def _grade_short_answer(
         self,

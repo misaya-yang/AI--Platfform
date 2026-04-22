@@ -245,14 +245,17 @@ export function QuizCard({
   ]);
 
   // --- derived -----------------------------------------------------------
-  const allAnswered = useMemo(
+  const answeredCount = useMemo(
     () =>
-      questions.length > 0 &&
-      questions.every((q) => {
+      questions.reduce((n, q) => {
         const a = selectedAnswers[q.id];
-        return a != null && a.trim() !== "";
-      }),
+        return n + (a != null && a.trim() !== "" ? 1 : 0);
+      }, 0),
     [questions, selectedAnswers],
+  );
+  const allAnswered = useMemo(
+    () => questions.length > 0 && answeredCount === questions.length,
+    [questions, answeredCount],
   );
 
   const reviewList = useMemo(() => {
@@ -479,6 +482,14 @@ export function QuizCard({
             {quizData.difficulty && ` · ${quizData.difficulty}`}
           </p>
         </div>
+        <StateChip
+          viewMode={viewMode}
+          answeredCount={answeredCount}
+          totalQuestions={totalQuestions}
+          scorePct={result ? Math.round(result.total_score * 100) : undefined}
+          reviewFilter={viewMode === "review" ? reviewFilter : undefined}
+          t={t}
+        />
       </div>
 
       <div className="p-4">
@@ -890,5 +901,107 @@ export function QuizCard({
         onClose={() => setShowShareDialog(false)}
       />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// StateChip — header badge that mirrors the 7-state machine so users can see
+// at-a-glance which phase the quiz is in. Uses neutral ink + the single gold
+// accent only while the user is actively answering (progress chip) and while
+// submitting. Success/destructive tokens carry result + error phases.
+// ---------------------------------------------------------------------------
+type StateChipProps = {
+  viewMode: ViewMode;
+  answeredCount: number;
+  totalQuestions: number;
+  scorePct?: number;
+  reviewFilter?: "all" | "wrong" | "unanswered";
+  t: (key: string, fallback?: string | Record<string, unknown>) => string;
+};
+
+function StateChip({
+  viewMode,
+  answeredCount,
+  totalQuestions,
+  scorePct,
+  reviewFilter,
+  t,
+}: StateChipProps) {
+  // Idle: no chip — the big "开始作答" CTA already signals intent.
+  if (viewMode === "idle") return null;
+
+  let label = "";
+  let toneClass =
+    "text-[hsl(var(--assistant-text-secondary))] border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))]";
+  let dotClass = "bg-[hsl(var(--assistant-text-tertiary))]";
+  let pulse = false;
+
+  if (viewMode === "quiz") {
+    label = t("assistant.quiz.chipAnswering", {
+      defaultValue: "作答中 · {{done}}/{{total}}",
+      done: answeredCount,
+      total: totalQuestions,
+    }) as string;
+    toneClass =
+      "text-[hsl(var(--assistant-accent))] border-[hsl(var(--assistant-accent)/0.4)] bg-[hsl(var(--assistant-accent)/0.1)]";
+    dotClass = "bg-[hsl(var(--assistant-accent))]";
+  } else if (viewMode === "quiz-all-answered") {
+    label = t("assistant.quiz.chipReadyToSubmit", "全部已答 · 待提交");
+    toneClass =
+      "text-[hsl(var(--assistant-accent))] border-[hsl(var(--assistant-accent)/0.4)] bg-[hsl(var(--assistant-accent)/0.1)]";
+    dotClass = "bg-[hsl(var(--assistant-accent))]";
+  } else if (viewMode === "submitting") {
+    label = t("assistant.quiz.chipSubmitting", "提交中…");
+    toneClass =
+      "text-[hsl(var(--assistant-accent))] border-[hsl(var(--assistant-accent)/0.4)] bg-[hsl(var(--assistant-accent)/0.1)]";
+    dotClass = "bg-[hsl(var(--assistant-accent))]";
+    pulse = true;
+  } else if (viewMode === "submit-error") {
+    label = t("assistant.quiz.chipSubmitError", "提交失败");
+    toneClass =
+      "text-[hsl(var(--destructive))] border-[hsl(var(--destructive)/0.4)] bg-[hsl(var(--destructive)/0.08)]";
+    dotClass = "bg-[hsl(var(--destructive))]";
+  } else if (viewMode === "result") {
+    const pct = scorePct ?? 0;
+    const good = pct >= 70;
+    label = t("assistant.quiz.chipResult", {
+      defaultValue: "已提交 · {{pct}}%",
+      pct,
+    }) as string;
+    toneClass = good
+      ? "text-[hsl(var(--success))] border-[hsl(var(--success)/0.4)] bg-[hsl(var(--success)/0.08)]"
+      : "text-[hsl(var(--destructive))] border-[hsl(var(--destructive)/0.4)] bg-[hsl(var(--destructive)/0.08)]";
+    dotClass = good ? "bg-[hsl(var(--success))]" : "bg-[hsl(var(--destructive))]";
+  } else if (viewMode === "review") {
+    const filterLabel =
+      reviewFilter === "wrong"
+        ? t("assistant.quiz.chipReviewWrong", "审阅 · 错题")
+        : reviewFilter === "unanswered"
+        ? t("assistant.quiz.chipReviewUnanswered", "审阅 · 未答")
+        : t("assistant.quiz.chipReview", "审阅模式");
+    label = filterLabel;
+    toneClass =
+      "text-[hsl(var(--assistant-text-secondary))] border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-surface-soft))]";
+    dotClass = "bg-[hsl(var(--assistant-text-secondary))]";
+  }
+
+  return (
+    <span
+      className={
+        "flex-shrink-0 inline-flex items-center gap-1.5 h-6 px-2 rounded-full border text-[11px] font-medium tabular-nums " +
+        toneClass
+      }
+      aria-live="polite"
+      role="status"
+    >
+      <span
+        className={
+          "w-1.5 h-1.5 rounded-full " +
+          dotClass +
+          (pulse ? " animate-pulse" : "")
+        }
+      />
+      {label}
+    </span>
   );
 }

@@ -75,6 +75,13 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
                 '    - "text": the ACTUAL answer text (NEVER the letter itself)\n'
                 '- correct_answer: array with one letter, e.g. ["B"]\n'
                 '- explanation: one sentence on why that answer is correct\n\n'
+                'CRITICAL correct_answer rules:\n'
+                '  - For "mc_single": correct_answer MUST be a list containing EXACTLY ONE letter\n'
+                '    from the options you generated, e.g. ["B"]. Never more than one letter.\n'
+                '    Never prose like ["B) Self-attention"] or ["2.5%"]. Just the letter.\n'
+                '  - For "mc_multi": list of 2-3 letters, e.g. ["A","C"].\n'
+                '  - For "true_false": ["true"] or ["false"].\n'
+                '  - The letter in correct_answer MUST exactly match one of the option "label" values.\n\n'
                 'CORRECT example of ONE question object:\n'
                 '{\n'
                 '  "question_num": 1,\n'
@@ -90,10 +97,13 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
                 '  "explanation": "The standard rate is 2.5% of qualifying wealth held for one lunar year."\n'
                 '}\n\n'
                 'WRONG examples — DO NOT do any of these:\n'
-                '  ✗ {"label": "A", "text": "A"}  ← text is the letter, not the answer\n'
-                '  ✗ {"A": "Earth"}                ← missing "label"/"text" keys\n'
-                '  ✗ ["A) Earth", "B) Mars"]       ← strings instead of objects\n'
-                '  ✗ [{"label": "A"}]              ← missing "text" key'
+                '  ✗ {"label": "A", "text": "A"}       ← text is the letter, not the answer\n'
+                '  ✗ {"A": "Earth"}                     ← missing "label"/"text" keys\n'
+                '  ✗ ["A) Earth", "B) Mars"]            ← strings instead of objects\n'
+                '  ✗ [{"label": "A"}]                   ← missing "text" key\n'
+                '  ✗ correct_answer: ["B) 2.5%"]        ← letter + prose, use ["B"] only\n'
+                '  ✗ correct_answer: ["2.5%"]           ← option text, use the LETTER ["B"]\n'
+                '  ✗ correct_answer: ["B","C"] for mc_single ← mc_single has ONE correct letter'
             ),
             required=True,
             items={"type": "object"},
@@ -303,6 +313,23 @@ class QuizGeneratorExecutor(ToolExecutor):
                                     break
                             if not matched:
                                 normalized_answers.append(ans_str)
+
+                    # For mc_single the grader only scores against the first
+                    # label, but the frontend highlights EVERY label in
+                    # correct_answer as "correct". If the LLM emitted 2+
+                    # labels (a known failure mode), the user sees multiple
+                    # green options while the backend silently grades only
+                    # the first — classic "why is my correct answer wrong?"
+                    # bug. Collapse to exactly one label for mc_single so the
+                    # UI and grader always agree.
+                    q_type = q.get("question_type", "mc_single")
+                    if q_type == "mc_single" and len(normalized_answers) > 1:
+                        logger.warning(
+                            f"Question {i + 1}: mc_single received "
+                            f"{len(normalized_answers)} correct answers "
+                            f"{normalized_answers!r}; keeping first only"
+                        )
+                        normalized_answers = [normalized_answers[0]]
                     q["correct_answer"] = normalized_answers
 
             # Persist to DB
