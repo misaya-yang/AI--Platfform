@@ -1472,6 +1472,18 @@ class ModelRegistry:
             for fd in t.get("functionDeclarations", []):
                 tool_names.append(fd.get("name", "unknown"))
         logger.info(f"[GEMINI] Tools in request: {tool_names}")
+        # TEMP: dump full body to /tmp so we can diff it against a known-fast
+        # curl payload. Drop once the 47s Vertex latency is understood.
+        try:
+            import os as _os
+            import tempfile as _tempfile
+            _body_json = json_module.dumps(body, ensure_ascii=False, default=str)
+            _body_path = _os.path.join(_tempfile.gettempdir(), "gemini_last_body.json")
+            with open(_body_path, "w", encoding="utf-8") as _fh:
+                _fh.write(_body_json)
+            logger.info(f"[GEMINI] body bytes={len(_body_json)} dumped to {_body_path}")
+        except Exception:
+            pass
         logger.debug(
             f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}"
         )
