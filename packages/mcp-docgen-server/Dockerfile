@@ -60,7 +60,7 @@ RUN useradd --system --create-home --shell /usr/sbin/nologin docgen \
  && chown -R docgen:docgen /var/lib/docgen
 USER docgen
 
-ENV MCP_TRANSPORT=sse \
+ENV MCP_TRANSPORT=http \
     PORT=8765 \
     LOG_LEVEL=INFO \
     DOCGEN_ARTIFACT_ROOT=/var/lib/docgen/artifacts

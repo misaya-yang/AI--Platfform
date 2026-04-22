@@ -2,7 +2,8 @@
 
 Dispatches to the selected transport based on ``MCP_TRANSPORT``:
   - unset / "stdio"  → main_stdio (default, used by the smoke test)
-  - "sse"            → main_sse (Starlette + uvicorn)
+  - "sse"            → main_sse  (Starlette + uvicorn, spec-compliant SSE)
+  - "http"           → main_http (simplified JSON-RPC POST — used by ai-gateway)
 
 Exit code 2 on an unknown value so supervisors (Docker, systemd) can
 distinguish misconfiguration from a crash.
@@ -15,7 +16,7 @@ import logging
 import os
 import sys
 
-from .server import main_sse, main_stdio
+from .server import main_http, main_sse, main_stdio
 
 
 def _main() -> int:
@@ -29,6 +30,9 @@ def _main() -> int:
         return 0
     if transport == "sse":
         asyncio.run(main_sse())
+        return 0
+    if transport == "http":
+        asyncio.run(main_http())
         return 0
     print(f"unknown MCP_TRANSPORT: {transport!r}", file=sys.stderr)
     return 2

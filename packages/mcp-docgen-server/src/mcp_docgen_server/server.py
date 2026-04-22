@@ -325,29 +325,25 @@ async def main_sse() -> None:
         return JSONResponse({"status": "ok", "name": "mcp-docgen"})
 
     async def artifact(request: Request) -> Response:
+        """See ``main_http.artifact`` — LocalArtifactStore signs the full
+        4-segment key_path, so the route must capture slashes."""
         from docgen.storage.signing import verify_url  # type: ignore
 
-        artifact_id = request.path_params["id"]
-        # Reconstruct full URL including query for signature verification.
+        key_path = request.path_params["path"]
         full_url = str(request.url)
         if not verify_url(full_url):
             return JSONResponse({"error": "invalid or expired signature"}, status_code=403)
-        # Path-to-file: walk the store looking for the id.
-        # LocalArtifactStore has no public "path_for" method, so we use
-        # the key_path stored on the artifact metadata.
-        for meta in store_root.rglob("*.meta.json"):
-            try:
-                data = json.loads(meta.read_text())
-            except Exception:
-                continue
-            if data.get("artifact_id") == artifact_id:
-                target = store_root / data["tenant_id"] / data["session_id"] / data["turn_id"] / data["filename"]
-                if target.is_file():
-                    return FileResponse(
-                        str(target),
-                        filename=data["filename"],
-                        media_type="application/octet-stream",
-                    )
+        target = (store_root / key_path).resolve()
+        try:
+            target.relative_to(store_root.resolve())
+        except ValueError:
+            return JSONResponse({"error": "invalid path"}, status_code=400)
+        if target.is_file():
+            return FileResponse(
+                str(target),
+                filename=target.name,
+                media_type="application/octet-stream",
+            )
         return JSONResponse({"error": "not found"}, status_code=404)
 
     app = Starlette(
@@ -355,7 +351,174 @@ async def main_sse() -> None:
             Route("/health", health),
             Route("/mcp", handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
-            Route("/artifacts/{id}", artifact),
+            Route("/artifacts/{path:path}", artifact),
+        ]
+    )
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    await uvicorn.Server(config).serve()
+
+
+# ---------------------------------------------------------------------------
+# streamable-http (simplified)
+#
+# MCP's official transports — SSE and the StreamableHTTP session manager —
+# assume a spec-compliant client (Accept negotiation, Mcp-Session-Id round-
+# tripping, version headers). The ai-gateway MCPClient is intentionally
+# simpler: it POSTs JSON-RPC 2.0 to ``/mcp`` and expects an immediate JSON
+# response, no SSE, no session state.
+#
+# Rather than force that client to implement the full streamable-http spec
+# (or add compat shims on both sides), we serve the same JSON-RPC surface
+# directly: ``initialize``, ``tools/list``, ``tools/call``, plus the
+# ``notifications/initialized`` fire-and-forget. This keeps the single-tool
+# server simple and still speaks MCP at the wire-format level so other
+# clients (Claude Desktop, etc.) can consume it via the stdio or sse
+# entrypoints when a real session is desired.
+
+
+async def main_http() -> None:
+    """Run the MCP server as a plain JSON-RPC-over-HTTP endpoint.
+
+    Suited for in-cluster consumption by our ai-gateway, where TLS is
+    terminated at the ingress and client ↔ server runs over a trusted
+    docker network. Serves:
+      - ``POST /mcp``           — JSON-RPC 2.0 single-request/response
+      - ``GET  /health``        — liveness probe
+      - ``GET  /artifacts/{id}``— signed-URL artifact download
+    """
+    import uvicorn  # type: ignore
+    from starlette.applications import Starlette  # type: ignore
+    from starlette.requests import Request  # type: ignore
+    from starlette.responses import FileResponse, JSONResponse, Response  # type: ignore
+    from starlette.routing import Route  # type: ignore
+
+    port = int(os.environ.get("PORT", "8765"))
+    public_base = os.environ.get(
+        "DOCGEN_PUBLIC_URL",
+        f"http://127.0.0.1:{port}",
+    ).rstrip("/")
+
+    from docgen.service import DocgenService  # type: ignore
+    from docgen.storage import LocalArtifactStore  # type: ignore
+
+    store_root = _tmp_artifact_root()
+    store = LocalArtifactStore(
+        store_root,
+        base_download_url=f"{public_base}/artifacts",
+    )
+    service = DocgenService(artifact_store=store, llm=None)
+
+    # JSON-RPC dispatch ------------------------------------------------------
+
+    def _error(request_id: Any, code: int, message: str) -> dict:
+        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+    def _result(request_id: Any, result: Any) -> dict:
+        return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+    async def _dispatch(payload: dict) -> Optional[dict]:
+        """Return a JSON-RPC response, or None for notifications."""
+        method = payload.get("method")
+        params = payload.get("params") or {}
+        req_id = payload.get("id")
+
+        # Notifications (id absent) — fire-and-forget, respond 204-ish.
+        if req_id is None:
+            return None
+
+        if method == "initialize":
+            return _result(req_id, {
+                "protocolVersion": params.get("protocolVersion", "2025-11-25"),
+                "capabilities": {"tools": {}, "resources": {}},
+                "serverInfo": {"name": "mcp-docgen", "version": "0.1.0"},
+            })
+
+        if method == "tools/list":
+            return _result(req_id, {
+                "tools": [
+                    {
+                        "name": "generate_document",
+                        "description": (
+                            "Plan + render a document (docx / pptx / xlsx / pdf). "
+                            "Returns a download URL plus artifact metadata."
+                        ),
+                        "inputSchema": input_json_schema(),
+                    }
+                ]
+            })
+
+        if method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if name != "generate_document":
+                return _error(req_id, -32601, f"unknown tool: {name!r}")
+            try:
+                result = await _run_generate(service, arguments)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("generate_document failed")
+                return _result(req_id, {
+                    "content": [{"type": "text", "text": f"Tool call failed: {exc}"}],
+                    "isError": True,
+                })
+            return _result(req_id, {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps(result, ensure_ascii=False, indent=2),
+                }],
+                "isError": False,
+            })
+
+        return _error(req_id, -32601, f"method not found: {method!r}")
+
+    async def mcp_endpoint(request: Request) -> Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid json"}, status_code=400)
+        response = await _dispatch(payload)
+        if response is None:
+            # Notification — empty 204.
+            return Response(status_code=204)
+        return JSONResponse(response)
+
+    async def health(_request: Request) -> Response:
+        return JSONResponse({"status": "ok", "name": "mcp-docgen"})
+
+    async def artifact(request: Request) -> Response:
+        """Serve artifact via 4-segment key_path: tenant/session/turn/filename.
+
+        LocalArtifactStore.download_url signs the full ``{base}/{key_path}``
+        URL, so the route has to accept all four segments. ``{path:path}``
+        captures slashes, letting us resolve the file directly off disk
+        without walking meta.json files.
+        """
+        from docgen.storage.signing import verify_url  # type: ignore
+
+        key_path = request.path_params["path"]
+        full_url = str(request.url)
+        if not verify_url(full_url):
+            return JSONResponse({"error": "invalid or expired signature"}, status_code=403)
+
+        target = (store_root / key_path).resolve()
+        # Defense in depth: prevent ``..`` escape out of the store root.
+        try:
+            target.relative_to(store_root.resolve())
+        except ValueError:
+            return JSONResponse({"error": "invalid path"}, status_code=400)
+        if target.is_file():
+            return FileResponse(
+                str(target),
+                filename=target.name,
+                media_type="application/octet-stream",
+            )
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    app = Starlette(
+        routes=[
+            Route("/health", health),
+            Route("/mcp", mcp_endpoint, methods=["POST"]),
+            Route("/artifacts/{path:path}", artifact),
         ]
     )
 
@@ -374,5 +537,7 @@ if __name__ == "__main__":  # pragma: no cover
         asyncio.run(main_stdio())
     elif transport == "sse":
         asyncio.run(main_sse())
+    elif transport == "http":
+        asyncio.run(main_http())
     else:
         raise SystemExit(f"unknown MCP_TRANSPORT: {transport!r}")

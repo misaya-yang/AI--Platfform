@@ -3,6 +3,21 @@
 # Change URLs from mock to real services when ready — agent code stays the same.
 
 mcp_servers:
+  # Document generation — plans + renders docx / pptx / xlsx / pdf with
+  # a design-system driven pipeline. Kept as a single tool
+  # ``generate_document`` so the agent doesn't need to know about the
+  # heavy per-format skill docs (which the server keeps to itself).
+  - name: docgen
+    # ``.internal`` suffix matches the gateway's MCPClient trusted-hostname
+    # rule so http:// across the docker network passes the SSRF guard.
+    # The alias is declared on the mcp-docgen-server service in docker-compose.yml.
+    url: http://mcp-docgen-server.internal:8765
+    transport: http
+    description: "Generate docx / pptx / xlsx / pdf — design-system driven, returns signed download URL"
+    enabled: true
+    max_concurrent: 4
+    timeout: 120.0
+
   - name: wahda
     url: http://wahda-mcp:3001
     description: "Wahda social platform — create posts, search messages, send DMs"

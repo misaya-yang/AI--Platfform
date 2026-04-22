@@ -320,6 +320,40 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # mcp-docgen-server
+  # Exposes a single ``generate_document`` MCP tool (docx / pptx / xlsx / pdf).
+  # Kept as a separate container so its heavy deps (LibreOffice, CJK fonts,
+  # poppler) don't bloat the gateway image. Reachable only on the internal
+  # network — the gateway's MCPClient connects via http://mcp-docgen-server:8765.
+  mcp-docgen-server:
+    build:
+      context: .
+      dockerfile: packages/mcp-docgen-server/Dockerfile
+    container_name: mcp-docgen-server
+    image: mcp-docgen-server:${TAG:-latest}
+    environment:
+      MCP_TRANSPORT: http
+      PORT: "8765"
+      LOG_LEVEL: INFO
+      DOCGEN_ARTIFACT_ROOT: /var/lib/docgen/artifacts
+      DOCGEN_PUBLIC_URL: http://mcp-docgen-server:8765
+    volumes:
+      - docgen-artifacts:/var/lib/docgen/artifacts
+    networks:
+      ai-gateway-net:
+        # ``.internal`` alias lets the gateway's MCPClient SSRF guard treat
+        # the hostname as a trusted docker-internal name and allow http://.
+        aliases:
+          - mcp-docgen-server.internal
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
 # =============================================================================
 # Networks
 # =============================================================================
@@ -342,3 +376,5 @@ volumes:
     name: ai-gateway-logs
   kb-data:
     name: ai-gateway-kb-data
+  docgen-artifacts:
+    name: ai-gateway-docgen-artifacts
