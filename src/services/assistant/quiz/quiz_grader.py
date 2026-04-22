@@ -145,25 +145,16 @@ class QuizGrader:
             return user_val == correct_val
 
         if question_type == "mc_multi":
-            # User answer is comma-separated labels: "A,C"
             user_labels = sorted(
                 l.strip().upper() for l in user_answer.split(",") if l.strip()
             )
             correct_labels = sorted(str(a).upper().strip() for a in correct_raw)
             return user_labels == correct_labels
 
-        # mc_single (default)
-        # Defense-in-depth: if correct_raw contains multiple labels (a known
-        # LLM failure mode for legacy rows written before the quiz_tool squash),
-        # accept ANY of them. This keeps the grader consistent with the UI,
-        # which highlights every label in correct_answer as correct.
+        # mc_single: quiz_tool squashes correct_answer to exactly one label.
         if not correct_raw:
             return False
-        user_label = user_answer.upper().strip()
-        for ans in correct_raw:
-            if user_label == str(ans).upper().strip():
-                return True
-        return False
+        return user_answer.upper().strip() == str(correct_raw[0]).upper().strip()
 
     async def _grade_short_answer(
         self,

@@ -28,23 +28,6 @@ interface QuizQuestionProps {
   };
 }
 
-/**
- * True/False options fallback. Some quiz generators (notably Gemini 3.1
- * Pro on Vertex) emit ``question_type: "true_false"`` with empty or
- * absent ``options`` — the model treats the statement itself as the
- * content and leaves True/False as implicit. Without this synthesis the
- * card renders a bare statement with no way to answer.
- *
- * Labels match ``src/services/assistant/quiz/quiz_generator.py`` — the
- * backend grader expects ``true`` / ``false`` as the ``correct_answer``
- * values for ``true_false`` questions, so we use the same label names
- * here. The UI still shows "True" / "False" as the display text.
- */
-const TRUE_FALSE_FALLBACK: QuizQuestionData["options"] = [
-  { label: "true", text: "True" },
-  { label: "false", text: "False" },
-];
-
 export function QuizQuestion({
   question,
   selectedAnswer,
@@ -53,10 +36,6 @@ export function QuizQuestion({
   result,
 }: QuizQuestionProps) {
   const qType = question.question_type || "mc_single";
-  const effectiveOptions =
-    qType === "true_false" && (!question.options || question.options.length < 2)
-      ? TRUE_FALSE_FALLBACK
-      : question.options;
 
   return (
     <motion.div
@@ -83,7 +62,7 @@ export function QuizQuestion({
         />
       ) : (
         <OptionList
-          options={effectiveOptions}
+          options={question.options}
           questionType={qType}
           selectedAnswer={selectedAnswer || ""}
           onSelect={onSelect}

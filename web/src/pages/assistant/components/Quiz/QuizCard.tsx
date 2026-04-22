@@ -100,32 +100,37 @@ export function QuizCard({
       : userScopeId || authUserId || "user";
 
   // --- hydrate -----------------------------------------------------------
+  // Server-restored result wins over persisted progress; falling back to
+  // the client's stored phase lets a refresh drop the user back on the
+  // correct question without re-taking the quiz.
+  type HydrationState = {
+    currentIndex: number;
+    selectedAnswers: Record<string, string>;
+    result: QuizAttemptResult | undefined;
+    viewMode: ViewMode;
+  };
+
   const hydratedQuizIdRef = useRef<string | null>(null);
-  const initial = useMemo(() => {
+  const resolveHydration = (): HydrationState => {
     const persisted = readPersisted(scopeId, quizData.quiz_id, questions);
     const restoredResult = existingResult ?? persisted?.result;
 
-    // Server truth wins.
     if (restoredResult) {
       return {
         currentIndex: persisted?.currentIndex ?? 0,
         selectedAnswers: persisted?.selectedAnswers ?? {},
         result: restoredResult,
-        viewMode: "result" as ViewMode,
+        viewMode: "result",
       };
     }
-
-    // No persisted state → idle.
     if (!persisted) {
       return {
         currentIndex: 0,
         selectedAnswers: {},
-        result: undefined as QuizAttemptResult | undefined,
-        viewMode: "idle" as ViewMode,
+        result: undefined,
+        viewMode: "idle",
       };
     }
-
-    // Legacy idle + progress → re-infer.
     let phase: PersistedPhase = persisted.phase ?? "quiz";
     if (phase === "idle") {
       phase = inferPhase(persisted.selectedAnswers, questions, undefined);
@@ -133,11 +138,13 @@ export function QuizCard({
     return {
       currentIndex: persisted.currentIndex ?? 0,
       selectedAnswers: persisted.selectedAnswers ?? {},
-      result: undefined as QuizAttemptResult | undefined,
+      result: undefined,
       viewMode: phase as ViewMode,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const initial = useMemo(() => resolveHydration(), []);
 
   const [currentIndex, setCurrentIndex] = useState(initial.currentIndex);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>(
@@ -161,33 +168,11 @@ export function QuizCard({
   useEffect(() => {
     if (hydratedQuizIdRef.current === quizData.quiz_id) return;
     hydratedQuizIdRef.current = quizData.quiz_id;
-
-    const persisted = readPersisted(scopeId, quizData.quiz_id, questions);
-    const restoredResult = existingResult ?? persisted?.result;
-
-    if (restoredResult) {
-      setCurrentIndex(persisted?.currentIndex ?? 0);
-      setSelectedAnswers(persisted?.selectedAnswers ?? {});
-      setResult(restoredResult);
-      setViewMode("result");
-      return;
-    }
-    if (!persisted) {
-      setCurrentIndex(0);
-      setSelectedAnswers({});
-      setResult(undefined);
-      setViewMode("idle");
-      return;
-    }
-
-    let phase: PersistedPhase = persisted.phase ?? "quiz";
-    if (phase === "idle") {
-      phase = inferPhase(persisted.selectedAnswers, questions, undefined);
-    }
-    setCurrentIndex(persisted.currentIndex ?? 0);
-    setSelectedAnswers(persisted.selectedAnswers ?? {});
-    setResult(undefined);
-    setViewMode(phase as ViewMode);
+    const h = resolveHydration();
+    setCurrentIndex(h.currentIndex);
+    setSelectedAnswers(h.selectedAnswers);
+    setResult(h.result);
+    setViewMode(h.viewMode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quizData.quiz_id]);
 
