@@ -139,6 +139,18 @@ dev-reset:                  ## 重置开发环境 (销毁并重建)
 dev-status:                 ## 查看开发环境状态
 	@bash $(SCRIPTS)/setup-dev.sh --status
 
+# -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
+
+.PHONY: test-isolation snapshot-assistant-openapi
+
+test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phase 0 gate)
+	@uv run pytest -q --no-cov \
+		tests/integration/test_assistant_isolation_contract.py \
+		tests/integration/test_assistant_openapi_contract.py
+
+snapshot-assistant-openapi: ## 重新生成 assistant-service OpenAPI 基线快照
+	@uv run python scripts/snapshot_assistant_openapi.py
+
 # -- Help ---------------------------------------------------------------------
 
 .PHONY: help
