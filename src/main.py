@@ -1064,7 +1064,12 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             "api_type": "openai",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
             "env_key": "DASHSCOPE_API_KEY",
-            "env_base_url": None,
+            # Chat-specific base_url override. Lets the assistant route chat
+            # traffic to the Intl endpoint (free tier) while image_gen /
+            # embedding / rerank keep using DASHSCOPE_API_KEY against the
+            # CN native URLs they hardcode. See DASHSCOPE_CHAT_API_KEY below
+            # for the matching key override.
+            "env_base_url": "DASHSCOPE_CHAT_BASE_URL",
         },
         "google": {
             "display_name": "Google Gemini",
@@ -1119,11 +1124,23 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         # 从环境变量获取 API key
         api_key = os.environ.get(config["env_key"], "")
 
-        # DashScope 特殊处理：fallback 到 knowledge.dashscope.api_key
-        if provider_id == "dashscope" and not api_key:
-            knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
-            if knowledge_dashscope:
-                api_key = getattr(knowledge_dashscope, "api_key", "")
+        # DashScope 特殊处理：
+        #   1. chat-specific override (DASHSCOPE_CHAT_API_KEY) — lets chat
+        #      route to the Intl endpoint (free tier) while image_gen,
+        #      embedding and rerank keep using DASHSCOPE_API_KEY against
+        #      their hardcoded CN URLs. Paired with DASHSCOPE_CHAT_BASE_URL
+        #      above; use together when switching to Intl.
+        #   2. fallback: knowledge.dashscope.api_key (legacy path, still works)
+        if provider_id == "dashscope":
+            chat_key = os.environ.get("DASHSCOPE_CHAT_API_KEY", "").strip()
+            if chat_key:
+                api_key = chat_key
+            if not api_key:
+                knowledge_dashscope = getattr(
+                    getattr(settings, "knowledge", None), "dashscope", None
+                )
+                if knowledge_dashscope:
+                    api_key = getattr(knowledge_dashscope, "api_key", "")
 
         # Google Gemini: backward-compatible fallback to GOOGLE_API_KEY
         if provider_id == "google" and not api_key:
