@@ -524,7 +524,12 @@ async def main_http() -> None:
         routes=[
             Route("/health", health),
             Route("/mcp", mcp_endpoint, methods=["POST"]),
+            # Two routes for the same handler: the container may be reached
+            # directly (/artifacts/...) in local dev, or behind an nginx
+            # reverse proxy that preserves a path prefix (``/docgen/...``)
+            # so signed URLs remain stable end-to-end.
             Route("/artifacts/{path:path}", artifact),
+            Route("/docgen/artifacts/{path:path}", artifact),
         ]
     )
 
