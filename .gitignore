@@ -3,10 +3,17 @@
 # =============================================================================
 
 # ======================== Environment & Secrets ========================
-# Local environment configuration (contains secrets)
+# Local environment configuration (contains secrets).
+# Also covers ad-hoc backups (.env.bak.YYYYMMDD-HHMMSS) and scratch
+# copies (.env.copy) that prior ops sessions left behind — they contain
+# the same secrets as the live .env and must never be committed.
 .env
 .env.local
 .env.*.local
+.env.bak
+.env.bak.*
+.env.copy
+.env.*.bak
 
 # ======================== Python ========================
 __pycache__/

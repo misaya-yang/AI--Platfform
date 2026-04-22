@@ -512,6 +512,14 @@ class EnhancedSessionMessage(BaseModel):
 # =============================================================================
 
 
+# Upper bound for reference_image strings on image-generation requests.
+# 6,000,000 base64 chars ≈ 4.5 MiB decoded; anything larger should be
+# compressed client-side before hitting us. Must stay ≤ nginx
+# `client_max_body_size` so this Pydantic 422 fires *before* the proxy
+# throws a generic 413 — keep them aligned if nginx is ever tuned.
+_REFERENCE_IMAGE_MAX_CHARS = 6_000_000
+
+
 class ImageGenerationRequest(BaseModel):
     """Request for image generation (single-turn or multi-turn).
 
@@ -541,7 +549,7 @@ class ImageGenerationRequest(BaseModel):
     )
     reference_image: str | None = Field(
         default=None,
-        max_length=6_000_000,
+        max_length=_REFERENCE_IMAGE_MAX_CHARS,
         description=(
             "Previous image to edit (base64 or data URL). When provided, the backend "
             "sends it to Gemini along with the prompt so the model edits that image "
@@ -606,7 +614,7 @@ class AsyncImageGenerationRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Session ID for artifact storage")
     reference_image: str | None = Field(
         default=None,
-        max_length=6_000_000,
+        max_length=_REFERENCE_IMAGE_MAX_CHARS,
         description=(
             "Previous image to edit (base64 or data URL). When provided, the backend "
             "sends it to Gemini with the prompt so the model edits that image. Use "
