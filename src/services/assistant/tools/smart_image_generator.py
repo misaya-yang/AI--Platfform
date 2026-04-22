@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .doubao_image_tool import get_doubao_image_generator
 from .gemini_image_tool import get_gemini_image_generator
 from .image_generator_tool import get_image_generator

@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..tasks.task_manager import get_task_manager
 from ..working_memory import TaskStatus
 from .tool_registry import (

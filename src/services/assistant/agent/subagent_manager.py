@@ -14,7 +14,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_types import (
     SUBAGENT_DEFAULTS,

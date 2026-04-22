@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import re
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     pass

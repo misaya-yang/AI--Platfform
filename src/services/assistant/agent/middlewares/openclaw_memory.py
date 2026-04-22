@@ -18,7 +18,7 @@ import contextlib
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-from .....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ..agent_loop import AgentLoopContext, AgentLoopEvent

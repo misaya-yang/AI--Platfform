@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..working_memory import WorkingMemory
 
 logger = get_logger(__name__)

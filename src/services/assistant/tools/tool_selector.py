@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .constants import ToolName
 
 if TYPE_CHECKING:

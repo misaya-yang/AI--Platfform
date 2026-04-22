@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .tool_registry import ToolCallRequest, ToolDefinition
 
 logger = get_logger(__name__)

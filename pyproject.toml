@@ -72,7 +72,17 @@ dependencies = [
 
     # Token Counting (for LLM context management)
     "tiktoken>=0.7.0",
+
+    # Shared primitives (workspace member — see packages/ai-gateway-core/)
+    "ai-gateway-core",
 ]
+
+[tool.uv.workspace]
+members = ["packages/ai-gateway-core", "apps/assistant-service"]
+
+[tool.uv.sources]
+ai-gateway-core = { workspace = true }
+assistant-service = { workspace = true }
 
 [project.optional-dependencies]
 # Database & Cache

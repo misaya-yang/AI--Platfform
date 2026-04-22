@@ -1,69 +1,17 @@
 {
-  "generated_at": "2026-04-22T11:47:45.283678+00:00",
+  "generated_at": "2026-04-22T11:54:07.636864+00:00",
   "analyzer_version": "1.0",
   "source_root": "src/services/assistant",
-  "total_external_imports": 90,
-  "total_unique_targets": 14,
+  "total_external_imports": 29,
+  "total_unique_targets": 11,
   "counts_by_bucket": {
-    "shared": 3,
+    "shared": 0,
     "contract": 7,
     "move": 0,
     "replace": 5,
     "review": 0
   },
   "entries": [
-    {
-      "target_module": "src.core.exceptions",
-      "symbol": "PermissionDeniedError",
-      "call_sites_count": 1,
-      "source_files": [
-        "src/services/assistant/assistant_service.py"
-      ],
-      "bucket": "shared",
-      "bucket_reason": "src.core.exceptions.* — exception classes, no infra"
-    },
-    {
-      "target_module": "src.core.observability.logging",
-      "symbol": "get_logger",
-      "call_sites_count": 56,
-      "source_files": [
-        "src/services/assistant/agent/agent_loop.py",
-        "src/services/assistant/agent/agui_protocol.py",
-        "src/services/assistant/agent/artifact_persister.py",
-        "src/services/assistant/agent/error_recovery.py",
-        "src/services/assistant/agent/middlewares/openclaw_memory.py",
-        "src/services/assistant/agent/react_executor.py",
-        "src/services/assistant/agent/subagent_manager.py",
-        "src/services/assistant/artifacts.py",
-        "src/services/assistant/assistant_proxy_client.py",
-        "src/services/assistant/assistant_service.py",
-        "src/services/assistant/audit/tool_audit.py",
-        "src/services/assistant/code_executor.py",
-        "src/services/assistant/content/content_generator.py",
-        "src/services/assistant/content/streaming_writer.py",
-        "src/services/assistant/content/structured_output.py",
-        "src/services/assistant/files/document_parser.py",
-        "src/services/assistant/files/file_processor.py",
-        "src/services/assistant/files/file_strategy.py",
-        "src/services/assistant/files/pdf_converter.py",
-        "src/services/assistant/gateway/execution_gateway.py"
-      ],
-      "bucket": "shared",
-      "bucket_reason": "src.core.observability.* — pure logging utilities"
-    },
-    {
-      "target_module": "src.models.enums",
-      "symbol": "StreamEventType",
-      "call_sites_count": 4,
-      "source_files": [
-        "src/services/assistant/agent/agent_loop.py",
-        "src/services/assistant/agent/agui_protocol.py",
-        "src/services/assistant/agent/artifact_persister.py",
-        "src/services/assistant/agent/react_executor.py"
-      ],
-      "bucket": "shared",
-      "bucket_reason": "src.models.enums.* — pure enum types"
-    },
     {
       "target_module": "src.core.auth.user_resolver",
       "symbol": "UserContext",

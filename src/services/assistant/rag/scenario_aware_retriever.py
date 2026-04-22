@@ -24,7 +24,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:

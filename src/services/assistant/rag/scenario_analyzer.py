@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..prompts.scenario_analysis_prompts import (
     SCENARIO_TYPES,
     build_analysis_prompt,

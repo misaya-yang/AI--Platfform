@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,

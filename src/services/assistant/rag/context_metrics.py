@@ -19,7 +19,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ....persistence.database import DatabaseStorage

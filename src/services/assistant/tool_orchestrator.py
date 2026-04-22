@@ -42,7 +42,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .tasks.task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
 

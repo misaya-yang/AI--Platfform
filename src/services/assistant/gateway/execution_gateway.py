@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..openclaw.security.sandbox_resolver import SandboxResolver
 from ..openclaw.tools.lane_scheduler import LaneScheduler
 from ..openclaw.tools.policy_lattice import ToolPolicyLattice

@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
-from ....models.enums import StreamEventType
+from ai_gateway_core.logging import get_logger
+from ai_gateway_core.enums import StreamEventType
 from ..tasks.task_planner import ExecutionPlan, PlannedTask, TaskPlanner
 from ..working_memory import TaskItem, TaskStatus, WorkingMemory
 

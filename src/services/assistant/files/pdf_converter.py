@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...knowledge.common import import_pymupdf
 
 logger = get_logger(__name__)

@@ -35,7 +35,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ....core.auth.user_resolver import UserContext

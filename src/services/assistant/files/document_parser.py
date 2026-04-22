@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 try:
     from unstructured.partition.auto import partition as unstructured_partition

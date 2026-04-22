@@ -43,7 +43,13 @@ dependencies = [
     "orjson>=3.11.0",
     "python-dotenv>=1.2.0",
     "tiktoken>=0.8.0",
+
+    # Shared primitives (workspace member — see packages/ai-gateway-core/)
+    "ai-gateway-core",
 ]
+
+[tool.uv.sources]
+ai-gateway-core = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/assistant_service"]

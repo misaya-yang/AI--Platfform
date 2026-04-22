@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

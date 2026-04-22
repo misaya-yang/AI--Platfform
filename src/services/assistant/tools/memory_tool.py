@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,

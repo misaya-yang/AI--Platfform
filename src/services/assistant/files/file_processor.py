@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ....core.auth.user_resolver import UserContext
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (
     FileProcessingStrategyFactory,

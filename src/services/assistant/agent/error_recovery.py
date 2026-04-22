@@ -20,7 +20,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Generic, TypeVar
 
-from ....core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

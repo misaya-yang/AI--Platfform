@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ..session.database_session_manager import DatabaseSessionManager
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
 from cachetools import TTLCache
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 from ..knowledge.knowledge_service import KnowledgeService
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..metrics.usage_recorder import get_usage_recorder
