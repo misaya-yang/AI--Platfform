@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.persistence.database import DatabaseStorage
+    from ai_gateway_core.persistence import DatabaseStorageLike
 
 logger = get_logger(__name__)
 
@@ -247,7 +247,7 @@ class ContextMetricsCollector:
 
     def __init__(
         self,
-        database: DatabaseStorage | None = None,
+        database: DatabaseStorageLike | None = None,
         enable_persistence: bool = True,
     ):
         """
@@ -609,7 +609,7 @@ def get_context_metrics_collector() -> ContextMetricsCollector:
 
 
 def init_context_metrics_collector(
-    database: DatabaseStorage | None = None,
+    database: DatabaseStorageLike | None = None,
 ) -> ContextMetricsCollector:
     """Initialize the global context metrics collector."""
     global _collector

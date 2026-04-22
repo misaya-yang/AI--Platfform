@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.core.auth.user_resolver import UserContext
+    from ai_gateway_core.auth import UserContextLike
 
 logger = get_logger(__name__)
 
@@ -217,7 +217,7 @@ class ToolCallRequest:
     call_id: str
     tool_name: str
     arguments: dict[str, Any]
-    user: UserContext | None = None
+    user: UserContextLike | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -349,7 +349,7 @@ class ToolRegistry:
     def list_tools(
         self,
         category: ToolCategory | None = None,
-        user: UserContext | None = None,
+        user: UserContextLike | None = None,
     ) -> list[ToolDefinition]:
         """List available tools, optionally filtered by category and user permissions."""
         with self._lock:
@@ -367,7 +367,7 @@ class ToolRegistry:
         return tools
 
     @staticmethod
-    def _user_has_required_permissions(user: UserContext, tool: ToolDefinition) -> bool:
+    def _user_has_required_permissions(user: UserContextLike, tool: ToolDefinition) -> bool:
         """Check required permissions with tier/role support."""
         required = tool.required_permissions or []
         if not required:
@@ -397,7 +397,7 @@ class ToolRegistry:
     def get_openai_schemas(
         self,
         tool_names: list[str] | None = None,
-        user: UserContext | None = None,
+        user: UserContextLike | None = None,
     ) -> list[dict[str, Any]]:
         """Get OpenAI-compatible schemas for specified tools."""
         tools = self.list_tools(user=user)
@@ -410,7 +410,7 @@ class ToolRegistry:
     def get_anthropic_schemas(
         self,
         tool_names: list[str] | None = None,
-        user: UserContext | None = None,
+        user: UserContextLike | None = None,
     ) -> list[dict[str, Any]]:
         """Get Anthropic-compatible schemas for specified tools."""
         tools = self.list_tools(user=user)

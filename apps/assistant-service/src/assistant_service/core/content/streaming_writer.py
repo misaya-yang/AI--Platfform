@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.core.auth.user_resolver import UserContext
+    from ai_gateway_core.auth import UserContextLike
     from src.services.knowledge.knowledge_service import KnowledgeService
     from .assistant_service import AssistantService
 
@@ -194,7 +194,7 @@ class StreamingWriter:
         writing_prompt: str,
         dataset_ids: list[str],
         verification_triggers: list[str] | None = None,
-        user: UserContext | None = None,
+        user: UserContextLike | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
         model_id: str = "qwen3.6-plus",
@@ -632,7 +632,7 @@ class StreamingWriter:
         self,
         query: str,
         dataset_ids: list[str],
-        user: UserContext | None = None,
+        user: UserContextLike | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search the knowledge base for verification.

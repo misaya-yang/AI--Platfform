@@ -28,7 +28,7 @@ from ai_gateway_core.logging import get_logger
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
-    from src.core.auth.user_resolver import UserContext
+    from ai_gateway_core.auth import UserContextLike
     from src.services.knowledge.knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
@@ -267,7 +267,7 @@ class ScenarioAwareRetriever:
         user_query: str,
         scenario: ScenarioDetectionResult,
         dataset_ids: list[str],
-        user: UserContext,
+        user: UserContextLike,
         top_k: int | None = None,
     ) -> ScenarioRetrievalContext:
         """
@@ -388,7 +388,7 @@ class ScenarioAwareRetriever:
         self,
         query: str,
         dataset_ids: list[str],
-        user: UserContext,
+        user: UserContextLike,
     ) -> list[RetrievalResult]:
         """Retrieve results for a single query across multiple datasets (parallel)."""
 
@@ -490,7 +490,7 @@ class ScenarioAwareRetriever:
         self,
         user_query: str,
         dataset_ids: list[str],
-        user: UserContext,
+        user: UserContextLike,
         top_k: int | None = None,
     ) -> ScenarioRetrievalContext:
         """

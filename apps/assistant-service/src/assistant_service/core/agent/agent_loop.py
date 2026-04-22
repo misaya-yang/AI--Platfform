@@ -130,7 +130,7 @@ from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from ..working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
-    from src.core.auth.user_resolver import UserContext
+    from ai_gateway_core.auth import UserContextLike
     from src.services.knowledge.knowledge_service import KnowledgeService
     from ..models.model_registry import ModelRegistry
     from ..memory_service import MemoryService
@@ -399,7 +399,7 @@ class AgentLoopContext:
     task_id: str | None = None  # For cancellation tracking
     cancel_event: asyncio.Event | None = None  # For immediate cancellation
     routed_request: RoutedAssistantRequest | None = None
-    user: UserContext | None = None
+    user: UserContextLike | None = None
 
     # Step 1: Memory
     user_preferences: dict[str, Any] | None = None
@@ -629,7 +629,7 @@ class AgentLoop:
     def _build_invocation_context(
         self,
         ctx: AgentLoopContext,
-        user: UserContext | None,
+        user: UserContextLike | None,
     ) -> ToolInvocationContext:
         """Build strict invocation context for all tool calls."""
         effective_user = user or ctx.user
@@ -669,7 +669,7 @@ class AgentLoop:
     async def _invoke_tool(
         self,
         ctx: AgentLoopContext,
-        user: UserContext | None,
+        user: UserContextLike | None,
         tool_name: str,
         arguments: dict[str, Any],
     ):
@@ -699,7 +699,7 @@ class AgentLoop:
     async def execute(
         self,
         session_id: str,
-        user: UserContext,
+        user: UserContextLike,
         message: str,
         config: AgentLoopConfig,
         history: list[dict[str, Any]] | None = None,
@@ -1309,7 +1309,7 @@ class AgentLoop:
     async def _execute_streaming_first(
         self,
         ctx: AgentLoopContext,
-        user: UserContext,
+        user: UserContextLike,
         history: list[dict[str, Any]],
         task_ctx: Any | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:

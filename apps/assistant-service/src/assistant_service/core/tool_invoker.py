@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.core.auth.user_resolver import UserContext
+    from ai_gateway_core.auth import UserContextLike
     from .tools.tool_registry import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRegistry
 
 logger = get_logger(__name__)
@@ -108,7 +108,7 @@ class ToolInvocationContext:
     kb_dataset_ids: list[str] = field(default_factory=list)
 
     # User context - required for tools that need user permissions (e.g., KB search)
-    user: UserContext | None = None
+    user: UserContextLike | None = None
 
     # Metadata for logging and analytics
     metadata: dict[str, Any] = field(default_factory=dict)

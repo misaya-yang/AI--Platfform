@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from src.services.session.database_session_manager import DatabaseSessionManager
+    from ai_gateway_core.session import SessionManagerLike
     from .code_executor import InputFile, KBDocument
     from .memory_service import MemoryService
 
@@ -589,7 +589,7 @@ Please use this web search context to inform your response when relevant."""
         model_registry: ModelRegistry,
         kb_service: KnowledgeService | None = None,
         tavily_api_key: str | None = None,
-        session_manager: DatabaseSessionManager | None = None,
+        session_manager: SessionManagerLike | None = None,
         context_config: ContextConfig | None = None,
         enable_rag_evaluation: bool = True,
         code_executor: CodeExecutorService | None = None,
