@@ -75,17 +75,39 @@ class ModelService:
         self,
         tenant_id: str,
         model_id: str,
+        provider_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Get a specific model."""
-        query = """
-            SELECT model_id, tenant_id, provider_id, display_name,
-                   context_window, max_output_tokens, supports_vision, supports_tools,
-                   input_price_per_1k, output_price_per_1k, access_level,
-                   is_enabled, sort_order, created_at, updated_at
-            FROM llm_models
-            WHERE tenant_id = $1 AND model_id = $2
+        """Get a specific model.
+
+        ``provider_id`` disambiguates when the same model_id exists under
+        multiple providers (e.g. ``gemini-3.1-pro-preview`` on both
+        ``google`` AI Studio and ``google-vertex`` Vertex Express Mode).
+        When omitted, returns the first match by sort_order — preserves
+        pre-migration-055 callers that only knew about one provider per
+        model_id.
         """
-        row = await self.db.fetchrow(query, tenant_id, model_id)
+        if provider_id is not None:
+            query = """
+                SELECT model_id, tenant_id, provider_id, display_name,
+                       context_window, max_output_tokens, supports_vision, supports_tools,
+                       input_price_per_1k, output_price_per_1k, access_level,
+                       is_enabled, sort_order, created_at, updated_at
+                FROM llm_models
+                WHERE tenant_id = $1 AND provider_id = $2 AND model_id = $3
+            """
+            row = await self.db.fetchrow(query, tenant_id, provider_id, model_id)
+        else:
+            query = """
+                SELECT model_id, tenant_id, provider_id, display_name,
+                       context_window, max_output_tokens, supports_vision, supports_tools,
+                       input_price_per_1k, output_price_per_1k, access_level,
+                       is_enabled, sort_order, created_at, updated_at
+                FROM llm_models
+                WHERE tenant_id = $1 AND model_id = $2
+                ORDER BY sort_order, provider_id
+                LIMIT 1
+            """
+            row = await self.db.fetchrow(query, tenant_id, model_id)
         return self._row_to_dict(row) if row else None
 
     async def create_model(
@@ -165,8 +187,15 @@ class ModelService:
         access_level: str | None = None,
         is_enabled: bool | None = None,
         sort_order: int | None = None,
+        provider_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Update a model. ``new_model_id`` renames the primary key."""
+        """Update a model. ``new_model_id`` renames the primary key.
+
+        ``provider_id`` disambiguates when the same model_id exists under
+        multiple providers. Post-migration-055 callers should pass it to
+        avoid updating the wrong row. Omitting it falls back to the
+        pre-migration behaviour of matching the first row by tenant+id.
+        """
         updates = []
         params = []
         param_idx = 1
@@ -227,18 +256,36 @@ class ModelService:
             param_idx += 1
 
         if not updates:
-            return await self.get_model(tenant_id, model_id)
+            return await self.get_model(tenant_id, model_id, provider_id=provider_id)
 
         updates.append(f"updated_at = ${param_idx}")
         params.append(datetime.now(timezone.utc))
         param_idx += 1
 
-        params.extend([tenant_id, model_id])
+        # WHERE clause composition. With the post-migration-055 PK of
+        # (tenant_id, provider_id, model_id), callers that know their
+        # provider MUST pass it here — otherwise the UPDATE could match
+        # multiple rows when the same model_id exists under ``google``
+        # and ``google-vertex``. Callers that don't pass provider_id get
+        # the old 2-column semantics; at worst that's a no-op when no
+        # row matches.
+        if provider_id is not None:
+            params.extend([tenant_id, provider_id, model_id])
+            where_clause = (
+                f"WHERE tenant_id = ${param_idx} "
+                f"AND provider_id = ${param_idx + 1} "
+                f"AND model_id = ${param_idx + 2}"
+            )
+        else:
+            params.extend([tenant_id, model_id])
+            where_clause = (
+                f"WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}"
+            )
 
         query = f"""
             UPDATE llm_models
             SET {", ".join(updates)}
-            WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}
+            {where_clause}
             RETURNING model_id, tenant_id, provider_id, display_name,
                       context_window, max_output_tokens, supports_vision, supports_tools,
                       input_price_per_1k, output_price_per_1k, access_level,
@@ -272,23 +319,45 @@ class ModelService:
         self,
         tenant_id: str,
         model_id: str,
+        provider_id: str | None = None,
     ) -> bool:
-        """Delete a model."""
-        result = await self.db.execute(
-            "DELETE FROM llm_models WHERE tenant_id = $1 AND model_id = $2",
-            tenant_id,
-            model_id,
-        )
-        return "DELETE 1" in str(result)
+        """Delete a model.
+
+        ``provider_id`` scopes the delete to one row when the same
+        model_id exists under multiple providers. Without it, callers
+        could unintentionally delete more than one row post-migration-055
+        — flag this in any new caller and pass provider_id wherever the
+        lookup context has it.
+        """
+        if provider_id is not None:
+            result = await self.db.execute(
+                "DELETE FROM llm_models WHERE tenant_id = $1 AND provider_id = $2 AND model_id = $3",
+                tenant_id,
+                provider_id,
+                model_id,
+            )
+        else:
+            result = await self.db.execute(
+                "DELETE FROM llm_models WHERE tenant_id = $1 AND model_id = $2",
+                tenant_id,
+                model_id,
+            )
+        return "DELETE" in str(result) and "DELETE 0" not in str(result)
 
     async def toggle_model(
         self,
         tenant_id: str,
         model_id: str,
         is_enabled: bool,
+        provider_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Toggle model enabled state."""
-        return await self.update_model(tenant_id, model_id, is_enabled=is_enabled)
+        return await self.update_model(
+            tenant_id,
+            model_id,
+            is_enabled=is_enabled,
+            provider_id=provider_id,
+        )
 
     async def get_models_for_assistant(
         self,

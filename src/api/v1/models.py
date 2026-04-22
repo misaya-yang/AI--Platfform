@@ -133,11 +133,21 @@ async def get_model(
 async def update_model(
     model_id: str,
     body: ModelUpdate,
+    provider_id: str | None = None,  # optional query param
     model_service: ModelService = Depends(get_model_service),
     model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
-    """Update a model."""
+    """Update a model.
+
+    ``provider_id`` is an optional query param that disambiguates when
+    the same model_id exists under multiple providers (introduced by
+    migration 055). Without it we default to pre-migration behaviour —
+    first row by sort_order+provider_id wins — which works for the
+    common case of a single provider per model_id. The frontend should
+    pass ``provider_id`` whenever it knows which row the user is
+    editing.
+    """
     # Check admin permission
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
@@ -170,6 +180,7 @@ async def update_model(
         access_level=body.access_level,
         is_enabled=body.is_enabled,
         sort_order=body.sort_order,
+        provider_id=provider_id,
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -185,11 +196,13 @@ async def update_model(
 @router.delete("/models/{model_id}")
 async def delete_model(
     model_id: str,
+    provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
     model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
-    """Delete a model."""
+    """Delete a model. ``provider_id`` is optional query param; pass it
+    when the same model_id exists under multiple providers (post-055)."""
     # Check admin permission
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
@@ -197,6 +210,7 @@ async def delete_model(
     deleted = await model_service.delete_model(
         tenant_id=user.tenant_id or "default",
         model_id=model_id,
+        provider_id=provider_id,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -213,11 +227,16 @@ async def delete_model(
 async def toggle_model(
     model_id: str,
     is_enabled: bool = Query(..., description="Enable or disable the model"),
+    provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
     model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
-    """Toggle model enabled state."""
+    """Toggle model enabled state.
+
+    ``provider_id`` query param scopes the toggle to one provider row
+    when the same model_id exists under multiple providers.
+    """
     # Check admin permission
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
@@ -226,6 +245,7 @@ async def toggle_model(
         tenant_id=user.tenant_id or "default",
         model_id=model_id,
         is_enabled=is_enabled,
+        provider_id=provider_id,
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
