@@ -680,6 +680,10 @@ export function getProviderDisplayName(provider: string): string {
     deepseek: "DeepSeek",
     dashscope: "Qwen/DashScope",
     google: "Google Gemini",
+    // Vertex is wired as a separate provider entry (same wire protocol,
+    // different host + key format). Labeled distinctly so users can tell
+    // a model routed through AI Studio apart from the Vertex mirror.
+    "google-vertex": "Google Vertex AI",
   };
   return names[provider] || provider;
 }
