@@ -229,6 +229,12 @@ class ProviderService:
                     # Test Google API
                     url = f"{base_url}/v1beta/models?key={api_key}"
                     response = await client.get(url)
+                elif api_type == "google-vertex":
+                    # Vertex Express Mode — list publisher models; same
+                    # ?key= query param shape as AI Studio but under the
+                    # /v1/publishers/google namespace.
+                    url = f"{base_url}/v1/publishers/google/models?key={api_key}"
+                    response = await client.get(url)
                 else:
                     return {"success": False, "message": f"Unknown API type: {api_type}"}
 

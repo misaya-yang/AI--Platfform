@@ -2994,6 +2994,14 @@
       "supportsToolsHint": "Model can call functions/tools",
       "enableModel": "Enable Model",
       "enableModelHint": "When disabled, users cannot select this model",
+      "sections": {
+        "identity": "Identity",
+        "capabilities": "Capabilities",
+        "pricing": "Pricing",
+        "accessDisplay": "Access & Display"
+      },
+      "nativeSearchNote": "Native web search support is derived from the (provider, model_id) pair in code (see NATIVE_SEARCH_CAPABLE). Adding support for a new model requires a code change, not a UI toggle.",
+      "modelIdEditHint": "This is the identifier sent to the provider's API. Renaming it updates the primary key; prior usage records keep their original id for audit.",
       "validation": {
         "contextWindowRequired": "Context window is required",
         "contextWindowMin": "Context window must be at least 1",

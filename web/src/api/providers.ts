@@ -115,6 +115,7 @@ export function getApiTypeDisplayName(apiType: string): string {
     openai: "OpenAI Compatible",
     anthropic: "Anthropic",
     google: "Google Gemini",
+    "google-vertex": "Google Vertex AI",
   };
   return names[apiType] || apiType;
 }
@@ -127,6 +128,7 @@ export function getDefaultBaseUrl(apiType: string): string {
     openai: "https://api.openai.com",
     anthropic: "https://api.anthropic.com",
     google: "https://generativelanguage.googleapis.com",
+    "google-vertex": "https://aiplatform.googleapis.com",
   };
   return urls[apiType] || "";
 }

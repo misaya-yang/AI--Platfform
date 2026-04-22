@@ -50,7 +50,18 @@ const API_TYPES = [
   { value: "openai", label: "OpenAI Compatible" },
   { value: "anthropic", label: "Anthropic" },
   { value: "google", label: "Google Gemini" },
+  { value: "google-vertex", label: "Google Vertex AI" },
 ];
+
+// Per-api-type hints for the API key field. Vertex Express Mode keys have
+// a distinct format (``AQ.xxx``) and land on a different host, so surface
+// that in the placeholder to reduce copy/paste-the-wrong-key incidents.
+const API_KEY_PLACEHOLDERS: Record<string, string> = {
+  openai: "sk-...",
+  anthropic: "sk-ant-...",
+  google: "AIzaSy...",
+  "google-vertex": "AQ.xxx  (Vertex Express Mode key)",
+};
 
 export function ProviderForm({
   open,
@@ -224,9 +235,20 @@ export function ProviderForm({
               <Input
                 id="api_key"
                 type="password"
-                placeholder={isEdit && provider?.has_api_key ? "••••••••" : "sk-..."}
+                placeholder={
+                  isEdit && provider?.has_api_key
+                    ? "••••••••"
+                    : API_KEY_PLACEHOLDERS[apiType] || "sk-..."
+                }
                 {...register("api_key")}
               />
+              {apiType === "google-vertex" && (
+                <p className="text-xs text-muted-foreground">
+                  Paste an Express Mode API key (format <code>AQ.xxx</code>).
+                  Vertex Express Mode works without OAuth / project / location
+                  setup.
+                </p>
+              )}
             </div>
 
             {/* Is Enabled */}

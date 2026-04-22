@@ -2992,6 +2992,14 @@
       "supportsToolsHint": "模型可以调用函数/工具",
       "enableModel": "启用模型",
       "enableModelHint": "禁用后用户无法选择此模型",
+      "sections": {
+        "identity": "标识",
+        "capabilities": "能力",
+        "pricing": "定价",
+        "accessDisplay": "访问与显示"
+      },
+      "nativeSearchNote": "原生网页搜索能力由代码中的 (provider, model_id) 映射决定（见 NATIVE_SEARCH_CAPABLE）。为新模型启用该能力需要改代码，而非在界面上切换开关。",
+      "modelIdEditHint": "这是发送给供应商 API 的标识符。修改后会更新主键；已有使用记录仍保留原始 ID 以便审计。",
       "validation": {
         "contextWindowRequired": "请输入上下文窗口大小",
         "contextWindowMin": "上下文窗口至少为 1",

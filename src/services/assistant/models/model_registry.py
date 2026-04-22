@@ -1,11 +1,12 @@
 """
 Model Registry - Unified interface for multiple LLM providers.
 
-Supports:
-- OpenAI (GPT-4o, GPT-4o-mini, etc.)
-- Anthropic (Claude 3.5 Sonnet, Claude 3 Opus, etc.)
+Supports (default catalog as of 2026-04):
+- OpenAI (gpt-4o, o1)
+- Anthropic (claude-opus-4-5, claude-sonnet-4-5)
 - DeepSeek (deepseek-chat, deepseek-reasoner)
-- DashScope/Qwen (qwen-turbo, qwen-plus, qwen-max)
+- DashScope/Qwen (qwen3.6-plus, qwen-max)
+- Google / Google Vertex (gemini-3-pro-preview, gemini-3-flash-preview)
 """
 
 from __future__ import annotations
@@ -32,6 +33,14 @@ class ModelProvider(str, Enum):
     DEEPSEEK = "deepseek"
     DASHSCOPE = "dashscope"
     GOOGLE = "google"
+    # Vertex AI — same wire protocol as Google Gemini (``_build_google_body``
+    # emits an identical body), only the host + path prefix differ. Kept as
+    # its own enum value so operators can add it through the Provider UI the
+    # same way they add any other provider, with its own API key, its own
+    # DB row, and its own set of models. The legacy env-driven flip
+    # (``GOOGLE_API_BACKEND=vertex``) still works but logs a deprecation
+    # warning at startup — prefer configuring the ``google-vertex`` provider.
+    GOOGLE_VERTEX = "google-vertex"
 
 
 class ModelAccessLevel(str, Enum):
@@ -57,10 +66,16 @@ class ModelInfo:
     output_price_per_1k: float = 0.0
     access_level: ModelAccessLevel = ModelAccessLevel.PUBLIC  # Permission level required
 
-    # --- Native web-search capability (populated from NATIVE_SEARCH_CAPABLE map) ---
-    # True when the provider exposes a built-in search/grounding mode that
-    # replaces the Tavily `search_web` tool. Populated in __post_init__ so
-    # DB-loaded models also pick up the capability.
+    # --- Native web-search capability (DERIVED — not persisted, not UI-editable) ---
+    # Populated from ``NATIVE_SEARCH_CAPABLE`` in ``__post_init__`` based on the
+    # (provider, model_id) pair. Intentionally NOT exposed in the Model
+    # Management UI because the capability requires provider-specific
+    # request-body wiring in ``_build_*_body`` (e.g. Anthropic's
+    # ``web_search_20250305`` tool, Gemini's ``google_search`` tool,
+    # DashScope's ``enable_search`` flag). Flipping a DB boolean without a
+    # matching code path would produce 400 errors — so the map is the
+    # single source of truth and DB-loaded ``ModelInfo`` instances pick
+    # it up transparently on construction.
     supports_native_search: bool = False
     native_search_config: dict[str, Any] | None = None
 
@@ -79,28 +94,31 @@ class ModelInfo:
 NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
     # DashScope / Qwen — `enable_search: true` in extra_body (OpenAI-compat).
     # Ref: https://help.aliyun.com/zh/model-studio/qwen-web-search
-    (ModelProvider.DASHSCOPE, "qwen-turbo"): {"enable_search": True},
-    (ModelProvider.DASHSCOPE, "qwen-plus"): {"enable_search": True},
+    # Note: qwen-turbo / qwen-plus retired from catalog (2026-04).
     (ModelProvider.DASHSCOPE, "qwen-max"): {"enable_search": True},
     (ModelProvider.DASHSCOPE, "qwen3.6-plus"): {"enable_search": True},
-    # Google Gemini — `google_search` tool (2.0+) / `google_search_retrieval` (1.5).
+    # Google Gemini — `google_search` tool (2.0+).
     # Ref: https://ai.google.dev/gemini-api/docs/grounding
-    (ModelProvider.GOOGLE, "gemini-2.5-pro"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE, "gemini-2.5-flash"): {"tool_type": "google_search"},
-    (ModelProvider.GOOGLE, "gemini-2.5-flash-lite"): {"tool_type": "google_search"},
+    # Note: Gemini 2.5 family retired from catalog (2026-04) in favor of 3.x.
+    (ModelProvider.GOOGLE, "gemini-3.1-pro-preview"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE, "gemini-3.1-flash-lite-preview"): {"tool_type": "google_search"},
     (ModelProvider.GOOGLE, "gemini-3-pro-preview"): {"tool_type": "google_search"},
     (ModelProvider.GOOGLE, "gemini-3-flash-preview"): {"tool_type": "google_search"},
+    # Vertex entries mirror the Google ones — same wire format, same tool_type,
+    # different host. Kept explicit (rather than branching on provider at
+    # lookup time) so the capability map stays uniform across providers.
+    (ModelProvider.GOOGLE_VERTEX, "gemini-3.1-pro-preview"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE_VERTEX, "gemini-3.1-flash-lite-preview"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE_VERTEX, "gemini-3-pro-preview"): {"tool_type": "google_search"},
+    (ModelProvider.GOOGLE_VERTEX, "gemini-3-flash-preview"): {"tool_type": "google_search"},
     # Anthropic — server tool `web_search_20250305`.
     # Ref: https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool
-    (ModelProvider.ANTHROPIC, "claude-sonnet-4-20250514"): {
+    # Note: Claude 3.5 and Sonnet-4 (2025-05) retired in favor of 4.5 family.
+    (ModelProvider.ANTHROPIC, "claude-opus-4-5"): {
         "tool_type": "web_search_20250305",
         "max_uses": 5,
     },
-    (ModelProvider.ANTHROPIC, "claude-3-5-sonnet-20241022"): {
-        "tool_type": "web_search_20250305",
-        "max_uses": 5,
-    },
-    (ModelProvider.ANTHROPIC, "claude-3-5-haiku-20241022"): {
+    (ModelProvider.ANTHROPIC, "claude-sonnet-4-5"): {
         "tool_type": "web_search_20250305",
         "max_uses": 5,
     },
@@ -237,123 +255,186 @@ class ModelConfig:
 
 
 # Default model catalog
+#
+# All prices are in **USD per 1K tokens** (list price per 1M ÷ 1000),
+# verified against each provider's official pricing page on 2026-04-22:
+#   - Google:    https://ai.google.dev/gemini-api/docs/pricing
+#   - Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+#   - OpenAI:    https://developers.openai.com/api/docs/pricing
+#   - DeepSeek:  https://api-docs.deepseek.com/quick_start/pricing/
+#   - DashScope: https://www.alibabacloud.com/help/en/model-studio/models
+#
+# For providers with tiered context-length pricing (Gemini 3 / 3.1 Pro,
+# Gemini 2.5 Pro) we record the ≤200K tier — long-context requests are
+# rare in our workload. Operators needing long-context cost tracking can
+# override prices per model via the Model Management UI.
 DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
     ModelProvider.OPENAI: [
+        # GPT-5 family — current flagship on OpenAI's pricing page
+        # (verified 2026-04-22). gpt-5.4 is the recommended production
+        # model; Mini / Nano are cheaper tiers for routing & bulk work.
+        # Legacy gpt-4o / o1 kept as fallbacks for old history keys.
         ModelInfo(
-            id="gpt-4o",
-            name="GPT-4o",
+            id="gpt-5.4",
+            name="GPT-5.4",
             provider=ModelProvider.OPENAI,
-            context_window=128000,
-            max_output_tokens=16384,
+            context_window=400000,
+            max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.0025,
-            output_price_per_1k=0.01,
+            input_price_per_1k=0.0025,  # $2.50 per 1M
+            output_price_per_1k=0.015,  # $15.00 per 1M
+            access_level=ModelAccessLevel.ADMIN,
         ),
         ModelInfo(
-            id="gpt-4o-mini",
-            name="GPT-4o Mini",
+            id="gpt-5.4-mini",
+            name="GPT-5.4 Mini",
+            provider=ModelProvider.OPENAI,
+            context_window=400000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.00075,  # $0.75 per 1M
+            output_price_per_1k=0.0045,  # $4.50 per 1M
+            access_level=ModelAccessLevel.PREMIUM,
+        ),
+        ModelInfo(
+            id="gpt-5.4-nano",
+            name="GPT-5.4 Nano",
+            provider=ModelProvider.OPENAI,
+            context_window=400000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.0002,  # $0.20 per 1M
+            output_price_per_1k=0.00125,  # $1.25 per 1M
+            access_level=ModelAccessLevel.PUBLIC,
+        ),
+        ModelInfo(
+            id="gpt-4o",
+            name="GPT-4o (legacy)",
             provider=ModelProvider.OPENAI,
             context_window=128000,
             max_output_tokens=16384,
             supports_vision=True,
-            input_price_per_1k=0.00015,
-            output_price_per_1k=0.0006,
+            input_price_per_1k=0.0025,  # $2.50 per 1M — unchanged
+            output_price_per_1k=0.01,  # $10.00 per 1M — unchanged
         ),
         ModelInfo(
             id="o1",
-            name="O1",
+            name="O1 (legacy reasoning)",
             provider=ModelProvider.OPENAI,
             context_window=200000,
             max_output_tokens=100000,
             supports_vision=True,
             input_price_per_1k=0.015,
             output_price_per_1k=0.06,
-        ),
-        ModelInfo(
-            id="o1-mini",
-            name="O1 Mini",
-            provider=ModelProvider.OPENAI,
-            context_window=128000,
-            max_output_tokens=65536,
-            supports_vision=False,
-            input_price_per_1k=0.0011,
-            output_price_per_1k=0.0044,
+            access_level=ModelAccessLevel.ADMIN,
         ),
     ],
     ModelProvider.ANTHROPIC: [
+        # Opus 4.5/4.6/4.7 share base pricing per Anthropic's page
+        # (verified 2026-04-22): $5 in / $25 out per 1M. Sonnet 4.5/4.6
+        # also share pricing ($3 / $15 per 1M). Haiku 4.5 is $1 / $5.
+        # Keep separate entries per model id so usage records identify
+        # exactly which version served the turn.
         ModelInfo(
-            id="claude-sonnet-4-20250514",
-            name="Claude Sonnet 4",
+            id="claude-opus-4-7",
+            name="Claude Opus 4.7",
+            provider=ModelProvider.ANTHROPIC,
+            context_window=1000000,
+            max_output_tokens=64000,
+            supports_vision=True,
+            input_price_per_1k=0.005,  # $5 per 1M
+            output_price_per_1k=0.025,  # $25 per 1M
+            access_level=ModelAccessLevel.ADMIN,
+        ),
+        ModelInfo(
+            id="claude-opus-4-5",
+            name="Claude Opus 4.5",
+            provider=ModelProvider.ANTHROPIC,
+            context_window=1000000,
+            max_output_tokens=64000,
+            supports_vision=True,
+            # Previous catalog had 0.015/0.075 (Opus 4 / 4.1 pricing).
+            # Opus 4.5 cut prices 67% vs 4.1 per Anthropic's blog.
+            input_price_per_1k=0.005,  # $5 per 1M — CORRECTED
+            output_price_per_1k=0.025,  # $25 per 1M — CORRECTED
+            access_level=ModelAccessLevel.ADMIN,
+        ),
+        ModelInfo(
+            id="claude-sonnet-4-6",
+            name="Claude Sonnet 4.6",
+            provider=ModelProvider.ANTHROPIC,
+            context_window=1000000,
+            max_output_tokens=64000,
+            supports_vision=True,
+            input_price_per_1k=0.003,  # $3 per 1M
+            output_price_per_1k=0.015,  # $15 per 1M
+            access_level=ModelAccessLevel.PREMIUM,
+        ),
+        ModelInfo(
+            id="claude-sonnet-4-5",
+            name="Claude Sonnet 4.5",
+            provider=ModelProvider.ANTHROPIC,
+            context_window=1000000,
+            max_output_tokens=64000,
+            supports_vision=True,
+            input_price_per_1k=0.003,  # $3 per 1M — unchanged
+            output_price_per_1k=0.015,  # $15 per 1M — unchanged
+        ),
+        ModelInfo(
+            id="claude-haiku-4-5",
+            name="Claude Haiku 4.5",
             provider=ModelProvider.ANTHROPIC,
             context_window=200000,
             max_output_tokens=64000,
             supports_vision=True,
-            input_price_per_1k=0.003,
-            output_price_per_1k=0.015,
-        ),
-        ModelInfo(
-            id="claude-3-5-sonnet-20241022",
-            name="Claude 3.5 Sonnet",
-            provider=ModelProvider.ANTHROPIC,
-            context_window=200000,
-            max_output_tokens=8192,
-            supports_vision=True,
-            input_price_per_1k=0.003,
-            output_price_per_1k=0.015,
-        ),
-        ModelInfo(
-            id="claude-3-5-haiku-20241022",
-            name="Claude 3.5 Haiku",
-            provider=ModelProvider.ANTHROPIC,
-            context_window=200000,
-            max_output_tokens=8192,
-            supports_vision=True,
-            input_price_per_1k=0.0008,
-            output_price_per_1k=0.004,
+            input_price_per_1k=0.001,  # $1 per 1M
+            output_price_per_1k=0.005,  # $5 per 1M
         ),
     ],
     ModelProvider.DEEPSEEK: [
+        # DeepSeek V3.2 unified chat + reasoner on the same price
+        # (verified at api-docs.deepseek.com 2026-04-22):
+        #   cache-miss input: $0.28 per 1M → 0.00028 per 1K
+        #   output:           $0.42 per 1M → 0.00042 per 1K
+        # Cache hits cost $0.028/1M; UsageRecorder counts billable tokens
+        # on the wire — the cache discount is applied at bill time.
+        # Context bumped to 128K (was 64K) per V3.2 release notes.
         ModelInfo(
             id="deepseek-chat",
-            name="DeepSeek Chat",
+            name="DeepSeek Chat (V3.2)",
             provider=ModelProvider.DEEPSEEK,
-            context_window=64000,
+            context_window=128000,  # bumped 64K → 128K per V3.2
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.00028,
-            output_price_per_1k=0.00042,
+            input_price_per_1k=0.00028,  # $0.28 per 1M — unchanged
+            output_price_per_1k=0.00042,  # $0.42 per 1M — unchanged
         ),
         ModelInfo(
             id="deepseek-reasoner",
-            name="DeepSeek Reasoner (R1)",
+            name="DeepSeek Reasoner (V3.2)",
             provider=ModelProvider.DEEPSEEK,
-            context_window=64000,
+            context_window=128000,
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.00028,
+            input_price_per_1k=0.00028,  # Unified with chat on V3.2
             output_price_per_1k=0.00042,
         ),
     ],
     ModelProvider.DASHSCOPE: [
+        # Qwen pricing — international (Singapore) DashScope endpoint,
+        # verified 2026-04-22. Mainland CN endpoint is cheaper but our
+        # gateway targets international.
         ModelInfo(
-            id="qwen-turbo",
-            name="Qwen Turbo",
+            id="qwen3.6-plus",
+            name="Qwen 3.6 Plus",
             provider=ModelProvider.DASHSCOPE,
-            context_window=131072,
-            max_output_tokens=8192,
+            context_window=1000000,
+            max_output_tokens=65536,
             supports_vision=False,
-            input_price_per_1k=0.0003,
-            output_price_per_1k=0.0006,
-        ),
-        ModelInfo(
-            id="qwen-plus",
-            name="Qwen Plus",
-            provider=ModelProvider.DASHSCOPE,
-            context_window=131072,
-            max_output_tokens=8192,
-            supports_vision=False,
-            input_price_per_1k=0.0004,
-            output_price_per_1k=0.0012,
+            # Prior catalog had 0/0 which broke cost tracking. Official
+            # DashScope global pricing (≤256K request): $0.50 / $3.00 per 1M.
+            input_price_per_1k=0.0005,  # $0.50 per 1M — FIXED (was 0)
+            output_price_per_1k=0.003,  # $3.00 per 1M — FIXED (was 0)
         ),
         ModelInfo(
             id="qwen-max",
@@ -362,32 +443,42 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=32768,
             max_output_tokens=8192,
             supports_vision=False,
-            input_price_per_1k=0.0012,
-            output_price_per_1k=0.006,
-        ),
-        ModelInfo(
-            id="qwen-vl-max",
-            name="Qwen VL Max",
-            provider=ModelProvider.DASHSCOPE,
-            context_window=32768,
-            max_output_tokens=8192,
-            supports_vision=True,
-            input_price_per_1k=0.00023,
-            output_price_per_1k=0.000574,
-        ),
-        ModelInfo(
-            id="qwen3.6-plus",
-            name="Qwen 3.6 Plus",
-            provider=ModelProvider.DASHSCOPE,
-            context_window=1000000,
-            max_output_tokens=65536,
-            supports_vision=False,
-            input_price_per_1k=0.0,
-            output_price_per_1k=0.0,
+            # Official global rate: $1.60 input / $6.40 output per 1M.
+            # Previous catalog had $1.20/$6.00 (pre-2026 price).
+            input_price_per_1k=0.0016,  # $1.60 per 1M — CORRECTED
+            output_price_per_1k=0.0064,  # $6.40 per 1M — CORRECTED
         ),
     ],
     ModelProvider.GOOGLE: [
-        # Gemini 3.0 系列 (2025年1月发布) - 高端模型，仅限管理员
+        # Gemini 3.1 family — released April 2026 (blog.google 2026-04-17)
+        # and now live on ai.google.dev/gemini-api/docs/pricing. The
+        # earlier comment "3.1 not released as of 2026-04" was based on
+        # info that has since become stale — 3.1 Pro Preview and 3.1
+        # Flash Lite Preview are callable today. Pro uses tiered pricing;
+        # we record the ≤200K tier.
+        ModelInfo(
+            id="gemini-3.1-pro-preview",
+            name="Gemini 3.1 Pro",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.002,  # $2 per 1M (≤200K tier)
+            output_price_per_1k=0.012,  # $12 per 1M (≤200K tier)
+            access_level=ModelAccessLevel.ADMIN,
+        ),
+        ModelInfo(
+            id="gemini-3.1-flash-lite-preview",
+            name="Gemini 3.1 Flash Lite",
+            provider=ModelProvider.GOOGLE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.00025,  # $0.25 per 1M
+            output_price_per_1k=0.0015,  # $1.50 per 1M
+            access_level=ModelAccessLevel.PUBLIC,
+        ),
+        # Gemini 3 preview series — retained for history-key resolution.
         ModelInfo(
             id="gemini-3-pro-preview",
             name="Gemini 3 Pro",
@@ -395,9 +486,9 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.002,  # $2 per 1M = $0.002 per 1K
-            output_price_per_1k=0.012,  # $12 per 1M = $0.012 per 1K
-            access_level=ModelAccessLevel.ADMIN,  # 高价模型，仅管理员可用
+            input_price_per_1k=0.002,  # $2 per 1M (≤200K) — unchanged
+            output_price_per_1k=0.012,  # $12 per 1M (≤200K) — unchanged
+            access_level=ModelAccessLevel.ADMIN,
         ),
         ModelInfo(
             id="gemini-3-flash-preview",
@@ -406,43 +497,65 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.0005,  # $0.50 per 1M
-            output_price_per_1k=0.003,  # $3 per 1M
-            access_level=ModelAccessLevel.ADMIN,  # 管理员可用
+            input_price_per_1k=0.0005,  # $0.50 per 1M — unchanged
+            output_price_per_1k=0.003,  # $3 per 1M — unchanged
+            access_level=ModelAccessLevel.ADMIN,
         ),
-        # Gemini 2.5 系列 (稳定版)
+    ],
+    # Vertex AI default catalog — mirrors the Google (AI Studio) Gemini set.
+    # Same model IDs on purpose: Gemini-on-Vertex and Gemini-on-AI-Studio
+    # target the same underlying models, so keeping IDs identical means the
+    # ModelRegistry can resolve a ``gemini-2.5-flash`` request against
+    # whichever provider the caller picks.
+    ModelProvider.GOOGLE_VERTEX: [
+        # Mirrors ModelProvider.GOOGLE — same IDs on purpose so the registry
+        # can resolve the same model_id against whichever provider the caller
+        # picks. Kept in sync with the Google block above (2.5 family retired,
+        # 3.1 family added). Display names suffixed " (Vertex)" so both
+        # providers can coexist visually in the Model Management UI.
         ModelInfo(
-            id="gemini-2.5-pro",
-            name="Gemini 2.5 Pro",
-            provider=ModelProvider.GOOGLE,
+            id="gemini-3.1-pro-preview",
+            name="Gemini 3.1 Pro (Vertex)",
+            provider=ModelProvider.GOOGLE_VERTEX,
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.00125,  # $1.25 per 1M
-            output_price_per_1k=0.01,  # $10 per 1M
-            access_level=ModelAccessLevel.ADMIN,  # 高价模型
+            input_price_per_1k=0.002,  # $2 per 1M (≤200K tier)
+            output_price_per_1k=0.012,  # $12 per 1M (≤200K tier)
+            access_level=ModelAccessLevel.ADMIN,
         ),
         ModelInfo(
-            id="gemini-2.5-flash",
-            name="Gemini 2.5 Flash",
-            provider=ModelProvider.GOOGLE,
+            id="gemini-3.1-flash-lite-preview",
+            name="Gemini 3.1 Flash Lite (Vertex)",
+            provider=ModelProvider.GOOGLE_VERTEX,
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.0003,  # $0.30 per 1M
-            output_price_per_1k=0.0025,  # $2.50 per 1M
-            access_level=ModelAccessLevel.PREMIUM,  # 性价比较高，付费用户可用
+            input_price_per_1k=0.00025,  # $0.25 per 1M
+            output_price_per_1k=0.0015,  # $1.50 per 1M
+            access_level=ModelAccessLevel.PUBLIC,
         ),
         ModelInfo(
-            id="gemini-2.5-flash-lite",
-            name="Gemini 2.5 Flash Lite",
-            provider=ModelProvider.GOOGLE,
+            id="gemini-3-pro-preview",
+            name="Gemini 3 Pro (Vertex)",
+            provider=ModelProvider.GOOGLE_VERTEX,
             context_window=1000000,
             max_output_tokens=65536,
             supports_vision=True,
-            input_price_per_1k=0.0001,
-            output_price_per_1k=0.0004,
-            access_level=ModelAccessLevel.PUBLIC,  # 最便宜的Google模型，普通用户可用
+            input_price_per_1k=0.002,
+            output_price_per_1k=0.012,
+            access_level=ModelAccessLevel.ADMIN,
+        ),
+        ModelInfo(
+            id="gemini-3-flash-preview",
+            name="Gemini 3 Flash (Vertex)",
+            provider=ModelProvider.GOOGLE_VERTEX,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=True,
+            input_price_per_1k=0.0005,
+            output_price_per_1k=0.003,
+            access_level=ModelAccessLevel.ADMIN,
         ),
     ],
 }
@@ -465,6 +578,7 @@ class ModelRegistry:
         ModelProvider.DEEPSEEK: "https://api.deepseek.com",
         ModelProvider.DASHSCOPE: "https://dashscope.aliyuncs.com/compatible-mode",
         ModelProvider.GOOGLE: "https://generativelanguage.googleapis.com",
+        ModelProvider.GOOGLE_VERTEX: "https://aiplatform.googleapis.com",
     }
 
     #: Base URL used when a Google provider is configured with ``backend="vertex"``.
@@ -653,6 +767,25 @@ class ModelRegistry:
             path += "&alt=sse"
         return f"{base}{path}"
 
+    def _vertex_endpoint(self, model_id: str, *, stream: bool) -> str:
+        """Build the absolute Vertex Express-Mode endpoint URL.
+
+        Used when a model's ``provider == ModelProvider.GOOGLE_VERTEX``.
+        Mirrors the Vertex branch of ``_google_endpoint`` but sources the
+        key from the GOOGLE_VERTEX provider config (not VERTEX_API_KEY env)
+        because the whole point of making Vertex its own provider is that
+        operators configure it through the Service Management UI — the DB
+        row is the source of truth.
+        """
+        config = self._configs.get(ModelProvider.GOOGLE_VERTEX)
+        api_key = config.api_key if config else ""
+        base = (config.base_url if config else None) or self.VERTEX_BASE_URL
+        action = "streamGenerateContent" if stream else "generateContent"
+        path = f"/v1/publishers/google/models/{model_id}:{action}?key={api_key}"
+        if stream:
+            path += "&alt=sse"
+        return f"{base}{path}"
+
     def get_available_models(self) -> list[ModelInfo]:
         """Get all models from configured providers."""
         available = []
@@ -687,7 +820,7 @@ class ModelRegistry:
             # trade for eliminating the tail-latency spikes. Other
             # providers (OpenAI / Anthropic / DashScope) aren't affected —
             # their completion endpoints handle keepalive cleanly.
-            if provider == ModelProvider.GOOGLE:
+            if provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
                 limits = httpx.Limits(
                     max_keepalive_connections=0,
                     max_connections=20,
@@ -713,8 +846,8 @@ class ModelRegistry:
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             }
-        elif provider == ModelProvider.GOOGLE:
-            # Google uses API key in URL, not header
+        elif provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
+            # Google / Vertex use API key in URL (?key=...), not header.
             return {
                 "Content-Type": "application/json",
             }
@@ -744,7 +877,7 @@ class ModelRegistry:
                 model_id, messages, temperature, max_tokens, tools, stream,
                 native_search_config=native_search_config,
             )
-        elif provider == ModelProvider.GOOGLE:
+        elif provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
             return self._build_google_body(
                 model_id,
                 messages,
@@ -1265,6 +1398,8 @@ class ModelRegistry:
         if model.provider == ModelProvider.GOOGLE:
             # Path differs between AI Studio and Vertex; key comes in as a query param.
             endpoint = self._google_endpoint(model_id, stream=False)
+        elif model.provider == ModelProvider.GOOGLE_VERTEX:
+            endpoint = self._vertex_endpoint(model_id, stream=False)
         elif model.provider == ModelProvider.ANTHROPIC:
             endpoint = "/v1/messages"
         else:
@@ -1274,7 +1409,7 @@ class ModelRegistry:
         response.raise_for_status()
         data = response.json()
 
-        if model.provider == ModelProvider.GOOGLE:
+        if model.provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
             # Parse Google Gemini response
             content = ""
             candidates = data.get("candidates", [])
@@ -1339,6 +1474,10 @@ class ModelRegistry:
 
         if model.provider == ModelProvider.GOOGLE:
             endpoint = self._google_endpoint(model_id, stream=True)
+            async for delta in self._stream_google(client, endpoint, body):
+                yield delta
+        elif model.provider == ModelProvider.GOOGLE_VERTEX:
+            endpoint = self._vertex_endpoint(model_id, stream=True)
             async for delta in self._stream_google(client, endpoint, body):
                 yield delta
         elif model.provider == ModelProvider.ANTHROPIC:

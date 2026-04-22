@@ -21,7 +21,10 @@ class ProviderBase(BaseModel):
         ..., min_length=1, max_length=50, description="Unique provider identifier"
     )
     display_name: str = Field(..., min_length=1, max_length=100, description="Display name")
-    api_type: str = Field(default="openai", description="API type: openai, anthropic, or google")
+    api_type: str = Field(
+        default="openai",
+        description="API type: openai, anthropic, google, or google-vertex",
+    )
     base_url: str | None = Field(None, max_length=500, description="Custom API base URL")
     is_enabled: bool = Field(default=True, description="Whether the provider is enabled")
 

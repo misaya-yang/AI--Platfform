@@ -24,11 +24,16 @@ import { testProviderConnection, getApiTypeDisplayName } from "@/api/providers";
 
 // Provider brand colors for visual differentiation
 const PROVIDER_BRANDS: Record<string, { bg: string; text: string; darkBg: string; darkText: string; initial: string }> = {
-  openai:    { bg: "bg-emerald-50", text: "text-emerald-700", darkBg: "dark:bg-emerald-950/40", darkText: "dark:text-emerald-400", initial: "OA" },
-  anthropic: { bg: "bg-amber-50", text: "text-amber-700", darkBg: "dark:bg-amber-950/40", darkText: "dark:text-amber-400", initial: "AN" },
-  deepseek:  { bg: "bg-indigo-50", text: "text-indigo-700", darkBg: "dark:bg-indigo-950/40", darkText: "dark:text-indigo-400", initial: "DS" },
-  google:    { bg: "bg-blue-50", text: "text-blue-700", darkBg: "dark:bg-blue-950/40", darkText: "dark:text-blue-400", initial: "GG" },
-  dashscope: { bg: "bg-orange-50", text: "text-orange-700", darkBg: "dark:bg-orange-950/40", darkText: "dark:text-orange-400", initial: "DS" },
+  openai:          { bg: "bg-emerald-50", text: "text-emerald-700", darkBg: "dark:bg-emerald-950/40", darkText: "dark:text-emerald-400", initial: "OA" },
+  anthropic:       { bg: "bg-amber-50", text: "text-amber-700", darkBg: "dark:bg-amber-950/40", darkText: "dark:text-amber-400", initial: "AN" },
+  deepseek:        { bg: "bg-indigo-50", text: "text-indigo-700", darkBg: "dark:bg-indigo-950/40", darkText: "dark:text-indigo-400", initial: "DS" },
+  // Vertex entry must come BEFORE "google" — getProviderBrand uses a
+  // substring match in insertion order, and "google-vertex" contains
+  // "google". Without this ordering the Vertex card would inherit the
+  // generic Google blue badge.
+  "google-vertex": { bg: "bg-cyan-50", text: "text-cyan-700", darkBg: "dark:bg-cyan-950/40", darkText: "dark:text-cyan-400", initial: "GV" },
+  google:          { bg: "bg-blue-50", text: "text-blue-700", darkBg: "dark:bg-blue-950/40", darkText: "dark:text-blue-400", initial: "GG" },
+  dashscope:       { bg: "bg-orange-50", text: "text-orange-700", darkBg: "dark:bg-orange-950/40", darkText: "dark:text-orange-400", initial: "DS" },
 };
 
 function getProviderBrand(id: string) {

@@ -1074,7 +1074,41 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             "env_key": "GEMINI_API_KEY",
             "env_base_url": None,
         },
+        # Vertex AI as a first-class provider: same wire protocol as Google
+        # Gemini but different host + key format (Express Mode ``AQ.xxx``).
+        # Having its own entry means operators configure it through the
+        # Service Management UI the same way they add any other provider;
+        # the env-driven ``GOOGLE_API_BACKEND=vertex`` flip is now a
+        # deprecated fallback (still works, logs a warning below).
+        "google-vertex": {
+            "display_name": "Google Vertex AI",
+            "api_type": "google-vertex",
+            "base_url": "https://aiplatform.googleapis.com",
+            "env_key": "VERTEX_API_KEY",
+            "env_base_url": None,
+        },
     }
+
+    # Deprecation warnings for the old env-driven Vertex switch. Kept
+    # functional for one release (see ``_google_backend_for_model`` in
+    # model_registry.py) so users with pre-existing deployments don't
+    # break, but the preferred path is to add a ``google-vertex``
+    # provider in the Service Management UI.
+    _legacy_backend = os.environ.get("GOOGLE_API_BACKEND", "").strip().lower()
+    _legacy_models = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
+    if _legacy_backend == "vertex":
+        logger.warning(
+            "GOOGLE_API_BACKEND=vertex is deprecated. Add a 'google-vertex' "
+            "provider in the Service Management UI (or set VERTEX_API_KEY "
+            "so the default google-vertex provider is seeded at startup) "
+            "and remove GOOGLE_API_BACKEND from your environment."
+        )
+    if _legacy_models:
+        logger.warning(
+            "GOOGLE_VERTEX_MODELS is deprecated. Use the 'google-vertex' "
+            "provider instead — models configured under that provider route "
+            "to Vertex without needing per-model env overrides."
+        )
 
     # 获取 provider_service 用于同步到数据库
     provider_service = getattr(app.state, "provider_service", None)
