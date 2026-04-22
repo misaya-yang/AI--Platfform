@@ -1124,9 +1124,18 @@ class ModelRegistry:
             "gemini-2.5" in mid
             or "gemini-3" in mid
         )
+        # Gemini 3 Flash defaults to an aggressive thinking level —
+        # observed: 100+ ``thoughtsTokenCount`` even for a 2-character
+        # greeting, yielding ~20s TTFT because nothing visible streams
+        # during the thinking window. Bias toward ``"low"`` for Flash-tier
+        # 3.x models when the caller hasn't asked for more. Users who
+        # want deeper thinking opt in via the UI's thinking-level chip.
+        is_gemini_3_flash = "gemini-3" in mid and "flash" in mid
+        default_thinking_level = "low" if is_gemini_3_flash else None
 
-        if thinking_level:
-            thinking_cfg: dict[str, Any] = {"thinkingLevel": thinking_level}
+        effective_level = thinking_level or default_thinking_level
+        if effective_level:
+            thinking_cfg: dict[str, Any] = {"thinkingLevel": effective_level}
             if supports_thought_summaries:
                 thinking_cfg["includeThoughts"] = True
             body["generationConfig"]["thinkingConfig"] = thinking_cfg
@@ -1467,6 +1476,20 @@ class ModelRegistry:
             f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}"
         )
 
+        # Wire-level timing — helps diagnose whether a slow response is
+        # client-side (context/tool-prep), network-side (httpx connect/TLS),
+        # or server-side (model inference). Each phase is logged at INFO
+        # so we don't need to flip debug levels in prod to debug latency.
+        import time as _time
+        _request_started = _time.perf_counter()
+        _host = "unknown"
+        try:
+            from urllib.parse import urlparse as _urlparse
+            _host = _urlparse(endpoint).hostname or "unknown"
+        except Exception:
+            pass
+        logger.info(f"[GEMINI] HTTP POST → host={_host}")
+
         # Track functionCall parts already emitted in this stream to avoid
         # duplicate tool calls. Gemini streaming does not provide stable tool
         # call ids, and the same functionCall part can legitimately appear in
@@ -1478,6 +1501,11 @@ class ModelRegistry:
         emitted_function_calls: set[tuple[str, str]] = set()
 
         async with client.stream("POST", endpoint, json=body) as response:
+            _headers_ms = (_time.perf_counter() - _request_started) * 1000
+            logger.info(
+                f"[GEMINI] response headers received after {_headers_ms:.0f}ms "
+                f"(host={_host} status={response.status_code})"
+            )
             if response.status_code != 200:
                 # Read error response body for debugging
                 error_body = await response.aread()
@@ -1485,7 +1513,15 @@ class ModelRegistry:
                     f"[GEMINI] Error response ({response.status_code}): {error_body.decode('utf-8', errors='replace')}"
                 )
             response.raise_for_status()
+            _first_line_logged = False
             async for line in response.aiter_lines():
+                if not _first_line_logged:
+                    _first_line_ms = (_time.perf_counter() - _request_started) * 1000
+                    logger.info(
+                        f"[GEMINI] first SSE line after {_first_line_ms:.0f}ms "
+                        f"(host={_host})"
+                    )
+                    _first_line_logged = True
                 if not line or not line.startswith("data:"):
                     continue
                 data_str = line[5:].strip()
