@@ -677,10 +677,31 @@ class ModelRegistry:
                 raise ValueError(f"Provider {provider} not configured")
 
             headers = self._build_headers(provider, config.api_key)
+            # For Google we disable keepalive. Reason: observed on prod
+            # 2026-04-22 — second streaming request on a reused Google
+            # connection routinely stalled for 30-47s waiting for response
+            # headers, while the first request on a fresh connection
+            # returned in 2-3s. Same pattern whether routed to AI Studio
+            # or Vertex, same pattern whether httpx was using HTTP/1.1 or
+            # HTTP/2. Paying ~150ms TLS handshake per request is a worthy
+            # trade for eliminating the tail-latency spikes. Other
+            # providers (OpenAI / Anthropic / DashScope) aren't affected —
+            # their completion endpoints handle keepalive cleanly.
+            if provider == ModelProvider.GOOGLE:
+                limits = httpx.Limits(
+                    max_keepalive_connections=0,
+                    max_connections=20,
+                )
+            else:
+                limits = httpx.Limits(
+                    max_keepalive_connections=5,
+                    max_connections=20,
+                )
             self._clients[provider] = httpx.AsyncClient(
                 base_url=config.base_url,
                 headers=headers,
                 timeout=httpx.Timeout(config.timeout),
+                limits=limits,
             )
         return self._clients[provider]
 
