@@ -2106,6 +2106,51 @@ class AgentLoop:
 
                 tool_calls_batch = [tool_calls_accumulated[k] for k in tool_call_order]
 
+                # Post-accumulator dedup: collapse tool calls that share the
+                # same (name, fully-assembled-args) pair.
+                #
+                # Why this is needed beyond `_stream_google`'s in-stream
+                # dedup: DashScope (Qwen) and other OpenAI-compatible
+                # providers sometimes emit the same tool call across two
+                # delta chunks — one with `index` set, one without — which
+                # `merge_stream_tool_calls` keys under *different* accumulator
+                # slots (`idx:0` vs `id:call_abc...`). The result is two
+                # entries with identical name+args, each assigned a fresh
+                # tool_id downstream → two Activity-drawer pills for a single
+                # logical call, and the tool (e.g. generate_quiz) actually
+                # runs twice. By the time we reach here the chunks are fully
+                # merged, so a (name, args) comparison is reliable.
+                if len(tool_calls_batch) > 1:
+                    _seen_tc: set[tuple[str, str]] = set()
+                    _deduped: list[dict[str, Any]] = []
+                    for _tc in tool_calls_batch:
+                        _fn = _tc.get("function") or {}
+                        _name = str(_fn.get("name") or "")
+                        _raw_args = _fn.get("arguments") or ""
+                        # Normalize args for comparison: re-serialize parsed
+                        # JSON with sort_keys so whitespace/ordering noise
+                        # doesn't defeat the dedup. Fall back to raw string
+                        # for unparseable fragments (keeps them distinct).
+                        try:
+                            _parsed = json.loads(_raw_args) if _raw_args else {}
+                            _args_norm = json.dumps(
+                                _parsed, sort_keys=True, ensure_ascii=False
+                            )
+                        except (json.JSONDecodeError, ValueError):
+                            _args_norm = str(_raw_args)
+                        _tc_key = (_name, _args_norm)
+                        if _tc_key in _seen_tc:
+                            logger.info(
+                                "[STREAMING-FIRST] Dropping duplicate tool "
+                                "call at batch-level: name=%s (same name+args "
+                                "as a prior call this iteration)",
+                                _name,
+                            )
+                            continue
+                        _seen_tc.add(_tc_key)
+                        _deduped.append(_tc)
+                    tool_calls_batch = _deduped
+
                 # If no tool calls, we're done
                 if not tool_calls_batch:
                     break

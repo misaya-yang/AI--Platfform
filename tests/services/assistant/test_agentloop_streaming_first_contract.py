@@ -487,3 +487,152 @@ async def test_streaming_first_merges_chunked_tool_calls_before_execute() -> Non
     assert tool_invoker.invocations[0][1]["query"] == "穆斯林饮食禁忌"
     assert tool_invoker.invocations[0][1]["dataset_ids"] == ["d1"]
     assert events.count("step_started") == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_dedups_batch_level_duplicate_tool_calls() -> None:
+    """Regression: Activity drawer showed `generate_quiz` twice for a single
+    logical call. Root cause: OpenAI-compatible providers (DashScope/Qwen)
+    sometimes emit the same tool call across two delta chunks where one
+    carries `index` and the other does not — `merge_stream_tool_calls` then
+    keys them under different accumulator slots (`idx:0` vs
+    `id:call_abc...`), producing two batch entries with identical
+    name+args. Each was assigned a fresh `tool_id` downstream, so the tool
+    ran twice and two completed pills appeared.
+
+    This test simulates that wire behavior and asserts:
+      * the tool runs exactly once
+      * exactly one `step_started` / `tool_call_started` pair is emitted
+    """
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    quiz_args = (
+        '{"title":"Quiz","questions":[{"question_num":1,'
+        '"question_type":"mc_single",'
+        '"question_text":"Q?","options":[{"label":"A","text":"a"},'
+        '{"label":"B","text":"b"}],"correct_answer":["A"],'
+        '"explanation":"because"}]}'
+    )
+
+    # Two chunks for the SAME logical call — first carries only `index`,
+    # second carries only `id`. Args are fully present in each to simulate
+    # the provider re-emitting the call in the finish chunk.
+    chunk_with_index_only = [
+        {
+            "index": 0,
+            "type": "function",
+            "function": {"name": "generate_quiz", "arguments": quiz_args},
+        }
+    ]
+    chunk_with_id_only = [
+        {
+            "id": "call_quiz_abc123",
+            "type": "function",
+            "function": {"name": "generate_quiz", "arguments": quiz_args},
+        }
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {"tool_calls": chunk_with_index_only},
+                {"tool_calls": chunk_with_id_only},
+            ],
+            [{"content": "Quiz ready"}],
+        ]
+    )
+    tool_invoker = FakeToolInvoker(
+        results_by_name={
+            "generate_quiz": {
+                "success": True,
+                "result": "Quiz 'Quiz' created with 1 questions.",
+                "duration_ms": 25.0,
+                "metadata": {"quiz_data": {"quiz_id": "q1", "title": "Quiz"}},
+            }
+        }
+    )
+
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+    )
+    user = MockUserContext(user_id="u1")
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
+
+    events: list[str] = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="make me a quiz",
+        config=cfg,
+        history=[],
+    ):
+        events.append(ev.event_type)
+
+    assert tool_invoker.invocation_count == 1, (
+        "generate_quiz should run exactly once despite two accumulator "
+        "entries on the wire"
+    )
+    assert events.count("tool_call_started") == 1
+    assert events.count("step_started") == 1
+    # Exactly one quiz_ready (the Activity drawer and the quiz card must
+    # agree — two would overwrite the rendered card while leaving two pills).
+    assert events.count("quiz:ready") == 1
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_batch_dedup_preserves_distinct_tool_calls() -> None:
+    """Guardrail: the batch-level dedup must NOT collapse genuinely
+    different tool calls. Same tool name with different args is legitimate
+    (e.g. two search_web queries, or two generate_image prompts)."""
+    from src.services.assistant.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "index": 0,
+            "id": "call_a",
+            "type": "function",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        },
+        {
+            "index": 1,
+            "id": "call_b",
+            "type": "function",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"dog"}'},
+        },
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls}],
+            [{"content": "done"}],
+        ]
+    )
+    tool_invoker = FakeToolInvoker(
+        results_by_name={
+            "generate_image": {
+                "success": True,
+                "result": "ok",
+                "duration_ms": 10.0,
+            }
+        }
+    )
+
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+    )
+    user = MockUserContext(user_id="u1")
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
+
+    events: list[str] = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="two images",
+        config=cfg,
+        history=[],
+    ):
+        events.append(ev.event_type)
+
+    # Both distinct calls should execute — dedup only collapses same-args.
+    assert tool_invoker.invocation_count == 2
+    assert events.count("tool_call_started") == 2
