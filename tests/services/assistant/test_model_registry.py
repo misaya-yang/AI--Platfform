@@ -111,6 +111,70 @@ class TestModelRegistryInit:
         assert len(registry._models) == 0
 
 
+class TestDefaultCatalogPricing:
+    """Regression tests pinning ``DEFAULT_MODELS`` prices against the
+    official provider pricing pages (verified 2026-04-22). If a provider
+    changes their list price, these tests must be updated in the same
+    commit that bumps the catalog — that keeps the catalog honest."""
+
+    def test_qwen36_plus_nonzero_price(self):
+        """Qwen 3.6 Plus must have nonzero price — the 0/0 entry in the
+        earlier catalog broke cost tracking for the default Assistant model."""
+        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+
+        qwen36 = next(
+            (m for m in DEFAULT_MODELS[ModelProvider.DASHSCOPE] if m.id == "qwen3.6-plus"),
+            None,
+        )
+        assert qwen36 is not None, "qwen3.6-plus must remain in the catalog"
+        assert qwen36.input_price_per_1k > 0, "input price must be set"
+        assert qwen36.output_price_per_1k > 0, "output price must be set"
+
+    def test_claude_opus_4_5_pricing_corrected(self):
+        """Opus 4.5 list price is $5/$25 per 1M (not $15/$75 of Opus 4.1)."""
+        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+
+        opus45 = next(
+            (m for m in DEFAULT_MODELS[ModelProvider.ANTHROPIC] if m.id == "claude-opus-4-5"),
+            None,
+        )
+        assert opus45 is not None
+        assert opus45.input_price_per_1k == 0.005
+        assert opus45.output_price_per_1k == 0.025
+
+    def test_gemini_3_1_family_present(self):
+        """Gemini 3.1 Pro + 3.1 Flash Lite must be in the Google catalog —
+        user-facing head models as of 2026-04."""
+        from src.services.assistant.models.model_registry import DEFAULT_MODELS, ModelProvider
+
+        google_ids = {m.id for m in DEFAULT_MODELS[ModelProvider.GOOGLE]}
+        assert "gemini-3.1-pro-preview" in google_ids
+        assert "gemini-3.1-flash-lite-preview" in google_ids
+
+    def test_native_search_capability_is_derived_not_persisted(self):
+        """``supports_native_search`` and ``native_search_config`` must be
+        populated by ``__post_init__`` from the ``NATIVE_SEARCH_CAPABLE``
+        map — they are derived, so the Model Management UI must not
+        expose them as editable fields. This test pins the invariant."""
+        from src.services.assistant.models.model_registry import (
+            NATIVE_SEARCH_CAPABLE,
+            ModelInfo,
+            ModelProvider,
+        )
+
+        # A model that IS in the capability map should auto-populate.
+        qwen = ModelInfo(id="qwen3.6-plus", name="Qwen 3.6 Plus", provider=ModelProvider.DASHSCOPE)
+        assert qwen.supports_native_search is True
+        assert qwen.native_search_config == NATIVE_SEARCH_CAPABLE[
+            (ModelProvider.DASHSCOPE, "qwen3.6-plus")
+        ]
+
+        # A model NOT in the map should remain False.
+        unknown = ModelInfo(id="made-up-id", name="Made Up", provider=ModelProvider.OPENAI)
+        assert unknown.supports_native_search is False
+        assert unknown.native_search_config is None
+
+
 class TestModelRegistryProviderConfig:
     """Tests for provider configuration."""
 
