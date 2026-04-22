@@ -19,6 +19,11 @@ dependencies = [
     "lxml>=5.0",
     "Pillow>=10.0",
     "httpx>=0.27",
+    # ``docgen.skills.loader`` reads skill manifests (frontmatter YAML).
+    # The original pyproject omitted PyYAML assuming it would arrive via
+    # a transitive dep — it didn't, and the MCP server crashed on import
+    # inside a fresh production image the first time we built it.
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
