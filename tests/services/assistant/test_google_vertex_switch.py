@@ -162,3 +162,41 @@ def test_missing_google_config_still_produces_usable_url(registry: ModelRegistry
     url = registry._google_endpoint("gemini-2.5-flash", stream=False)
     assert url.startswith("https://generativelanguage.googleapis.com/")
     assert url.endswith("key=")
+
+
+def test_per_model_vertex_override_uses_vertex_api_key(
+    registry: ModelRegistry, monkeypatch,
+):
+    """The global provider is configured for AI Studio with an
+    ``AIzaSy...`` key. When one model flips to Vertex via env, the URL
+    must carry ``VERTEX_API_KEY`` (``AQ.xxx``) instead — otherwise the
+    AI-Studio-shaped key hits the Vertex endpoint and gets 401."""
+    registry.configure_provider(ModelProvider.GOOGLE, api_key="AIzaSy_ai_studio_key")
+    monkeypatch.setenv("GOOGLE_VERTEX_MODELS", "gemini-3-flash-preview")
+    monkeypatch.setenv("VERTEX_API_KEY", "AQ.vertex_express_mode_key")
+
+    url = registry._google_endpoint("gemini-3-flash-preview", stream=False)
+    assert "aiplatform.googleapis.com" in url
+    assert "key=AQ.vertex_express_mode_key" in url
+    assert "AIzaSy_ai_studio_key" not in url
+
+    # The non-overridden model should still use the AI Studio key.
+    other = registry._google_endpoint("gemini-2.5-flash", stream=False)
+    assert "key=AIzaSy_ai_studio_key" in other
+
+
+def test_vertex_override_falls_back_to_config_key_when_no_vertex_env(
+    registry: ModelRegistry, monkeypatch,
+):
+    """If someone sets ``GOOGLE_VERTEX_MODELS`` without also setting
+    ``VERTEX_API_KEY`` we still try the call — but with the config's
+    key. This is the "I know what I'm doing" escape hatch for a shared
+    key that actually works for both backends (rare, but tests should
+    allow it). Should not crash, should not log secrets."""
+    registry.configure_provider(ModelProvider.GOOGLE, api_key="AIzaSy_shared")
+    monkeypatch.setenv("GOOGLE_VERTEX_MODELS", "gemini-3-flash-preview")
+    monkeypatch.delenv("VERTEX_API_KEY", raising=False)
+
+    url = registry._google_endpoint("gemini-3-flash-preview", stream=False)
+    assert "aiplatform.googleapis.com" in url
+    assert "key=AIzaSy_shared" in url

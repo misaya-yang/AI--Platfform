@@ -628,16 +628,26 @@ class ModelRegistry:
 
         Vertex Express Mode accepts the same ``?key=`` query param as AI
         Studio, so we don't need OAuth / service-account flow here.
+
+        Key selection mirrors backend selection: when a model routes to
+        Vertex (either by global default or the ``GOOGLE_VERTEX_MODELS``
+        env override) and ``VERTEX_API_KEY`` is set, use it in place of
+        the config's api_key — the two keys are different formats
+        (``AIzaSy...`` vs ``AQ.xxx``) and the wrong one against the wrong
+        endpoint fails auth. Fall back to the config key only if
+        ``VERTEX_API_KEY`` is unset (caller made a conscious choice).
         """
         config = self._configs.get(ModelProvider.GOOGLE)
-        api_key = config.api_key if config else ""
+        default_api_key = config.api_key if config else ""
         backend = self._google_backend_for_model(model_id)
         action = "streamGenerateContent" if stream else "generateContent"
         if backend == "vertex":
             base = self.VERTEX_BASE_URL
+            api_key = os.environ.get("VERTEX_API_KEY", "").strip() or default_api_key
             path = f"/v1/publishers/google/models/{model_id}:{action}?key={api_key}"
         else:
             base = self.DEFAULT_BASE_URLS[ModelProvider.GOOGLE]
+            api_key = default_api_key
             path = f"/v1beta/models/{model_id}:{action}?key={api_key}"
         if stream:
             path += "&alt=sse"
