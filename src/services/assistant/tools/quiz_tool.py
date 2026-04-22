@@ -66,47 +66,79 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
             name="questions",
             type="array",
             description=(
-                "Array of question objects. Each question MUST be a JSON object with these exact fields:\n"
-                '- question_num: integer (1, 2, 3, ...)\n'
-                '- question_type: "mc_single"\n'
-                '- question_text: the question itself (string)\n'
-                '- options: array of EXACTLY 4 objects, each with:\n'
-                '    - "label": one letter "A", "B", "C", or "D"\n'
-                '    - "text": the ACTUAL answer text (NEVER the letter itself)\n'
-                '- correct_answer: array with one letter, e.g. ["B"]\n'
-                '- explanation: one sentence on why that answer is correct\n\n'
-                'CRITICAL correct_answer rules:\n'
-                '  - For "mc_single": correct_answer MUST be a list containing EXACTLY ONE letter\n'
-                '    from the options you generated, e.g. ["B"]. Never more than one letter.\n'
-                '    Never prose like ["B) Self-attention"] or ["2.5%"]. Just the letter.\n'
-                '  - For "mc_multi": list of 2-3 letters, e.g. ["A","C"].\n'
-                '  - For "true_false": ["true"] or ["false"].\n'
-                '  - The letter in correct_answer MUST exactly match one of the option "label" values.\n\n'
-                'CORRECT example of ONE question object:\n'
-                '{\n'
-                '  "question_num": 1,\n'
-                '  "question_type": "mc_single",\n'
-                '  "question_text": "What is the standard Zakat rate on wealth?",\n'
-                '  "options": [\n'
-                '    {"label": "A", "text": "1%"},\n'
-                '    {"label": "B", "text": "2.5%"},\n'
-                '    {"label": "C", "text": "5%"},\n'
-                '    {"label": "D", "text": "10%"}\n'
-                '  ],\n'
-                '  "correct_answer": ["B"],\n'
-                '  "explanation": "The standard rate is 2.5% of qualifying wealth held for one lunar year."\n'
-                '}\n\n'
-                'WRONG examples — DO NOT do any of these:\n'
-                '  ✗ {"label": "A", "text": "A"}       ← text is the letter, not the answer\n'
-                '  ✗ {"A": "Earth"}                     ← missing "label"/"text" keys\n'
-                '  ✗ ["A) Earth", "B) Mars"]            ← strings instead of objects\n'
-                '  ✗ [{"label": "A"}]                   ← missing "text" key\n'
-                '  ✗ correct_answer: ["B) 2.5%"]        ← letter + prose, use ["B"] only\n'
-                '  ✗ correct_answer: ["2.5%"]           ← option text, use the LETTER ["B"]\n'
-                '  ✗ correct_answer: ["B","C"] for mc_single ← mc_single has ONE correct letter'
+                'Array of question objects. Use EXACTLY the field names below — '
+                'never "answer" (use "correct_answer") or "question" (use "question_text"). '
+                'For mc_single: correct_answer is a list with ONE letter, e.g. ["B"]. '
+                'For mc_multi: 2-3 letters, e.g. ["A","C"]. '
+                'For true_false: ["true"] or ["false"]. '
+                'option.text must be the actual answer text, never the letter itself.'
             ),
             required=True,
-            items={"type": "object"},
+            # Full nested JSON Schema. Gemini / Qwen / Claude structured
+            # output modes enforce this at the provider side, so the model
+            # cannot emit `answer` instead of `correct_answer` or forget
+            # `question_text` — the retry-until-schema-right loop that
+            # produced three-pills-for-one-logical-call symptoms goes away.
+            items={
+                "type": "object",
+                "properties": {
+                    "question_num": {
+                        "type": "integer",
+                        "description": "1-based position in the quiz",
+                    },
+                    "question_type": {
+                        "type": "string",
+                        "enum": ["mc_single", "mc_multi", "true_false"],
+                        "description": "mc_single = one correct letter; "
+                        "mc_multi = 2-3 correct letters; true_false = "
+                        "['true'] or ['false'].",
+                    },
+                    "question_text": {
+                        "type": "string",
+                        "description": "The question itself, as a sentence. "
+                        "Never put the whole thing into options.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "Exactly 4 options for mc_single / "
+                        "mc_multi. Omit or empty for true_false.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "enum": ["A", "B", "C", "D"],
+                                    "description": "The option letter.",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Actual answer text — "
+                                    "never just 'A'/'B'/'C'/'D'.",
+                                },
+                            },
+                            "required": ["label", "text"],
+                        },
+                    },
+                    "correct_answer": {
+                        "type": "array",
+                        "description": 'Letters of the correct option(s): '
+                        '["B"] for mc_single, ["A","C"] for mc_multi, '
+                        '["true"] / ["false"] for true_false. Never prose, '
+                        'never the option text, never numeric indices.',
+                        "items": {"type": "string"},
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "One sentence on why the answer is correct.",
+                    },
+                },
+                "required": [
+                    "question_num",
+                    "question_type",
+                    "question_text",
+                    "correct_answer",
+                ],
+            },
         ),
     ],
     category=ToolCategory.GENERATION,
