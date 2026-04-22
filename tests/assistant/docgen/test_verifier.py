@@ -31,15 +31,45 @@ from src.services.assistant.docgen.planners import Brief
 from src.services.assistant.docgen.pipeline import DocgenPipeline
 from src.services.assistant.docgen.quality import (
     DocxXmlVerifier,
+    FreshContextVisionCritic,
     PptxPdfVisualVerifier,
+    StructuralVisionCritic,
     VerifierPipeline,
     XlsxFormulaVerifier,
+    default_vision_critic,
 )
 from src.services.assistant.docgen.quality.types import IssueSeverity
 from src.services.assistant.docgen.renderers import RendererDispatcher
 
 
 GOLDEN = Path(__file__).parent / "golden" / "prompts.yaml"
+
+
+# -------- default vision critic wiring (D3) --------
+
+
+def test_default_vision_critic_without_api_key_is_structural(monkeypatch):
+    """No ANTHROPIC_API_KEY → deterministic structural critic (no network)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    critic = default_vision_critic()
+    assert isinstance(critic, StructuralVisionCritic)
+
+
+def test_default_vision_critic_with_api_key_prefers_fresh_context(monkeypatch):
+    """With ANTHROPIC_API_KEY set, return FreshContextVisionCritic if the
+    anthropic SDK is importable; otherwise gracefully fall back to
+    StructuralVisionCritic (never crash)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    critic = default_vision_critic()
+    # Either the real critic (SDK installed) or the safe fallback (SDK absent).
+    assert isinstance(critic, (FreshContextVisionCritic, StructuralVisionCritic))
+    try:
+        import anthropic  # noqa: F401
+        sdk_available = True
+    except ImportError:
+        sdk_available = False
+    if sdk_available:
+        assert isinstance(critic, FreshContextVisionCritic)
 
 
 # -------- DOCX --------

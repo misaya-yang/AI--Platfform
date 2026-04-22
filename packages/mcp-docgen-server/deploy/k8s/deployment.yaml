@@ -1,0 +1,136 @@
+# Kubernetes deployment for mcp-docgen-server.
+#
+# Apply after pushing the image to your registry and updating the
+# ``image:`` tag + namespace to match your environment.
+#
+#   kubectl apply -f packages/mcp-docgen-server/deploy/k8s/
+#
+# Assumes an Ingress controller + cert-manager in the cluster. If you
+# terminate TLS elsewhere, delete ingress.yaml.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-docgen
+  labels:
+    app.kubernetes.io/name: mcp-docgen
+    app.kubernetes.io/component: document-generation
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-docgen
+  strategy:
+    # Rolling with low surge — LibreOffice takes 10-15s to initialise
+    # per pod, so we prefer staggered rollouts.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-docgen
+    spec:
+      # PodSecurity: non-root enforced (matches Dockerfile's ``USER docgen``)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/YOUR-ORG/mcp-docgen:TAG   # ← replace before apply
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8765
+              protocol: TCP
+          env:
+            - name: MCP_TRANSPORT
+              value: sse
+            - name: PORT
+              value: "8765"
+            - name: LOG_LEVEL
+              value: INFO
+            - name: DOCGEN_ARTIFACT_ROOT
+              value: /var/lib/docgen/artifacts
+          envFrom:
+            # Expected keys:
+            #   ANTHROPIC_API_KEY  — enables FreshContextVisionCritic
+            #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / DOCGEN_S3_BUCKET
+            #     — optional, swap LocalArtifactStore for S3ArtifactStore
+            - secretRef:
+                name: mcp-docgen-secrets
+                optional: true
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 1536Mi
+          volumeMounts:
+            - name: artifacts
+              mountPath: /var/lib/docgen/artifacts
+            # Scratch space for LibreOffice's headless profile. Avoids
+            # crashes where soffice tries to write to $HOME on a read-only
+            # fs.
+            - name: home
+              mountPath: /home/docgen
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # soffice writes to /tmp and ~/.config
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: mcp-docgen-artifacts
+        - name: home
+          emptyDir:
+            sizeLimit: 256Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-docgen
+  labels:
+    app.kubernetes.io/name: mcp-docgen
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-docgen
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcp-docgen-artifacts
+spec:
+  accessModes: ["ReadWriteMany"]   # if RWX is unavailable, switch to RWO
+                                    # + replicas: 1 (single-node)
+  resources:
+    requests:
+      storage: 20Gi

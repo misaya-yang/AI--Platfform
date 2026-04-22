@@ -1,0 +1,37 @@
+# Ingress for mcp-docgen-server.
+#
+# SSE requires stream-oriented, not buffered, proxying. On nginx-ingress
+# that means `proxy-buffering: off` and a long read-timeout. Other
+# controllers (Traefik, HAProxy) have equivalent annotations.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-docgen
+  annotations:
+    # Disable response buffering so SSE events stream to the client
+    # rather than being batched.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # Long read timeout: document generation can take 30-90s end-to-end
+    # (LLM planning + rendering + verification).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "180"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "180"
+    # cert-manager for TLS.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - docgen.internal.example.com   # ← replace
+      secretName: mcp-docgen-tls
+  rules:
+    - host: docgen.internal.example.com  # ← replace
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-docgen
+                port:
+                  name: http

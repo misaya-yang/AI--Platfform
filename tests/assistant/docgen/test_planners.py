@@ -187,6 +187,138 @@ async def test_pipeline_streaming_emits_expected_events(tmp_path):
     assert events == ["plan", "ir", "render", "done"]
 
 
+# -------- PptxPlanner + layout rule engine integration
+
+@pytest.mark.asyncio
+async def test_pptx_planner_llm_path_applies_rule_engine():
+    """The LLM path should delegate to apply_rules — big_stat + divider."""
+    payload = {
+        "doc_type": "pptx",
+        "metadata": {"title": "Harness", "page_size": "Widescreen16x9"},
+        "content": {
+            "doc_type": "pptx",
+            "slides": [
+                {"layout": "title", "title": "Harness"},
+                {
+                    "layout": "title_content",
+                    "title": "Scale",
+                    "body": [{"kind": "paragraph", "text": "1300 AI PRs per week."}],
+                },
+                {
+                    "layout": "title_content",
+                    "title": "Layer 1: Context",
+                    "body": [{"kind": "paragraph", "text": "KV cache & retrieval."}],
+                },
+                {
+                    "layout": "title_content",
+                    "title": "Maturity Model",
+                    "body": [
+                        {"kind": "paragraph", "text": "Level 1 ad-hoc. Level 2 shared. Level 3 automated."}
+                    ],
+                },
+                {"layout": "title_content", "title": "Closing"},
+            ],
+        },
+    }
+
+    class _LLM:
+        async def generate_json(self, *, system, user, max_tokens=4000):
+            return payload
+
+    res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="h", goal="g"))
+    layouts = [s.layout for s in res.ir.content.slides]
+    assert res.used_llm
+    assert "big_stat" in layouts
+    assert "comparison_table" in layouts
+    assert "section_divider" in layouts
+
+
+@pytest.mark.asyncio
+async def test_pptx_planner_big_stat_does_not_hijack_year():
+    """D6 regression: a slide whose body says '2026' should NOT become big_stat."""
+    payload = {
+        "doc_type": "pptx",
+        "metadata": {"title": "Deck", "page_size": "Widescreen16x9"},
+        "content": {
+            "doc_type": "pptx",
+            "slides": [
+                {"layout": "title", "title": "Deck"},
+                {
+                    "layout": "title_content",
+                    "title": "Timeline",
+                    "body": [{"kind": "paragraph", "text": "In 2026 we ship it."}],
+                },
+            ],
+        },
+    }
+
+    class _LLM:
+        async def generate_json(self, *, system, user, max_tokens=4000):
+            return payload
+
+    res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="d", goal="g"))
+    layouts = [s.layout for s in res.ir.content.slides]
+    assert "big_stat" not in layouts
+
+
+@pytest.mark.asyncio
+async def test_pptx_planner_chinese_section_dividers():
+    """B1 regression: Chinese boundary keywords must trigger section dividers."""
+    payload = {
+        "doc_type": "pptx",
+        "metadata": {"title": "中文演示", "page_size": "Widescreen16x9"},
+        "content": {
+            "doc_type": "pptx",
+            "slides": [
+                {"layout": "title", "title": "中文演示"},
+                {"layout": "title_content", "title": "第一层：上下文"},
+                {"layout": "title_content", "title": "成熟度模型"},
+                {"layout": "title_content", "title": "结束语"},
+            ],
+        },
+    }
+
+    class _LLM:
+        async def generate_json(self, *, system, user, max_tokens=4000):
+            return payload
+
+    res = await PptxPlanner(llm=_LLM()).plan(Brief(doc_type="pptx", title="t", goal="g", locale="zh-CN"))
+    divider_count = sum(1 for s in res.ir.content.slides if s.layout == "section_divider")
+    assert divider_count == 3
+
+
+@pytest.mark.asyncio
+async def test_pptx_planner_custom_rules_list():
+    """PptxPlanner accepts a custom rules list for extension."""
+    from src.services.assistant.docgen.planners.layout_rules import EyebrowHintRule
+
+    payload = {
+        "doc_type": "pptx",
+        "metadata": {"title": "t", "page_size": "Widescreen16x9"},
+        "content": {
+            "doc_type": "pptx",
+            "slides": [
+                {"layout": "title", "title": "t"},
+                {
+                    "layout": "title_content",
+                    "title": "Scale",
+                    "body": [{"kind": "paragraph", "text": "1300 AI PRs per week."}],
+                },
+            ],
+        },
+    }
+
+    class _LLM:
+        async def generate_json(self, *, system, user, max_tokens=4000):
+            return payload
+
+    # Only EyebrowHintRule → no big_stat upgrade even though text matches.
+    planner = PptxPlanner(llm=_LLM(), rules=[EyebrowHintRule()])
+    res = await planner.plan(Brief(doc_type="pptx", title="t", goal="g"))
+    layouts = [s.layout for s in res.ir.content.slides]
+    assert "big_stat" not in layouts
+
+
 @pytest.mark.asyncio
 async def test_pipeline_streaming_includes_critic_when_verify_on(tmp_path):
     pipe = DocgenPipeline(llm=None, verify=True, max_fix_rounds=1)
