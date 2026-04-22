@@ -49,7 +49,7 @@ from ..knowledge.knowledge_service import KnowledgeService
 from ..metrics.realtime_metrics import get_realtime_metrics
 from ..metrics.usage_recorder import get_usage_recorder
 from ..storage import get_artifact_storage, get_file_storage
-from .agent.agent_loop import AgentLoopEvent
+from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
 from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
 from .rag.context_engine import ContextEngine, ContextStructure
@@ -409,7 +409,14 @@ def _append_tool_results_block(
         return content
 
     total_used = 0
-    lines: list[str] = ["", "[Previous tool results — for your reference only, not shown to the user]"]
+    # NOTE: the opening line MUST start with PRIOR_TOOL_RESULTS_MARKER —
+    # agent_loop._trim_history_for_streaming matches on that prefix to
+    # enlarge the per-message cap for messages carrying this block.
+    lines: list[str] = [
+        "",
+        f"{PRIOR_TOOL_RESULTS_MARKER} — for your reference only, "
+        f"not shown to the user]",
+    ]
     for entry in tool_results:
         if not isinstance(entry, dict):
             continue

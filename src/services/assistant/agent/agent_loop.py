@@ -138,6 +138,16 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# Opening line of the "[Previous tool results]" block that
+# ``_session_history_to_messages`` (assistant_service.py) appends to old
+# assistant messages so cross-turn / cross-model follow-ups can reference
+# prior tool output. ``_trim_history_for_streaming`` matches on this
+# prefix to enlarge the per-message char cap so the block isn't amputated.
+# BOTH sides must import this constant — drifting the literal text in one
+# file silently regresses cross-model context.
+PRIOR_TOOL_RESULTS_MARKER = "[Previous tool results"
+
+
 # =============================================================================
 # Enums and Data Classes
 # =============================================================================
@@ -1440,7 +1450,7 @@ class AgentLoop:
                     # _session_history_to_messages in assistant_service.py).
                     per_msg_cap = (
                         8000
-                        if "[Previous tool results" in content_text
+                        if PRIOR_TOOL_RESULTS_MARKER in content_text
                         else 2500
                     )
                     selected.append(
@@ -2117,19 +2127,28 @@ class AgentLoop:
                 tool_calls_batch = [tool_calls_accumulated[k] for k in tool_call_order]
 
                 # Post-accumulator dedup: collapse tool calls that share the
-                # same (name, fully-assembled-args) pair.
+                # same (name, fully-assembled-args) pair within a single
+                # iteration.
                 #
-                # Why this is needed beyond `_stream_google`'s in-stream
-                # dedup: DashScope (Qwen) and other OpenAI-compatible
-                # providers sometimes emit the same tool call across two
-                # delta chunks — one with `index` set, one without — which
-                # `merge_stream_tool_calls` keys under *different* accumulator
-                # slots (`idx:0` vs `id:call_abc...`). The result is two
-                # entries with identical name+args, each assigned a fresh
-                # tool_id downstream → two Activity-drawer pills for a single
-                # logical call, and the tool (e.g. generate_quiz) actually
-                # runs twice. By the time we reach here the chunks are fully
-                # merged, so a (name, args) comparison is reliable.
+                # This is a provider-agnostic safety net. The symptom we first
+                # saw in prod was two Activity-drawer `generate_quiz` pills
+                # for a single logical call on Gemini 3 Flash — the
+                # `_stream_google` in-stream dedup (keyed on name+args) was in
+                # place but something still leaked through. Rather than chase
+                # the exact provider wire shape (chunk-key drift in
+                # `merge_stream_tool_calls`, partial-args accumulator races,
+                # re-emission in the finish chunk, etc. — each provider has
+                # its own quirks), we dedup once here after the accumulator
+                # has fully assembled each call. By this point chunks are
+                # merged, so an `(name, normalized_args_json)` comparison is
+                # reliable.
+                #
+                # Trade-off: a model that legitimately calls the same tool
+                # twice with identical args in the same iteration gets the
+                # second call silently dropped. That's an unusual pattern for
+                # us — same-name calls typically vary args (e.g. different
+                # search queries). If it becomes a problem, promote the INFO
+                # log below to capture enough context for triage.
                 if len(tool_calls_batch) > 1:
                     _seen_tc: set[tuple[str, str]] = set()
                     _deduped: list[dict[str, Any]] = []

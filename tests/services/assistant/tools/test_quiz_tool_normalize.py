@@ -121,11 +121,16 @@ def test_reject_all_same_correct_answer_5_questions():
     assert "same correct_answer" in (result.error or "")
 
 
-def test_reject_all_same_correct_answer_3_questions():
-    """Threshold is 3 — fewer real quizzes naturally share one answer."""
-    result, _ = _run([_build_question(i, ["B"]) for i in range(1, 4)])
-    assert result.success is False
-    assert "same correct_answer" in (result.error or "")
+def test_short_uniform_quiz_allowed_below_threshold():
+    """Threshold bumped to 5 after code review (review round 2026-04-22):
+    at ≤4 questions a legitimately uniform quiz (e.g. a Zakat-rate drill
+    where B=2.5% is the real answer every time) is statistically plausible
+    enough that rejection was too aggressive. ≥5 is where the prior-known
+    LLM failure mode (Gemini emitting ['A']×N after a schema retry) lives,
+    and real quizzes being truly uniform is near zero."""
+    result, questions = _run([_build_question(i, ["B"]) for i in range(1, 4)])
+    assert result.success is True
+    assert [q["correct_answer"] for q in questions] == [["B"]] * 3
 
 
 def test_two_same_answer_quiz_allowed():
@@ -134,6 +139,14 @@ def test_two_same_answer_quiz_allowed():
     result, questions = _run([_build_question(1, ["B"]), _build_question(2, ["B"])])
     assert result.success is True
     assert [q["correct_answer"] for q in questions] == [["B"], ["B"]]
+
+
+def test_reject_all_same_correct_answer_above_threshold():
+    """5+ objective questions with identical answers remain rejected —
+    this is the actual Gemini failure-mode signature."""
+    result, _ = _run([_build_question(i, ["B"]) for i in range(1, 6)])
+    assert result.success is False
+    assert "same correct_answer" in (result.error or "")
 
 
 def test_reject_empty_string_answer():

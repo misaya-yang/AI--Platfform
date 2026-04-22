@@ -358,8 +358,13 @@ class QuizGeneratorExecutor(ToolExecutor):
                             continue
 
                     # Prose with a leading label — "B) Self-attention",
-                    # "B. ...", "B: ..." — salvage the letter.
-                    if len(ans_str) >= 2 and ans_str[0].upper() in label_set and ans_str[1] in ").: -":
+                    # "B. ...", "B: ...", and CJK variants "B、..."
+                    # "B：..." — salvage the letter.
+                    if (
+                        len(ans_str) >= 2
+                        and ans_str[0].upper() in label_set
+                        and not ans_str[1].isalnum()
+                    ):
                         normalized_answers.append(ans_str[0].upper())
                         continue
 
@@ -420,7 +425,13 @@ class QuizGeneratorExecutor(ToolExecutor):
             # retry-after-error (question → question_text arg-name fix-up).
             # The resulting quiz grades every non-A pick as wrong and is
             # useless. Catching this here forces the model to regenerate.
-            _UNIFORM_MIN_QUESTIONS = 3
+            # Threshold 5: at 3-4 questions a legitimately uniform quiz
+            # (e.g. a Zakat quiz where B=2.5% is always the right answer for
+            # a rate-themed drill) is statistically plausible enough that
+            # rejection is too aggressive. At ≥5 the probability of a
+            # well-designed quiz being truly uniform is near zero, so this
+            # is almost always an LLM failure mode.
+            _UNIFORM_MIN_QUESTIONS = 5
             objective_qs = [
                 q for q in questions
                 if q.get("question_type", "mc_single")
@@ -433,9 +444,12 @@ class QuizGeneratorExecutor(ToolExecutor):
                     for q in objective_qs
                 ):
                     logger.warning(
-                        f"Rejecting uniform-answer quiz: all "
-                        f"{len(objective_qs)} objective questions have "
-                        f"correct_answer={list(first_ans)!r}"
+                        "Rejecting uniform-answer quiz: %d objective questions "
+                        "all have correct_answer=%r (threshold=%d, total_qs=%d)",
+                        len(objective_qs),
+                        list(first_ans),
+                        _UNIFORM_MIN_QUESTIONS,
+                        len(questions),
                     )
                     return ToolCallResult(
                         call_id=request.call_id,

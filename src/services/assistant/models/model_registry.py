@@ -1457,29 +1457,30 @@ class ModelRegistry:
                                 fc.get("args", {}), sort_keys=True, ensure_ascii=False
                             )
                             dedup_key = (str(fc_name), fc_args_json)
-                            # Trace emission at INFO so duplicate-pill
-                            # regressions are diagnosable from server logs
-                            # (the args-hash lets us see whether Gemini is
-                            # re-emitting the same call or varying its args).
+                            # args_hash helps diagnose duplicate-pill
+                            # regressions (lets us see whether re-emitted
+                            # chunks carry identical args or varied ones).
+                            # Emit stays DEBUG to keep prod log volume sane;
+                            # SKIP stays INFO — each skip is an actual signal.
                             import hashlib
 
                             _args_hash = hashlib.md5(
                                 fc_args_json.encode("utf-8")
                             ).hexdigest()[:10]
                             if dedup_key in emitted_function_calls:
-                                # Gemini re-emitted the same functionCall in a
-                                # later SSE chunk. Skip — downstream already
+                                # Provider re-emitted the same functionCall in
+                                # a later SSE chunk. Skip — downstream already
                                 # accumulated it under a fresh uuid, and
                                 # adding another copy would create a duplicate
                                 # Activity-drawer pill.
                                 logger.info(
-                                    f"[GEMINI-DEBUG] functionCall SKIP (dup): "
+                                    f"[GEMINI] functionCall SKIP (dup): "
                                     f"name={fc_name} args_hash={_args_hash}"
                                 )
                                 continue
                             emitted_function_calls.add(dedup_key)
-                            logger.info(
-                                f"[GEMINI-DEBUG] functionCall emit: "
+                            logger.debug(
+                                f"[GEMINI] functionCall emit: "
                                 f"name={fc_name} args_hash={_args_hash}"
                             )
 

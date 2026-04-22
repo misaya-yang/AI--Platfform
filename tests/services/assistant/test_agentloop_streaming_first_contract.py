@@ -492,15 +492,22 @@ async def test_streaming_first_merges_chunked_tool_calls_before_execute() -> Non
 @pytest.mark.asyncio
 async def test_streaming_first_dedups_batch_level_duplicate_tool_calls() -> None:
     """Regression: Activity drawer showed `generate_quiz` twice for a single
-    logical call. Root cause: OpenAI-compatible providers (DashScope/Qwen)
-    sometimes emit the same tool call across two delta chunks where one
-    carries `index` and the other does not — `merge_stream_tool_calls` then
-    keys them under different accumulator slots (`idx:0` vs
-    `id:call_abc...`), producing two batch entries with identical
-    name+args. Each was assigned a fresh `tool_id` downstream, so the tool
-    ran twice and two completed pills appeared.
+    logical call (first observed on Gemini 3 Flash, 2026-04-22).
 
-    This test simulates that wire behavior and asserts:
+    Root cause, in general terms: provider streaming can land the same
+    logical tool call in two accumulator slots — e.g. one chunk keys on
+    `index`, another on `id`, or partial-args chunks split across frames
+    — so `merge_stream_tool_calls` flushes two batch entries with
+    identical name+args. Each gets a fresh `tool_id` downstream, so the
+    tool (e.g. `generate_quiz`) runs twice.
+
+    The fix is a provider-agnostic dedup right after the accumulator has
+    fully assembled each call. This test simulates the `index`-only vs
+    `id`-only chunk split to pin that dedup in place, but the real
+    defense is structural — any provider that produces two batch entries
+    with the same `(name, args)` after merge is deduped here.
+
+    Asserts:
       * the tool runs exactly once
       * exactly one `step_started` / `tool_call_started` pair is emitted
     """
