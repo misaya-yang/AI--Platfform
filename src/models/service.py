@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 
 
 @dataclass

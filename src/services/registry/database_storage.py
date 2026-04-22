@@ -10,7 +10,7 @@ import builtins
 import json
 from typing import TYPE_CHECKING, Any
 
-from ...models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from ...models.service import (
     ServiceAuthConfig,
     ServiceCacheConfig,

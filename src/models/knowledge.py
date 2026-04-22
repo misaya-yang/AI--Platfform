@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from .enums import DatasetPermission, DatasetVisibility, DocumentStatus
+from ai_gateway_core.enums import DatasetPermission, DatasetVisibility, DocumentStatus
 
 
 class ProcessRuleMode(str, Enum):

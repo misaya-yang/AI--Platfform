@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .common import import_pymupdf
 from .processing_mode import ProcessingMode
 

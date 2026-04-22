@@ -4,7 +4,7 @@ import importlib
 from abc import ABC, abstractmethod
 from typing import Any
 
-from ..models.enums import ConnectorType
+from ai_gateway_core.enums import ConnectorType
 from ..models.service import ServiceDefinition
 
 

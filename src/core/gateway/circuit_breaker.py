@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..exceptions import CircuitBreakerOpenError
+from ai_gateway_core.exceptions import CircuitBreakerOpenError
 
 
 class CircuitBreaker:

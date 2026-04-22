@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ...core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 from ...models.session import Session, SessionMessage
 
 if TYPE_CHECKING:

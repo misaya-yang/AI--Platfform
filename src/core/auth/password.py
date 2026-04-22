@@ -28,7 +28,7 @@ except ImportError:
     HAS_JWT = False
     jwt = None
 
-from ..exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 # ============================================================
 # Configuration Constants

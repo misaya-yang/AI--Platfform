@@ -3,7 +3,7 @@
 import pytest
 
 from src.core.auth.rbac import RBAC
-from src.core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 
 ROLE_PERMISSIONS = {
     "guest": ["console:dashboard:view"],

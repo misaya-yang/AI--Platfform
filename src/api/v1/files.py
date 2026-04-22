@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.file_cleanup import get_cleanup_service
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...services.storage import FileStorageService, get_file_storage
 from ..deps import get_user_context
 

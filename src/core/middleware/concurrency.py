@@ -10,7 +10,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..observability.metrics import get_metrics
 from .base import InvocationContext, InvocationMiddleware
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import GatewayError, TaskNotFoundError
+from ai_gateway_core.exceptions import GatewayError, TaskNotFoundError
 from ...services.task.task_manager import TaskManager
 from ..deps import get_task_manager, get_user_context
 from ..schemas.response import UnifiedResponseSchema

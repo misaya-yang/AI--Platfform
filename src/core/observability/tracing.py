@@ -21,7 +21,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from .logging import LogContext, clear_log_context, get_logger, set_log_context
+from ai_gateway_core.logging import LogContext, clear_log_context, get_logger, set_log_context
 
 logger = get_logger(__name__)
 

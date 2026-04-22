@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...services.registry.health_monitor import HealthMonitor
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import get_health_monitor, get_registry, get_user_context

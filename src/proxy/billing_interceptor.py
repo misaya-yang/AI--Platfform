@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ..core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..core.observability.metrics import get_metrics
 from ..services.metrics.observability import (
     classify_error_type,

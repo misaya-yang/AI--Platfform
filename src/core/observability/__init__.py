@@ -1,5 +1,5 @@
 # 可观测性模块
-from .logging import (
+from ai_gateway_core.logging import (
     LogContext,
     configure_structured_logging,
     get_logger,

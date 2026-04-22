@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from ...core.crypto import decrypt_value, encrypt_value
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)

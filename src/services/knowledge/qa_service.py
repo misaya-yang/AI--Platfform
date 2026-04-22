@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .knowledge_service import KnowledgeService, RetrieveResult
 
 logger = get_logger(__name__)

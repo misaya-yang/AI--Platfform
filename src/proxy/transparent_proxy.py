@@ -23,7 +23,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from ..core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..services.metrics.observability import (
     classify_error_type,
     ensure_duration_breakdown,

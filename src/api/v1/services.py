@@ -18,7 +18,7 @@ from ...core.auth.service_access import (
     service_scope_matches,
 )
 from ...core.auth.user_resolver import UserContext
-from ...models.enums import ServiceType
+from ai_gateway_core.enums import ServiceType
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 

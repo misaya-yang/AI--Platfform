@@ -18,7 +18,7 @@ from typing import Any
 
 from qdrant_client.http import models as qmodels
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -5,7 +5,7 @@ import pytest
 from src.config.settings import Settings
 from src.core.auth.permissions import Capability, check_capability, require_capability
 from src.core.auth.rbac import RBAC
-from src.core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 
 
 def test_agent_invoke_capability_accepts_canonical_permission() -> None:

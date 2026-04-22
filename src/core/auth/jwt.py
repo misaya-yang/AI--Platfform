@@ -5,7 +5,7 @@ from typing import Any
 
 import jwt
 
-from ..exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 logger = logging.getLogger(__name__)
 

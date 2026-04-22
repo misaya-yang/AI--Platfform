@@ -16,7 +16,7 @@ from ..core.auth.api_key import verify_api_key
 from ..core.auth.jwt import decode_jwt_token
 from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ..core.auth.user_resolver import UserContext
-from ..core.exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
 logger = logging.getLogger(__name__)
 

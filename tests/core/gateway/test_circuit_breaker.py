@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.core.exceptions import CircuitBreakerOpenError
+from ai_gateway_core.exceptions import CircuitBreakerOpenError
 from src.core.gateway.circuit_breaker import CircuitBreaker
 
 

@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
+from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.confluence.sync_service import (
     ConfluenceAccessDeniedError,
     ConfluenceSyncError,

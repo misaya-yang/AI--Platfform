@@ -15,7 +15,7 @@ from src.config.settings import (
 )
 from src.core.auth.rbac import RBAC
 from src.core.auth.user_resolver import UserContext
-from src.core.exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 TEST_JWT_SECRET = "test-secret-key"
 TEST_JWT_ALGORITHM = "HS256"

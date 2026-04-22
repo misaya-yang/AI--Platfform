@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .processing_mode import ProcessingMode
 
 logger = get_logger(__name__)

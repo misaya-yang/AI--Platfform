@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/connectors", tags=["Connectors"])

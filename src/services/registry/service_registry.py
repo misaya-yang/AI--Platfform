@@ -8,8 +8,8 @@ from typing import Any
 import yaml
 
 from ...adapters.base import ProtocolAdapter
-from ...core.exceptions import AdapterNotFoundError, ValidationFailedError
-from ...models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.exceptions import AdapterNotFoundError, ValidationFailedError
+from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from ...models.service import (
     ServiceAuthConfig,
     ServiceCacheConfig,

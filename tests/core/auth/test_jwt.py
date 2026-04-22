@@ -6,7 +6,7 @@ import jwt as pyjwt
 import pytest
 
 from src.core.auth.jwt import decode_jwt_token
-from src.core.exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 SECRET = "test-secret-for-jwt-tests"
 ALGORITHMS = ["HS256"]

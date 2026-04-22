@@ -6,7 +6,7 @@ import pytest
 
 from src.core.auth.password import hash_password
 from src.core.auth.user_resolver import UserContext
-from src.core.exceptions import PermissionDeniedError, ValidationFailedError
+from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
 from src.services.knowledge.knowledge_service import KnowledgeService
 
 

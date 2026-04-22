@@ -9,7 +9,7 @@
 
 import pytest
 
-from src.models.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from src.services.registry.service_registry import MemoryRegistryStorage, ServiceRegistry
 
 

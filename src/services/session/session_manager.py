@@ -5,7 +5,7 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
-from ...core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 from ...models.session import Session, SessionMessage
 
 

@@ -37,7 +37,7 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitContext,
     RateLimitHeaders,
 )
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...core.observability.metrics import get_metrics
 from ...core.utils import estimate_tokens
 from ...proxy import (

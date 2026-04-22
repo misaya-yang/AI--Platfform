@@ -16,8 +16,8 @@ from typing import Any
 from ...config.settings import Settings
 from ...core.auth.password import verify_password
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError, ValidationFailedError
-from ...core.observability.logging import get_logger
+from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 # Type hint imports

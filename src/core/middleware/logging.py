@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ..observability.logging import LogContext, get_logger, set_log_context
+from ai_gateway_core.logging import LogContext, get_logger, set_log_context
 from ..observability.metrics import get_metrics
 from .base import InvocationContext, InvocationMiddleware
 

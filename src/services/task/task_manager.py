@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from ...core.exceptions import TaskNotFoundError
+from ai_gateway_core.exceptions import TaskNotFoundError
 from ...models.request import UnifiedRequest
 from ...models.response import UnifiedResponse
 from ...models.task import Task, TaskStatus

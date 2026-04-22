@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...persistence.database import DatabaseStorage
 from ...services.billing.model_pricing import get_pricing_service
 

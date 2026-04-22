@@ -22,7 +22,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ...services.metrics import get_metrics_recorder
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .rate_limit_http import RateLimitInfo, SlidingWindowRateLimiter
 
 logger = get_logger(__name__)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hmac
 
-from ..exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 
 def _constant_time_compare(a: str, b: str) -> bool:

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from src.core.exceptions import AuthenticationRequiredError
+from ai_gateway_core.exceptions import AuthenticationRequiredError
 
 
 def _rbac_has_permission(subjects, permission: str) -> bool:

@@ -33,7 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 from ...services.assistant import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
 from ...services.assistant.assistant_service import RAGMode
 from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator

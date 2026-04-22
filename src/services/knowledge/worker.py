@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .common import import_pymupdf
 from .processing_mode import ProcessingMode, parse_processing_mode
 from .streaming_loader import StreamingDocumentLoader

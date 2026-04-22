@@ -3,7 +3,7 @@
 import pytest
 
 from src.core.auth.rbac import RBAC
-from src.core.exceptions import (
+from ai_gateway_core.exceptions import (
     AuthenticationRequiredError,
     InvalidContentTypeError,
     PermissionDeniedError,

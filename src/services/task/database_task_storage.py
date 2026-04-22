@@ -12,7 +12,7 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ...core.exceptions import TaskNotFoundError
+from ai_gateway_core.exceptions import TaskNotFoundError
 from ...models.task import Task, TaskStatus
 
 if TYPE_CHECKING:

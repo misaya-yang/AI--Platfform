@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ...config.settings import Settings
-from ...core.exceptions import ValidationFailedError
-from ...core.observability.logging import get_logger
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.logging import get_logger
 from ...persistence.database import DatabaseStorage
 from .common import ensure_dict as _ensure_dict
 from .embedding import BaseEmbedding, get_cached_embedder

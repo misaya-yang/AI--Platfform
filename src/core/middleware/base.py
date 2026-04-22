@@ -20,7 +20,7 @@ from typing import Any, TypeVar
 from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

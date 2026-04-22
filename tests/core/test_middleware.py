@@ -14,7 +14,7 @@ from src.core.middleware.base import (
     InvocationMiddleware,
     MiddlewareChain,
 )
-from src.models.enums import ContentType
+from ai_gateway_core.enums import ContentType
 from src.models.request import ContentItem, UnifiedRequest
 from src.models.response import UnifiedResponse
 from src.models.service import ServiceDefinition

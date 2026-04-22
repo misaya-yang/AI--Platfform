@@ -8,8 +8,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.exceptions import ValidationFailedError
-from ..models.enums import ConnectorType, ContentType, StreamEventType
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.enums import ConnectorType, ContentType, StreamEventType
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, ToolCall, UnifiedResponse
 from .base import ProtocolAdapter

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from ..core.exceptions import ValidationFailedError
-from ..models.enums import ContentType
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.enums import ContentType
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import UnifiedResponse
 from .base import ProtocolAdapter

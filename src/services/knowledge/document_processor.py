@@ -8,8 +8,8 @@ import re
 import tempfile
 from typing import Any
 
-from ...core.exceptions import ValidationFailedError
-from ...core.observability.logging import get_logger
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.logging import get_logger
 from .utils import normalize_text
 
 logger = get_logger(__name__)

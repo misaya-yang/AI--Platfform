@@ -450,7 +450,7 @@ class TestKBSearchEndpoint:
     ):
         """Should return 403 when user doesn't have access."""
         from src.api.v1.kb_tools import kb_search
-        from src.core.exceptions import PermissionDeniedError
+        from ai_gateway_core.exceptions import PermissionDeniedError
 
         mock_knowledge_service.require_dataset_access.side_effect = PermissionDeniedError(
             "No access to dataset"
@@ -471,7 +471,7 @@ class TestKBSearchEndpoint:
     ):
         """Should return 404 when dataset doesn't exist."""
         from src.api.v1.kb_tools import kb_search
-        from src.core.exceptions import ValidationFailedError
+        from ai_gateway_core.exceptions import ValidationFailedError
 
         mock_knowledge_service.require_dataset_access.side_effect = ValidationFailedError(
             "Dataset not found"
@@ -546,7 +546,7 @@ class TestKBMultiSearchEndpoint:
     ):
         """Should skip datasets user can't access without failing."""
         from src.api.v1.kb_tools import kb_multi_search
-        from src.core.exceptions import PermissionDeniedError
+        from ai_gateway_core.exceptions import PermissionDeniedError
 
         # First dataset accessible, second denied
         access_count = [0]
@@ -662,7 +662,7 @@ class TestToolDefinitionEndpoint:
     ):
         """Should return 403 when user can't access dataset."""
         from src.api.v1.kb_tools import get_tool_definition
-        from src.core.exceptions import PermissionDeniedError
+        from ai_gateway_core.exceptions import PermissionDeniedError
 
         mock_knowledge_service.require_dataset_access.side_effect = PermissionDeniedError(
             "No access"

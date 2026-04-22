@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.core.exceptions import RateLimitExceededError
+from ai_gateway_core.exceptions import RateLimitExceededError
 from src.core.gateway.rate_limiter import (
     RateLimit,
     RateLimitConfig,

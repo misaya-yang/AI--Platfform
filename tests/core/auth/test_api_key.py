@@ -3,7 +3,7 @@
 import pytest
 
 from src.core.auth.api_key import verify_api_key
-from src.core.exceptions import AuthError
+from ai_gateway_core.exceptions import AuthError
 
 
 class TestVerifyApiKey:

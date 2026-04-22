@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..deps import get_user_context
 
 logger = get_logger(__name__)

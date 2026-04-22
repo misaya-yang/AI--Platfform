@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
-from ..core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

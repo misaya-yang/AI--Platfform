@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ...models.enums import ContentType, StreamEventType
+from ai_gateway_core.enums import ContentType, StreamEventType
 from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
@@ -19,7 +19,7 @@ from ...services.registry.service_registry import ServiceRegistry
 from ...services.session.session_manager import SessionManager
 from ...services.task.task_manager import TaskManager
 from ..auth.rbac import RBAC
-from ..exceptions import RateLimitExceededError, ServiceNotFoundError
+from ai_gateway_core.exceptions import RateLimitExceededError, ServiceNotFoundError
 from ..utils import estimate_tokens
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter

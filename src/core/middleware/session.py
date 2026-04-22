@@ -9,9 +9,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ...models.enums import ContentType, StreamEventType
+from ai_gateway_core.enums import ContentType, StreamEventType
 from ...models.response import UnifiedResponse
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .base import InvocationContext, InvocationMiddleware
 
 logger = get_logger(__name__)

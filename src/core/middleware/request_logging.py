@@ -23,7 +23,7 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

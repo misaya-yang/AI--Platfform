@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ...models.request import UnifiedRequest
 from ...models.service import ServiceDefinition
-from ..exceptions import RateLimitExceededError
+from ai_gateway_core.exceptions import RateLimitExceededError
 
 
 @dataclass

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 
 
 class RBAC:

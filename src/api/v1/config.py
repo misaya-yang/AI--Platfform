@@ -12,7 +12,7 @@ from ...core.auth.permissions import (
     build_permission_denied_detail,
     check_capability,
 )
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..deps import AuthContext, get_auth_context
 
 logger = get_logger(__name__)

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..services.metrics.usage_parser import extract_model
 from .config_loader import ProxyServiceConfig
 from .context_injector import RequestContext

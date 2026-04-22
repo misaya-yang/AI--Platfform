@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..errors.base import GatewayException
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .base import InvocationContext, InvocationMiddleware
 
 logger = get_logger(__name__)

@@ -30,7 +30,7 @@ from .core.errors import (
 )
 
 # 兼容旧的异常导入（向后兼容）
-from .core.exceptions import (
+from ai_gateway_core.exceptions import (
     AuthError,
     CircuitBreakerOpenError,
     GatewayError,
@@ -53,7 +53,7 @@ from .core.middleware.streaming import (
     StreamingTracingConfig,
     StreamingTracingMiddleware,
 )
-from .core.observability.logging import configure_structured_logging, get_logger
+from ai_gateway_core.logging import configure_structured_logging, get_logger
 from .core.observability.metrics import get_metrics
 from .services.metrics.metrics_recorder import init_metrics_recorder
 from .services.metrics.realtime_metrics import init_realtime_metrics

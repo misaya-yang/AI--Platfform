@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ...models.enums import ContentType
+from ai_gateway_core.enums import ContentType
 from ...models.request import ContentItem, UnifiedRequest
 
 

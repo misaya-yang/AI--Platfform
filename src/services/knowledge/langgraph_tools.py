@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import AuthenticationRequiredError
+from ai_gateway_core.exceptions import AuthenticationRequiredError
 from .knowledge_service import KnowledgeService
 
 logger = logging.getLogger(__name__)

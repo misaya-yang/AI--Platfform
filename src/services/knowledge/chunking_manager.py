@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import Any
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import ValidationFailedError
-from ...core.observability.logging import get_logger
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.logging import get_logger
 from ...persistence.database import DatabaseStorage
 from .chunking import (
     Chunk,

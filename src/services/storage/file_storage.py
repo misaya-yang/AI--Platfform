@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from .image_storage import (
     BaseStorageBackend,
     LocalStorageBackend,

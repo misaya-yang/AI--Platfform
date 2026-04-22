@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Any
 
 from ..errors import RateLimitError
-from ..observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ..observability.metrics import get_metrics
 from .storage import MemoryRateLimitStorage, RedisRateLimitStorage
 from .strategy import RateLimitStrategy, get_strategy

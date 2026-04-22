@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .enums import StreamEventType
+from ai_gateway_core.enums import StreamEventType
 from .request import ContentItem
 
 

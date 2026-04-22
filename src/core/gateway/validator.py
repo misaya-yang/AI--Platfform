@@ -9,7 +9,7 @@ from ...models.request import ContentItem, UnifiedRequest
 from ...models.service import ServiceDefinition
 from ..auth.permissions import Capability, require_capability
 from ..auth.rbac import RBAC
-from ..exceptions import (
+from ai_gateway_core.exceptions import (
     AuthenticationRequiredError,
     InvalidContentTypeError,
     PermissionDeniedError,

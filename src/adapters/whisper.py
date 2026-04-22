@@ -4,8 +4,8 @@ import base64
 
 import httpx
 
-from ..core.exceptions import ValidationFailedError
-from ..models.enums import ContentType
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.enums import ContentType
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import UnifiedResponse
 from .base import ProtocolAdapter

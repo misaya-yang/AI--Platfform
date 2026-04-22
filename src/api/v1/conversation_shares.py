@@ -14,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
-from ...core.observability.logging import get_logger
+from ai_gateway_core.logging import get_logger
 from ...services.assistant.quiz.quiz_grader import QuizGrader
 from ..deps import enforce_rate_limit, get_user_context
 

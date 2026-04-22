@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.gateway.dispatcher import GatewayDispatcher
-from src.models.enums import (
+from ai_gateway_core.enums import (
     ConnectorType,
     ContentType,
     InvocationMode,

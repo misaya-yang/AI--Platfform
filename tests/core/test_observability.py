@@ -7,7 +7,7 @@
 - 指标收集
 """
 
-from src.core.observability.logging import (
+from ai_gateway_core.logging import (
     LogContext,
     clear_log_context,
     get_log_context,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .enums import ContentType
+from ai_gateway_core.enums import ContentType
 
 
 @dataclass

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
-from ...core.exceptions import GatewayError
+from ai_gateway_core.exceptions import GatewayError
 from ...core.gateway.dispatcher import GatewayDispatcher
 from ..deps import get_dispatcher, get_user_context
 from ..schemas.request import UnifiedRequestSchema

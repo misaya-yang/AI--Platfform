@@ -12,7 +12,7 @@ from src.core.auth.permissions import (
     require_capability,
 )
 from src.core.auth.rbac import RBAC
-from src.core.exceptions import PermissionDeniedError
+from ai_gateway_core.exceptions import PermissionDeniedError
 
 ROLE_PERMISSIONS = {
     "user": ["console:dashboard:view", "conversation:playground:access"],

@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ...models.enums import ContentType, StreamEventType
+from ai_gateway_core.enums import ContentType, StreamEventType
 from ...models.request import ContentItem
 from ...models.response import StreamChunk, ToolCall, UnifiedResponse
 
