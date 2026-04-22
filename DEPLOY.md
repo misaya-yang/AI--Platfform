@@ -111,7 +111,7 @@ packages/
 1. **Dependencies** — docgen pulls in LibreOffice, CJK fonts, poppler. None of that should be in the gateway image.
 2. **Isolation** — the server's heavy/slow work doesn't contend with gateway request handling, and it can be restarted independently.
 
-**Adding a new MCP server.** Four touchpoints, **all required**:
+**Adding a new MCP server.** Five touchpoints, **all required** (the 5th only when the server returns URLs the browser must reach):
 
 1. **Code** — `packages/<name>-mcp-server/` with `src/`, `pyproject.toml`, `Dockerfile`.
    Copy the layout from `packages/mcp-docgen-server/`. Ensure the server speaks the simplified JSON-RPC-over-HTTP transport (`main_http()`) — the gateway client is **not** a full MCP streamable-HTTP client.
@@ -122,6 +122,10 @@ packages/
      build: { context: ., dockerfile: packages/<name>-mcp-server/Dockerfile }
      container_name: <name>-mcp-server
      environment: { MCP_TRANSPORT: http, PORT: "<port>" }
+     ports:
+       # Include ONLY if the server returns browser-visible URLs (signed
+       # downloads). Loopback-only; nginx proxies public traffic here.
+       - "127.0.0.1:<port>:<port>"
      networks:
        ai-gateway-net:
          aliases: [ <name>-mcp-server.internal ]   # ← SSRF guard requires .internal
@@ -137,6 +141,24 @@ packages/
    ```
 
 4. **src/services/assistant/tools/tool_selector.py** — add keywords under `_MCP_SERVER_KEYWORDS` so the tool surfaces when relevant. Without this, the selector scores your tool 0 for messages that don't literally contain the server name, and it's invisible to the model.
+
+5. **(Conditional) nginx reverse-proxy for browser-visible URLs.** If the server returns signed URLs that a user will click (downloads, artifacts), wire nginx so those URLs actually resolve publicly. Four coordinated pieces:
+
+   - **nginx location** — edit `/etc/nginx/sites-enabled/<site>` on the server, adding:
+     ```nginx
+     location /<name>/ {
+         proxy_pass http://127.0.0.1:<port>;   # no trailing slash — preserve path prefix
+         proxy_set_header Host $host;
+         proxy_set_header X-Forwarded-Proto https;
+         proxy_read_timeout 60s;
+     }
+     ```
+     Back up first (`sudo cp ... .bak-$(date +%Y%m%d-%H%M)`), then `sudo nginx -t && sudo nginx -s reload`.
+   - **`<SERVER>_PUBLIC_URL` env** in compose — set to `https://<host>/<name>` so signed URLs carry the public prefix from the start.
+   - **Path-only signing** — the server's URL-signing must HMAC only the path (and tenant/expiry), not scheme+host. Otherwise the sign-side URL (public) and verify-side URL (internal, after nginx proxy) will disagree and every signature fails.
+   - **Dual-prefix routing** — the server should register routes for BOTH `/artifacts/{path:path}` (direct-access, local dev) and `/<name>/artifacts/{path:path}` (public-prefix, behind nginx). Since nginx preserves the path prefix (no trailing slash on `proxy_pass`), the container sees `/<name>/artifacts/...` and must match that path.
+
+   See `packages/mcp-docgen-server/src/mcp_docgen_server/server.py::main_http` for a worked example.
 
 **Rebuild rule.** An MCP package rebuild is independent of gateway/microservices:
 
