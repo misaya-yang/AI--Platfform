@@ -12,7 +12,7 @@ import base64
 from dataclasses import dataclass
 from typing import Any
 
-from src.core.auth.user_resolver import UserContext
+from ai_gateway_core.auth import UserContext
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)

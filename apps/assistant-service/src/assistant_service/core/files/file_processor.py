@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.core.auth.user_resolver import UserContext
+from ai_gateway_core.auth import UserContext
 from ai_gateway_core.logging import get_logger
 from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (

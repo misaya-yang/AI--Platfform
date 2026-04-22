@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.core.auth.user_resolver import UserContext
+from ai_gateway_core.auth import UserContext
 from ..files.file_processor import FileProcessor
 
 logger = logging.getLogger(__name__)

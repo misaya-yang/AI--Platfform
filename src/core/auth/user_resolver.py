@@ -5,6 +5,11 @@
 - JWT Token 认证
 - API Key 认证
 - 匿名用户（基于 IP）
+
+``UserContext`` itself is declared in ``ai_gateway_core.auth`` so the
+assistant-service can build identical records without a gateway import.
+Re-exported below so existing ``from src.core.auth.user_resolver import
+UserContext`` call sites keep working.
 """
 
 from __future__ import annotations
@@ -15,21 +20,7 @@ from typing import Any
 import jwt
 from fastapi import Request
 
-
-@dataclass
-class UserContext:
-    """用户上下文"""
-
-    user_id: str
-    tenant_id: str = ""
-    tier: str = "anonymous"  # anonymous | normal | premium | enterprise | admin
-    is_authenticated: bool = False
-    ip: str = ""
-    roles: list[str] = None
-
-    def __post_init__(self):
-        if self.roles is None:
-            self.roles = []
+from ai_gateway_core.auth import UserContext  # noqa: F401 — re-export
 
 
 @dataclass

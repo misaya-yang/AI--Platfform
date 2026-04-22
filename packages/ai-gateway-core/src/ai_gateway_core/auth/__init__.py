@@ -1,26 +1,26 @@
-"""Authentication contract.
+"""Authentication contract + concrete user context.
 
-Concrete ``UserContext`` lives in each service. This module exports a
-structural protocol so code that only reads identity can depend on the
-contract instead of the concrete type.
+- ``UserContextLike`` — structural protocol; use for type annotations
+  inside business code.
+- ``UserContext`` — concrete dataclass; construct instances of this to
+  pass around. Lives here so both services can build identical records
+  from their respective auth paths (gateway: JWT/API key; assistant:
+  X-User-* header trust).
 """
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from ._core import UserContext
+
 
 @runtime_checkable
 class UserContextLike(Protocol):
-    """Minimal contract for an authenticated-user value passed between services.
-
-    Concrete implementations in ai-gateway and assistant-service must
-    expose at least these attributes. Additional fields (permissions,
-    tenant metadata, etc.) are implementation-defined.
-    """
+    """Minimal contract for an authenticated-user value passed between services."""
 
     user_id: str
     tenant_id: str | None
 
 
-__all__ = ["UserContextLike"]
+__all__ = ["UserContext", "UserContextLike"]

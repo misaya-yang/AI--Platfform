@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from .memory_service import MemoryService
 
 from cachetools import TTLCache
-from src.core.auth.user_resolver import UserContext
+from ai_gateway_core.auth import UserContext
 from ai_gateway_core.exceptions import PermissionDeniedError
 from src.services.knowledge.knowledge_service import KnowledgeService
 from src.services.metrics.realtime_metrics import get_realtime_metrics
