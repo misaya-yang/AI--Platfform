@@ -198,6 +198,90 @@ class TestRequestBodyInjection:
         assert any(t.get("type") == "web_search_20250305" for t in tools), tools
 
 
+class TestGeminiThinkingConfig:
+    """Gemini 2.5+ / 3.x must emit `thinkingConfig.includeThoughts: true` by
+    default so thought summaries stream back as `thought` parts. Without this,
+    the Activity drawer has no thinking block to render.
+    """
+
+    def _registry(self):
+        mod = _get_mod()
+        return mod.ModelRegistry(use_default_models=True)
+
+    def test_gemini_3_flash_includes_thoughts_by_default(self):
+        mod = _get_mod()
+        reg = self._registry()
+        body = reg._build_google_body(
+            model_id="gemini-3-flash-preview",
+            messages=[mod.ChatMessage(role="user", content="hello")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=None,
+            stream=True,
+        )
+        cfg = body.get("generationConfig", {}).get("thinkingConfig", {})
+        assert cfg.get("includeThoughts") is True, body
+
+    def test_gemini_3_pro_includes_thoughts_by_default(self):
+        mod = _get_mod()
+        reg = self._registry()
+        body = reg._build_google_body(
+            model_id="gemini-3-pro-preview",
+            messages=[mod.ChatMessage(role="user", content="hello")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=None,
+            stream=True,
+        )
+        cfg = body.get("generationConfig", {}).get("thinkingConfig", {})
+        assert cfg.get("includeThoughts") is True, body
+
+    def test_gemini_2_5_flash_includes_thoughts_by_default(self):
+        mod = _get_mod()
+        reg = self._registry()
+        body = reg._build_google_body(
+            model_id="gemini-2.5-flash",
+            messages=[mod.ChatMessage(role="user", content="hello")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=None,
+            stream=True,
+        )
+        cfg = body.get("generationConfig", {}).get("thinkingConfig", {})
+        assert cfg.get("includeThoughts") is True, body
+
+    def test_thinking_level_preserved_when_set(self):
+        """PPT path sets thinking_level='high'; both fields must coexist."""
+        mod = _get_mod()
+        reg = self._registry()
+        body = reg._build_google_body(
+            model_id="gemini-3-pro-preview",
+            messages=[mod.ChatMessage(role="user", content="make a ppt")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=None,
+            stream=True,
+            thinking_level="high",
+        )
+        cfg = body.get("generationConfig", {}).get("thinkingConfig", {})
+        assert cfg.get("thinkingLevel") == "high", body
+        assert cfg.get("includeThoughts") is True, body
+
+    def test_legacy_gemini_does_not_inject_thinking_config(self):
+        """Gemini 1.5 / older ids must NOT receive thinkingConfig."""
+        mod = _get_mod()
+        reg = self._registry()
+        body = reg._build_google_body(
+            model_id="gemini-1.5-pro",
+            messages=[mod.ChatMessage(role="user", content="hello")],
+            temperature=0.7,
+            max_tokens=None,
+            tools=None,
+            stream=True,
+        )
+        assert "thinkingConfig" not in body.get("generationConfig", {}), body
+
+
 class TestToolListFilter:
     """Contract: when native search is active, search_web must be dropped."""
 

@@ -1005,8 +1005,35 @@ class ModelRegistry:
             },
         }
 
+        # Thinking configuration.
+        #
+        # Gemini 2.5+ / 3.x only emits "thought summary" parts
+        # (`candidates[].content.parts[].thought == true`) when the request
+        # body explicitly enables `thinkingConfig.includeThoughts`. Without
+        # it the REST API silently drops thinking content, which breaks the
+        # Activity drawer (no thinking_start / thinking_delta SSE events).
+        #
+        # Rules:
+        #   - When the caller explicitly sets `thinking_level`, honour it
+        #     (PPT request path) AND turn on includeThoughts so thought
+        #     summaries still stream to the Activity drawer.
+        #   - Otherwise, default to `includeThoughts: true` for Gemini
+        #     models that support thought summaries (2.5+ / 3.x). We skip
+        #     older ids (gemini-1.5-*, gemini-pro, etc.) since their REST
+        #     surface does not accept the field.
+        mid = (model_id or "").lower()
+        supports_thought_summaries = (
+            "gemini-2.5" in mid
+            or "gemini-3" in mid
+        )
+
         if thinking_level:
-            body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level}
+            thinking_cfg: dict[str, Any] = {"thinkingLevel": thinking_level}
+            if supports_thought_summaries:
+                thinking_cfg["includeThoughts"] = True
+            body["generationConfig"]["thinkingConfig"] = thinking_cfg
+        elif supports_thought_summaries:
+            body["generationConfig"]["thinkingConfig"] = {"includeThoughts": True}
 
         if system_instruction:
             # Strip Anthropic-only cache marker before sending to Gemini.
@@ -1346,6 +1373,16 @@ class ModelRegistry:
             f"[GEMINI] Request body: {json_module.dumps(body, ensure_ascii=False, default=str)[:2000]}"
         )
 
+        # Track functionCall parts already emitted in this stream to avoid
+        # duplicate tool calls. Gemini streaming does not provide stable tool
+        # call ids, and the same functionCall part can legitimately appear in
+        # more than one SSE data frame (e.g. once in the content chunk, once
+        # in the finish chunk). Since we synthesize a fresh uuid per part,
+        # naive emission creates duplicate tool_call pills in the Activity
+        # drawer. Key on (name, args_json) — thoughtSignature varies so we
+        # don't include it in the dedup key.
+        emitted_function_calls: set[tuple[str, str]] = set()
+
         async with client.stream("POST", endpoint, json=body) as response:
             if response.status_code != 200:
                 # Read error response body for debugging
@@ -1415,12 +1452,29 @@ class ModelRegistry:
                             # Gemini streaming does not provide a stable unique call id, so we generate one.
                             import uuid
 
+                            fc_name = fc.get("name") or "unknown"
+                            fc_args_json = json.dumps(
+                                fc.get("args", {}), sort_keys=True, ensure_ascii=False
+                            )
+                            dedup_key = (str(fc_name), fc_args_json)
+                            if dedup_key in emitted_function_calls:
+                                # Gemini re-emitted the same functionCall in a
+                                # later SSE chunk. Skip — downstream already
+                                # accumulated it under a fresh uuid, and
+                                # adding another copy would create a duplicate
+                                # Activity-drawer pill.
+                                logger.debug(
+                                    f"[GEMINI] Skipping duplicate functionCall: {fc_name}"
+                                )
+                                continue
+                            emitted_function_calls.add(dedup_key)
+
                             tool_call: dict[str, Any] = {
-                                "id": f"call_{fc.get('name', 'unknown')}_{uuid.uuid4().hex[:10]}",
+                                "id": f"call_{fc_name}_{uuid.uuid4().hex[:10]}",
                                 "type": "function",
                                 "function": {
-                                    "name": fc.get("name"),
-                                    "arguments": json.dumps(fc.get("args", {})),
+                                    "name": fc_name,
+                                    "arguments": fc_args_json,
                                 },
                             }
                             # CRITICAL: Preserve thoughtSignature for Gemini 3
@@ -1428,7 +1482,7 @@ class ModelRegistry:
                             if "thoughtSignature" in part:
                                 tool_call["thoughtSignature"] = part["thoughtSignature"]
                                 logger.debug(
-                                    f"[GEMINI3] Captured thoughtSignature for {fc.get('name')}"
+                                    f"[GEMINI3] Captured thoughtSignature for {fc_name}"
                                 )
                             tool_calls_batch.append(tool_call)
 
