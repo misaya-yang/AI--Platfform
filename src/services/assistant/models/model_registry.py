@@ -803,38 +803,52 @@ class ModelRegistry:
         self._models[model.id] = model
 
     async def _get_client(self, provider: ModelProvider) -> httpx.AsyncClient:
-        """Get or create HTTP client for provider."""
-        if provider not in self._clients:
-            config = self._configs.get(provider)
-            if not config:
-                raise ValueError(f"Provider {provider} not configured")
+        """Get or create HTTP client for provider.
 
-            headers = self._build_headers(provider, config.api_key)
-            # For Google we disable keepalive. Reason: observed on prod
-            # 2026-04-22 — second streaming request on a reused Google
-            # connection routinely stalled for 30-47s waiting for response
-            # headers, while the first request on a fresh connection
-            # returned in 2-3s. Same pattern whether routed to AI Studio
-            # or Vertex, same pattern whether httpx was using HTTP/1.1 or
-            # HTTP/2. Paying ~150ms TLS handshake per request is a worthy
-            # trade for eliminating the tail-latency spikes. Other
-            # providers (OpenAI / Anthropic / DashScope) aren't affected —
-            # their completion endpoints handle keepalive cleanly.
-            if provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
-                limits = httpx.Limits(
-                    max_keepalive_connections=0,
-                    max_connections=20,
-                )
-            else:
-                limits = httpx.Limits(
-                    max_keepalive_connections=5,
-                    max_connections=20,
-                )
+        Google providers (both AI Studio and Vertex) use a **fresh client
+        per call**. Our earlier mitigation — caching the client with
+        ``max_keepalive_connections=0`` — did NOT eliminate the 30-47s
+        tail latency observed on the second streaming request of a
+        session. Even with keepalive off, httpx's ``AsyncClient``
+        maintains internal HTTP/1 connection state per host; an SSE
+        stream that finishes normally appears to leave something in a
+        half-closed state that the Google servers don't reply to
+        promptly.
+
+        The fix is to make the client fully ephemeral for Google: every
+        call builds, uses, and closes its own ``AsyncClient`` (see the
+        ``finally: await client.aclose()`` in ``chat_stream`` /
+        ``chat``). This costs ~150ms per request for TLS, but guarantees
+        no shared state between calls. Non-Google providers keep their
+        cached, keepalive-enabled client — they don't exhibit the bug.
+
+        Caller contract:
+          * Google / Vertex: treat the returned client as single-use.
+            ``async with`` it or explicitly ``await client.aclose()``.
+          * Everyone else: do NOT close it; the registry owns the lifetime.
+        """
+        config = self._configs.get(provider)
+        if not config:
+            raise ValueError(f"Provider {provider} not configured")
+
+        headers = self._build_headers(provider, config.api_key)
+        is_google = provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX)
+
+        if is_google:
+            # Ephemeral — caller closes.
+            return httpx.AsyncClient(
+                base_url=config.base_url,
+                headers=headers,
+                timeout=httpx.Timeout(config.timeout),
+                limits=httpx.Limits(max_keepalive_connections=0, max_connections=2),
+            )
+
+        if provider not in self._clients:
             self._clients[provider] = httpx.AsyncClient(
                 base_url=config.base_url,
                 headers=headers,
                 timeout=httpx.Timeout(config.timeout),
-                limits=limits,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
             )
         return self._clients[provider]
 
@@ -1383,6 +1397,12 @@ class ModelRegistry:
             raise ValueError(f"Unknown model: {model_id}")
 
         client = await self._get_client(model.provider)
+        # Google providers return ephemeral clients from _get_client;
+        # wrap the call so the client is closed even on exception.
+        _owns_client = model.provider in (
+            ModelProvider.GOOGLE,
+            ModelProvider.GOOGLE_VERTEX,
+        )
         body = self._build_request_body(
             model.provider,
             model_id,
@@ -1405,9 +1425,13 @@ class ModelRegistry:
         else:
             endpoint = "/v1/chat/completions"
 
-        response = await client.post(endpoint, json=body)
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await client.post(endpoint, json=body)
+            response.raise_for_status()
+            data = response.json()
+        finally:
+            if _owns_client:
+                await client.aclose()
 
         if model.provider in (ModelProvider.GOOGLE, ModelProvider.GOOGLE_VERTEX):
             # Parse Google Gemini response
@@ -1459,6 +1483,12 @@ class ModelRegistry:
             raise ValueError(f"Unknown model: {model_id}")
 
         client = await self._get_client(model.provider)
+        # Google providers return ephemeral clients; close on exit so no
+        # TLS connection outlives the stream.
+        _owns_client = model.provider in (
+            ModelProvider.GOOGLE,
+            ModelProvider.GOOGLE_VERTEX,
+        )
         body = self._build_request_body(
             model.provider,
             model_id,
@@ -1472,22 +1502,26 @@ class ModelRegistry:
             native_search_config=native_search_config,
         )
 
-        if model.provider == ModelProvider.GOOGLE:
-            endpoint = self._google_endpoint(model_id, stream=True)
-            async for delta in self._stream_google(client, endpoint, body):
-                yield delta
-        elif model.provider == ModelProvider.GOOGLE_VERTEX:
-            endpoint = self._vertex_endpoint(model_id, stream=True)
-            async for delta in self._stream_google(client, endpoint, body):
-                yield delta
-        elif model.provider == ModelProvider.ANTHROPIC:
-            endpoint = "/v1/messages"
-            async for delta in self._stream_anthropic(client, endpoint, body):
-                yield delta
-        else:
-            endpoint = "/v1/chat/completions"
-            async for delta in self._stream_openai(client, endpoint, body):
-                yield delta
+        try:
+            if model.provider == ModelProvider.GOOGLE:
+                endpoint = self._google_endpoint(model_id, stream=True)
+                async for delta in self._stream_google(client, endpoint, body):
+                    yield delta
+            elif model.provider == ModelProvider.GOOGLE_VERTEX:
+                endpoint = self._vertex_endpoint(model_id, stream=True)
+                async for delta in self._stream_google(client, endpoint, body):
+                    yield delta
+            elif model.provider == ModelProvider.ANTHROPIC:
+                endpoint = "/v1/messages"
+                async for delta in self._stream_anthropic(client, endpoint, body):
+                    yield delta
+            else:
+                endpoint = "/v1/chat/completions"
+                async for delta in self._stream_openai(client, endpoint, body):
+                    yield delta
+        finally:
+            if _owns_client:
+                await client.aclose()
 
     async def _stream_openai(
         self,

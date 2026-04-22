@@ -17,6 +17,8 @@
 
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { T, ui } from "./activityTheme";
 import { Icon } from "./activityIcons";
 
@@ -227,16 +229,72 @@ export function TimelineStep({
             {step.title}
           </div>
           {step.body && (
+            // The thinking body is markdown — Gemini's thought summaries
+            // come back with ``**Bold Heading**`` and bullet lists, and
+            // Qwen's reasoning_content is free-form markdown too. Render
+            // via ReactMarkdown so headings/emphasis/lists look right
+            // instead of showing literal ``**`` and ``##``. Kept scoped
+            // to prose elements — no images, no links in thought bodies.
             <div
+              className="act-thinking-md"
               style={{
                 fontSize: 12.5,
                 color: T.textMute,
                 lineHeight: 1.55,
-                whiteSpace: "pre-line",
                 fontFamily: ui.sans,
               }}
             >
-              {step.body}
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  // Tighten paragraph spacing — defaults push too much air.
+                  p: ({ children }) => (
+                    <p style={{ margin: "4px 0" }}>{children}</p>
+                  ),
+                  ul: ({ children }) => (
+                    <ul style={{ margin: "4px 0", paddingLeft: 18 }}>{children}</ul>
+                  ),
+                  ol: ({ children }) => (
+                    <ol style={{ margin: "4px 0", paddingLeft: 18 }}>{children}</ol>
+                  ),
+                  li: ({ children }) => (
+                    <li style={{ margin: "2px 0" }}>{children}</li>
+                  ),
+                  h1: ({ children }) => (
+                    <div style={{ fontWeight: 600, margin: "6px 0 2px" }}>
+                      {children}
+                    </div>
+                  ),
+                  h2: ({ children }) => (
+                    <div style={{ fontWeight: 600, margin: "6px 0 2px" }}>
+                      {children}
+                    </div>
+                  ),
+                  h3: ({ children }) => (
+                    <div style={{ fontWeight: 600, margin: "6px 0 2px" }}>
+                      {children}
+                    </div>
+                  ),
+                  code: ({ children }) => (
+                    <code
+                      style={{
+                        fontFamily: ui.mono,
+                        fontSize: "0.9em",
+                        background: T.surfaceSoft,
+                        padding: "1px 4px",
+                        borderRadius: 3,
+                      }}
+                    >
+                      {children}
+                    </code>
+                  ),
+                  strong: ({ children }) => (
+                    <strong style={{ color: T.text }}>{children}</strong>
+                  ),
+                }}
+              >
+                {step.body}
+              </ReactMarkdown>
               {isRunning && <span className="act-caret" />}
             </div>
           )}
