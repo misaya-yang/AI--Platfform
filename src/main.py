@@ -1244,8 +1244,6 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         get_tool_registry,
         register_builtin_tools,
         register_code_executor_tool,
-        register_document_generation_tool,
-        register_pptx_generation_tool,
     )
     from .services.assistant.tools.image_generator_tool import register_image_generation_tool
 
@@ -1263,11 +1261,14 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Register image generation tool if at least one provider is configured (Gemini preferred, DashScope fallback)
     image_gen_registered = register_image_generation_tool()
 
-    # Register document generation tool (always available)
-    doc_gen_registered = register_document_generation_tool()
-
-    # Register PowerPoint generation tool (requires python-pptx)
-    register_pptx_generation_tool()
+    # Document + PowerPoint generation are now served by the ``mcp-docgen-server``
+    # MCP service (packages/mcp-docgen-server), registered as
+    # ``mcp_docgen__generate_document``. That tool spans docx / pptx / xlsx / pdf
+    # through a design-system-driven pipeline and a vision-critic loop — strictly
+    # better than the legacy builtins which only supported docx/pdf/md and had a
+    # broken weasyprint dependency. The old builtin registration call sites are
+    # intentionally left out; the modules themselves stay in the tree so imports
+    # don't break, but they're not connected to the request path.
 
     # Register quiz generation tool (KB → LLM → interactive quiz)
     from .services.assistant.tools.quiz_tool import register_quiz_tool
@@ -1432,8 +1433,6 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         features.append("code execution")
     if image_gen_registered:
         features.append("image generation")
-    if doc_gen_registered:
-        features.append("document generation")
 
     registered_tools = len(tool_registry.list_tools())
     if registered_tools > 0:

@@ -465,10 +465,10 @@ class AssistantService:
 
 ## How to Use Tools
 
-You have access to tools like `generate_pptx`, `generate_document`, `web_search`, etc.
+You have access to tools like `mcp_docgen__generate_document`, `web_search`, etc.
 
 **CRITICAL**: To use a tool, you must trigger the function calling mechanism - NOT write tool calls as text in your response.
-- WRONG: Writing `generate_pptx(title="...", slides=[...])` in your text response
+- WRONG: Writing `mcp_docgen__generate_document(format="pptx", ...)` in your text response
 - RIGHT: Using the function calling feature to invoke the tool
 
 When you need to use a tool:
@@ -482,16 +482,17 @@ When you need to use a tool:
 - Use provided context when available
 - Be accurate and cite sources
 
-### PowerPoint/PPT Generation
-When asked to create a PPT/演示文稿/幻灯片:
-1. Briefly outline the structure (1-2 sentences)
-2. Invoke `generate_pptx` tool with title and slides data
-3. Tell the user when done
+### Document Generation (Word / PowerPoint / Excel / PDF)
+One tool covers all four formats: ``mcp_docgen__generate_document``.
+- ``format``: "docx" | "pptx" | "xlsx" | "pdf"
+- ``title``: document title
+- ``goal``: one sentence on audience + intent (drives the planner)
+- ``body_markdown``: optional markdown ground-truth content
 
-### Document Generation (Word/PDF)
-When asked to create a document:
-1. Write the FULL content in chat first
-2. Then invoke `generate_document` tool
+Workflow:
+1. Briefly outline the structure (1-2 sentences)
+2. Invoke the tool with the appropriate ``format``
+3. Tell the user when the file is ready — it will surface as a download link
 
 ### General Rules
 - Tell the user when files are ready
@@ -535,7 +536,7 @@ When asked to create a document:
 
 ### 关键原则
 **你必须通过 function calling 机制调用工具，而不是在文本中写工具调用代码。**
-- 错误示例：在回复中写 `generate_pptx(title="...", slides=[...])`
+- 错误示例：在回复中写 `mcp_docgen__generate_document(format="pptx", ...)`
 - 正确做法：使用 function calling 功能调用工具
 
 ### 调用流程
@@ -544,10 +545,11 @@ When asked to create a document:
 3. 工具执行后，总结结果告知用户
 
 ### 常见工具
-- `generate_pptx`: 生成 PowerPoint 演示文稿
-- `generate_document`: 生成 Word 文档
+- `mcp_docgen__generate_document`: 一个工具覆盖四种格式 —— 用 `format` 参数
+  在 docx / pptx / xlsx / pdf 之间选择。会自动规划结构、渲染、视觉复核，
+  返回可下载的签名 URL。
 - `web_search`: 搜索网络获取最新信息
-- `execute_python`: 执行 Python 代码
+- `execute_python`: 执行 Python 代码（数据分析、临时计算）
 
 ### 注意事项
 - 文件生成完成后告知用户
