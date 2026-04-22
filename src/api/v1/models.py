@@ -150,9 +150,16 @@ async def update_model(
         Decimal(str(body.output_price_per_1k)) if body.output_price_per_1k is not None else None
     )
 
+    # Renames: when the request changes ``model_id`` to something new,
+    # pass it through as ``new_model_id`` so the service UPDATEs the PK.
+    # When the body omits model_id OR sends the same value, treat as no-op
+    # (avoids useless SET on identity columns + pricing sync spam).
+    new_mid = body.model_id if body.model_id and body.model_id != model_id else None
+
     model = await model_service.update_model(
         tenant_id=user.tenant_id or "default",
         model_id=model_id,
+        new_model_id=new_mid,
         display_name=body.display_name,
         context_window=body.context_window,
         max_output_tokens=body.max_output_tokens,

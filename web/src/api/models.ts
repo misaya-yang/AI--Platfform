@@ -47,6 +47,10 @@ export interface ModelCreate {
 }
 
 export interface ModelUpdate {
+  // Renames are allowed — the server will UPDATE the primary key when this
+  // differs from the path's model_id. Passing the same value (or omitting it)
+  // is a no-op.
+  model_id?: string;
   display_name?: string;
   context_window?: number;
   max_output_tokens?: number;

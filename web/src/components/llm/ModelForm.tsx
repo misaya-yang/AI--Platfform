@@ -135,6 +135,9 @@ export function ModelForm({
   const onFormSubmit = async (data: FormData) => {
     const submitData: ModelCreate | ModelUpdate = isEdit
       ? {
+          // ``model_id`` may be a rename in edit mode; the server treats
+          // unchanged values as a no-op and new values as a PK UPDATE.
+          model_id: data.model_id,
           display_name: data.display_name,
           context_window: data.context_window,
           max_output_tokens: data.max_output_tokens,
@@ -176,45 +179,53 @@ export function ModelForm({
           </DialogHeader>
 
           <div className="grid gap-4 py-4">
-            {/* Model ID & Provider (only for create) */}
-            {!isEdit && (
-              <>
-                <div className="grid gap-2">
-                  <Label htmlFor="model_id">{t("llm.model.modelId")}</Label>
-                  <Input
-                    id="model_id"
-                    placeholder={t("llm.model.modelIdPlaceholder")}
-                    {...register("model_id", {
-                      required: t("llm.model.modelIdRequired"),
-                    })}
-                  />
-                  {errors.model_id && (
-                    <p className="text-sm text-destructive">{errors.model_id.message}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    {t("llm.model.modelIdHint")}
-                  </p>
-                </div>
+            {/* Model ID — editable in both create and edit modes. Renaming
+                (e.g. ``gemini-3-flash-preview`` → ``gemini-3.1-flash``) is
+                supported server-side via PK UPDATE so operators don't
+                have to delete+recreate when the provider renames a model. */}
+            <div className="grid gap-2">
+              <Label htmlFor="model_id">{t("llm.model.modelId")}</Label>
+              <Input
+                id="model_id"
+                placeholder={t("llm.model.modelIdPlaceholder")}
+                {...register("model_id", {
+                  required: t("llm.model.modelIdRequired"),
+                })}
+              />
+              {errors.model_id && (
+                <p className="text-sm text-destructive">{errors.model_id.message}</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {isEdit
+                  ? t(
+                      "llm.model.modelIdEditHint",
+                      "This is the identifier sent to the provider's API. Renaming it updates the primary key; prior usage records keep their original id for audit.",
+                    )
+                  : t("llm.model.modelIdHint")}
+              </p>
+            </div>
 
-                <div className="grid gap-2">
-                  <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
-                  <Select
-                    value={providerId}
-                    onValueChange={(value) => setValue("provider_id", value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map((p) => (
-                        <SelectItem key={p.provider_id} value={p.provider_id}>
-                          {p.display_name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
+            {/* Provider (create only — moving a model between providers
+                is a much bigger operation and out of scope for this form). */}
+            {!isEdit && (
+              <div className="grid gap-2">
+                <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
+                <Select
+                  value={providerId}
+                  onValueChange={(value) => setValue("provider_id", value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providers.map((p) => (
+                      <SelectItem key={p.provider_id} value={p.provider_id}>
+                        {p.display_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             )}
 
             {/* Display Name */}

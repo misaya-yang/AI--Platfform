@@ -112,8 +112,16 @@ class ModelCreate(ModelBase):
 
 
 class ModelUpdate(BaseModel):
-    """Request to update a model."""
+    """Request to update a model.
 
+    ``model_id`` is renameable — the frontend now exposes it in the edit
+    dialog so a provider's model rename (e.g. ``gemini-3-flash-preview`` →
+    ``gemini-3.1-flash``) doesn't require delete+recreate. Server-side
+    rename pushes an UPDATE on the primary key; the pricing-table sync
+    also follows the new id.
+    """
+
+    model_id: str | None = Field(None, min_length=1, max_length=100)
     display_name: str | None = Field(None, min_length=1, max_length=100)
     context_window: int | None = Field(None, ge=1)
     max_output_tokens: int | None = Field(None, ge=1)

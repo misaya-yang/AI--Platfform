@@ -154,6 +154,7 @@ class ModelService:
         self,
         tenant_id: str,
         model_id: str,
+        new_model_id: str | None = None,
         display_name: str | None = None,
         context_window: int | None = None,
         max_output_tokens: int | None = None,
@@ -165,10 +166,15 @@ class ModelService:
         is_enabled: bool | None = None,
         sort_order: int | None = None,
     ) -> dict[str, Any] | None:
-        """Update a model."""
+        """Update a model. ``new_model_id`` renames the primary key."""
         updates = []
         params = []
         param_idx = 1
+
+        if new_model_id is not None and new_model_id != model_id:
+            updates.append(f"model_id = ${param_idx}")
+            params.append(new_model_id)
+            param_idx += 1
 
         if display_name is not None:
             updates.append(f"display_name = ${param_idx}")
@@ -242,9 +248,13 @@ class ModelService:
 
         if row:
             row_dict = self._row_to_dict(row)
-            # Sync with model_pricing table for usage recording
+            # Sync with model_pricing table for usage recording.
+            # Use the RETURNING row's model_id (reflects a rename) so the
+            # pricing table stays keyed to the new id. An old pricing row
+            # for the original id is left alone — historic usage records
+            # still reference it.
             await self._sync_single_model_pricing(
-                model_id=model_id,
+                model_id=row["model_id"],
                 input_price_per_1k=float(row["input_price_per_1k"] or 0),
                 output_price_per_1k=float(row["output_price_per_1k"] or 0),
                 provider=row["provider_id"],
