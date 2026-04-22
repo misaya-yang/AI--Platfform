@@ -16,13 +16,16 @@ from datetime import datetime
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
-from src.persistence.database import DatabaseStorage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_gateway_core.persistence import DatabaseStorageLike
 
 logger = get_logger(__name__)
 
 
 class MemoryService:
-    def __init__(self, database: DatabaseStorage):
+    def __init__(self, database: DatabaseStorageLike):
         self.database = database
 
     @staticmethod

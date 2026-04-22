@@ -10,7 +10,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from src.persistence.database import DatabaseStorage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_gateway_core.persistence import DatabaseStorageLike
 from .quiz_generator import QuizGenerator
 from .quiz_grader import QuizGrader
 
@@ -22,7 +25,7 @@ class QuizService:
 
     def __init__(
         self,
-        db: DatabaseStorage,
+        db: DatabaseStorageLike,
         generator: QuizGenerator,
         grader: QuizGrader | None = None,
     ) -> None:

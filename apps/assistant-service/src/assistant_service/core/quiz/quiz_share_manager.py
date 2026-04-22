@@ -13,7 +13,10 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from src.persistence.database import DatabaseStorage
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_gateway_core.persistence import DatabaseStorageLike
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +48,7 @@ def _shuffle_options(questions: list[dict]) -> list[dict]:
 class QuizShareManager:
     """Manages shareable quiz links."""
 
-    def __init__(self, db: DatabaseStorage) -> None:
+    def __init__(self, db: DatabaseStorageLike) -> None:
         self.db = db
 
     async def create_share(
