@@ -62,26 +62,61 @@ async def lifespan(app: FastAPI):
     from .core.models.model_registry import ModelRegistry, ModelProvider
     model_registry = ModelRegistry()
 
+    # Provider config must mirror gateway's (src/main.py). When the gateway
+    # chat-stream route proxies to assistant-service, the request specifies a
+    # ``model_id`` that ModelRegistry must resolve against a CONFIGURED provider
+    # — a model routed to ``google-vertex`` or ``dashscope`` with the chat-key
+    # override fails here if the provider isn't configured. Previously the
+    # gateway ran assistant code in-process so its registry was used; now that
+    # assistant-service is the real execution target, its registry has to know
+    # every provider the gateway knows.
     providers_config = {
         "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", "https://api.openai.com"),
         "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "dashscope": ("DASHSCOPE_API_KEY", None, "https://dashscope.aliyuncs.com/compatible-mode"),
+        "dashscope": ("DASHSCOPE_API_KEY", "DASHSCOPE_CHAT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode"),
         "google": ("GEMINI_API_KEY", None, "https://generativelanguage.googleapis.com"),
+        "google-vertex": ("VERTEX_API_KEY", None, "https://aiplatform.googleapis.com"),
     }
+    google_backend = os.environ.get("GOOGLE_API_BACKEND", "ai_studio").strip().lower()
+    if google_backend not in {"ai_studio", "vertex"}:
+        google_backend = "ai_studio"
+
     for pid, (env_key, env_url, default_url) in providers_config.items():
         api_key = os.environ.get(env_key, "")
+
+        # DashScope chat-specific override (DASHSCOPE_CHAT_API_KEY) to route
+        # chat to Intl/free-tier endpoint while embedding+rerank stay on CN.
+        if pid == "dashscope":
+            chat_key = os.environ.get("DASHSCOPE_CHAT_API_KEY", "").strip()
+            if chat_key:
+                api_key = chat_key
+
+        # Google fallback: GOOGLE_API_KEY is the legacy env name.
         if pid == "google" and not api_key:
             api_key = os.environ.get("GOOGLE_API_KEY", "")
-        if api_key:
-            try:
-                base_url = os.environ.get(env_url) if env_url else None
-                model_registry.configure_provider(
-                    ModelProvider(pid), api_key=api_key, base_url=base_url or default_url,
-                )
-                logger.info(f"Provider {pid} configured")
-            except Exception as e:
-                logger.warning(f"Provider {pid} failed: {e}")
+
+        # google-vertex also seeds from GOOGLE_API_BACKEND=vertex + VERTEX_API_KEY
+        # so deployments that flipped the legacy switch still reach Vertex.
+        if pid == "google" and google_backend == "vertex":
+            vertex_key = os.environ.get("VERTEX_API_KEY", "").strip()
+            if vertex_key:
+                api_key = vertex_key
+
+        if not api_key:
+            continue
+
+        try:
+            base_url = os.environ.get(env_url) if env_url else None
+            kwargs = dict(api_key=api_key, base_url=base_url or default_url)
+            if pid == "google":
+                kwargs["backend"] = google_backend
+            model_registry.configure_provider(ModelProvider(pid), **kwargs)
+            logger.info(f"Provider {pid} configured")
+        except ValueError:
+            logger.warning(f"Provider {pid} unknown in ModelProvider enum — skipping")
+        except Exception as e:
+            logger.warning(f"Provider {pid} failed: {e}")
 
     # Load models from database
     if database and getattr(database, "_pool", None):
