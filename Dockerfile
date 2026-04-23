@@ -42,9 +42,18 @@ RUN pip install --no-cache-dir --upgrade pip \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
-# Copy source code and install with all optional dependencies
+# Copy source code
 COPY src/ ./src/
-RUN pip install --no-cache-dir ".[all]" \
+
+# Copy workspace member packages. ``pyproject.toml`` lists
+# ``ai-gateway-core`` as a dependency with ``{ workspace = true }`` — pip
+# doesn't understand uv workspaces so we install the local package first
+# from its path, then the outer gateway package picks it up as satisfied.
+COPY packages/ ./packages/
+RUN pip install --no-cache-dir ./packages/ai-gateway-core \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
+    pip install --no-cache-dir ".[all]" \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
