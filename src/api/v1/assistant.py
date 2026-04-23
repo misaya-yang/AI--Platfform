@@ -666,22 +666,41 @@ async def chat(
 
 @router.post("/chat/stream")
 async def chat_stream(
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """
+    Streaming chat completion (SSE) — pure HTTP proxy to assistant-service.
+
+    Gateway handles: rate limiting + X-User-* header injection.
+    Business logic (session, model routing, tool execution, streaming) all
+    runs in the assistant-service container at :8093. This means
+    ``docker compose stop assistant-service`` now returns a clean 502 for
+    this endpoint instead of crashing gateway — true microservice isolation
+    for the hot path.
+
+    Event types preserved end-to-end: context_retrieved, text_delta,
+    tool_call, artifact_created, usage, done, error.
+    """
+    from ..deps import enforce_rate_limit
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    await enforce_rate_limit(request, user, operation="assistant_chat")
+    return await proxy_to_assistant_service(request, user, path="chat/stream")
+
+
+@router.post("/chat/stream/_legacy_in_process", include_in_schema=False)
+async def chat_stream_legacy(
     body: AssistantChatRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ):
-    """
-    Streaming chat completion (SSE).
+    """Legacy in-process implementation. Kept for fallback + reference.
 
-    Returns Server-Sent Events with incremental response chunks.
-    Event types:
-    - context_retrieved: KB search results
-    - text_delta: Incremental text content
-    - tool_call: Tool invocation
-    - usage: Token usage statistics
-    - done: Stream completion
-    - error: Error occurred
+    Hit-test only — the public path ``/chat/stream`` now proxies to
+    assistant-service. Remove this handler once we've shipped one stable
+    week on the proxy path.
     """
     from ..deps import enforce_rate_limit
     await enforce_rate_limit(request, user, operation="assistant_chat")
