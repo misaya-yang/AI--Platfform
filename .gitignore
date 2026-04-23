@@ -138,7 +138,12 @@ apps/islamic-content-service/data/
 *-Report*.js
 *-Spec.md
 claude-code-*.md
-plans/
+# plans/ holds migration plans and generated reports. Track .md + .json
+# (committable deliverables); ignore any other scratch/binary artifacts
+# that land alongside.
+plans/*
+!plans/*.md
+!plans/*.json
 docs/plans/
 docs/architecture/
 
