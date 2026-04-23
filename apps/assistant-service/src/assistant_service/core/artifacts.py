@@ -9,6 +9,7 @@ Centralizes:
 from __future__ import annotations
 
 import base64
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,31 @@ async def persist_output_files(
         filename = str(file_info.get("filename") or "output")
         mime_type = str(file_info.get("mime_type") or "application/octet-stream")
         content_base64 = file_info.get("content_base64") or ""
+
+        # Externally-hosted files (MCP resource_link, pre-signed S3/OSS URLs,
+        # etc.) come with a reachable ``download_url`` and no base64 payload.
+        # Skip the re-upload — synthesize an artifact_id so downstream event
+        # emission fires, and pass the existing URL through.
+        existing_url = file_info.get("download_url") or ""
+        if (
+            file_info.get("externally_hosted")
+            or (existing_url and not content_base64)
+        ):
+            inferred = _infer_type_and_format(filename=filename, mime_type=mime_type)
+            synthetic_id = (
+                file_info.get("artifact_id")
+                or f"ext-{uuid.uuid4().hex[:16]}"
+            )
+            persisted.append(
+                {
+                    **file_info,
+                    "artifact_id": synthetic_id,
+                    "download_url": existing_url,
+                    "type": inferred.type,
+                    "format": inferred.format,
+                }
+            )
+            continue
 
         try:
             content = base64.b64decode(content_base64)

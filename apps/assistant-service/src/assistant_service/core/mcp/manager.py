@@ -116,11 +116,12 @@ class MCPManager:
                     uri = c.get("uri") or ""
                     if uri:
                         file_outputs.append({
-                            "url": uri,
+                            "download_url": uri,
                             "filename": c.get("name") or c.get("title") or "artifact",
                             "mime_type": c.get("mimeType") or c.get("mime_type"),
                             "size_bytes": c.get("size") or c.get("size_bytes"),
                             "source": "mcp",
+                            "externally_hosted": True,
                         })
                 elif ctype == "resource":
                     # MCP "embedded resource" content — nested resource object.
@@ -128,11 +129,12 @@ class MCPManager:
                     uri = r.get("uri") or ""
                     if uri:
                         file_outputs.append({
-                            "url": uri,
+                            "download_url": uri,
                             "filename": r.get("name") or r.get("title") or "artifact",
                             "mime_type": r.get("mimeType") or r.get("mime_type"),
                             "size_bytes": r.get("size") or r.get("size_bytes"),
                             "source": "mcp",
+                            "externally_hosted": True,
                         })
                 elif ctype == "image":
                     # Inline image content — treat as file with data URL.
@@ -140,10 +142,11 @@ class MCPManager:
                     mime = c.get("mimeType") or "image/png"
                     if data:
                         file_outputs.append({
-                            "url": f"data:{mime};base64,{data}",
+                            "download_url": f"data:{mime};base64,{data}",
                             "filename": "image",
                             "mime_type": mime,
                             "source": "mcp_inline",
+                            "externally_hosted": True,
                         })
             return ToolCallResult(
                 call_id=getattr(request, "call_id", ""),
