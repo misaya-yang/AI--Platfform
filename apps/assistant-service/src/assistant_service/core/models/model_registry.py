@@ -177,6 +177,43 @@ def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
     return result
 
 
+# --- Streaming smoother for Vertex-style chunked upstreams ---
+# Vertex Express Mode flushes SSE frames ~1/sec with ~100 chars each — the
+# frontend then renders those as 3-6 big jumps and the user perceives it as
+# "not streaming." We split each Vertex frame into smaller sub-deltas with
+# a small inter-chunk delay so the UI sees a token-like cadence without
+# materially changing total stream time.
+#
+# Operator override: ``GEMINI_SMOOTHER_DISABLED=1`` turns this off (the
+# provider then yields each Vertex frame verbatim). Useful for debugging
+# "is the smoother introducing artificial latency?" and nothing else — in
+# production the smoother is always on.
+_SMOOTHER_DISABLED = os.environ.get("GEMINI_SMOOTHER_DISABLED", "").lower() in {"1", "true", "yes"}
+_SMOOTHER_CHARS_PER_CHUNK = 4
+_SMOOTHER_DELAY_SECONDS = 0.020
+_SMOOTHER_MIN_TEXT_LEN = 12  # chunks smaller than this don't benefit from splitting
+
+
+async def _smooth_text_delta(text: str) -> AsyncIterator[str]:
+    """Split a large Vertex text frame into smaller sub-deltas.
+
+    For a 200-char Vertex frame this yields ~50 sub-chunks at ~20ms intervals,
+    which the frontend renders as ~25 char/s typewriter flow — noticeably
+    streamy, total extra latency ~1s (well below the original 1-second
+    gap between Vertex frames so no net regression on total time).
+    """
+    if _SMOOTHER_DISABLED or len(text) <= _SMOOTHER_MIN_TEXT_LEN:
+        yield text
+        return
+    import asyncio as _asyncio
+    chunk_size = _SMOOTHER_CHARS_PER_CHUNK
+    for i in range(0, len(text), chunk_size):
+        yield text[i : i + chunk_size]
+        # Skip sleep on the final slice — no one sees it
+        if i + chunk_size < len(text):
+            await _asyncio.sleep(_SMOOTHER_DELAY_SECONDS)
+
+
 @dataclass
 class StreamDelta:
     """A single streaming delta from the model."""
@@ -1801,7 +1838,18 @@ class ModelRegistry:
                                     pass  # fall through to raw text
                             yield StreamDelta(thinking_content=_thought_text)
                         elif "text" in part:
-                            yield StreamDelta(content=part["text"])
+                            # SMOOTHER: Vertex Express Mode streams ~1 SSE frame
+                            # per second with ~100 chars at a time (verified with
+                            # direct curl against aiplatform.googleapis.com —
+                            # list-30-facts yielded only 6 SSE events over 6.5s).
+                            # Emitting that as a single StreamDelta makes the
+                            # frontend render in 3-6 large bursts, which users
+                            # perceive as "not streaming." Split each Vertex
+                            # frame into smaller deltas with a small inter-chunk
+                            # delay so the frontend sees token-like cadence.
+                            _text = part["text"]
+                            async for _sub in _smooth_text_delta(_text):
+                                yield StreamDelta(content=_sub)
                         elif "functionCall" in part:
                             # Gemini 3 function call with optional thoughtSignature
                             fc = part["functionCall"]
