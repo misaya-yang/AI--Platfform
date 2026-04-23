@@ -73,29 +73,51 @@ async def _reset_client() -> None:
 
 
 # --- Circuit breaker ---
+# State machine: CLOSED → (N failures) → OPEN → (recovery elapsed) → HALF_OPEN
+# → (one probe) → CLOSED on success, or → OPEN on fail with timer reset.
+# Half-open matters because when assistant-service restarts fast (e.g., a
+# 5-second rolling deploy) the breaker would otherwise force every request
+# to 503 for the full recovery window after the service is back.
 _CB_THRESHOLD, _CB_RECOVERY = 3, 30.0
 _cb_fails, _cb_opened = 0, 0.0
+_cb_half_open_probe_in_flight = False
 
 
 def _cb_check() -> None:
-    if _cb_fails >= _CB_THRESHOLD:
-        elapsed = time.monotonic() - _cb_opened
-        if elapsed < _CB_RECOVERY:
-            raise HTTPException(
-                503,
-                "Assistant Service temporarily unavailable",
-                headers={"Retry-After": str(int(_CB_RECOVERY - elapsed))},
-            )
+    """Gate the request. Raise 503 if breaker OPEN and no probe window yet."""
+    global _cb_half_open_probe_in_flight
+    if _cb_fails < _CB_THRESHOLD:
+        return
+    elapsed = time.monotonic() - _cb_opened
+    if elapsed < _CB_RECOVERY:
+        raise HTTPException(
+            503,
+            "Assistant Service temporarily unavailable",
+            headers={"Retry-After": str(int(_CB_RECOVERY - elapsed))},
+        )
+    # Recovery window elapsed. Let exactly ONE request through as a probe;
+    # its outcome (success/fail) via ``_cb_success``/``_cb_fail`` decides
+    # whether the breaker closes or re-opens. Additional concurrent requests
+    # during the probe still see OPEN to avoid stampede on a flaky upstream.
+    if _cb_half_open_probe_in_flight:
+        raise HTTPException(
+            503,
+            "Assistant Service recovering — probe in flight",
+            headers={"Retry-After": "2"},
+        )
+    _cb_half_open_probe_in_flight = True
 
 
 def _cb_success() -> None:
-    global _cb_fails, _cb_opened
+    global _cb_fails, _cb_opened, _cb_half_open_probe_in_flight
     _cb_fails, _cb_opened = 0, 0.0
+    _cb_half_open_probe_in_flight = False
 
 
 def _cb_fail() -> None:
-    global _cb_fails, _cb_opened
+    global _cb_fails, _cb_opened, _cb_half_open_probe_in_flight
     _cb_fails += 1
+    _cb_half_open_probe_in_flight = False
     if _cb_fails >= _CB_THRESHOLD:
         _cb_opened = time.monotonic()
         logger.warning("Assistant Service circuit breaker OPEN after %d failures", _cb_fails)
@@ -188,11 +210,15 @@ async def proxy_to_assistant_service(
             media_type=mt,
         )
 
+    # One external failure = one _cb_fail() call. Previously the retry
+    # path called _cb_fail() twice (on both ConnectError AND the retry's
+    # exception), which halved the effective circuit-breaker threshold —
+    # 1.5 real failures tripped a 3-strike breaker. Fixed by counting
+    # only the FINAL outcome per external request.
     try:
         return await _do()
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:
         logger.warning("Assistant proxy connection error, resetting: %s", exc)
-        _cb_fail()
         await _reset_client()
         try:
             return await _do()
