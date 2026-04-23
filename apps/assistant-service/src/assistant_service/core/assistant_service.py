@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
+    from ai_gateway_core.knowledge import KnowledgeClientLike
     from ai_gateway_core.session import SessionManagerLike
     from .code_executor import InputFile, KBDocument
     from .memory_service import MemoryService
@@ -57,8 +58,6 @@ from ai_gateway_core.storage import (
     NoOpArtifactStorage,
     NoOpFileStorage,
 )
-from src.services.knowledge.knowledge_service import KnowledgeService
-
 # Module-level NoOp singletons used as DI defaults. These are safe to share —
 # they hold no mutable state and every method is a silent no-op.
 _DEFAULT_NOOP_USAGE_RECORDER: UsageRecorderLike = NoOpUsageRecorder()
@@ -603,7 +602,7 @@ Please use this web search context to inform your response when relevant."""
     def __init__(
         self,
         model_registry: ModelRegistry,
-        kb_service: KnowledgeService | None = None,
+        kb_service: "KnowledgeClientLike | None" = None,
         tavily_api_key: str | None = None,
         session_manager: SessionManagerLike | None = None,
         context_config: ContextConfig | None = None,
