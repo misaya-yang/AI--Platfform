@@ -10,7 +10,7 @@ This is a core component of the file upload analysis feature, integrating:
 - PDFConverter for PDF-to-image conversion (vision models)
 - DocumentParser for document parsing (text extraction fallback)
 - VLM service for image descriptions
-- KnowledgeService for session-level temporary KB (long documents)
+- KnowledgeClientLike for session-level temporary KB (long documents)
 
 Supports remote storage backends (S3/OSS) via FileStorageService:
 - Files are downloaded from remote storage when needed
@@ -39,7 +39,7 @@ from .file_strategy import (
 from .pdf_converter import PDFConversionError, create_pdf_converter
 
 if TYPE_CHECKING:
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from ai_gateway_core.knowledge import KnowledgeClientLike
     from src.services.knowledge.vlm_service import DashScopeVLMService
     from ..storage.file_storage import FileStorageService
 
@@ -239,7 +239,7 @@ The description should be detailed enough for someone who hasn't seen the image 
     def __init__(
         self,
         vlm_service: DashScopeVLMService | None = None,
-        knowledge_service: KnowledgeService | None = None,
+        knowledge_service: KnowledgeClientLike | None = None,
         storage_base_path: Path | None = None,
         use_english_prompt: bool = False,
         max_pdf_pages: int = MAX_PDF_PAGES,
@@ -1421,7 +1421,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         Returns:
             Session KB ID if created, None otherwise
         """
-        # TODO: Implement session KB creation using KnowledgeService
+        # TODO: Implement session KB creation using KnowledgeClientLike
         # This would:
         # 1. Create a temporary dataset with session_id as prefix
         # 2. Add documents to the dataset
@@ -1437,13 +1437,13 @@ The description should be detailed enough for someone who hasn't seen the image 
         )
 
         # Placeholder: return None, actual KB creation to be implemented
-        # in a future task that integrates with KnowledgeService
+        # in a future task that integrates with KnowledgeClientLike
         return None
 
 
 def create_file_processor(
     vlm_service: DashScopeVLMService | None = None,
-    knowledge_service: KnowledgeService | None = None,
+    knowledge_service: KnowledgeClientLike | None = None,
     storage_base_path: Path | None = None,
     file_storage: FileStorageService | None = None,
     redis_client: Any | None = None,

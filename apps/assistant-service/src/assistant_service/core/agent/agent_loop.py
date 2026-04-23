@@ -131,7 +131,7 @@ from ..working_memory import TaskStatus, WorkingMemory
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from ai_gateway_core.knowledge import KnowledgeClientLike
     from ..models.model_registry import ModelRegistry
     from ..memory_service import MemoryService
 
@@ -464,7 +464,7 @@ class AgentLoop:
         self,
         # Core services
         model_registry: ModelRegistry | None = None,
-        kb_service: KnowledgeService | None = None,
+        kb_service: KnowledgeClientLike | None = None,
         memory_service: MemoryService | None = None,
         # Components (optional - will be created if not provided)
         scenario_analyzer: ScenarioAnalyzer | None = None,
@@ -3400,7 +3400,7 @@ class AgentLoop:
 
 def create_agent_loop(
     model_registry: ModelRegistry | None = None,
-    kb_service: KnowledgeService | None = None,
+    kb_service: KnowledgeClientLike | None = None,
     memory_service: MemoryService | None = None,
     system_prompt: str = "",
 ) -> AgentLoop:

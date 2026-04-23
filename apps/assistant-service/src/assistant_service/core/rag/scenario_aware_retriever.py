@@ -29,7 +29,7 @@ from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from ai_gateway_core.knowledge import KnowledgeClientLike
 
 logger = get_logger(__name__)
 
@@ -239,7 +239,7 @@ class ScenarioAwareRetriever:
 
     def __init__(
         self,
-        knowledge_service: KnowledgeService,
+        knowledge_service: KnowledgeClientLike,
         default_top_k: int = 5,
         max_queries: int = 5,
         results_per_query: int = 3,
@@ -520,7 +520,7 @@ class ScenarioAwareRetriever:
 
 
 def create_scenario_aware_retriever(
-    knowledge_service: KnowledgeService,
+    knowledge_service: KnowledgeClientLike,
     **kwargs,
 ) -> ScenarioAwareRetriever:
     """Create a scenario-aware retriever instance."""

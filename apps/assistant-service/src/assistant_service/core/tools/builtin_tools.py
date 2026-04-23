@@ -27,7 +27,7 @@ from .tool_registry import (
 )
 
 if TYPE_CHECKING:
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from ai_gateway_core.knowledge import KnowledgeClientLike
     from ..memory_service import MemoryService
 
 logger = get_logger(__name__)
@@ -110,7 +110,7 @@ KB_SEARCH_DEFINITION = ToolDefinition(
 class KBSearchExecutor(ToolExecutor):
     """Executor for Knowledge Base search tool."""
 
-    def __init__(self, kb_service: KnowledgeService):
+    def __init__(self, kb_service: KnowledgeClientLike):
         self.kb_service = kb_service
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
@@ -571,7 +571,7 @@ class WebSearchExecutor(ToolExecutor):
 
 
 def register_builtin_tools(
-    kb_service: KnowledgeService | None = None,
+    kb_service: KnowledgeClientLike | None = None,
     tavily_tool=None,
     memory_service: MemoryService | None = None,
     database: Any | None = None,

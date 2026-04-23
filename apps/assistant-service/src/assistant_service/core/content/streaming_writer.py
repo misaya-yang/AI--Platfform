@@ -39,7 +39,7 @@ from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from ai_gateway_core.knowledge import KnowledgeClientLike
     from .assistant_service import AssistantService
 
 logger = get_logger(__name__)
@@ -162,7 +162,7 @@ class StreamingWriter:
 
     def __init__(
         self,
-        kb_service: KnowledgeService,
+        kb_service: KnowledgeClientLike,
         assistant_service: AssistantService,
         buffer_threshold: int = 100,
         search_top_k: int = 3,
@@ -689,7 +689,7 @@ class StreamingWriter:
 
 
 def create_streaming_writer(
-    kb_service: KnowledgeService,
+    kb_service: KnowledgeClientLike,
     assistant_service: AssistantService,
     buffer_threshold: int = 100,
     search_top_k: int = 3,
