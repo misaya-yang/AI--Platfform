@@ -11,15 +11,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Install gateway deps first (for AssistantService compatibility)
+# Install workspace member package first (ai-gateway-core). Pip doesn't
+# understand uv workspaces so installing from path satisfies the
+# ``ai-gateway-core`` entry in both pyprojects below.
+COPY packages/ ./packages/
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir ./packages/ai-gateway-core
+
+# Install gateway deps (assistant-service main.py composition root still
+# imports kernel concretes from src/: persistence, session, metrics, storage).
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir ".[all]" 2>/dev/null || pip install --no-cache-dir "." && \
+RUN pip install --no-cache-dir ".[all]" 2>/dev/null || pip install --no-cache-dir "." && \
     find /opt/venv -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
 
 # Install assistant-service deps
-COPY apps/assistant-service/pyproject.toml /build/assistant-service/
+COPY apps/assistant-service/pyproject.toml apps/assistant-service/README.md /build/assistant-service/
 RUN cd /build/assistant-service && pip install --no-cache-dir "." 2>/dev/null; true
 
 # --- Runtime ---
