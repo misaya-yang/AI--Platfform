@@ -368,9 +368,14 @@ def configure_structured_logging(
     # 创建文件处理器
     if log_to_file:
         if log_dir is None:
-            # 默认日志目录：项目根目录/logs
-            project_root = Path(__file__).parent.parent.parent.parent
-            log_dir = str(project_root / "logs")
+            # Resolution order:
+            #   1. AI_GATEWAY_LOG_DIR env var (explicit override)
+            #   2. $CWD/logs (works in containers — /app/logs when WORKDIR=/app)
+            # Do NOT derive from __file__ — after Phase-2 workspace carve-out
+            # this module lives under site-packages and its parent dirs are
+            # read-only to non-root container users.
+            env_log_dir = os.environ.get("AI_GATEWAY_LOG_DIR")
+            log_dir = env_log_dir if env_log_dir else str(Path.cwd() / "logs")
 
         # 确保日志目录存在
         Path(log_dir).mkdir(parents=True, exist_ok=True)
