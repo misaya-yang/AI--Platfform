@@ -157,13 +157,16 @@ async def proxy_to_assistant_service(
             _cb_fail()
         rh, mt = _clean_headers(resp.headers), resp.headers.get("content-type")
         cl = resp.headers.get("content-length")
-        # Small non-stream responses: buffer. SSE has no content-length
-        # so it always falls through to the streaming branch.
+        # SSE has no content-length → always streams. Rename the local to
+        # avoid shadowing the outer ``body`` kwarg — Python treats any
+        # assignment in a function as scoping that name local throughout,
+        # so ``body = ...`` here would UnboundLocalError the earlier
+        # ``content=body if body is not None`` reference. Silent class of bug.
         if cl and cl.isdigit() and int(cl) < 256 * 1024:
-            body = await resp.aread()
+            buffered = await resp.aread()
             await resp.aclose()
             return Response(
-                content=body, status_code=resp.status_code, headers=rh, media_type=mt
+                content=buffered, status_code=resp.status_code, headers=rh, media_type=mt
             )
 
         async def _stream() -> AsyncIterator[bytes]:
