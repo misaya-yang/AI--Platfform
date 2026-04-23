@@ -124,12 +124,22 @@ class UserResolver:
             if isinstance(roles, str):
                 roles = [roles]
 
+            # Optional claims — absent in some JWTs, so default to safe values.
+            # These populate the X-User-Type / X-User-Email / X-User-Name
+            # headers that the Phase 5a proxy forwards to assistant-service.
+            user_type = payload.get("user_type", "user")
+            email = payload.get("email", "")
+            name = payload.get("name", "")
+
             return UserContext(
                 user_id=user_id,
                 tenant_id=tenant_id,
                 tier=tier,
                 is_authenticated=True,
                 roles=roles,
+                user_type=user_type,
+                email=email,
+                name=name,
             )
         except jwt.PyJWTError:
             return None

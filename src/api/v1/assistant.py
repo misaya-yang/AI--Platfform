@@ -276,6 +276,7 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
 
 @router.get("/models", response_model=ModelsListResponse)
 async def list_models(
+    request: Request,
     user: UserContext = Depends(get_user_context),
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ModelsListResponse:
@@ -288,7 +289,17 @@ async def list_models(
     - public: Available to all authenticated users
     - premium: Available to premium/enterprise/admin users only
     - admin: Available to admin users only (e.g., expensive Google Gemini 3 models)
+
+    Phase 5b: under ``ASSISTANT_ROUTE_MODELS_PROXIED=true`` this handler
+    proxies to assistant-service instead of running the in-process logic
+    below. The in-process path is kept as rollback fallback.
     """
+    from ._route_flags import proxied
+
+    if proxied("MODELS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(request, user, path="models")
+
     all_models = model_registry.get_available_models()
 
     # Filter models based on user's access level
@@ -324,7 +335,15 @@ async def list_datasets(
     List available knowledge base datasets.
 
     Returns datasets the user has access to for RAG integration.
+
+    Phase 5b: proxies under ``ASSISTANT_ROUTE_DATASETS_PROXIED=true``.
     """
+    from ._route_flags import proxied
+
+    if proxied("DATASETS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(request, user, path="datasets")
+
     kb_service = getattr(request.app.state, "knowledge_service", None)
     kb_proxy = getattr(request.app.state, "kb_proxy", None)
 
@@ -376,12 +395,21 @@ async def list_datasets(
 async def get_config(
     model_registry: ModelRegistry = Depends(get_model_registry),
     request: Request = None,
+    user: UserContext = Depends(get_user_context),
 ) -> AssistantConfigResponse:
     """
     Get assistant configuration.
 
     Returns default settings and available features.
+
+    Phase 5b: proxies under ``ASSISTANT_ROUTE_CONFIG_PROXIED=true``.
     """
+    from ._route_flags import proxied
+
+    if proxied("CONFIG"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(request, user, path="config")
+
     import os
 
     available_providers = [

@@ -20,6 +20,12 @@ class UserContext:
     Fields align with the Protocol in ``ai_gateway_core.auth.UserContextLike``
     so concrete instances structurally satisfy the protocol without any
     explicit registration.
+
+    ``user_type`` / ``email`` / ``name`` populate the matching X-User-*
+    identity headers the gateway proxy forwards to assistant-service
+    (Phase 5a expanded the canonical 7-header set). They're optional
+    defaults so existing callers continue to construct UserContext with
+    just ``user_id`` + ``tenant_id``.
     """
 
     user_id: str
@@ -28,6 +34,9 @@ class UserContext:
     is_authenticated: bool = False
     ip: str = ""
     roles: list[str] = field(default_factory=list)
+    user_type: str = "user"  # user | admin | service
+    email: str = ""
+    name: str = ""
 
 
 __all__ = ["UserContext"]
