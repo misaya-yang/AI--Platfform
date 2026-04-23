@@ -1029,7 +1029,16 @@ class ModelRegistry:
             if not body.get("max_tokens") or body["max_tokens"] < 16384:
                 body["max_tokens"] = 16384
         if native_search_config and native_search_config.get("enable_search"):
-            body["enable_search"] = True
+            # DashScope Intl endpoint (dashscope-intl.aliyuncs.com) does NOT
+            # support the ``enable_search`` flag — the server returns 500 when
+            # it arrives. Detect via the configured base_url and silently drop
+            # the flag for Intl; the agent loop will have already swapped in
+            # the Tavily search_web tool as a fallback.
+            provider = ModelProvider.DASHSCOPE
+            cfg = self._configs.get(provider) if provider in self._configs else None
+            cfg_base = (cfg.base_url if cfg else "") or ""
+            if "-intl" not in cfg_base:
+                body["enable_search"] = True
         return body
 
     def _build_anthropic_body(
