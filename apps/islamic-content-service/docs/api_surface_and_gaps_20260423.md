@@ -1,9 +1,63 @@
 # Islamic Content Service — 完整 API 清单 + 缺口审计
 
 **更新时间**：2026-04-23
-**对应代码版本**：`dev` 分支（包含本轮新增的 Quran `/juzs` 端点）
+**对应代码版本**：`dev` 分支（commit `1a7b4a0`，已部署生产）
 **基础地址**：`http://52.65.136.42:8091/api/v1`
 **Swagger**：`http://52.65.136.42:8091/docs`
+**部署状态**：✅ 生产已上线，18 个新端点全部 200 响应
+
+---
+
+## -1. 数据完整度（生产 DB 实测 · 2026-04-23 06:34 UTC）
+
+数据层**全部满配**，所有新端点都能返回真实数据，不会触发 `NotReadyError`。
+
+### Quran —— canonical 完整
+
+| 项 | 数量 | 说明 |
+|---|---|---|
+| Chapters | **114** | 全 canonical |
+| Ayahs | **6,236** | 全 canonical |
+| 逐词 words | 77,429 | word-by-word 完整 |
+| 同步翻译 | **145 个** | en/ar-tafsir/zh/ur/tr/ms/id 全覆盖 |
+| 同步诵读人 | **12 个** | Mishary / Sudais / Minshawi 等 |
+| 节级音频 URL | 74,832 | = 6,236 × 12 |
+| 章级音频 track | 1,368 | = 114 × 12 |
+| 字级时间轴 | 74,831 | 逐字对齐（word-level segments） |
+| Triplet 块（AI Quran） | 2,115 | 3 句一组 |
+
+### Hadith —— 3 级层次结构 100% 覆盖（2026-04-22 刚完成重构）
+
+| Collection | Items | Books | Chapters | Orphans |
+|---|---|---|---|---|
+| bukhari | 7,563 | 98 | 3,738 | **0** |
+| muslim | 7,205 | 56 | 1,334 | **0** |
+| abudawud | 5,274 | 43 | 1,884 | **0** |
+| nasai | 5,758 | 52 | 2,531 | **0** |
+| tirmidhi | 3,956 | 49 | 2,224 | **0** |
+| ibnmajah | 4,341 | 38 | 1,494 | **0** |
+| nawawi（40 Hadith） | 42 | 1 | 1 | **0** |
+| **合计** | **34,139** | **338** | **13,206** | **0** |
+
+- **67,937 条 localizations**（en + ar 双语全覆盖） — `/hadith/search` 的数据基础
+- **73,460 条 grades**（sahih / hasan / daif 评级） — 为未来 grade-filter 端点就绪
+- **0 orphan** —— 每条 hadith 都挂到 book + chapter
+
+### Dua —— 满配
+
+| 项 | 数量 |
+|---|---|
+| Categories | 31 |
+| Duas | 72 |
+
+全部带 `category` / `occasion` / `authenticity` / `source` —— `/dua/search` 和 `/dua/by-occasion` 新端点全可用。
+
+### 同步健康度
+
+- `source_sync_runs` = **76 条历史记录**（最近四周持续增量 sync，数据不冷）
+- Redis DB 1 部署后已 FLUSHDB，前端拿到的是最新响应（不会命中旧缓存）
+
+**一句话**：三大数据都已存好、更新好，新端点接上即可，客户端/第三方直接调用就行。
 
 ---
 
