@@ -48,16 +48,31 @@ class _NoOpConfig:
 
 
 class NoOpFileStorage:
-    """Protocol-satisfying null FileStorage. download_file returns empty bytes."""
+    """Protocol-satisfying null FileStorage. download_file returns empty bytes.
+
+    ``__bool__`` returns False so legacy ``if self.file_storage:`` truthy
+    checks continue to skip the "real storage configured" branch when the
+    service is un-injected — matching the pre-DI semantics where the
+    attribute was ``None`` on initialisation failure.
+    """
 
     config: Any = _NoOpConfig()
+
+    def __bool__(self) -> bool:
+        return False
 
     async def download_file(self, path: str) -> bytes:
         return b""
 
 
 class NoOpArtifactStorage:
-    """Protocol-satisfying null ArtifactStorage. Persist calls return None-like stubs."""
+    """Protocol-satisfying null ArtifactStorage. Persist calls return None-like stubs.
+
+    See ``NoOpFileStorage.__bool__`` — same rationale.
+    """
+
+    def __bool__(self) -> bool:
+        return False
 
     async def create_artifact(self, **fields: Any) -> Any:
         return None

@@ -45,10 +45,26 @@ if TYPE_CHECKING:
 from cachetools import TTLCache
 from ai_gateway_core.auth import UserContext
 from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.metrics import (
+    NoOpRealtimeMetrics,
+    NoOpUsageRecorder,
+    RealtimeMetricsLike,
+    UsageRecorderLike,
+)
+from ai_gateway_core.storage import (
+    ArtifactStorageLike,
+    FileStorageLike,
+    NoOpArtifactStorage,
+    NoOpFileStorage,
+)
 from src.services.knowledge.knowledge_service import KnowledgeService
-from src.services.metrics.realtime_metrics import get_realtime_metrics
-from src.services.metrics.usage_recorder import get_usage_recorder
-from src.services.storage import get_artifact_storage, get_file_storage
+
+# Module-level NoOp singletons used as DI defaults. These are safe to share —
+# they hold no mutable state and every method is a silent no-op.
+_DEFAULT_NOOP_USAGE_RECORDER: UsageRecorderLike = NoOpUsageRecorder()
+_DEFAULT_NOOP_REALTIME_METRICS: RealtimeMetricsLike = NoOpRealtimeMetrics()
+_DEFAULT_NOOP_ARTIFACT_STORAGE: ArtifactStorageLike = NoOpArtifactStorage()
+_DEFAULT_NOOP_FILE_STORAGE: FileStorageLike = NoOpFileStorage()
 from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
 from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
@@ -608,6 +624,13 @@ Please use this web search context to inform your response when relevant."""
         tenant_tool_policy: Any | None = None,
         tenant_mcp_config: Any | None = None,
         tool_audit: Any | None = None,
+        # Bucket-B injection (Phase 4.2). Defaults are NoOp reference impls
+        # from ai_gateway_core; the composition root in main.py passes in the
+        # gateway's real recorder/storage concretes.
+        usage_recorder: UsageRecorderLike = _DEFAULT_NOOP_USAGE_RECORDER,
+        realtime_metrics: RealtimeMetricsLike = _DEFAULT_NOOP_REALTIME_METRICS,
+        artifact_storage: ArtifactStorageLike = _DEFAULT_NOOP_ARTIFACT_STORAGE,
+        file_storage: FileStorageLike = _DEFAULT_NOOP_FILE_STORAGE,
     ):
         self.model_registry = model_registry
         self.kb_service = kb_service or kb_proxy  # Use proxy when local KB unavailable
@@ -650,18 +673,22 @@ Please use this web search context to inform your response when relevant."""
         if self.code_executor:
             self._register_code_executor_tool()
 
-        # Artifact storage (for persisting output files)
-        self.artifact_storage = get_artifact_storage()
+        # Artifact storage (for persisting output files) — DI from composition root
+        self.artifact_storage = artifact_storage
+        # Bucket-B DI — recorders for per-request usage + realtime dashboards
+        self.usage_recorder = usage_recorder
+        self.realtime_metrics = realtime_metrics
 
-        # File storage (for accessing user uploads from S3/OSS)
-        try:
-            self.file_storage = get_file_storage()
+        # File storage (for accessing user uploads from S3/OSS) — DI from composition root.
+        # A NoOp default makes ``if self.file_storage:`` evaluate False (via __bool__),
+        # preserving the legacy "not configured, fall back to local" semantics.
+        self.file_storage = file_storage
+        if self.file_storage:
             logger.info(
-                f"[AssistantService] File storage initialized: backend={self.file_storage.config.backend.value if self.file_storage else 'None'}"
+                f"[AssistantService] File storage initialized: backend={self.file_storage.config.backend.value}"
             )
-        except RuntimeError as e:
-            self.file_storage = None  # Not initialized, local storage only
-            logger.warning(f"[AssistantService] File storage not available (will use local): {e}")
+        else:
+            logger.info("[AssistantService] File storage not configured (using local fallback)")
 
         # KV-Cache optimization
         self.cache_optimizer = ContextCacheOptimizer(CacheConfig())
@@ -2734,7 +2761,7 @@ Please use this web search context to inform your response when relevant."""
             input_tokens = usage.get("input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             try:
-                usage_recorder = get_usage_recorder()
+                usage_recorder = self.usage_recorder
                 await usage_recorder.record_usage(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
@@ -2757,7 +2784,7 @@ Please use this web search context to inform your response when relevant."""
 
             # Update real-time metrics in Redis for dashboard
             try:
-                realtime_metrics = get_realtime_metrics()
+                realtime_metrics = self.realtime_metrics
                 if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
                     await realtime_metrics.record_token_usage(input_tokens, output_tokens)
                     logger.debug(
@@ -2954,7 +2981,7 @@ Please use this web search context to inform your response when relevant."""
             input_tokens = usage.get("input_tokens", 0)
             output_tokens = usage.get("output_tokens", 0)
             try:
-                usage_recorder = get_usage_recorder()
+                usage_recorder = self.usage_recorder
                 await usage_recorder.record_usage(
                     tenant_id=user.tenant_id,
                     user_id=user.user_id,
@@ -2976,7 +3003,7 @@ Please use this web search context to inform your response when relevant."""
 
             # Update real-time metrics in Redis for dashboard
             try:
-                realtime_metrics = get_realtime_metrics()
+                realtime_metrics = self.realtime_metrics
                 if realtime_metrics and (input_tokens > 0 or output_tokens > 0):
                     await realtime_metrics.record_token_usage(input_tokens, output_tokens)
                     logger.debug(

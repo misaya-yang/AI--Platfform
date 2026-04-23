@@ -181,6 +181,24 @@ async def lifespan(app: FastAPI):
 
     # ── AssistantService ──
     from .core import AssistantService
+    # Bucket-B wiring (Phase 4.2): fetch concrete recorders/storage from the
+    # gateway's src/ and inject into AssistantService. ``main.py`` is the
+    # only allowed composition-root site for these src.* imports; anywhere
+    # else in apps/assistant-service/ uses the Protocols from ai-gateway-core.
+    from src.services.metrics.realtime_metrics import get_realtime_metrics
+    from src.services.metrics.usage_recorder import get_usage_recorder
+    from src.services.storage import get_artifact_storage, get_file_storage
+
+    realtime_metrics = get_realtime_metrics()
+    usage_recorder = get_usage_recorder()
+    artifact_storage = get_artifact_storage()
+    try:
+        file_storage = get_file_storage()
+    except RuntimeError as e:
+        logger.warning(f"File storage not configurable — falling back to NoOp: {e}")
+        from ai_gateway_core.storage import NoOpFileStorage
+        file_storage = NoOpFileStorage()
+
     assistant_service = AssistantService(
         model_registry=model_registry,
         kb_service=None,
@@ -190,6 +208,10 @@ async def lifespan(app: FastAPI):
         redis_client=redis_client,
         memory_service=memory_service,
         db=database,
+        usage_recorder=usage_recorder,
+        realtime_metrics=realtime_metrics,
+        artifact_storage=artifact_storage,
+        file_storage=file_storage,
     )
     app.state.assistant_service = assistant_service
     app.state.session_manager = session_manager
