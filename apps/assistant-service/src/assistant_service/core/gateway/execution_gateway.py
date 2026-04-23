@@ -482,7 +482,7 @@ class AssistantExecutionGateway:
             tool_name=tool_name,
             arguments=arguments,
         )
-        existing_command_id = self._find_active_command(command_key)
+        existing_command_id = await self._find_active_command(command_key)
         if existing_command_id:
             return ToolCallResult(
                 call_id=str(uuid.uuid4()),
@@ -815,7 +815,41 @@ class AssistantExecutionGateway:
             return False
         return row.get("status") == "approved"
 
-    def _find_active_command(self, command_key: str) -> str | None:
+    async def _find_active_command(self, command_key: str) -> str | None:
+        """Return the command_id of an active dedup match, or None.
+
+        ADR-004 §B: when ``self.database`` is available this reads against
+        ``assistant_command_queue`` via the partial index
+        ``idx_assistant_command_queue_active_by_key`` (migration 056).
+        The in-memory dict scan is kept as a fallback **only** for code
+        paths that construct an ``AssistantExecutionGateway`` without a
+        database (primarily tests and the legacy no-DB dev loop); it is
+        scheduled for removal once Phase 5c migrates every deployment to
+        the DB-required init path.
+        """
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT command_id
+                      FROM assistant_command_queue
+                     WHERE command_key = $1
+                       AND status IN ('queued', 'running', 'awaiting_approval')
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                    """,
+                    command_key,
+                )
+                if row:
+                    return row["command_id"]
+                return None
+            except Exception as exc:  # noqa: BLE001 — keep the fallback open
+                logger.warning(
+                    "_find_active_command DB query failed, falling back to "
+                    "in-memory scan: %s",
+                    exc,
+                )
+        # In-memory fallback — tests and DB-less dev only.
         for command_id, item in self._commands.items():
             if item.get("command_key") != command_key:
                 continue
