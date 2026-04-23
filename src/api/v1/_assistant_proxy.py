@@ -73,53 +73,49 @@ async def _reset_client() -> None:
 
 
 # --- Circuit breaker ---
-# State machine: CLOSED → (N failures) → OPEN → (recovery elapsed) → HALF_OPEN
-# → (one probe) → CLOSED on success, or → OPEN on fail with timer reset.
-# Half-open matters because when assistant-service restarts fast (e.g., a
-# 5-second rolling deploy) the breaker would otherwise force every request
-# to 503 for the full recovery window after the service is back.
-_CB_THRESHOLD, _CB_RECOVERY = 3, 30.0
-_cb_fails, _cb_opened = 0, 0.0
-_cb_half_open_probe_in_flight = False
+# State machine: CLOSED → (N failures) → OPEN. When OPEN, the next
+# request in becomes a half-open probe — it tries the upstream and its
+# outcome decides whether to close (success) or stay open (fail).
+# Concurrent requests during the probe fast-fail with 503 so we don't
+# hammer a flaky upstream.
+#
+# This design intentionally doesn't use a "recovery timer". That felt
+# safe for flapping upstreams but produced a painful 30s dead-zone
+# after a clean restart — the upstream was healthy the whole time but
+# every request bounced because the timer hadn't elapsed. With a probe
+# slot the worst case is: one request pays the upstream-timeout cost
+# per outage, and every subsequent request either succeeds (CLOSED)
+# or fast-fails (OPEN with no slot).
+_CB_THRESHOLD = 3
+_cb_fails = 0
+_cb_probe_in_flight = False
 
 
 def _cb_check() -> None:
-    """Gate the request. Raise 503 if breaker OPEN and no probe window yet."""
-    global _cb_half_open_probe_in_flight
+    """Gate the request. Allow one probe through while OPEN; fast-fail the rest."""
+    global _cb_probe_in_flight
     if _cb_fails < _CB_THRESHOLD:
         return
-    elapsed = time.monotonic() - _cb_opened
-    if elapsed < _CB_RECOVERY:
-        raise HTTPException(
-            503,
-            "Assistant Service temporarily unavailable",
-            headers={"Retry-After": str(int(_CB_RECOVERY - elapsed))},
-        )
-    # Recovery window elapsed. Let exactly ONE request through as a probe;
-    # its outcome (success/fail) via ``_cb_success``/``_cb_fail`` decides
-    # whether the breaker closes or re-opens. Additional concurrent requests
-    # during the probe still see OPEN to avoid stampede on a flaky upstream.
-    if _cb_half_open_probe_in_flight:
+    if _cb_probe_in_flight:
         raise HTTPException(
             503,
             "Assistant Service recovering — probe in flight",
             headers={"Retry-After": "2"},
         )
-    _cb_half_open_probe_in_flight = True
+    _cb_probe_in_flight = True
 
 
 def _cb_success() -> None:
-    global _cb_fails, _cb_opened, _cb_half_open_probe_in_flight
-    _cb_fails, _cb_opened = 0, 0.0
-    _cb_half_open_probe_in_flight = False
+    global _cb_fails, _cb_probe_in_flight
+    _cb_fails = 0
+    _cb_probe_in_flight = False
 
 
 def _cb_fail() -> None:
-    global _cb_fails, _cb_opened, _cb_half_open_probe_in_flight
+    global _cb_fails, _cb_probe_in_flight
     _cb_fails += 1
-    _cb_half_open_probe_in_flight = False
-    if _cb_fails >= _CB_THRESHOLD:
-        _cb_opened = time.monotonic()
+    _cb_probe_in_flight = False
+    if _cb_fails == _CB_THRESHOLD:
         logger.warning("Assistant Service circuit breaker OPEN after %d failures", _cb_fails)
 
 
