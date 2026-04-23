@@ -52,8 +52,18 @@ COPY src/ ./src/
 COPY packages/ ./packages/
 RUN pip install --no-cache-dir ./packages/ai-gateway-core \
     --index-url ${PIP_INDEX_URL} \
-    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
-    pip install --no-cache-dir ".[all]" \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
+
+# Also install assistant-service package. Gateway v1 routes at src/api/v1/*.py
+# still import from ``assistant_service.core.*`` after the Phase-3 refactor.
+# A true HTTP boundary (gateway → assistant-service over :8093) is Phase 5;
+# until then, the gateway image needs the assistant source bundled in.
+COPY apps/assistant-service/ ./apps/assistant-service/
+RUN pip install --no-cache-dir ./apps/assistant-service \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
+
+RUN pip install --no-cache-dir ".[all]" \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
