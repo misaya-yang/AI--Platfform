@@ -62,8 +62,14 @@ async def persist_output_files(
         - type
         - format
     """
-    if not artifact_storage or not output_files:
+    if not output_files:
         return output_files
+
+    # ``artifact_storage`` may be a NoOpArtifactStorage instance whose
+    # ``__bool__`` returns False (see ai_gateway_core.storage). We MUST still
+    # process externally-hosted entries (MCP resource_link) in that case —
+    # they don't need storage — but skip the real upload path.
+    storage_available = bool(artifact_storage)
 
     persisted: list[dict[str, Any]] = []
     for file_info in output_files:
@@ -74,7 +80,8 @@ async def persist_output_files(
         # Externally-hosted files (MCP resource_link, pre-signed S3/OSS URLs,
         # etc.) come with a reachable ``download_url`` and no base64 payload.
         # Skip the re-upload — synthesize an artifact_id so downstream event
-        # emission fires, and pass the existing URL through.
+        # emission fires, and pass the existing URL through. This branch is
+        # independent of storage availability.
         existing_url = file_info.get("download_url") or ""
         if (
             file_info.get("externally_hosted")
@@ -94,6 +101,11 @@ async def persist_output_files(
                     "format": inferred.format,
                 }
             )
+            continue
+
+        # Below this point we need real storage to upload inline bytes.
+        if not storage_available:
+            persisted.append(file_info)
             continue
 
         try:
