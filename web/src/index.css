@@ -9,39 +9,40 @@
 
 @layer base {
   :root {
-    --background: 150 8% 95%;
-    --foreground: 152 15% 8%;
+    /* Cool-neutral canvas + violet brand (matches GPT dashboard mockup) */
+    --background: 220 20% 97%;
+    --foreground: 222 28% 10%;
 
     --card: 0 0% 100%;
-    --card-foreground: 152 15% 8%;
+    --card-foreground: 222 28% 10%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 152 15% 8%;
+    --popover-foreground: 222 28% 10%;
 
-    --primary: 153 46% 19%;
-    --primary-foreground: 48 30% 96%;
+    --primary: 262 83% 58%;                 /* violet-600 */
+    --primary-foreground: 220 20% 98%;
 
-    --secondary: 150 6% 93%;
-    --secondary-foreground: 152 12% 15%;
+    --secondary: 220 14% 94%;
+    --secondary-foreground: 222 20% 18%;
 
-    --muted: 150 6% 93%;
-    --muted-foreground: 150 5% 44%;
+    --muted: 220 14% 94%;
+    --muted-foreground: 220 8% 42%;
 
-    --accent: 43 50% 54%;
-    --accent-foreground: 43 55% 14%;
+    --accent: 262 83% 58%;                  /* violet = brand (single accent) */
+    --accent-foreground: 220 20% 98%;
 
-    --destructive: 0 72% 51%;
+    --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
 
-    --success: 152 55% 34%;
+    --success: 160 84% 39%;                 /* emerald-500 */
     --success-foreground: 0 0% 98%;
 
     --warning: 38 92% 50%;
     --warning-foreground: 38 80% 12%;
 
-    --border: 150 8% 88%;
-    --input: 150 8% 88%;
-    --ring: 153 46% 19%;
+    --border: 220 14% 91%;
+    --input: 220 14% 91%;
+    --ring: 262 83% 58%;
 
     --radius: 0.5rem;
     --transition-fast: 150ms;
@@ -69,41 +70,42 @@
   }
 
   .dark {
-    --background: 152 12% 6%;
-    --foreground: 150 5% 95%;
+    /* Dark canvas — deep cool ink with violet brand */
+    --background: 222 30% 7%;
+    --foreground: 220 14% 90%;
 
-    --card: 152 8% 11%;
-    --card-foreground: 150 5% 95%;
+    --card: 222 24% 11%;
+    --card-foreground: 220 14% 90%;
 
-    --popover: 152 8% 11%;
-    --popover-foreground: 150 5% 95%;
+    --popover: 222 24% 11%;
+    --popover-foreground: 220 14% 90%;
 
-    --primary: 153 38% 42%;
-    --primary-foreground: 48 30% 96%;
+    --primary: 258 90% 72%;                 /* violet-400 */
+    --primary-foreground: 222 28% 10%;
 
-    --secondary: 152 6% 15%;
-    --secondary-foreground: 150 5% 95%;
+    --secondary: 222 18% 16%;
+    --secondary-foreground: 220 14% 90%;
 
-    --muted: 152 6% 15%;
-    --muted-foreground: 150 4% 55%;
+    --muted: 222 18% 16%;
+    --muted-foreground: 220 8% 60%;
 
-    --accent: 43 42% 58%;
-    --accent-foreground: 43 50% 92%;
+    --accent: 258 90% 72%;
+    --accent-foreground: 220 20% 98%;
 
-    --destructive: 0 62% 55%;
+    --destructive: 0 72% 58%;
     --destructive-foreground: 0 0% 98%;
 
-    --success: 152 45% 44%;
+    --success: 160 70% 50%;
     --success-foreground: 0 0% 98%;
 
     --warning: 38 80% 55%;
     --warning-foreground: 38 70% 12%;
 
-    --border: 152 6% 18%;
-    --input: 152 6% 18%;
-    --ring: 153 38% 42%;
+    --border: 222 18% 20%;
+    --input: 222 18% 20%;
+    --ring: 258 90% 72%;
 
-    --sidebar-bg: 152 12% 6%;
+    --sidebar-bg: 222 30% 7%;
 
     /* Assistant UI scoped tokens — ALIGNED with global --background /
        --card / --muted / --border above so assistant page shares the

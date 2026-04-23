@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { DashboardProvider, useDashboardContext } from "./DashboardContext";
 import { KPICards } from "./components/KPICards";
+import { SummaryCharts } from "./components/SummaryCharts";
 import { DashboardLayout } from "./DashboardLayout";
 import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { useAppStore } from "@/store/useAppStore";
@@ -86,45 +87,52 @@ function DashboardContent() {
     <div ref={containerRef} style={{ minHeight: "100%", background: colors.pageBg, padding: `${P}px 0` }}>
       <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
 
-        {/* ─── Row 1: Title + Time Range + Refresh ─── */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <h1 style={{ ...TYPOGRAPHY.pageTitle, margin: 0, color: colors.textPrimary, letterSpacing: "-0.02em" }}>
+        {/* ─── Row 1: Editorial headline + live clock + refresh controls ─── */}
+        <div style={{
+          display: "flex", alignItems: "flex-end",
+          justifyContent: "space-between", gap: 16,
+          marginBottom: 18,
+        }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+            <div style={{
+              fontSize: 10, fontWeight: 600, letterSpacing: "0.14em",
+              textTransform: "uppercase", color: colors.textMuted,
+              marginBottom: 4,
+            }}>
+              <span style={{
+                display: "inline-block", width: 6, height: 6,
+                borderRadius: "50%", background: colors.accent,
+                marginRight: 8, verticalAlign: "middle",
+                boxShadow: `0 0 0 3px ${colors.accentBg}`,
+              }} />
+              Gateway · Overview
+            </div>
+            <h1 style={{
+              ...TYPOGRAPHY.pageTitle,
+              margin: 0,
+              color: colors.textPrimary,
+            }}>
               {t("metrics.title")}
             </h1>
-            <span style={{ fontSize: 12, color: colors.textMuted, fontWeight: 400, marginLeft: 8 }}>
-              {dayjs(lastRefresh).format("HH:mm:ss")}
+            <span style={{
+              fontFamily: '"IBM Plex Mono", monospace',
+              fontSize: 11, color: colors.textMuted,
+              letterSpacing: "0.02em", marginTop: 2,
+              fontVariantNumeric: "tabular-nums",
+            }}>
+              {dayjs(lastRefresh).format("YYYY-MM-DD HH:mm:ss")}
             </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Select size="small" value={refreshInterval} onChange={setRefreshInterval}
-              options={refreshOptions} style={{ width: 80 }} />
-            <Tooltip title={t("common.refresh")}><button onClick={triggerRefresh} className="dash-icon-btn"><SyncOutlined /></button></Tooltip>
-            <Tooltip title={t("dashboard.actions.fullscreen")}><button onClick={() => document.documentElement.requestFullscreen?.()} className="dash-icon-btn"><ExpandOutlined /></button></Tooltip>
+              options={refreshOptions} style={{ width: 90 }} />
+            <Tooltip title={t("common.refresh")}><button onClick={triggerRefresh} className="dash-icon-btn" aria-label="refresh"><SyncOutlined /></button></Tooltip>
+            <Tooltip title={t("dashboard.actions.fullscreen")}><button onClick={() => document.documentElement.requestFullscreen?.()} className="dash-icon-btn" aria-label="fullscreen"><ExpandOutlined /></button></Tooltip>
           </div>
         </div>
 
-        {/* ─── Row 2: Inline Filters ─── */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap",
-          background: "transparent",
-        }}>
-          <Select size="small" value={serviceId} onChange={setServiceId} options={serviceOptions} style={{ minWidth: 120 }} />
-          <Select size="small" value={userId} onChange={setUserId} options={userOptions} style={{ minWidth: 110 }} />
-          <Select size="small" value={source} onChange={(v: string) => setSource(v as SourceFilter)}
-            options={[{ label: t("dashboard.filters.allSources"), value: "all" }, { label: t("dashboard.filters.internal"), value: "internal" }, { label: t("dashboard.filters.external"), value: "external" }]}
-            style={{ minWidth: 90 }} />
-          <RangePicker size="small"
-            value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
-            onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
-            format="YYYY-MM-DD" allowClear={false} style={{ width: 220 }} />
-          <Select size="small" value={granularity} onChange={setGranularity}
-            options={[{ label: t("dashboard.filters.byDay"), value: "day" }, { label: t("dashboard.filters.byHour"), value: "hour" }]}
-            style={{ width: 75 }} />
-        </div>
-
-        {/* ─── Row 3: Tab Bar ─── */}
-        <div style={{ marginBottom: 10 }}>
+        {/* ─── Row 2: Tabs (hairline + signature red underline) ─── */}
+        <div style={{ marginBottom: 14 }}>
           <div className="dash-tabs">
             {tabs.map((tab) => (
               <button key={tab.key} className={`dash-tab ${activeTab === tab.key ? "active" : ""}`}
@@ -133,11 +141,33 @@ function DashboardContent() {
           </div>
         </div>
 
-        {/* ─── Tab Content (all content shares same container padding) ─── */}
+        {/* ─── Row 3: Filter strip (subtle, above content) ─── */}
+        <div className="dash-filters" style={{
+          display: "flex", alignItems: "center",
+          gap: 10, marginBottom: 20, flexWrap: "wrap",
+          paddingBottom: 14,
+          borderBottom: `1px solid ${colors.border}`,
+        }}>
+          <Select size="small" value={serviceId} onChange={setServiceId} options={serviceOptions} style={{ minWidth: 130 }} />
+          <Select size="small" value={userId} onChange={setUserId} options={userOptions} style={{ minWidth: 120 }} />
+          <Select size="small" value={source} onChange={(v: string) => setSource(v as SourceFilter)}
+            options={[{ label: t("dashboard.filters.allSources"), value: "all" }, { label: t("dashboard.filters.internal"), value: "internal" }, { label: t("dashboard.filters.external"), value: "external" }]}
+            style={{ minWidth: 100 }} />
+          <RangePicker size="small"
+            value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
+            onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
+            format="YYYY-MM-DD" allowClear={false} style={{ width: 230 }} />
+          <Select size="small" value={granularity} onChange={setGranularity}
+            options={[{ label: t("dashboard.filters.byDay"), value: "day" }, { label: t("dashboard.filters.byHour"), value: "hour" }]}
+            style={{ width: 80 }} />
+        </div>
+
+        {/* ─── Tab Content ─── */}
         {activeTab === "summary" && (
-          <div>
-            <div style={{ marginBottom: LAYOUT.CARD_GAP }}><KPICards /></div>
-            <div style={{ margin: 0 }}><ProviderStatusCard /></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: LAYOUT.SECTION_GAP }}>
+            <KPICards />
+            <SummaryCharts />
+            <ProviderStatusCard />
           </div>
         )}
         {activeTab !== "summary" && (
@@ -151,12 +181,42 @@ function DashboardContent() {
       </div>
 
       <style>{`
-        .dash-tabs { display: flex; gap: 0; border-bottom: 1px solid ${darkMode ? '#2e3830' : '#dde1de'}; width: 100%; }
-        .dash-tab { padding: 8px 16px; border: none; background: transparent; color: ${darkMode ? '#6d786f' : '#98a29b'}; font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; position: relative; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-        .dash-tab:hover { color: ${darkMode ? '#eef0ef' : '#161b17'}; }
-        .dash-tab.active { color: ${darkMode ? '#eef0ef' : '#161b17'}; border-bottom-color: ${darkMode ? '#3daa73' : '#1a4731'}; font-weight: 600; }
-        .dash-icon-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid ${darkMode ? '#2e3830' : '#dde1de'}; background: transparent; color: ${darkMode ? '#6d786f' : '#98a29b'}; cursor: pointer; transition: all 0.15s; font-size: 13px; }
-        .dash-icon-btn:hover { background: ${darkMode ? '#1a211c' : '#eef0ef'}; color: ${darkMode ? '#eef0ef' : '#161b17'}; }
+        .dash-tabs {
+          display: flex; gap: 2px; width: 100%;
+          border-bottom: 1px solid ${colors.border};
+        }
+        .dash-tab {
+          padding: 10px 18px; border: none; background: transparent;
+          color: ${colors.textMuted};
+          font-size: 13px; font-weight: 500;
+          letter-spacing: -0.005em;
+          cursor: pointer;
+          transition: color 140ms cubic-bezier(0.16, 1, 0.3, 1);
+          white-space: nowrap; position: relative;
+          margin-bottom: -1px;
+        }
+        .dash-tab::after {
+          content: ""; position: absolute; left: 18px; right: 18px; bottom: -1px;
+          height: 1.5px; background: transparent;
+          transition: background 180ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .dash-tab:hover { color: ${colors.textPrimary}; }
+        .dash-tab.active { color: ${colors.textPrimary}; font-weight: 600; }
+        .dash-tab.active::after { background: ${colors.accent}; }
+        .dash-icon-btn {
+          display: flex; align-items: center; justify-content: center;
+          width: 30px; height: 30px; border-radius: 6px;
+          border: 1px solid ${colors.border};
+          background: ${colors.cardBg};
+          color: ${colors.textSecondary};
+          cursor: pointer; font-size: 13px;
+          transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        .dash-icon-btn:hover {
+          background: ${colors.cardHover};
+          border-color: ${colors.borderHover};
+          color: ${colors.textPrimary};
+        }
       `}</style>
     </div>
   );
