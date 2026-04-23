@@ -122,7 +122,7 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const SIDER_WIDTH = 167;
+  const SIDER_WIDTH = 220;
   const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
   const pageTitleKey = getPageTitleKey(location.pathname);
@@ -142,21 +142,24 @@ export function AppLayout() {
         theme={resolvedTheme}
       >
         <div className="flex flex-col h-full">
-          {/* Logo + wordmark */}
-          <div className="px-4 pt-5 pb-5">
+          {/* Brand — 60px tall with bottom hairline per design */}
+          <div
+            className={`flex items-center gap-2.5 border-b border-border/60 ${collapsed ? 'justify-center px-0' : 'px-[18px]'}`}
+            style={{ height: 60, flexShrink: 0 }}
+          >
             <Logo collapsed={collapsed} />
           </div>
 
           {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto px-2 scrollbar-hide">
-            <div className="space-y-0.5 pt-2">
+          <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide py-2.5">
+            <div className="flex flex-col gap-[2px]">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
-                    `app-nav-link relative group flex items-center rounded-lg transition-all duration-150 ease-out ${
-                      collapsed ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2'
+                    `app-nav-link relative group flex items-center rounded-lg transition-colors duration-140 ease-out ${
+                      collapsed ? 'justify-center py-[9px]' : 'gap-3 px-3 py-[9px]'
                     } ${isActive ? 'app-nav-item-active' : ''}`
                   }
                 >
@@ -165,8 +168,11 @@ export function AppLayout() {
                       {isActive && !collapsed && (
                         <span
                           aria-hidden
-                          className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-full"
-                          style={{ background: 'hsl(var(--primary))' }}
+                          className="absolute left-0 top-2 bottom-2 w-[3px]"
+                          style={{
+                            background: 'hsl(var(--primary))',
+                            borderRadius: '0 2px 2px 0',
+                          }}
                         />
                       )}
                       <span className="app-nav-icon flex-shrink-0">{item.icon}</span>
@@ -187,36 +193,41 @@ export function AppLayout() {
             </div>
           </nav>
 
-          {/* Footer */}
-          <div className="px-2 py-3 border-t border-border/60 space-y-0.5">
+          {/* Footer — theme + collapse */}
+          <div className="px-2.5 py-2.5 border-t border-border/60 flex flex-col gap-[2px]">
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
-              className={`app-nav-link flex items-center w-full rounded-lg transition-colors duration-150 ease-out ${
-                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2'
+              className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
+                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
               }`}
             >
               <span className="app-nav-icon flex-shrink-0">
                 {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
               </span>
               {!collapsed && (
-                <span className="app-nav-label">
-                  {darkMode ? t("theme.mode.dark") : t("theme.mode.light")}
-                </span>
+                <>
+                  <span className="app-nav-label flex-1 text-left">
+                    {darkMode ? t("theme.mode.dark", "深色模式") : t("theme.mode.light", "浅色模式")}
+                  </span>
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ color: 'hsl(var(--muted-foreground) / 0.5)', transform: 'rotate(-90deg)' }}>
+                    <path d="M2.5 3.8l2.5 2.5 2.5-2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </>
               )}
             </button>
             <button
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
-              className={`app-nav-link flex items-center w-full rounded-lg transition-colors duration-150 ease-out ${
-                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2'
+              className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
+                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
               }`}
             >
-              <span className="app-nav-icon flex-shrink-0">
+              <span className="app-nav-icon flex-shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
                 {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
               </span>
               {!collapsed && (
-                <span className="app-nav-label">{t('nav.collapseSidebar')}</span>
+                <span className="app-nav-label">{t('nav.collapseSidebar', '收起侧栏')}</span>
               )}
             </button>
           </div>
@@ -237,7 +248,9 @@ export function AppLayout() {
                 <Menu size={18} />
               </button>
             )}
-            <span className="text-sm font-medium text-foreground">{t(pageTitleKey)}</span>
+            {!location.pathname.startsWith("/dashboard") && (
+              <span className="text-sm font-medium text-foreground">{t(pageTitleKey)}</span>
+            )}
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
             <div className="flex items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
@@ -269,27 +282,35 @@ export function AppLayout() {
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
-        /* Base nav link */
-        .app-nav-link { color: hsl(var(--muted-foreground)); cursor: pointer; }
-        .app-nav-link:hover { background: hsl(var(--muted) / 0.55); color: hsl(var(--foreground)); }
+        /* Base nav link — matches design-handoff Sidebar */
+        .app-nav-link {
+          color: hsl(215 16% 38%); /* textMid */
+          cursor: pointer;
+          font-size: 13px;
+        }
+        .dark .app-nav-link { color: hsl(220 8% 65%); }
+        .app-nav-link:hover { background: hsl(var(--muted) / 0.5); color: hsl(var(--foreground)); }
         .app-nav-link:hover .app-nav-icon { color: hsl(var(--foreground)); }
-        .app-nav-icon { color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; }
+        .app-nav-icon {
+          color: inherit;
+          display: inline-flex;
+          align-items: center;
+        }
         .app-nav-label {
-          font-family: "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif;
-          font-size: 13.5px;
-          font-weight: 400;
+          font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+          font-size: 13px;
+          font-weight: 500;
           letter-spacing: 0;
           line-height: 1.2;
         }
 
-        /* Active state — violet tint bg + violet icon & text */
+        /* Active — indigo soft bg + indigo icon/text + 600 weight */
         .app-nav-item-active {
           background: hsl(var(--primary) / 0.10);
-          color: hsl(var(--primary));
+          color: hsl(var(--primary)) !important;
         }
         .app-nav-item-active:hover {
-          background: hsl(var(--primary) / 0.14);
-          color: hsl(var(--primary));
+          background: hsl(var(--primary) / 0.13);
         }
         .app-nav-item-active .app-nav-icon,
         .app-nav-item-active:hover .app-nav-icon {
@@ -299,9 +320,8 @@ export function AppLayout() {
           color: hsl(var(--primary));
           font-weight: 600;
         }
-
-        .dark .app-nav-item-active { background: hsl(var(--primary) / 0.16); }
-        .dark .app-nav-item-active:hover { background: hsl(var(--primary) / 0.22); }
+        .dark .app-nav-item-active { background: hsl(var(--primary) / 0.18); }
+        .dark .app-nav-item-active:hover { background: hsl(var(--primary) / 0.24); }
       `}</style>
     </Layout>
   );

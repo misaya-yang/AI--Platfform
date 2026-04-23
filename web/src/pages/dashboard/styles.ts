@@ -1,22 +1,27 @@
-// Dashboard Design Tokens — aligned with GPT mockup
-// Cool-neutral canvas · violet brand · per-metric accent colors · multi-hue charts
+// Dashboard Design Tokens — 1:1 mirror of the design-handoff dashboard.jsx
+// Reference: anthropic design handoff bundle · gateway/project/dashboard.jsx `T`
 
 export const SPACING = {
   xs: 4, sm: 8, md: 12, lg: 16, xl: 20, '2xl': 24, '3xl': 32, '4xl': 40, '5xl': 56, '6xl': 72,
 } as const;
 
-export const RADIUS = { sm: 6, md: 10, lg: 14 } as const;
+export const RADIUS = { sm: 6, md: 8, lg: 12 } as const;
 
 export const TYPOGRAPHY = {
-  pageTitle:    { fontSize: 22, fontWeight: 600, letterSpacing: '-0.02em', lineHeight: 1.2 },
-  sectionTitle: { fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' },
-  eyebrow:      { fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase' as const },
-  cardLabel:    { fontSize: 13, fontWeight: 500 },
-  kpiValue:     { fontSize: 28, fontWeight: 600, fontFeatureSettings: '"tnum"', letterSpacing: '-0.02em' },
+  pageTitle:    { fontSize: 17, fontWeight: 600, letterSpacing: '-0.2px', lineHeight: 1.2 },
+  sectionTitle: { fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.01em' },
+  eyebrow:      { fontSize: 11, fontWeight: 500, letterSpacing: '0' },
+  cardLabel:    { fontSize: 12.5, fontWeight: 500 },
+  kpiValue:     { fontSize: 26, fontWeight: 600, fontFeatureSettings: '"tnum"', letterSpacing: '-0.5px' },
   kpiUnit:      { fontSize: 13, fontWeight: 500 },
   body:         { fontSize: 13, fontWeight: 400 },
-  caption:      { fontSize: 12, fontWeight: 500 },
-  mono:         { fontFamily: '"IBM Plex Mono", "JetBrains Mono", SFMono-Regular, Menlo, monospace', fontFeatureSettings: '"tnum"' },
+  caption:      { fontSize: 11.5, fontWeight: 500 },
+  mono:         { fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace', fontFeatureSettings: '"tnum"' },
+} as const;
+
+export const FONT_FAMILY = {
+  sans: '"Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif',
+  mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace',
 } as const;
 
 export const TRANSITION = {
@@ -29,110 +34,117 @@ export const REDUCED_MOTION_CSS = `@media(prefers-reduced-motion:reduce){*,*::be
 
 export const ELEVATION = (dark: boolean) => ({
   none: 'none',
-  sm: dark ? 'none' : '0 1px 2px rgba(17, 24, 39, 0.05)',
-  md: dark ? 'none' : '0 2px 10px rgba(17, 24, 39, 0.06)',
-  lg: dark ? 'none' : '0 6px 24px rgba(17, 24, 39, 0.08)',
+  sm: dark ? 'none' : '0 1px 2px rgba(16,18,24,0.04)',
+  md: dark ? 'none' : '0 4px 16px rgba(16,18,24,0.05)',
+  lg: dark ? 'none' : '0 8px 32px rgba(16,18,24,0.08)',
 });
 
 export const LAYOUT = {
   CARD_GAP: 14,
-  CARD_PADDING: 18,
+  CARD_PADDING: 16,
   CARD_RADIUS: 12,
   PAGE_PADDING: 0,
   KPI_HEIGHT: 'auto' as unknown as number,
   PANEL_MIN_HEIGHT: 400,
-  DASHBOARD_MIN_CONTENT_WIDTH: 1060,
+  DASHBOARD_MIN_CONTENT_WIDTH: 1020,
   GRID_GAP: 14,
   SECTION_GAP: 16,
   KPI_COLUMNS: 5,
   PROVIDER_COLUMNS: 5,
-  FIVE_COL_MIN_ITEM_WIDTH: 200,
+  FIVE_COL_MIN_ITEM_WIDTH: 190,
   BREAKPOINTS: { sm: 640, md: 768, lg: 1024, xl: 1280 },
 } as const;
 
-// ── Palette — violet brand on cool-neutral canvas ───────────────────
+// ── Exact design-handoff palette ────────────────────────────────────
+// All hex values verbatim from dashboard.jsx `T`. Dark mode values
+// derived by inverting luminance on the neutrals while keeping the
+// indigo accent stable (with minor brightness lift).
 export const getColors = (darkMode: boolean) => ({
-  // Surfaces
-  pageBg:    darkMode ? '#0b0f17' : '#f5f7fa',
-  cardBg:    darkMode ? '#151a24' : '#ffffff',
-  cardHover: darkMode ? '#1a202c' : '#f8fafc',
-  innerBg:   darkMode ? '#1c2230' : '#f1f3f7',
+  // Canvas
+  pageBg:    darkMode ? '#0c0f16' : '#f5f6f8',
+  cardBg:    darkMode ? '#161a24' : '#ffffff',
+  cardHover: darkMode ? '#1b2130' : '#f3f4f7',   // T.hover
+  innerBg:   darkMode ? '#111622' : '#fafbfc',   // T.surfaceAlt
 
-  // Borders (hairlines)
-  border:      darkMode ? '#242b38' : '#e5e7eb',
-  borderHover: darkMode ? '#2f3745' : '#d1d5db',
-  borderStrong: darkMode ? '#3a4252' : '#cbd5e1',
+  // Borders
+  border:      darkMode ? '#2a3042' : '#e6e8ee',  // T.border
+  borderSoft:  darkMode ? '#232938' : '#eef0f4',  // T.borderSoft
+  divider:     darkMode ? '#1e2432' : '#f1f2f6',  // T.divider
+  borderHover: darkMode ? '#3a4156' : '#cfd2d8',
+  borderStrong: darkMode ? '#3f465c' : '#cfd2d8',
 
   // Ink
-  textPrimary:   darkMode ? '#e5e7eb' : '#111827',
-  textSecondary: darkMode ? '#9ca3af' : '#4b5563',
-  textMuted:     darkMode ? '#6b7280' : '#9ca3af',
+  textPrimary:   darkMode ? '#e7e9ef' : '#1a1d24',  // T.text
+  textSecondary: darkMode ? '#a2a7b4' : '#565a66',  // T.textMid
+  textMuted:     darkMode ? '#787d8a' : '#8b8f9b',  // T.textDim
+  textFaint:     darkMode ? '#4e5362' : '#b7bac3',  // T.textFaint
 
-  // Brand (violet) — active nav, primary CTAs, focus rings
-  accent:       darkMode ? '#a78bfa' : '#7c3aed',
-  accentBright: darkMode ? '#c4b5fd' : '#8b5cf6',
-  accentDeep:   darkMode ? '#8b5cf6' : '#6d28d9',
+  // Signature indigo — the ONE accent
+  accent:       darkMode ? '#8794ff' : '#6674f4',   // T.accent
+  accentBright: darkMode ? '#9ea9ff' : '#7b87f6',
+  accentDeep:   darkMode ? '#6674f4' : '#5663e8',   // T.accentHover
+  accentSoft:   darkMode ? '#232958' : '#eef0fe',   // T.accentSoft
 
-  // Semantic palette (KPI per-metric color + status)
-  success: darkMode ? '#34d399' : '#10b981',
-  info:    darkMode ? '#60a5fa' : '#3b82f6',
-  warning: darkMode ? '#fbbf24' : '#f59e0b',
-  error:   darkMode ? '#f87171' : '#ef4444',
+  // Semantic
+  success:      darkMode ? '#34d399' : '#10b981',
+  successSoft:  darkMode ? 'rgba(16,185,129,0.12)' : '#ecfdf5',
+  error:        darkMode ? '#f87171' : '#ef4444',
+  errorSoft:    darkMode ? 'rgba(239,68,68,0.12)' : '#fef2f2',
+  warning:      darkMode ? '#fbbf24' : '#f59e0b',
+  warningSoft:  darkMode ? 'rgba(245,158,11,0.12)' : '#fffbeb',
+  danger:       darkMode ? '#f87171' : '#ef4444',
 
   // Back-compat aliases
   gold:   darkMode ? '#fbbf24' : '#f59e0b',
-  purple: darkMode ? '#a78bfa' : '#8b5cf6',
+  purple: darkMode ? '#c4b5fd' : '#a78bfa',
+  info:   darkMode ? '#22d3ee' : '#06b6d4',
 
-  // Tinted surface fills (KPI badge backgrounds, status chips)
-  successBg: darkMode ? 'rgba(52,211,153,0.14)'  : 'rgba(16,185,129,0.10)',
-  infoBg:    darkMode ? 'rgba(96,165,250,0.14)'  : 'rgba(59,130,246,0.10)',
-  warningBg: darkMode ? 'rgba(251,191,36,0.14)'  : 'rgba(245,158,11,0.10)',
-  errorBg:   darkMode ? 'rgba(248,113,113,0.14)' : 'rgba(239,68,68,0.10)',
-  accentBg:  darkMode ? 'rgba(167,139,250,0.15)' : 'rgba(124,58,237,0.10)',
-  purpleBg:  darkMode ? 'rgba(167,139,250,0.15)' : 'rgba(139,92,246,0.10)',
+  // Tinted fills
+  successBg: darkMode ? 'rgba(52,211,153,0.14)' : '#ecfdf5',
+  warningBg: darkMode ? 'rgba(251,191,36,0.14)' : '#fffbeb',
+  errorBg:   darkMode ? 'rgba(248,113,113,0.14)' : '#fef2f2',
+  accentBg:  darkMode ? 'rgba(135,148,255,0.14)' : '#eef0fe',
+  purpleBg:  darkMode ? 'rgba(196,181,253,0.14)' : '#f5f0ff',
+  infoBg:    darkMode ? 'rgba(34,211,238,0.14)' : '#ecfeff',
 
-  shadowSm: darkMode ? 'none' : '0 1px 2px rgba(17,24,39,0.05)',
-  shadowMd: darkMode ? 'none' : '0 2px 10px rgba(17,24,39,0.06)',
-  shadowLg: darkMode ? 'none' : '0 6px 24px rgba(17,24,39,0.08)',
+  shadowSm: darkMode ? 'none' : '0 1px 2px rgba(16,18,24,0.04)',
+  shadowMd: darkMode ? 'none' : '0 4px 16px rgba(16,18,24,0.05)',
+  shadowLg: darkMode ? 'none' : '0 8px 32px rgba(16,18,24,0.08)',
 
-  // Legacy gradient keys (kept for back-compat with other panels)
-  accentGradient:  darkMode ? 'linear-gradient(135deg,#a78bfa,#7c3aed)' : 'linear-gradient(135deg,#8b5cf6,#6d28d9)',
+  // Legacy gradient keys
+  accentGradient:  darkMode ? 'linear-gradient(135deg,#8794ff,#6674f4)' : 'linear-gradient(135deg,#6674f4,#5663e8)',
   successGradient: darkMode ? 'linear-gradient(135deg,#34d399,#10b981)' : 'linear-gradient(135deg,#10b981,#059669)',
   warningGradient: darkMode ? 'linear-gradient(135deg,#fbbf24,#f59e0b)' : 'linear-gradient(135deg,#f59e0b,#d97706)',
   errorGradient:   darkMode ? 'linear-gradient(135deg,#f87171,#ef4444)' : 'linear-gradient(135deg,#ef4444,#dc2626)',
-  purpleGradient:  darkMode ? 'linear-gradient(135deg,#c4b5fd,#a78bfa)' : 'linear-gradient(135deg,#a78bfa,#7c3aed)',
+  purpleGradient:  darkMode ? 'linear-gradient(135deg,#c4b5fd,#a78bfa)' : 'linear-gradient(135deg,#a78bfa,#8b5cf6)',
 });
 
-// ── KPI per-metric color map (matches GPT mockup icon badges) ───────
+// ── KPI per-metric color map (dashboard.jsx KPIS) ─────────────────────
 export const getKpiAccents = (darkMode: boolean) => {
   const c = getColors(darkMode);
   return {
-    requests: { fg: c.purple,  bg: c.purpleBg  },
-    cost:     { fg: c.success, bg: c.successBg },
-    latency:  { fg: c.info,    bg: c.infoBg    },
-    success:  { fg: c.success, bg: c.successBg },
-    tokens:   { fg: c.accent,  bg: c.accentBg  },
+    requests: { fg: c.accent, bg: c.accentBg  }, // indigo
+    cost:     { fg: c.success, bg: c.successBg }, // green
+    latency:  { fg: c.info,   bg: c.infoBg    }, // cyan
+    success:  { fg: c.success, bg: c.successBg }, // green
+    tokens:   { fg: c.purple, bg: c.purpleBg  }, // purple
   };
 };
 
-// ── Chart series palette — multi-hue brand colors (donut, stacks) ───
-// Order matches GPT mockup: orange (DashScope-ish), blue (Gemini),
-// green (Vertex/google), slate (others), violet (Anthropic/extras), amber.
-export const getChartPalette = (darkMode: boolean) => darkMode ? [
-  '#fb923c', // orange-400
-  '#60a5fa', // blue-400
-  '#34d399', // emerald-400
-  '#94a3b8', // slate-400
-  '#a78bfa', // violet-400
-  '#fbbf24', // amber-400
-] : [
-  '#f97316', // orange-500
-  '#3b82f6', // blue-500
-  '#10b981', // emerald-500
-  '#94a3b8', // slate-400
-  '#8b5cf6', // violet-500
-  '#f59e0b', // amber-500
-];
+// ── Chart series palette (exact from dashboard.jsx) ───────────────────
+export const getChartPalette = (darkMode: boolean) => {
+  const c = getColors(darkMode);
+  return darkMode ? [
+    '#8794ff', '#34d399', '#22d3ee', '#c4b5fd', '#fbbf24', c.textFaint,
+  ] : [
+    '#6674f4', // indigo
+    '#10b981', // green
+    '#06b6d4', // cyan
+    '#a78bfa', // purple
+    '#f59e0b', // amber
+    '#c9ccd4', // muted
+  ];
+};
 
 export const commonStyles = { transition: TRANSITION.normal, cardHeaderHeight: 44 };
 
@@ -143,10 +155,10 @@ export const gridStyles = {
 
 export const getCardStyles = (darkMode: boolean) => {
   const c = getColors(darkMode);
-  return { background: c.cardBg, border: `1px solid ${c.border}`, borderRadius: LAYOUT.CARD_RADIUS, padding: LAYOUT.CARD_PADDING };
+  return { background: c.cardBg, border: `1px solid ${c.borderSoft}`, borderRadius: LAYOUT.CARD_RADIUS, padding: LAYOUT.CARD_PADDING };
 };
 
 export const getSectionStyles = (darkMode: boolean) => {
   const c = getColors(darkMode);
-  return { marginBottom: LAYOUT.SECTION_GAP, background: c.cardBg, border: `1px solid ${c.border}`, borderRadius: LAYOUT.CARD_RADIUS, padding: LAYOUT.CARD_PADDING };
+  return { marginBottom: LAYOUT.SECTION_GAP, background: c.cardBg, border: `1px solid ${c.borderSoft}`, borderRadius: LAYOUT.CARD_RADIUS, padding: LAYOUT.CARD_PADDING };
 };

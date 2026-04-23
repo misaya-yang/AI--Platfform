@@ -1,26 +1,57 @@
 // web/src/pages/dashboard/components/KPICards.tsx
-// KPI Summary Cards — round icon badge · large figure · inline trend · sparkline
-// Matches GPT dashboard mockup (per-metric color coding).
+// KPI Cards — 1:1 port of design-handoff dashboard.jsx KPI block.
+// Uses hand-drawn SVG icons + smooth cardinal sparkline (no recharts).
 
-import {
-  ArrowUp,
-  ArrowDown,
-  Minus,
-  FileText,
-  DollarSign,
-  Clock,
-  CheckCircle2,
-  Box,
-  type LucideIcon,
-} from "lucide-react";
+import { useId } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Area, AreaChart, ResponsiveContainer } from "recharts";
 import { useDashboardContext } from "../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary, getUsageTimeSeries, type UsageTimeSeriesPoint } from "@/api/usage";
-import { LAYOUT, TRANSITION, TYPOGRAPHY, getColors, getKpiAccents } from "../styles";
+import { FONT_FAMILY, LAYOUT, TRANSITION, getColors, getKpiAccents } from "../styles";
 import { useTranslation } from "react-i18next";
 import dayjs from "dayjs";
+
+// ── Design-handoff SVG icons ────────────────────────────────────────
+const ICON = {
+  requests: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M6 3h9l-3 6h3l-9 9 3-8H6l0-7z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  ),
+  cost: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <path d="M9 3v12M12 6H7.5a2 2 0 100 4h3a2 2 0 110 4H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  latency: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <circle cx="9" cy="9" r="6.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M9 5v4l2.5 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  success: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <circle cx="9" cy="9" r="6.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M6 9.2l2.2 2.2L12.2 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  tokens: (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+      <rect x="2.5" y="5" width="13" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M6 8.5h1M9 8.5h1M12 8.5h1M6 11h6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  trendUp: (
+    <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+      <path d="M2 7.5l3-3 2 2 3-4M6 2.5h3v3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  trendDown: (
+    <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+      <path d="M2 3.5l3 3 2-2 3 4M6 8.5h3v-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+};
 
 // ── Formatters ──────────────────────────────────────────────────────
 function formatNumber(num: number): string {
@@ -49,131 +80,62 @@ function getPreviousPeriod(dateRange: [string, string]): [string, string] {
   return [prevStart.format("YYYY-MM-DD"), prevEnd.format("YYYY-MM-DD")];
 }
 
-// ── Sparkline (area under KPI value) ───────────────────────────────
-function Sparkline({
-  data, color, gradientId,
-}: { data: number[]; color: string; gradientId: string }) {
-  if (!data || data.length < 2) return <div style={{ height: 32 }} />;
-  const series = data.map((v, i) => ({ i, v }));
-  return (
-    <div style={{ height: 32, marginTop: 10, marginLeft: -2, marginRight: -2 }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={series} margin={{ top: 3, right: 2, bottom: 0, left: 2 }}>
-          <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.32} />
-              <stop offset="100%" stopColor={color} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <Area
-            type="monotone"
-            dataKey="v"
-            stroke={color}
-            strokeWidth={1.75}
-            fill={`url(#${gradientId})`}
-            isAnimationActive={false}
-            dot={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
+// ── Smooth cardinal spline sparkline (exact design-handoff algorithm)
+function smoothPath(points: { x: number; y: number }[]) {
+  if (!points.length) return "";
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x} ${p2.y}`;
+  }
+  return d;
 }
 
-// ── Trend chip ─────────────────────────────────────────────────────
-function TrendChip({
-  value, isPositiveGood = true, isNewData = false,
-}: { value: number | null; isPositiveGood?: boolean; isNewData?: boolean }) {
-  const { t } = useTranslation();
-  const { darkMode } = useAppStore();
-  const colors = getColors(darkMode);
-
-  if (isNewData) {
-    return (
-      <span style={{
-        display: "inline-flex", alignItems: "center", gap: 4,
-        fontSize: 12, fontWeight: 600, color: colors.accent,
-      }}>
-        <span style={{
-          width: 5, height: 5, borderRadius: "50%",
-          background: colors.accent,
-        }} />
-        <span>NEW</span>
-        <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 2 }}>
-          {t("dashboard.trend.noBaseline", "无基线")}
-        </span>
-      </span>
-    );
-  }
-
-  if (value === null || value === undefined) {
-    return (
-      <span style={{
-        display: "inline-flex", alignItems: "center", gap: 4,
-        fontSize: 12, fontWeight: 500, color: colors.textMuted,
-      }}>
-        <Minus size={12} strokeWidth={2} />
-        <span>—</span>
-      </span>
-    );
-  }
-
-  const isUp = value > 0;
-  const isGood = isUp === isPositiveGood;
-  const color = isGood ? colors.success : colors.error;
-  const trendLabel = isUp ? t("dashboard.trend.up", "增长") : t("dashboard.trend.down", "下降");
-
+function Sparkline({ data, color, w = 220, h = 36 }: { data: number[]; color: string; w?: number; h?: number }) {
+  const id = useId();
+  if (!data || data.length < 2) return <div style={{ height: h }} />;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const pad = 2;
+  const range = max - min || 1;
+  const pts = data.map((v, i) => ({
+    x: pad + (i * (w - pad * 2)) / (data.length - 1),
+    y: h - pad - ((v - min) / range) * (h - pad * 2),
+  }));
+  const d = smoothPath(pts);
+  const areaD = `${d} L ${pts[pts.length - 1].x} ${h} L ${pts[0].x} ${h} Z`;
   return (
-    <span
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 3,
-        fontSize: 12, fontWeight: 600, color,
-        fontVariantNumeric: "tabular-nums",
-      }}
-      aria-label={`${trendLabel} ${Math.abs(value)}%`}
-    >
-      {isUp ? <ArrowUp size={12} strokeWidth={2.25} /> : <ArrowDown size={12} strokeWidth={2.25} />}
-      <span>{Math.abs(value).toFixed(1)}%</span>
-      <span style={{ fontWeight: 500, marginLeft: 1 }}>{trendLabel}</span>
-      <span style={{ color: colors.textMuted, fontWeight: 400, marginLeft: 4 }}>
-        {t("dashboard.trend.vsPrevious", "较上期")}
-      </span>
-    </span>
-  );
-}
-
-// ── Skeleton ────────────────────────────────────────────────────────
-function KPICardSkeleton({ darkMode }: { darkMode: boolean }) {
-  const colors = getColors(darkMode);
-  return (
-    <div style={{
-      padding: LAYOUT.CARD_PADDING,
-      borderRadius: LAYOUT.CARD_RADIUS,
-      background: colors.cardBg,
-      border: `1px solid ${colors.border}`,
-      boxShadow: colors.shadowSm,
-      minHeight: 150,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-        <div className="animate-shimmer" style={{ width: 40, height: 40, borderRadius: "50%" }} />
-        <div className="animate-shimmer" style={{ height: 12, width: 70, borderRadius: 3 }} />
-      </div>
-      <div className="animate-shimmer" style={{ height: 28, width: "55%", borderRadius: 4, marginBottom: 10 }} />
-      <div className="animate-shimmer" style={{ height: 32, width: "100%", borderRadius: 4 }} />
-    </div>
+    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display: "block" }}>
+      <defs>
+        <linearGradient id={id} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.22" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaD} fill={`url(#${id})`} />
+      <path d={d} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
 // ── KPI Card ────────────────────────────────────────────────────────
 interface KPICardProps {
   id: string;
-  title: string;
+  label: string;
   value: string | number;
-  suffix?: string;
-  icon: LucideIcon;
-  accentFg: string;
-  accentBg: string;
-  trend?: number | null;
+  unit?: string;
+  icon: React.ReactNode;
+  iconBg: string;
+  iconColor: string;
+  sparkColor: string;
+  delta: number | null;
   isPositiveGood?: boolean;
   isNewData?: boolean;
   sparklineData?: number[];
@@ -183,14 +145,20 @@ interface KPICardProps {
 }
 
 function KPICard({
-  id, title, value, suffix, icon: Icon,
-  accentFg, accentBg,
-  trend, isPositiveGood, isNewData,
+  id, label, value, unit, icon, iconBg, iconColor, sparkColor,
+  delta, isPositiveGood = true, isNewData,
   sparklineData, onClick, noData, ariaLabel,
 }: KPICardProps) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-  const colors = getColors(darkMode);
+  const c = getColors(darkMode);
+
+  const isUp = (delta ?? 0) > 0;
+  const isGood = isUp === isPositiveGood;
+  const deltaColor = isGood ? c.success : c.danger;
+  const deltaLabel = isUp
+    ? t("dashboard.trend.up", "增长")
+    : t("dashboard.trend.down", "下降");
 
   return (
     <article
@@ -205,107 +173,162 @@ function KPICard({
           onClick();
         }
       }}
-      className="kpi-card"
       style={{
-        padding: LAYOUT.CARD_PADDING,
+        flex: 1,
+        minWidth: 0,
+        background: c.cardBg,
         borderRadius: LAYOUT.CARD_RADIUS,
-        background: colors.cardBg,
-        border: `1px solid ${colors.border}`,
-        boxShadow: colors.shadowSm,
-        minHeight: 150,
+        border: `1px solid ${c.borderSoft}`,
+        padding: "16px 18px 14px",
         display: "flex",
         flexDirection: "column",
-        minWidth: 0,
-        transition: TRANSITION.normal,
-        position: "relative",
-        overflow: "hidden",
+        gap: 10,
+        transition: "transform .15s, box-shadow .15s, border-color .15s",
         cursor: onClick ? "pointer" : "default",
         outline: "none",
+        fontFamily: FONT_FAMILY.sans,
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.borderColor = colors.borderHover;
-        e.currentTarget.style.boxShadow = colors.shadowMd;
+        e.currentTarget.style.borderColor = c.border;
+        e.currentTarget.style.boxShadow = c.shadowMd;
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.borderColor = colors.border;
-        e.currentTarget.style.boxShadow = colors.shadowSm;
+        e.currentTarget.style.borderColor = c.borderSoft;
+        e.currentTarget.style.boxShadow = "none";
       }}
     >
-      {/* Row: round icon + title */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+      {/* Top row: rounded-square icon + label */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{
-          width: 40, height: 40, borderRadius: "50%",
-          background: accentBg,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          color: accentFg,
+          width: 32,
+          height: 32,
+          borderRadius: 9,
+          background: iconBg,
+          color: iconColor,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
           flexShrink: 0,
         }}>
-          <Icon size={18} strokeWidth={2} />
+          {icon}
         </div>
         <span
           id={`kpi-${id}`}
           style={{
-            ...TYPOGRAPHY.cardLabel,
-            color: colors.textSecondary,
+            fontSize: 12.5,
+            color: c.textSecondary,
+            fontWeight: 500,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {title}
+          {label}
         </span>
       </div>
 
       {/* Value */}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 2 }}>
-        <span
-          style={{
-            ...TYPOGRAPHY.kpiValue,
-            color: colors.textPrimary,
-            lineHeight: 1.1,
-          }}
-        >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
+        <span style={{
+          fontSize: 26,
+          fontWeight: 600,
+          color: c.textPrimary,
+          letterSpacing: "-0.5px",
+          fontFeatureSettings: '"tnum"',
+          lineHeight: 1.1,
+        }}>
           {value}
         </span>
-        {suffix && (
-          <span style={{
-            ...TYPOGRAPHY.kpiUnit,
-            color: colors.textMuted,
-          }}>
-            {suffix}
+        {unit && (
+          <span style={{ fontSize: 13, color: c.textSecondary, fontWeight: 500 }}>
+            {unit}
           </span>
         )}
       </div>
 
       {/* Trend */}
       {noData ? (
-        <div style={{ fontSize: 12, color: colors.textMuted, marginTop: 6 }}>
+        <div style={{ fontSize: 11.5, color: c.textMuted, minHeight: 13 }}>
           {t("dashboard.kpi.noRealData", "暂无数据")}
         </div>
       ) : (
-        <div style={{ marginTop: 4 }}>
-          <TrendChip value={trend ?? null} isPositiveGood={isPositiveGood} isNewData={isNewData} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, minHeight: 13 }}>
+          {delta === null ? (
+            <span style={{ color: c.textMuted, fontWeight: 500 }}>—</span>
+          ) : isNewData ? (
+            <>
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                color: c.accent, fontWeight: 600,
+              }}>
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.accent }} />
+                NEW
+              </span>
+              <span style={{ color: c.textMuted }}>{t("dashboard.trend.noBaseline", "无基线")}</span>
+            </>
+          ) : (
+            <>
+              <span style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+                color: deltaColor,
+                fontWeight: 600,
+                fontFeatureSettings: '"tnum"',
+              }}>
+                <span style={{ display: "flex" }}>{isUp ? ICON.trendUp : ICON.trendDown}</span>
+                {Math.abs(delta).toFixed(1)}%
+              </span>
+              <span style={{ color: c.textSecondary }}>{deltaLabel}</span>
+              <span style={{ color: c.textMuted }}>
+                {t("dashboard.trend.vsPrevious", "较上期")}
+              </span>
+            </>
+          )}
         </div>
       )}
 
-      {/* Sparkline — uses this metric's accent */}
-      {!noData && (
-        <Sparkline
-          data={sparklineData ?? []}
-          color={accentFg}
-          gradientId={`kpi-spark-${id}`}
-        />
-      )}
+      {/* Sparkline */}
+      <div style={{ marginTop: "auto", marginLeft: -4, marginRight: -4 }}>
+        {noData ? (
+          <div style={{ height: 36 }} />
+        ) : (
+          <Sparkline data={sparklineData ?? []} color={sparkColor} w={220} h={36} />
+        )}
+      </div>
     </article>
   );
 }
 
-// ── KPI Cards Container ─────────────────────────────────────────────
+// ── KPI Skeleton ────────────────────────────────────────────────────
+function KPICardSkeleton({ darkMode }: { darkMode: boolean }) {
+  const c = getColors(darkMode);
+  return (
+    <div style={{
+      flex: 1, minWidth: 0,
+      background: c.cardBg,
+      borderRadius: LAYOUT.CARD_RADIUS,
+      border: `1px solid ${c.borderSoft}`,
+      padding: "16px 18px 14px",
+      minHeight: 154,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <div className="animate-shimmer" style={{ width: 32, height: 32, borderRadius: 9 }} />
+        <div className="animate-shimmer" style={{ height: 11, width: 70, borderRadius: 3 }} />
+      </div>
+      <div className="animate-shimmer" style={{ height: 26, width: "55%", borderRadius: 4, marginBottom: 10 }} />
+      <div className="animate-shimmer" style={{ height: 11, width: "60%", borderRadius: 3, marginBottom: 14 }} />
+      <div className="animate-shimmer" style={{ height: 36, width: "100%", borderRadius: 4 }} />
+    </div>
+  );
+}
+
+// ── KPI Row Container ───────────────────────────────────────────────
 export function KPICards() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const { dateRange, granularity, serviceId, userId, lastRefresh, setTraceFilter } = useDashboardContext();
-  const kpiAccent = getKpiAccents(darkMode);
+  const kpi = getKpiAccents(darkMode);
 
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard-kpi", dateRange, serviceId, userId, lastRefresh.getTime()],
@@ -357,18 +380,18 @@ export function KPICards() {
   const latencyTrend = computeTrend(data?.avg_latency_ms || 0, prevData?.avg_latency_ms || 0);
   const successRateTrend = computeTrend(data?.success_rate || 0, prevData?.success_rate || 0);
   const tokensTrend = computeTrend(data?.total_tokens || 0, prevData?.total_tokens || 0);
+  const successSeries = series.map(() => data?.success_rate || 0);
 
-  const successSeries = series.map(() => (data?.success_rate || 0));
-
-  const kpiData: KPICardProps[] = [
+  const cards: KPICardProps[] = [
     {
       id: "requests",
-      title: t("metrics.totalRequests"),
+      label: t("metrics.totalRequests"),
       value: hasData ? formatNumber(data?.total_requests || 0) : "—",
-      icon: FileText,
-      accentFg: kpiAccent.requests.fg,
-      accentBg: kpiAccent.requests.bg,
-      trend: requestsTrend,
+      icon: ICON.requests,
+      iconBg: kpi.requests.bg,
+      iconColor: kpi.requests.fg,
+      sparkColor: kpi.requests.fg,
+      delta: requestsTrend,
       isNewData,
       noData: !hasData,
       sparklineData: sparkOf("requests"),
@@ -376,12 +399,13 @@ export function KPICards() {
     },
     {
       id: "cost",
-      title: t("dashboard.kpi.totalCostUsd"),
+      label: t("dashboard.kpi.totalCostUsd"),
       value: hasData ? formatCurrency(data?.total_cost_usd || 0) : "—",
-      icon: DollarSign,
-      accentFg: kpiAccent.cost.fg,
-      accentBg: kpiAccent.cost.bg,
-      trend: costTrend,
+      icon: ICON.cost,
+      iconBg: kpi.cost.bg,
+      iconColor: kpi.cost.fg,
+      sparkColor: kpi.cost.fg,
+      delta: costTrend,
       isPositiveGood: false,
       isNewData,
       noData: !hasData,
@@ -390,13 +414,14 @@ export function KPICards() {
     },
     {
       id: "latency",
-      title: t("metrics.avgLatency"),
+      label: t("metrics.avgLatency"),
       value: hasData ? Math.round(data?.avg_latency_ms || 0).toLocaleString() : "—",
-      suffix: hasData ? "ms" : undefined,
-      icon: Clock,
-      accentFg: kpiAccent.latency.fg,
-      accentBg: kpiAccent.latency.bg,
-      trend: latencyTrend,
+      unit: hasData ? "ms" : undefined,
+      icon: ICON.latency,
+      iconBg: kpi.latency.bg,
+      iconColor: kpi.latency.fg,
+      sparkColor: kpi.latency.fg,
+      delta: latencyTrend,
       isPositiveGood: false,
       isNewData,
       noData: !hasData,
@@ -409,13 +434,14 @@ export function KPICards() {
     },
     {
       id: "success",
-      title: t("metrics.successRate"),
+      label: t("metrics.successRate"),
       value: hasData ? (data?.success_rate || 0).toFixed(1) : "—",
-      suffix: hasData ? "%" : undefined,
-      icon: CheckCircle2,
-      accentFg: kpiAccent.success.fg,
-      accentBg: kpiAccent.success.bg,
-      trend: successRateTrend,
+      unit: hasData ? "%" : undefined,
+      icon: ICON.success,
+      iconBg: kpi.success.bg,
+      iconColor: kpi.success.fg,
+      sparkColor: kpi.success.fg,
+      delta: successRateTrend,
       isNewData,
       noData: !hasData,
       sparklineData: successSeries,
@@ -427,12 +453,13 @@ export function KPICards() {
     },
     {
       id: "tokens",
-      title: t("metrics.totalTokens"),
+      label: t("metrics.totalTokens"),
       value: hasData ? formatNumber(data?.total_tokens || 0) : "—",
-      icon: Box,
-      accentFg: kpiAccent.tokens.fg,
-      accentBg: kpiAccent.tokens.bg,
-      trend: tokensTrend,
+      icon: ICON.tokens,
+      iconBg: kpi.tokens.bg,
+      iconColor: kpi.tokens.fg,
+      sparkColor: kpi.tokens.fg,
+      delta: tokensTrend,
       isNewData,
       noData: !hasData,
       sparklineData: sparkOf("total_tokens"),
@@ -441,20 +468,25 @@ export function KPICards() {
   ];
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(auto-fit, minmax(200px, 1fr))`,
-        gap: LAYOUT.CARD_GAP,
-      }}
-    >
+    <div className="kpi-row" style={{ display: "flex", gap: 14 }}>
       {isLoading
         ? Array.from({ length: 5 }).map((_, i) => <KPICardSkeleton key={i} darkMode={darkMode} />)
-        : kpiData.map((kpi, i) => (
-            <div key={kpi.id} className="stagger-item" style={{ "--stagger-i": i } as React.CSSProperties}>
-              <KPICard {...kpi} />
+        : cards.map((k, i) => (
+            <div key={k.id} className="stagger-item" style={{ flex: 1, minWidth: 0, "--stagger-i": i } as React.CSSProperties}>
+              <KPICard {...k} />
             </div>
           ))}
+      <style>{`
+        @media (max-width: 1080px) {
+          .kpi-row { flex-wrap: wrap; }
+          .kpi-row > div { flex: 1 1 calc(50% - 7px) !important; min-width: calc(50% - 7px); }
+        }
+        @media (max-width: 640px) {
+          .kpi-row > div { flex: 1 1 100% !important; }
+        }
+      `}</style>
+      {/* swallow unused transitions */}
+      <span style={{ display: "none" }}>{TRANSITION.normal}</span>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 // web/src/pages/dashboard/index.tsx
-// Enterprise Dashboard — Compact tab-based layout
+// 监控面板 — 1:1 port of design-handoff dashboard.jsx
+// Title row · FilterBar · Tabs · KPI row · Charts row · Provider table
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { DashboardProvider, useDashboardContext } from "./DashboardContext";
@@ -8,9 +9,8 @@ import { SummaryCharts } from "./components/SummaryCharts";
 import { DashboardLayout } from "./DashboardLayout";
 import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { useAppStore } from "@/store/useAppStore";
-import { LAYOUT, getColors, TYPOGRAPHY } from "./styles";
-import { Select, DatePicker, Tooltip } from "antd";
-import { SyncOutlined, ExpandOutlined } from "@ant-design/icons";
+import { FONT_FAMILY, LAYOUT, getColors } from "./styles";
+import { Select, DatePicker } from "antd";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 import { useDashboardEntityLabels } from "./hooks/useDashboardEntityLabels";
@@ -28,10 +28,30 @@ function loadTab(): DashTab {
   return "summary";
 }
 
+// ── Design-handoff SVG icons (clock, refresh, expand, chev, cal) ─────
+const ICON = {
+  clock: (
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M6.5 3.5V6.5L8.5 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  refresh: (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M12 7a5 5 0 11-1.5-3.5M12 2v2h-2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  expand: (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M2 5V2h3M12 5V2H9M2 9v3h3M12 9v3H9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+};
+
 function DashboardContent() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-  const colors = getColors(darkMode);
+  const c = getColors(darkMode);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(1200);
   const [activeTab, setActiveTab] = useState<DashTab>(loadTab);
@@ -65,11 +85,11 @@ function DashboardContent() {
   };
 
   const tabs: { key: DashTab; label: string }[] = [
-    { key: "summary", label: t("dashboard.tabs.summary") },
-    { key: "operations", label: t("dashboard.tabs.operations") },
-    { key: "reliability", label: t("dashboard.tabs.reliability") },
-    { key: "governance", label: t("dashboard.tabs.governance") },
-    { key: "tracing", label: t("dashboard.tabs.tracing") },
+    { key: "summary", label: t("dashboard.tabs.summary", "总览") },
+    { key: "operations", label: t("dashboard.tabs.operations", "运营") },
+    { key: "reliability", label: t("dashboard.tabs.reliability", "可靠性") },
+    { key: "governance", label: t("dashboard.tabs.governance", "治理") },
+    { key: "tracing", label: t("dashboard.tabs.tracing", "追踪") },
   ];
 
   const workspaceMap: Record<string, string> = {
@@ -77,101 +97,164 @@ function DashboardContent() {
   };
 
   const refreshOptions: { label: string; value: RefreshInterval }[] = [
-    { label: t("dashboard.refresh.manual"), value: 0 }, { label: t("dashboard.refresh.30s"), value: 30 },
-    { label: t("dashboard.refresh.1min"), value: 60 }, { label: t("dashboard.refresh.5min"), value: 300 },
+    { label: t("dashboard.refresh.manual", "手动"), value: 0 },
+    { label: t("dashboard.refresh.30s", "30秒"), value: 30 },
+    { label: t("dashboard.refresh.1min", "1分钟"), value: 60 },
+    { label: t("dashboard.refresh.5min", "5分钟"), value: 300 },
   ];
 
-  const P = LAYOUT.PAGE_PADDING;
-
   return (
-    <div ref={containerRef} style={{ minHeight: "100%", background: colors.pageBg, padding: `${P}px 0` }}>
+    <div
+      ref={containerRef}
+      style={{
+        minHeight: "100%",
+        background: c.pageBg,
+        fontFamily: FONT_FAMILY.sans,
+        color: c.textPrimary,
+      }}
+    >
       <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
 
-        {/* ─── Row 1: Editorial headline + live clock + refresh controls ─── */}
+        {/* ── Title + timestamp row (matches design TopBar) */}
         <div style={{
-          display: "flex", alignItems: "flex-end",
-          justifyContent: "space-between", gap: 16,
-          marginBottom: 18,
+          display: "flex", alignItems: "center", gap: 16,
+          padding: "16px 24px 0",
         }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-            <div style={{
-              fontSize: 10, fontWeight: 600, letterSpacing: "0.14em",
-              textTransform: "uppercase", color: colors.textMuted,
-              marginBottom: 4,
-            }}>
-              <span style={{
-                display: "inline-block", width: 6, height: 6,
-                borderRadius: "50%", background: colors.accent,
-                marginRight: 8, verticalAlign: "middle",
-                boxShadow: `0 0 0 3px ${colors.accentBg}`,
-              }} />
-              Gateway · Overview
-            </div>
-            <h1 style={{
-              ...TYPOGRAPHY.pageTitle,
-              margin: 0,
-              color: colors.textPrimary,
-            }}>
-              {t("metrics.title")}
-            </h1>
-            <span style={{
-              fontFamily: '"IBM Plex Mono", monospace',
-              fontSize: 11, color: colors.textMuted,
-              letterSpacing: "0.02em", marginTop: 2,
-              fontVariantNumeric: "tabular-nums",
-            }}>
-              {dayjs(lastRefresh).format("YYYY-MM-DD HH:mm:ss")}
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Select size="small" value={refreshInterval} onChange={setRefreshInterval}
-              options={refreshOptions} style={{ width: 90 }} />
-            <Tooltip title={t("common.refresh")}><button onClick={triggerRefresh} className="dash-icon-btn" aria-label="refresh"><SyncOutlined /></button></Tooltip>
-            <Tooltip title={t("dashboard.actions.fullscreen")}><button onClick={() => document.documentElement.requestFullscreen?.()} className="dash-icon-btn" aria-label="fullscreen"><ExpandOutlined /></button></Tooltip>
+          <h1 style={{
+            fontSize: 17, fontWeight: 600, color: c.textPrimary,
+            margin: 0, letterSpacing: "-0.2px",
+          }}>
+            {t("metrics.title", "监控面板")}
+          </h1>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            padding: "4px 10px", borderRadius: 999,
+            background: c.innerBg, border: `1px solid ${c.borderSoft}`,
+            fontSize: 12, color: c.textSecondary, fontFamily: FONT_FAMILY.mono,
+          }}>
+            <span style={{ display: "flex", color: c.textMuted }}>{ICON.clock}</span>
+            <span>{dayjs(lastRefresh).format("YYYY-MM-DD HH:mm:ss")}</span>
           </div>
         </div>
 
-        {/* ─── Row 2: Tabs (hairline + signature red underline) ─── */}
-        <div style={{ marginBottom: 14 }}>
-          <div className="dash-tabs">
-            {tabs.map((tab) => (
-              <button key={tab.key} className={`dash-tab ${activeTab === tab.key ? "active" : ""}`}
-                onClick={() => handleTabChange(tab.key)}>{tab.label}</button>
-            ))}
-          </div>
-        </div>
-
-        {/* ─── Row 3: Filter strip (subtle, above content) ─── */}
-        <div className="dash-filters" style={{
-          display: "flex", alignItems: "center",
-          gap: 10, marginBottom: 20, flexWrap: "wrap",
-          paddingBottom: 14,
-          borderBottom: `1px solid ${colors.border}`,
+        {/* ── Filter bar ── */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "14px 24px 0", flexWrap: "wrap",
         }}>
-          <Select size="small" value={serviceId} onChange={setServiceId} options={serviceOptions} style={{ minWidth: 130 }} />
-          <Select size="small" value={userId} onChange={setUserId} options={userOptions} style={{ minWidth: 120 }} />
-          <Select size="small" value={source} onChange={(v: string) => setSource(v as SourceFilter)}
-            options={[{ label: t("dashboard.filters.allSources"), value: "all" }, { label: t("dashboard.filters.internal"), value: "internal" }, { label: t("dashboard.filters.external"), value: "external" }]}
-            style={{ minWidth: 100 }} />
-          <RangePicker size="small"
+          <Select
+            size="middle"
+            value={serviceId}
+            onChange={setServiceId}
+            options={serviceOptions}
+            style={{ minWidth: 130 }}
+            className="dash-filter-select"
+          />
+          <Select
+            size="middle"
+            value={userId}
+            onChange={setUserId}
+            options={userOptions}
+            style={{ minWidth: 120 }}
+            className="dash-filter-select"
+          />
+          <Select
+            size="middle"
+            value={source}
+            onChange={(v: string) => setSource(v as SourceFilter)}
+            options={[
+              { label: t("dashboard.filters.allSources", "全部来源"), value: "all" },
+              { label: t("dashboard.filters.internal", "内部"), value: "internal" },
+              { label: t("dashboard.filters.external", "外部"), value: "external" },
+            ]}
+            style={{ minWidth: 110 }}
+            className="dash-filter-select"
+          />
+          <RangePicker
+            size="middle"
             value={[dayjs(dateRange[0]), dayjs(dateRange[1])]}
             onChange={(d) => d && d[0] && d[1] && setDateRange([d[0].format("YYYY-MM-DD"), d[1].format("YYYY-MM-DD")])}
-            format="YYYY-MM-DD" allowClear={false} style={{ width: 230 }} />
-          <Select size="small" value={granularity} onChange={setGranularity}
-            options={[{ label: t("dashboard.filters.byDay"), value: "day" }, { label: t("dashboard.filters.byHour"), value: "hour" }]}
-            style={{ width: 80 }} />
+            format="YYYY-MM-DD"
+            allowClear={false}
+            style={{ width: 250 }}
+            className="dash-filter-range"
+          />
+          <Select
+            size="middle"
+            value={granularity}
+            onChange={setGranularity}
+            options={[
+              { label: t("dashboard.filters.byDay", "按天"), value: "day" },
+              { label: t("dashboard.filters.byHour", "按小时"), value: "hour" },
+            ]}
+            style={{ width: 96 }}
+            className="dash-filter-select"
+          />
+          <div style={{ flex: 1 }} />
+          <Select
+            size="middle"
+            value={refreshInterval}
+            onChange={setRefreshInterval}
+            options={refreshOptions}
+            style={{ width: 96 }}
+            className="dash-filter-select"
+          />
+          <button onClick={triggerRefresh} className="dash-icon-btn" aria-label="refresh">{ICON.refresh}</button>
+          <button
+            onClick={() => document.documentElement.requestFullscreen?.()}
+            className="dash-icon-btn"
+            aria-label="fullscreen"
+          >
+            {ICON.expand}
+          </button>
         </div>
 
-        {/* ─── Tab Content ─── */}
+        {/* ── Tabs ── */}
+        <div style={{
+          display: "flex", gap: 24,
+          padding: "14px 24px 0",
+          borderBottom: `1px solid ${c.borderSoft}`,
+          margin: "14px 0 0",
+        }}>
+          {tabs.map((tab) => {
+            const active = activeTab === tab.key;
+            return (
+              <div
+                key={tab.key}
+                onClick={() => handleTabChange(tab.key)}
+                className={`dash-tab ${active ? "active" : ""}`}
+                style={{
+                  padding: "8px 2px 12px",
+                  fontSize: 13.5,
+                  fontWeight: active ? 600 : 500,
+                  color: active ? c.accent : c.textSecondary,
+                  cursor: "pointer",
+                  borderBottom: `2px solid ${active ? c.accent : "transparent"}`,
+                  marginBottom: -1,
+                  transition: ".15s",
+                }}
+              >
+                {tab.label}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ── Tab content ── */}
         {activeTab === "summary" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: LAYOUT.SECTION_GAP }}>
+          <div style={{
+            padding: "20px 24px 28px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 16,
+          }}>
             <KPICards />
             <SummaryCharts />
             <ProviderStatusCard />
           </div>
         )}
         {activeTab !== "summary" && (
-          <div style={{ margin: `0 -${LAYOUT.GRID_GAP}px` }}>
+          <div style={{ padding: "20px 0 28px", margin: `0 -${LAYOUT.GRID_GAP}px` }}>
             <DashboardLayout
               width={effectiveWidth}
               forceWorkspace={workspaceMap[activeTab] as "overview" | "reliability" | "governance" | "tracing"}
@@ -181,42 +264,57 @@ function DashboardContent() {
       </div>
 
       <style>{`
-        .dash-tabs {
-          display: flex; gap: 2px; width: 100%;
-          border-bottom: 1px solid ${colors.border};
+        /* Filter select — match design's 34px pill */
+        .dash-filter-select .ant-select-selector {
+          height: 34px !important;
+          border-radius: 8px !important;
+          border-color: ${c.border} !important;
+          background: ${c.cardBg} !important;
+          padding: 0 12px !important;
+          display: flex;
+          align-items: center;
+          font-size: 12.5px !important;
         }
-        .dash-tab {
-          padding: 10px 18px; border: none; background: transparent;
-          color: ${colors.textMuted};
-          font-size: 13px; font-weight: 500;
-          letter-spacing: -0.005em;
-          cursor: pointer;
-          transition: color 140ms cubic-bezier(0.16, 1, 0.3, 1);
-          white-space: nowrap; position: relative;
-          margin-bottom: -1px;
+        .dash-filter-select .ant-select-selection-item {
+          line-height: 32px !important;
+          color: ${c.textPrimary};
         }
-        .dash-tab::after {
-          content: ""; position: absolute; left: 18px; right: 18px; bottom: -1px;
-          height: 1.5px; background: transparent;
-          transition: background 180ms cubic-bezier(0.16, 1, 0.3, 1);
+        .dash-filter-select .ant-select-arrow { color: ${c.textFaint}; }
+        .dash-filter-select:hover .ant-select-selector { border-color: ${c.borderHover} !important; }
+
+        /* Range picker — match same 34px pill */
+        .dash-filter-range {
+          height: 34px !important;
+          border-radius: 8px !important;
+          border-color: ${c.border} !important;
+          background: ${c.cardBg} !important;
+          font-family: ${FONT_FAMILY.mono} !important;
+          font-size: 12.5px !important;
         }
-        .dash-tab:hover { color: ${colors.textPrimary}; }
-        .dash-tab.active { color: ${colors.textPrimary}; font-weight: 600; }
-        .dash-tab.active::after { background: ${colors.accent}; }
+        .dash-filter-range:hover { border-color: ${c.borderHover} !important; }
+        .dash-filter-range .ant-picker-input input {
+          font-family: ${FONT_FAMILY.mono} !important;
+          font-size: 12.5px !important;
+          color: ${c.textPrimary} !important;
+        }
+        .dash-filter-range .ant-picker-suffix { color: ${c.textFaint} !important; }
+
+        /* Icon buttons in header */
         .dash-icon-btn {
-          display: flex; align-items: center; justify-content: center;
-          width: 30px; height: 30px; border-radius: 6px;
-          border: 1px solid ${colors.border};
-          background: ${colors.cardBg};
-          color: ${colors.textSecondary};
-          cursor: pointer; font-size: 13px;
-          transition: all 160ms cubic-bezier(0.16, 1, 0.3, 1);
+          width: 34px; height: 34px; border-radius: 8px;
+          border: none; background: transparent;
+          display: inline-flex; align-items: center; justify-content: center;
+          color: ${c.textSecondary};
+          cursor: pointer;
+          transition: all .14s cubic-bezier(0.16, 1, 0.3, 1);
         }
         .dash-icon-btn:hover {
-          background: ${colors.cardHover};
-          border-color: ${colors.borderHover};
-          color: ${colors.textPrimary};
+          background: ${c.cardHover};
+          color: ${c.textPrimary};
         }
+
+        /* Tabs hover */
+        .dash-tab:hover:not(.active) { color: ${c.textPrimary} !important; }
       `}</style>
     </div>
   );

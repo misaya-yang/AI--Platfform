@@ -13,12 +13,12 @@ export function Logo({ collapsed }: { collapsed: boolean }) {
             </div>
 
             {!collapsed && (
-                <div className="flex flex-col justify-center animate-in fade-in slide-in-from-left-2 duration-300 ml-2 gap-1">
-                    <span className="text-[15px] font-semibold tracking-tight text-foreground leading-none">
+                <div className="flex flex-col justify-center animate-in fade-in slide-in-from-left-2 duration-300 ml-1">
+                    <span
+                        className="text-[15px] font-semibold text-foreground leading-none"
+                        style={{ letterSpacing: "-0.2px" }}
+                    >
                         Hejaz AI
-                    </span>
-                    <span className="text-[10.5px] tracking-wide text-muted-foreground leading-none">
-                        智能 · 高效 · 可信
                     </span>
                 </div>
             )}

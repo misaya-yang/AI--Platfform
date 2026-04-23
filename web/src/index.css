@@ -19,7 +19,7 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 28% 10%;
 
-    --primary: 262 83% 58%;                 /* violet-600 */
+    --primary: 234 87% 68%;                 /* #6674f4 indigo (design-handoff accent) */
     --primary-foreground: 220 20% 98%;
 
     --secondary: 220 14% 94%;
@@ -28,7 +28,7 @@
     --muted: 220 14% 94%;
     --muted-foreground: 220 8% 42%;
 
-    --accent: 262 83% 58%;                  /* violet = brand (single accent) */
+    --accent: 234 87% 68%;                  /* indigo = brand (single accent) */
     --accent-foreground: 220 20% 98%;
 
     --destructive: 0 84% 60%;
@@ -42,7 +42,7 @@
 
     --border: 220 14% 91%;
     --input: 220 14% 91%;
-    --ring: 262 83% 58%;
+    --ring: 234 87% 68%;
 
     --radius: 0.5rem;
     --transition-fast: 150ms;
@@ -80,7 +80,7 @@
     --popover: 222 24% 11%;
     --popover-foreground: 220 14% 90%;
 
-    --primary: 258 90% 72%;                 /* violet-400 */
+    --primary: 234 92% 76%;                 /* indigo-400ish for dark */
     --primary-foreground: 222 28% 10%;
 
     --secondary: 222 18% 16%;
@@ -89,7 +89,7 @@
     --muted: 222 18% 16%;
     --muted-foreground: 220 8% 60%;
 
-    --accent: 258 90% 72%;
+    --accent: 234 92% 76%;
     --accent-foreground: 220 20% 98%;
 
     --destructive: 0 72% 58%;
@@ -103,7 +103,7 @@
 
     --border: 222 18% 20%;
     --input: 222 18% 20%;
-    --ring: 258 90% 72%;
+    --ring: 234 92% 76%;
 
     --sidebar-bg: 222 30% 7%;
 
