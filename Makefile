@@ -143,10 +143,11 @@ dev-status:                 ## 查看开发环境状态
 
 .PHONY: test-isolation snapshot-assistant-openapi
 
-test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phase 0 gate)
+test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phase 0 + Phase 4 gates)
 	@uv run pytest -q --no-cov \
 		tests/integration/test_assistant_isolation_contract.py \
-		tests/integration/test_assistant_openapi_contract.py
+		tests/integration/test_assistant_openapi_contract.py \
+		tests/integration/test_assistant_core_isolation.py
 
 snapshot-assistant-openapi: ## 重新生成 assistant-service OpenAPI 基线快照
 	@uv run python scripts/snapshot_assistant_openapi.py
