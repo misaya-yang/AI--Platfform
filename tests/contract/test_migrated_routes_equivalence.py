@@ -445,3 +445,154 @@ def test_as_chat_returns_gateway_schema_keys():
         assert f'"{key}"' in source, (
             f"AS /chat handler missing schema key: {key}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5c: /runs/{id} + /approvals/{id} equivalence (post-ADR-004 step 2)
+# ---------------------------------------------------------------------------
+
+
+RUN_REQUIRED_TOP_LEVEL = {"run"}
+APPROVAL_REQUIRED_TOP_LEVEL = {"approval"}
+
+
+def _build_run_handler():
+    def _handler(user, run_id="r1"):
+        return {
+            "run": {
+                "run_id": run_id,
+                "tenant_id": user.tenant_id,
+                "user_id": user.user_id,
+                "session_id": "sess-1",
+                "status": "succeeded",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+                "started_at": "2026-04-23T20:00:00+00:00",
+                "finished_at": "2026-04-23T20:00:05+00:00",
+            }
+        }
+    return _handler
+
+
+def _build_approval_handler():
+    def _handler(user, body, approval_id="a1"):
+        return {
+            "approval": {
+                "approval_id": approval_id,
+                "tenant_id": user.tenant_id,
+                "user_id": user.user_id,
+                "session_id": "sess-1",
+                "run_id": "r1",
+                "tool_name": "search_knowledge",
+                "arguments": {"query": "x"},
+                "status": "approved" if body.get("approved") else "rejected",
+                "approved_by": user.user_id,
+            }
+        }
+    return _handler
+
+
+def test_run_response_has_required_top_level_key(monkeypatch):
+    """Proxied GET /runs/{id} → AS returns {"run": {...}} — top-level key
+    matches gateway's RunStatusResponse."""
+    fake_as_app = FastAPI()
+    from assistant_service.auth import GatewaySecretAuthMiddleware, get_user_context as as_get_user_context
+
+    gs = GatewaySecret(secret=GATEWAY_SECRET, replay_store=InMemoryReplayStore())
+    fake_as_app.add_middleware(
+        GatewaySecretAuthMiddleware, gateway_secret=gs, allow_anonymous=False,
+    )
+
+    @fake_as_app.get("/api/v1/assistant/runs/{run_id}")
+    async def _h(run_id: str, user=Depends(as_get_user_context)):
+        return _build_run_handler()(user, run_id=run_id)
+
+    gw = _build_gateway_app(monkeypatch, fake_as_app)
+    # _build_gateway_app only wires known paths; add /gw/runs/{id} proxy
+    import src.api.v1._assistant_proxy as ap
+    from src.core.auth.user_resolver import UserResolver, UserResolverConfig
+
+    resolver = UserResolver(
+        UserResolverConfig(jwt_enabled=True, jwt_secret=JWT_SECRET, jwt_algorithms=["HS256"])
+    )
+
+    @gw.get("/gw/runs/{run_id}")
+    async def _gw_run(run_id: str, request: Request):
+        u = await resolver.resolve(request)
+        return await ap.proxy_to_assistant_service(request, u, path=f"runs/{run_id}")
+
+    with TestClient(gw) as c:
+        r = c.get("/gw/runs/r1", headers={"Authorization": f"Bearer {_token()}"})
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert RUN_REQUIRED_TOP_LEVEL <= set(body.keys())
+    assert isinstance(body["run"], dict)
+    assert body["run"]["run_id"] == "r1"
+
+
+def test_approval_response_has_required_top_level_key(monkeypatch):
+    """Proxied POST /approvals/{id} → AS returns {"approval": {...}}."""
+    fake_as_app = FastAPI()
+    from assistant_service.auth import GatewaySecretAuthMiddleware, get_user_context as as_get_user_context
+
+    gs = GatewaySecret(secret=GATEWAY_SECRET, replay_store=InMemoryReplayStore())
+    fake_as_app.add_middleware(
+        GatewaySecretAuthMiddleware, gateway_secret=gs, allow_anonymous=False,
+    )
+
+    @fake_as_app.post("/api/v1/assistant/approvals/{approval_id}")
+    async def _h(approval_id: str, request: Request, user=Depends(as_get_user_context)):
+        raw = await request.body()
+        import json as _json
+        body_dict = _json.loads(raw) if raw else {}
+        return _build_approval_handler()(user, body_dict, approval_id=approval_id)
+
+    gw = _build_gateway_app(monkeypatch, fake_as_app)
+    import src.api.v1._assistant_proxy as ap
+    from src.core.auth.user_resolver import UserResolver, UserResolverConfig
+
+    resolver = UserResolver(
+        UserResolverConfig(jwt_enabled=True, jwt_secret=JWT_SECRET, jwt_algorithms=["HS256"])
+    )
+
+    @gw.post("/gw/approvals/{approval_id}")
+    async def _gw_approval(approval_id: str, request: Request):
+        u = await resolver.resolve(request)
+        b = await request.body()
+        return await ap.proxy_to_assistant_service(
+            request, u, path=f"approvals/{approval_id}", body=b
+        )
+
+    with TestClient(gw) as c:
+        r = c.post(
+            "/gw/approvals/a1",
+            headers={"Authorization": f"Bearer {_token()}"},
+            json={"approved": True, "reason": "looks safe"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert APPROVAL_REQUIRED_TOP_LEVEL <= set(body.keys())
+    assert isinstance(body["approval"], dict)
+    assert body["approval"]["status"] == "approved"
+
+
+def test_as_run_approval_routes_exist_and_delegate_to_assistant_service():
+    """AS-side runs/approvals must delegate to AssistantService methods,
+    not return stubs."""
+    import inspect
+
+    from assistant_service.api.routes.runs_approvals import (
+        get_run_status as as_run,
+        approve_tool_call as as_approval,
+    )
+
+    run_src = inspect.getsource(as_run)
+    approval_src = inspect.getsource(as_approval)
+
+    assert "get_run_status" in run_src, (
+        "AS /runs/{id} must delegate to AssistantService.get_run_status()"
+    )
+    assert "approve_tool_request" in approval_src, (
+        "AS /approvals/{id} must delegate to AssistantService.approve_tool_request()"
+    )

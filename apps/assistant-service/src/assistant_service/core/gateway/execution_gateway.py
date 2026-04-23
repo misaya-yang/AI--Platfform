@@ -23,6 +23,10 @@ from .request_router import RoutedAssistantRequest
 logger = get_logger(__name__)
 
 
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class ApprovalRecord:
     """In-memory fallback approval record."""
@@ -77,6 +81,20 @@ class AssistantExecutionGateway:
         self.policy_engine = policy_engine or AssistantPolicyEngine.from_env()
         self.database = database
         self.enabled = enabled
+
+        # ADR-004 §B GATE-ADR004-3: when ASSISTANT_REQUIRE_DB is truthy,
+        # a missing ``database`` is a configuration error rather than a
+        # graceful fallback — production must refuse to start without
+        # it so the in-memory split-brain is impossible. Default OFF
+        # so dev + test + one-off scripts that construct the gateway
+        # without a DB keep working during the transition.
+        if database is None and _env_truthy("ASSISTANT_REQUIRE_DB"):
+            raise RuntimeError(
+                "ASSISTANT_REQUIRE_DB=true but AssistantExecutionGateway was "
+                "constructed without a database — refusing to run with an "
+                "in-memory-only store (ADR-004 §B). Provide a DatabaseStorage "
+                "or unset ASSISTANT_REQUIRE_DB."
+            )
 
         self._runs: dict[str, RunRecord] = {}
         self._approvals: dict[str, ApprovalRecord] = {}

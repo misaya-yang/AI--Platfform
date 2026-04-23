@@ -47,6 +47,38 @@ def test_every_in_memory_read_is_audit_ok_tagged():
     )
 
 
+def test_require_db_env_blocks_in_memory_only_construction(monkeypatch):
+    """GATE-ADR004-3 — when ASSISTANT_REQUIRE_DB=true, constructing the
+    gateway without a ``database`` must raise. Production sets this
+    flag; dev/test do not.
+    """
+    import pytest
+
+    from assistant_service.core.gateway.execution_gateway import (
+        AssistantExecutionGateway,
+    )
+
+    monkeypatch.setenv("ASSISTANT_REQUIRE_DB", "true")
+    with pytest.raises(RuntimeError, match="ASSISTANT_REQUIRE_DB"):
+        AssistantExecutionGateway(
+            tool_invoker=object(),  # shape-compatible stub — __init__ only stores it
+            database=None,
+        )
+
+
+def test_require_db_env_unset_allows_in_memory_construction(monkeypatch):
+    """Dev / test path must not break because of the ADR guard when
+    the env flag is not set."""
+    from assistant_service.core.gateway.execution_gateway import (
+        AssistantExecutionGateway,
+    )
+
+    monkeypatch.delenv("ASSISTANT_REQUIRE_DB", raising=False)
+    # Should not raise.
+    gw = AssistantExecutionGateway(tool_invoker=object(), database=None)
+    assert gw.database is None
+
+
 def test_audit_ok_justifications_are_from_the_allowed_set():
     """AUDIT-OK comments must use one of the approved reasons — not
     ad-hoc "this is fine" hand-waves.

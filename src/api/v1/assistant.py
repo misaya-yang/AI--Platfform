@@ -544,20 +544,28 @@ async def get_policies(
 async def approve_tool_call(
     approval_id: str,
     body: ApprovalRequest,
+    request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> ApprovalResponse:
     """Approve or reject a pending tool invocation.
 
-    TODO(5c): migrate to proxy. Deferred from 5b because the
-    ``approval_id`` is registered inside ``execution_gateway`` on the
-    side that served the triggering chat call. With two separate
-    ``AssistantService`` instances (gateway in-process vs AS container)
-    an approval raised by one side is invisible to the other, so a
-    per-route feature flag would leak 404s as soon as /chat flips to
-    proxy mode. Proper migration requires externalising approval
-    state (DB or shared redis) first.
+    Phase 5c: proxies under ``ASSISTANT_ROUTE_APPROVALS_PROXIED=true``.
+    The 5b blocker (approval state scoped to a single
+    ``AssistantService`` instance) was removed by ADR-004 step 2 —
+    both the gateway's in-process execution_gateway and the AS
+    container's one read from ``assistant_tool_approvals``
+    authoritatively, so a flag flip no longer leaks 404s.
     """
+    from ._route_flags import proxied
+
+    if proxied("APPROVALS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        body_bytes = await request.body()
+        return await proxy_to_assistant_service(
+            request, user, path=f"approvals/{approval_id}", body=body_bytes
+        )
+
     approval = await assistant.approve_tool_request(
         approval_id=approval_id,
         tenant_id=user.tenant_id,
@@ -574,16 +582,23 @@ async def approve_tool_call(
 @router.get("/runs/{run_id}", response_model=RunStatusResponse)
 async def get_run_status(
     run_id: str,
+    request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> RunStatusResponse:
     """Get run status for current user/tenant.
 
-    TODO(5c): same deferral reason as /approvals/{id}. ``run_id`` is
-    registered in the ``execution_gateway`` that handled the chat call
-    that started it. Two ``AssistantService`` instances → split brain.
-    Migrate once run state is externalised.
+    Phase 5c: proxies under ``ASSISTANT_ROUTE_RUNS_PROXIED=true``.
+    Split-brain removed by ADR-004 step 2 (see /approvals/{id}).
     """
+    from ._route_flags import proxied
+
+    if proxied("RUNS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(
+            request, user, path=f"runs/{run_id}"
+        )
+
     run = await assistant.get_run_status(
         run_id=run_id,
         tenant_id=user.tenant_id,
