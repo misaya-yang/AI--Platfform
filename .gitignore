@@ -144,6 +144,9 @@ claude-code-*.md
 plans/*
 !plans/*.md
 !plans/*.json
+# Verify scripts belong with their design docs so "the gate the user
+# runs" is always reviewable next to the spec it enforces.
+!plans/verify-*.sh
 docs/plans/
 docs/architecture/
 

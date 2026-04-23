@@ -149,6 +149,12 @@ services:
       GATEWAY_PROXY__ENABLED: "true"
       GATEWAY_PROXY__BILLING_ENABLED: "${PROXY_BILLING_ENABLED:-false}"
 
+      # Shared HMAC for gateway → assistant-service (Phase 5a). Same
+      # value must be set on the assistant-service block. Both sides
+      # load it via env_file in prod.
+      ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
+      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
+
       # Object Storage (S3/OSS)
       GATEWAY_STORAGE__BACKEND: "${STORAGE_BACKEND:-s3}"
       GATEWAY_STORAGE__S3__BUCKET: "${S3_BUCKET:-}"
@@ -305,14 +311,23 @@ services:
       dockerfile: apps/assistant-service/Dockerfile
     container_name: assistant-service
     image: assistant-service:${TAG:-latest}
-    ports:
-      - "8093:8093"
+    # Phase 5a: ``expose`` makes port 8093 reachable only on the docker
+    # bridge network (other compose services). Public access is not
+    # published to the host. See audit Finding H-4 + GATE G5a-6.
+    expose:
+      - "8093"
     environment:
       ASSISTANT_CORS__ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:80,http://localhost:3000}"
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/gateway
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       KB_SERVICE_URL: http://knowledge-service:8092
-      ASSISTANT_APP__ALLOW_ANONYMOUS: "true"  # Internal network, gateway handles auth
+      # Must be ``false`` in prod. When set to ``true`` (dev only) the
+      # gateway-secret middleware lets requests without an HMAC header
+      # through; get_user_context still demands X-User-Id/X-Tenant-Id.
+      ASSISTANT_APP__ALLOW_ANONYMOUS: "${ASSISTANT_APP__ALLOW_ANONYMOUS:-false}"
+      # Shared HMAC for gateway↔assistant-service. Both services MUST
+      # have the same value; a mismatch yields 401 at the middleware.
+      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_CHAT_API_KEY: ${DASHSCOPE_CHAT_API_KEY:-}
       DASHSCOPE_CHAT_BASE_URL: ${DASHSCOPE_CHAT_BASE_URL:-}

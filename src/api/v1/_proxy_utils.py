@@ -1,153 +1,93 @@
-"""Gateway → KB Service streaming proxy with circuit breaker and auto-reconnect."""
+"""Gateway → knowledge-service streaming proxy.
+
+Thin glue around ``ai_gateway_core.proxy.ServiceProxy`` — same shared
+implementation as ``_assistant_proxy.py``. Breaker, SSE pass-through,
+header strip/inject, and HMAC signing are defined once in the core
+module (Design doc §3.6 GATE-P1).
+
+Public entry point: ``proxy_to_kb_service(request, user, ...)``.
+"""
 from __future__ import annotations
 
-import logging
 import os
-from typing import AsyncIterator
+from typing import Final
 
-import httpx
-from fastapi import HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import Request
 from starlette.responses import Response
+
+from ai_gateway_core.auth.gateway_secret import GatewaySecret
+from ai_gateway_core.proxy import ServiceProxy, ServiceProxyConfig
+
 from ...core.auth.user_resolver import UserContext
 
-logger = logging.getLogger(__name__)
-
-KB_SERVICE_URL = os.getenv("KB_SERVICE_URL", "http://knowledge-service:8092")
-_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=120.0, pool=30.0)
-_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
-# Strip every case-variant of the identity headers from the incoming
-# request before we inject the trusted ones. Otherwise an attacker can
-# smuggle ``X-USER-ID: victim`` and dict key-case mismatch lets it
-# survive alongside our injection, letting the downstream starlette
-# ``request.headers.get()`` return the attacker's value (first-match).
-_INJECTED_IDENTITY_HEADERS = frozenset({"x-user-id", "x-tenant-id", "x-user-tier"})
-_STRIP_REQ = frozenset({
-    "host", "connection", "transfer-encoding", "content-length",
-}) | _INJECTED_IDENTITY_HEADERS
-_STRIP_RESP = frozenset({"transfer-encoding", "connection", "content-encoding"})
-
-# --- Client with auto-reconnect (Bug 2) ---
-_client: httpx.AsyncClient | None = None
-
-def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(
-            base_url=KB_SERVICE_URL, timeout=_TIMEOUT, limits=_LIMITS,
-            transport=httpx.AsyncHTTPTransport(retries=2),
-        )
-    return _client
-
-async def _reset_client() -> None:
-    global _client
-    old, _client = _client, None
-    if old:
-        try: await old.aclose()
-        except Exception: pass
-
-# --- Circuit breaker ---
-# Mirrors the state machine in ``_assistant_proxy.py``: CLOSED →
-# (N failures) → OPEN; while OPEN, the next request becomes a half-open
-# probe whose outcome closes or re-opens the breaker. No wall-clock
-# recovery window (the previous 30s dead-zone meant a fast KB restart
-# still bounced every request for 30s even though the upstream was back).
-_CB_THRESHOLD = 3
-_cb_fails = 0
-_cb_probe_in_flight = False
+KB_SERVICE_URL: Final[str] = os.getenv(
+    "KB_SERVICE_URL", "http://knowledge-service:8092"
+)
+_INJECTED_IDENTITY_HEADERS: Final = frozenset(
+    {
+        "x-user-id",
+        "x-tenant-id",
+        "x-user-tier",
+        "x-user-type",
+        "x-user-roles",
+        "x-user-email",
+        "x-user-name",
+    }
+)
 
 
-def _cb_check() -> None:
-    """Gate the request. Allow one probe through while OPEN; fast-fail the rest."""
-    global _cb_probe_in_flight
-    if _cb_fails < _CB_THRESHOLD:
-        return
-    if _cb_probe_in_flight:
-        raise HTTPException(
-            503,
-            "KB Service recovering — probe in flight",
-            headers={"Retry-After": "2"},
-        )
-    _cb_probe_in_flight = True
+def _build_signer() -> GatewaySecret | None:
+    secret = os.getenv("GATEWAY_KNOWLEDGE_SHARED_SECRET", "").strip() or os.getenv(
+        "GATEWAY_ASSISTANT_SHARED_SECRET", ""
+    ).strip()
+    if not secret:
+        return None
+    return GatewaySecret(secret=secret)
 
 
-def _cb_success() -> None:
-    global _cb_fails, _cb_probe_in_flight
-    _cb_fails = 0
-    _cb_probe_in_flight = False
+_signer = _build_signer()
 
 
-def _cb_fail() -> None:
-    global _cb_fails, _cb_probe_in_flight
-    _cb_fails += 1
-    _cb_probe_in_flight = False
-    if _cb_fails == _CB_THRESHOLD:
-        logger.warning("KB Service circuit breaker OPEN after %d failures", _cb_fails)
+def _sign_request(_request: Request) -> tuple[str, str] | None:
+    if _signer is None:
+        return None
+    return (_signer.header_name, _signer.sign())
 
-# --- Header helpers (Bug 4: preserve Content-Type with multipart boundary) ---
-def _fwd_headers(request: Request, user: UserContext) -> dict[str, str]:
-    h = {k: v for k, v in request.headers.items() if k.lower() not in _STRIP_REQ}
-    h.update({"X-User-Id": user.user_id, "X-Tenant-Id": user.tenant_id, "X-User-Tier": user.tier})
-    return h
 
-def _clean_headers(h: httpx.Headers) -> dict[str, str]:
-    return {k: v for k, v in h.items() if k.lower() not in _STRIP_RESP}
+_proxy = ServiceProxy(
+    ServiceProxyConfig(
+        name="KB Service",
+        base_url=KB_SERVICE_URL,
+    ),
+    signer=_sign_request,
+)
 
-# --- Core streaming proxy (Bugs 1+2+3+4) ---
+
 async def proxy_to_kb_service(
-    request: Request, user: UserContext, *, path: str = "",
+    request: Request,
+    user: UserContext,
+    *,
+    path: str = "",
     upstream_prefix: str = "/api/v1/knowledge",
 ) -> Response:
-    _cb_check()
-    url = f"{upstream_prefix}/{path}" if path else upstream_prefix
-    if request.url.query:
-        url += f"?{request.url.query}"
-    headers = _fwd_headers(request, user)
+    """Forward a request to knowledge-service, streaming both directions."""
+    upstream_path = f"{upstream_prefix}/{path}" if path else upstream_prefix
+    user_headers = {
+        "X-User-Id": user.user_id,
+        "X-Tenant-Id": user.tenant_id,
+        "X-User-Tier": getattr(user, "tier", "normal"),
+        "X-User-Type": getattr(user, "user_type", "user"),
+        "X-User-Roles": ",".join(getattr(user, "roles", []) or []),
+    }
+    email = getattr(user, "email", None) or getattr(user, "user_email", None)
+    if email:
+        user_headers["X-User-Email"] = email
+    name = getattr(user, "name", None) or getattr(user, "display_name", None)
+    if name:
+        user_headers["X-User-Name"] = name
 
-    async def _do() -> Response:
-        client = _get_client()
-        req = client.build_request(
-            method=request.method, url=url, headers=headers,
-            content=request.stream(),  # Bug 1: stream request body
-        )
-        resp = await client.send(req, stream=True)  # Bug 1: stream response
-        if resp.status_code < 500:
-            _cb_success()
-        else:
-            _cb_fail()
-        rh, mt = _clean_headers(resp.headers), resp.headers.get("content-type")
-        cl = resp.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) < 256 * 1024:  # small response: buffer
-            body = await resp.aread()
-            await resp.aclose()
-            return Response(content=body, status_code=resp.status_code, headers=rh, media_type=mt)
-        async def _stream() -> AsyncIterator[bytes]:
-            # aiter_bytes() with no chunk_size yields per network read —
-            # don't pass a size or ByteChunker will buffer until the
-            # threshold is reached. KB responses can also be SSE (QA stream).
-            try:
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-            finally:
-                await resp.aclose()
-        return StreamingResponse(content=_stream(), status_code=resp.status_code, headers=rh, media_type=mt)
-
-    # One external failure = one _cb_fail() call. The retry path previously
-    # called _cb_fail() twice (once on ConnectError, once on the retry's
-    # exception), halving the effective 3-strike threshold.
-    try:
-        return await _do()
-    except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:
-        logger.warning("KB proxy connection error, resetting: %s", exc)
-        await _reset_client()
-        try:
-            return await _do()
-        except Exception as e:
-            _cb_fail()
-            raise HTTPException(502, "KB Service unavailable") from e
-    except httpx.TimeoutException as exc:
-        _cb_fail()
-        raise HTTPException(504, "KB Service timeout") from exc
-    except Exception as exc:
-        _cb_fail()
-        raise HTTPException(502, "KB Service error") from exc
+    return await _proxy.forward(
+        request,
+        user_headers,
+        upstream_path=upstream_path,
+    )

@@ -170,8 +170,20 @@ provides-extras = ["database", "knowledge", "documents", "grpc", "aiohttp", "sto
 
 [[package]]
 name = "ai-gateway-core"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "packages/ai-gateway-core" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "starlette" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "starlette" },
+]
 
 [[package]]
 name = "aioboto3"

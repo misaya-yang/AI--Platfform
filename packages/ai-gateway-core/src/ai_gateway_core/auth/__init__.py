@@ -13,6 +13,12 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from ._core import UserContext
+from .gateway_secret import (
+    GatewaySecret,
+    InMemoryReplayStore,
+    InvalidGatewaySecret,
+    ReplayStore,
+)
 
 
 @runtime_checkable
@@ -23,4 +29,11 @@ class UserContextLike(Protocol):
     tenant_id: str | None
 
 
-__all__ = ["UserContext", "UserContextLike"]
+__all__ = [
+    "GatewaySecret",
+    "InMemoryReplayStore",
+    "InvalidGatewaySecret",
+    "ReplayStore",
+    "UserContext",
+    "UserContextLike",
+]

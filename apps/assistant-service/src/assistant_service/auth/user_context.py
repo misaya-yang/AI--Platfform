@@ -45,11 +45,20 @@ ANONYMOUS_CONTEXT = UserContext(
 
 
 async def get_user_context(request: Request) -> UserContext:
-    """FastAPI dependency: resolve user from gateway-forwarded headers."""
+    """FastAPI dependency: resolve user from gateway-forwarded headers.
+
+    Roles come through ``X-User-Roles`` as a comma-separated list. The
+    gateway's JWT layer produced the list; tool_registry consumes it
+    for ``role:admin`` / ``role:premium-analyst`` authz. Without this
+    parsing every request would default to ``["user"]`` and admin-only
+    tools would be silently unavailable (Audit Finding H-2).
+    """
     user_id = request.headers.get("X-User-Id", "").strip()
     tenant_id = request.headers.get("X-Tenant-Id", "").strip()
     user_tier = request.headers.get("X-User-Tier", "normal").strip()
     user_type = request.headers.get("X-User-Type", "user").strip()
+    roles_raw = request.headers.get("X-User-Roles", "").strip()
+    roles = [r.strip() for r in roles_raw.split(",") if r.strip()] if roles_raw else ["user"]
 
     if user_id and tenant_id:
         return UserContext(
@@ -57,6 +66,7 @@ async def get_user_context(request: Request) -> UserContext:
             tenant_id=tenant_id,
             user_tier=user_tier,
             user_type=user_type,
+            roles=roles,
         )
 
     # Allow anonymous in dev/internal calls

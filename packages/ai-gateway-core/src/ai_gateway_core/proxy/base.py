@@ -1,0 +1,496 @@
+"""Shared ``ServiceProxy`` + ``CircuitBreaker`` used by the gateway's
+HTTP proxies to assistant-service and knowledge-service.
+
+Design reference: ``plans/SystemDesign-Assistant-Service-True-Extraction-Phase5-2026-04-23.md`` §5.1.
+
+Semantics locked by the Phase-5 audit (Findings M-1..M-5):
+- Half-open probe state machine, no wall-clock dead-zone.
+- 4xx is NOT counted as success — only 2xx closes the breaker.
+- Stream-mid-failure is counted as a breaker failure via ``_stream_wrapped``.
+- ``content-type: text/event-stream`` FORCES streaming even when
+  ``content-length`` is present (some misconfigured upstreams advertise it).
+- Retry path calls ``_on_failure()`` at most once per external request.
+
+Worker-scope caveat: ``InMemoryCounter`` is process-local. With
+``uvicorn --workers N > 1`` each worker owns its own breaker state; the
+module docstring on the concrete counter explains how to swap in a Redis
+counter for multi-worker deployments.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Protocol
+
+import httpx
+from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
+from starlette.responses import Response
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class CircuitBreakerState(str, Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+
+
+class CounterStore(Protocol):
+    """Contract for breaker state storage.
+
+    ``InMemoryCounter`` is process-local; a Redis-backed impl can be
+    dropped in for multi-worker deployments without touching the proxy.
+    """
+
+    def get(self) -> tuple[int, bool]:  # (fail_count, probe_in_flight)
+        ...
+
+    def set_probe(self, in_flight: bool) -> None:
+        ...
+
+    def on_success(self) -> None:
+        ...
+
+    def on_failure(self) -> int:  # returns new fail count
+        ...
+
+
+class InMemoryCounter:
+    """Process-local breaker counter.
+
+    ⚠️  Single-worker only. With ``uvicorn --workers N > 1`` each worker
+    maintains independent ``fails`` / ``probe_in_flight`` state, so the
+    "one probe" guarantee is per-worker (aggregate probes = N). Swap
+    to a Redis-backed store for multi-worker deployments.
+    """
+
+    __slots__ = ("_fails", "_probe_in_flight", "_lock")
+
+    def __init__(self) -> None:
+        self._fails = 0
+        self._probe_in_flight = False
+        self._lock = threading.Lock()
+
+    def get(self) -> tuple[int, bool]:
+        with self._lock:
+            return self._fails, self._probe_in_flight
+
+    def set_probe(self, in_flight: bool) -> None:
+        with self._lock:
+            self._probe_in_flight = in_flight
+
+    def on_success(self) -> None:
+        with self._lock:
+            self._fails = 0
+            self._probe_in_flight = False
+
+    def on_failure(self) -> int:
+        with self._lock:
+            self._fails += 1
+            self._probe_in_flight = False
+            return self._fails
+
+
+@dataclass
+class CircuitBreaker:
+    """Half-open probe breaker. Threshold = 3 consecutive failures.
+
+    State machine:
+        CLOSED ──(N failures)──▶ OPEN
+        OPEN    one probe slot; the next request takes it and tries the
+                upstream. Success → CLOSED. Failure → stay OPEN, slot
+                released so a later request can retry.
+
+    No wall-clock recovery window — the old 30s dead-zone blocked every
+    request for 30s even after the upstream came back healthy.
+    """
+
+    name: str
+    threshold: int = 3
+    store: CounterStore = field(default_factory=InMemoryCounter)
+
+    def gate(self) -> None:
+        """Allow or block the incoming request.
+
+        Raises ``HTTPException(503)`` if the breaker is OPEN and a
+        probe is already in flight. Claims the probe slot otherwise.
+        """
+        fails, probe = self.store.get()
+        if fails < self.threshold:
+            return
+        if probe:
+            raise HTTPException(
+                status_code=503,
+                detail=f"{self.name} recovering — probe in flight",
+                headers={"Retry-After": "2"},
+            )
+        self.store.set_probe(True)
+
+    def on_response(self, status_code: int) -> None:
+        """Feedback from a completed upstream response.
+
+        Finding M-5: only 2xx closes the breaker. 3xx/4xx leaves state
+        as-is — "200 means upstream is fine", "400 means configuration
+        is broken but not a transport failure".
+        """
+        if 200 <= status_code < 300:
+            self.store.on_success()
+        elif status_code >= 500:
+            new_fails = self.store.on_failure()
+            if new_fails == self.threshold:
+                logger.warning(
+                    "%s circuit breaker OPEN after %d failures",
+                    self.name,
+                    new_fails,
+                )
+        else:
+            # 3xx / 4xx: release the probe slot but do not change fail count.
+            _, probe = self.store.get()
+            if probe:
+                self.store.set_probe(False)
+
+    def on_failure(self) -> None:
+        """Transport/stream failure (connect error, timeout, mid-stream abort)."""
+        new_fails = self.store.on_failure()
+        if new_fails == self.threshold:
+            logger.warning(
+                "%s circuit breaker OPEN after %d failures",
+                self.name,
+                new_fails,
+            )
+
+    @property
+    def state(self) -> CircuitBreakerState:
+        fails, _ = self.store.get()
+        return (
+            CircuitBreakerState.OPEN
+            if fails >= self.threshold
+            else CircuitBreakerState.CLOSED
+        )
+
+
+# ---------------------------------------------------------------------------
+# Service proxy
+# ---------------------------------------------------------------------------
+
+
+# These are stripped from incoming client requests before we inject the
+# trusted values. Case-insensitive; we compare against ``.lower()``.
+_DEFAULT_INJECTED_IDENTITY_HEADERS = frozenset(
+    {
+        "x-user-id",
+        "x-tenant-id",
+        "x-user-tier",
+        "x-user-type",
+        "x-user-roles",
+        "x-user-email",
+        "x-user-name",
+    }
+)
+# Headers the gateway injects via the optional ``signer`` callback.
+# These too must be stripped from inbound requests — otherwise a
+# public client could smuggle ``X-Gateway-Secret: <forged>``, which
+# (in the absence of strip) would ride along next to the gateway's
+# own real signature since Python dicts are case-sensitive.
+_DEFAULT_INJECTED_AUTH_HEADERS = frozenset({"x-gateway-secret"})
+_DEFAULT_STRIP_REQ = (
+    frozenset({"host", "connection", "transfer-encoding", "content-length"})
+    | _DEFAULT_INJECTED_IDENTITY_HEADERS
+    | _DEFAULT_INJECTED_AUTH_HEADERS
+)
+_DEFAULT_STRIP_RESP = frozenset(
+    {"transfer-encoding", "connection", "content-encoding"}
+)
+
+
+class ProxyError(Exception):
+    """Raised for local proxy misconfiguration (not upstream errors)."""
+
+
+@dataclass
+class ServiceProxyConfig:
+    name: str                                    # e.g. "assistant-service"
+    base_url: str                                 # e.g. "http://assistant-service:8093"
+    timeout: httpx.Timeout = field(
+        default_factory=lambda: httpx.Timeout(
+            connect=5.0, read=600.0, write=120.0, pool=30.0
+        )
+    )
+    limits: httpx.Limits = field(
+        default_factory=lambda: httpx.Limits(
+            max_connections=50, max_keepalive_connections=10
+        )
+    )
+    breaker_threshold: int = 3
+    buffer_threshold_bytes: int = 256 * 1024
+    strip_req: frozenset[str] = _DEFAULT_STRIP_REQ
+    strip_resp: frozenset[str] = _DEFAULT_STRIP_RESP
+    injected_identity_headers: frozenset[str] = _DEFAULT_INJECTED_IDENTITY_HEADERS
+
+
+class ServiceProxy:
+    """Shared HTTP streaming proxy.
+
+    Owns one ``httpx.AsyncClient`` with auto-reconnect on transport
+    failure. The client is lazily constructed and reset on connection
+    errors (remember: pooled connections can go stale).
+
+    Behavior contract (matches Phase-5 design §5.1 + audit findings):
+      1. SSE streams: ``content-type == text/event-stream`` → always stream
+         chunk-by-chunk. Never buffer even if a rogue upstream sent
+         ``content-length`` (Finding M-3).
+      2. Small JSON: ``content-length`` present AND < buffer_threshold AND
+         content-type is not SSE → buffer to a plain ``Response``.
+      3. Everything else: stream via ``aiter_bytes()`` (no chunk_size
+         argument — passing one forces httpx's ``ByteChunker`` to buffer
+         until the threshold is hit; fatal for SSE).
+      4. Circuit breaker: half-open probe, only 2xx closes the breaker,
+         mid-stream failures are counted (Findings M-1, M-2, M-5).
+      5. Retry: one reconnect on ``ConnectError`` / ``RemoteProtocolError``
+         / ``PoolTimeout``. If the retry also fails, ``on_failure()``
+         fires exactly once (never double-counted).
+    """
+
+    def __init__(
+        self,
+        config: ServiceProxyConfig,
+        *,
+        breaker: CircuitBreaker | None = None,
+        signer: Callable[[Request], tuple[str, str] | None] | None = None,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        config
+            Immutable proxy config (base url, timeouts, strip lists).
+        breaker
+            Injectable circuit breaker. Defaults to a fresh
+            ``CircuitBreaker(name=config.name, threshold=config.breaker_threshold)``.
+            Inject explicitly to share state with tests or swap in a
+            Redis-backed counter.
+        signer
+            Optional callable that returns ``(header_name, header_value)``
+            for a per-request HMAC signature (``X-Gateway-Secret`` etc).
+            Return ``None`` to skip signing for a given request.
+        """
+        self._cfg = config
+        self._breaker = breaker or CircuitBreaker(
+            name=config.name, threshold=config.breaker_threshold
+        )
+        self._signer = signer
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+
+    # ----- public API -----
+
+    @property
+    def breaker(self) -> CircuitBreaker:
+        return self._breaker
+
+    async def forward(
+        self,
+        request: Request,
+        user_headers: dict[str, str],
+        *,
+        upstream_path: str,
+        body: bytes | None = None,
+        error_prefix: str | None = None,
+    ) -> Response:
+        """Forward a request to the upstream service.
+
+        Parameters
+        ----------
+        request
+            The inbound FastAPI/Starlette ``Request``. The proxy reads
+            the method, URL query string, and — unless ``body`` is
+            passed — the request stream.
+        user_headers
+            The trusted identity headers to inject (caller builds these
+            from a validated ``UserContext``).
+        upstream_path
+            Path segment appended to ``config.base_url``. The caller
+            is responsible for including the API prefix
+            (e.g. ``"/api/v1/assistant/chat/stream"``).
+        body
+            Pre-read request bytes. Required when the caller has
+            already consumed ``request.stream()`` (e.g. for authz
+            parsing) — starlette's request stream is single-use.
+        error_prefix
+            Human-readable prefix for HTTPException details. Defaults
+            to the service name.
+        """
+        self._breaker.gate()
+
+        url = upstream_path
+        if request.url.query:
+            url = f"{upstream_path}?{request.url.query}"
+
+        headers = self._build_headers(request, user_headers)
+
+        prefix = error_prefix or self._cfg.name
+
+        try:
+            return await self._do(request, url, headers, body)
+        except (
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+            httpx.PoolTimeout,
+        ) as exc:
+            logger.warning(
+                "%s proxy connection error, resetting client: %s",
+                self._cfg.name,
+                exc,
+            )
+            await self._reset_client()
+            try:
+                return await self._do(request, url, headers, body)
+            except Exception as e:
+                # Count exactly once for this external request.
+                self._breaker.on_failure()
+                raise HTTPException(502, f"{prefix} unavailable") from e
+        except httpx.TimeoutException as exc:
+            self._breaker.on_failure()
+            raise HTTPException(504, f"{prefix} timeout") from exc
+        except HTTPException:
+            # Propagate upstream-produced HTTPExceptions without treating
+            # them as transport failures.
+            raise
+        except Exception as exc:
+            self._breaker.on_failure()
+            raise HTTPException(502, f"{prefix} error") from exc
+
+    async def aclose(self) -> None:
+        await self._reset_client()
+
+    # ----- internals -----
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is not None:
+            return self._client
+        async with self._client_lock:
+            if self._client is None:
+                self._client = httpx.AsyncClient(
+                    base_url=self._cfg.base_url,
+                    timeout=self._cfg.timeout,
+                    limits=self._cfg.limits,
+                    transport=httpx.AsyncHTTPTransport(retries=2),
+                )
+            return self._client
+
+    async def _reset_client(self) -> None:
+        old: httpx.AsyncClient | None
+        async with self._client_lock:
+            old, self._client = self._client, None
+        if old is not None:
+            try:
+                await old.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _build_headers(
+        self, request: Request, user_headers: dict[str, str]
+    ) -> dict[str, str]:
+        strip = self._cfg.strip_req
+        out = {k: v for k, v in request.headers.items() if k.lower() not in strip}
+        out.update(user_headers)
+        if self._signer is not None:
+            sig = self._signer(request)
+            if sig is not None:
+                name, value = sig
+                out[name] = value
+        return out
+
+    def _clean_response_headers(self, h: httpx.Headers) -> dict[str, str]:
+        strip = self._cfg.strip_resp
+        return {k: v for k, v in h.items() if k.lower() not in strip}
+
+    async def _do(
+        self,
+        request: Request,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+    ) -> Response:
+        client = await self._get_client()
+        req = client.build_request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            content=body if body is not None else request.stream(),
+        )
+        resp = await client.send(req, stream=True)
+
+        # Breaker feedback on the response status. Mid-stream failures
+        # are handled separately by ``_stream_wrapped``.
+        self._breaker.on_response(resp.status_code)
+
+        rh = self._clean_response_headers(resp.headers)
+        mt = resp.headers.get("content-type")
+        cl = resp.headers.get("content-length")
+        is_sse = mt is not None and mt.lower().startswith("text/event-stream")
+
+        # Small-response buffer path — only if we have a plausible length,
+        # the body is small, AND it is NOT an SSE stream. ``text/event-stream``
+        # with content-length is still streamed chunk-by-chunk.
+        if (
+            not is_sse
+            and cl is not None
+            and cl.isdigit()
+            and int(cl) < self._cfg.buffer_threshold_bytes
+        ):
+            buffered = await resp.aread()
+            await resp.aclose()
+            return Response(
+                content=buffered,
+                status_code=resp.status_code,
+                headers=rh,
+                media_type=mt,
+            )
+
+        return StreamingResponse(
+            content=self._stream_wrapped(resp),
+            status_code=resp.status_code,
+            headers=rh,
+            media_type=mt,
+        )
+
+    async def _stream_wrapped(
+        self, resp: httpx.Response
+    ) -> AsyncIterator[bytes]:
+        """Stream chunks and count mid-stream failures as breaker failures.
+
+        ``aiter_bytes()`` WITHOUT a chunk_size yields each network read
+        directly. Passing a size wraps the stream in httpx's ``ByteChunker``
+        which BUFFERS until the threshold is hit — fatal for SSE text_delta
+        latency.
+        """
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        except Exception:
+            # Finding M-2: a "handshake 200 + stream truncated" upstream
+            # previously flew under the breaker's radar.
+            self._breaker.on_failure()
+            raise
+        finally:
+            await resp.aclose()
+
+
+__all__ = [
+    "CircuitBreaker",
+    "CircuitBreakerState",
+    "CounterStore",
+    "InMemoryCounter",
+    "ProxyError",
+    "ServiceProxy",
+    "ServiceProxyConfig",
+]

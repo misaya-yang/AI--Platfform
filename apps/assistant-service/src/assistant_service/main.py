@@ -347,6 +347,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Phase 5a: reject traffic without a valid ``X-Gateway-Secret``. Closes
+# Audit Finding H-4 (sibling-container SSRF → user impersonation). Skipped
+# entirely when the secret env var is unset (local dev); in prod compose
+# the env MUST be set and ``ASSISTANT_APP__ALLOW_ANONYMOUS`` MUST be
+# ``false`` for the middleware to actively reject.
+_gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+if _gateway_secret_env:
+    from ai_gateway_core.auth.gateway_secret import GatewaySecret
+    from .auth import GatewaySecretAuthMiddleware
+
+    app.add_middleware(
+        GatewaySecretAuthMiddleware,
+        gateway_secret=GatewaySecret(secret=_gateway_secret_env),
+        allow_anonymous=settings.app.allow_anonymous,
+    )
+    logger.info(
+        "Gateway-secret middleware active (allow_anonymous=%s)",
+        settings.app.allow_anonymous,
+    )
+elif not settings.app.allow_anonymous:
+    logger.warning(
+        "GATEWAY_ASSISTANT_SHARED_SECRET unset AND allow_anonymous=False — "
+        "every request will be rejected by get_user_context until the secret "
+        "is provided or allow_anonymous is enabled (dev only)."
+    )
+
 
 @app.get("/health")
 async def health():
