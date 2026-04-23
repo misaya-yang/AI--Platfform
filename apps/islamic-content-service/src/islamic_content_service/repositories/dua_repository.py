@@ -108,3 +108,85 @@ class DuaRepository:
 
     async def count(self) -> int:
         return int(await self.db.fetchval("SELECT COUNT(*) FROM dua_items") or 0)
+
+    async def get_random(self) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT dua_id, category, title, arabic_text, transliteration,
+                   english_meaning, urdu_meaning, source, reference,
+                   authenticity, occasion, data_source, verification_status
+            FROM dua_items
+            ORDER BY random() LIMIT 1
+            """
+        )
+        return dict(row) if row else None
+
+    async def search_items(
+        self,
+        query: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Case-insensitive search across title, arabic_text, transliteration,
+        english_meaning, urdu_meaning. Returns (items, total)."""
+        pattern = f"%{query}%"
+        rows = await self.db.fetch(
+            """
+            SELECT dua_id, category, title, arabic_text, transliteration,
+                   english_meaning, urdu_meaning, source, reference,
+                   authenticity, occasion, data_source, verification_status
+            FROM dua_items
+            WHERE title ILIKE $1
+               OR arabic_text ILIKE $1
+               OR transliteration ILIKE $1
+               OR english_meaning ILIKE $1
+               OR urdu_meaning ILIKE $1
+            ORDER BY dua_id
+            LIMIT $2 OFFSET $3
+            """,
+            pattern,
+            limit,
+            offset,
+        )
+        total = await self.db.fetchval(
+            """
+            SELECT COUNT(*) FROM dua_items
+            WHERE title ILIKE $1
+               OR arabic_text ILIKE $1
+               OR transliteration ILIKE $1
+               OR english_meaning ILIKE $1
+               OR urdu_meaning ILIKE $1
+            """,
+            pattern,
+        )
+        return [dict(row) for row in rows], int(total or 0)
+
+    async def get_items_by_occasion(self, occasion: str) -> list[dict[str, Any]]:
+        """Filter by occasion column (ILIKE — occasions can be phrases like
+        'Morning', 'Before eating', 'Entering mosque')."""
+        rows = await self.db.fetch(
+            """
+            SELECT dua_id, category, title, arabic_text, transliteration,
+                   english_meaning, urdu_meaning, source, reference,
+                   authenticity, occasion, data_source, verification_status
+            FROM dua_items
+            WHERE occasion ILIKE $1
+            ORDER BY dua_id
+            """,
+            f"%{occasion}%",
+        )
+        return [dict(row) for row in rows]
+
+    async def list_occasions(self) -> list[dict[str, Any]]:
+        """Distinct occasions with counts (for building a filter chip UI)."""
+        rows = await self.db.fetch(
+            """
+            SELECT occasion, COUNT(*) AS dua_count
+            FROM dua_items
+            WHERE occasion IS NOT NULL AND occasion <> ''
+            GROUP BY occasion
+            ORDER BY occasion
+            """
+        )
+        return [{"occasion": row["occasion"], "dua_count": int(row["dua_count"])} for row in rows]

@@ -445,6 +445,146 @@ class HadithRepository:
             for row in rows
         ]
 
+    async def get_collection(self, collection_name: str) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT name, title, short_intro, has_books, has_chapters,
+                   total_books, total_hadith
+            FROM hadith_collections
+            WHERE name = $1
+            """,
+            collection_name,
+        )
+        return dict(row) if row else None
+
+    async def get_random_hadith(
+        self, *, collection_name: str | None = None
+    ) -> tuple[str, str] | None:
+        """Pick a random (collection, hadith_number) tuple. Caller then fetches
+        the full detail via get_detail() to reuse its localization/grade joins."""
+        if collection_name:
+            row = await self.db.fetchrow(
+                """
+                SELECT collection_name, hadith_number
+                FROM hadith_items
+                WHERE collection_name = $1
+                ORDER BY random() LIMIT 1
+                """,
+                collection_name,
+            )
+        else:
+            row = await self.db.fetchrow(
+                """
+                SELECT collection_name, hadith_number
+                FROM hadith_items
+                ORDER BY random() LIMIT 1
+                """
+            )
+        if row is None:
+            return None
+        return row["collection_name"], row["hadith_number"]
+
+    async def get_neighbors(
+        self,
+        collection_name: str,
+        hadith_number: str,
+    ) -> dict[str, str | None]:
+        """Return previous/next hadith_number using natural numeric sort key."""
+        rows = await self.db.fetch(
+            """
+            SELECT hadith_number
+            FROM hadith_items
+            WHERE collection_name = $1
+            """,
+            collection_name,
+        )
+        ordered = sorted((r["hadith_number"] for r in rows), key=_hadith_sort_key)
+        if hadith_number not in ordered:
+            return {"previous": None, "next": None}
+        idx = ordered.index(hadith_number)
+        return {
+            "previous": ordered[idx - 1] if idx > 0 else None,
+            "next": ordered[idx + 1] if idx < len(ordered) - 1 else None,
+        }
+
+    async def search_hadiths(
+        self,
+        query: str,
+        *,
+        language: str,
+        collection_name: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Case-insensitive full-text search across ``hadith_localizations.body_text``.
+
+        language filters which column to search (en/ar). collection_name optionally
+        scopes to one collection. Returns (items, total).
+        """
+        pattern = f"%{query}%"
+        args: list[Any] = [pattern, language]
+        scope_sql = ""
+        if collection_name:
+            args.append(collection_name)
+            scope_sql = f"AND hi.collection_name = ${len(args)}"
+        args.extend([limit, offset])
+
+        rows = await self.db.fetch(
+            f"""
+            SELECT hi.id, hi.collection_name, hi.book_number, hi.hadith_number,
+                   hi.chapter_title AS fallback_chapter_title,
+                   hb.title AS book_title,
+                   hc.title_en AS ch_title_en,
+                   hc.title_ar AS ch_title_ar,
+                   hl.body_text AS matched_body
+            FROM hadith_localizations hl
+            JOIN hadith_items hi ON hi.id = hl.hadith_item_id
+            LEFT JOIN hadith_books hb
+                ON hb.collection_name = hi.collection_name AND hb.book_number = hi.book_number
+            LEFT JOIN hadith_chapters hc ON hc.id = hi.chapter_ref_id
+            WHERE hl.body_text ILIKE $1
+              AND hl.language = $2
+              {scope_sql}
+            ORDER BY hi.collection_name, hi.id
+            LIMIT ${len(args) - 1} OFFSET ${len(args)}
+            """,
+            *args,
+        )
+
+        # Count query reuses the same filters (drop limit/offset at end)
+        count_args: list[Any] = [pattern, language]
+        count_scope_sql = ""
+        if collection_name:
+            count_args.append(collection_name)
+            count_scope_sql = f"AND hi.collection_name = ${len(count_args)}"
+        total = await self.db.fetchval(
+            f"""
+            SELECT COUNT(*)
+            FROM hadith_localizations hl
+            JOIN hadith_items hi ON hi.id = hl.hadith_item_id
+            WHERE hl.body_text ILIKE $1
+              AND hl.language = $2
+              {count_scope_sql}
+            """,
+            *count_args,
+        )
+
+        items = [
+            {
+                "collection": row["collection_name"],
+                "book_number": row["book_number"],
+                "book_title": row["book_title"],
+                "chapter_title": (
+                    row["ch_title_en"] if language == "en" else row["ch_title_ar"]
+                ) or row["fallback_chapter_title"],
+                "hadith_number": row["hadith_number"],
+                "language": language,
+                "preview_text": (row["matched_body"] or "")[:400],
+            }
+            for row in rows
+        ]
+        return items, int(total or 0)
+
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any] | None:
         row = await self.db.fetchrow(
             """

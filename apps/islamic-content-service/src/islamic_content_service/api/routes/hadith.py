@@ -7,8 +7,12 @@ from ..schemas.hadith import (
     HadithBookItemsResponse,
     HadithBooksResponse,
     HadithChaptersResponse,
+    HadithCollectionDetailResponse,
     HadithCollectionsResponse,
+    HadithContextResponse,
     HadithDetailResponse,
+    HadithRandomResponse,
+    HadithSearchResponse,
 )
 from ...domain.errors import NotReadyError
 from ...services.hadith_query_service import HadithQueryService
@@ -28,6 +32,83 @@ def _to_http_error(exc: NotReadyError) -> HTTPException:
 async def get_collections(service: HadithQueryService = Depends(get_hadith_query_service)):
     try:
         return await service.get_collections()
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/random",
+    response_model=HadithRandomResponse,
+    summary="Return one random Hadith (Hadith of the Day)",
+)
+async def get_random_hadith(
+    collection: str | None = Query(default=None, description="Optionally scope to one collection"),
+    service: HadithQueryService = Depends(get_hadith_query_service),
+):
+    try:
+        return await service.get_random_hadith(collection_name=collection)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/collections/{collection_name}",
+    response_model=HadithCollectionDetailResponse,
+    summary="Get metadata for a single Hadith collection",
+)
+async def get_collection_detail(
+    collection_name: str,
+    service: HadithQueryService = Depends(get_hadith_query_service),
+):
+    try:
+        return await service.get_collection_detail(collection_name)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/collections/{collection_name}/hadiths/{hadith_number}/context",
+    response_model=HadithContextResponse,
+    summary="Get previous/next hadith numbers for reading navigation",
+)
+async def get_hadith_context(
+    collection_name: str,
+    hadith_number: str,
+    service: HadithQueryService = Depends(get_hadith_query_service),
+):
+    try:
+        return await service.get_context(collection_name, hadith_number)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/search",
+    response_model=HadithSearchResponse,
+    summary="Search Hadith text across collections",
+    description=(
+        "Case-insensitive substring search over `hadith_localizations.body_text`. "
+        "`lang=en` searches the English translation, `lang=ar` searches the "
+        "Arabic original. `collection` optionally scopes to a single collection "
+        "(bukhari, muslim, abudawud, tirmidhi, nasai, ibnmajah, nawawi)."
+    ),
+)
+async def search_hadiths(
+    q: str = Query(description="Search query"),
+    lang: str = Query(default="en", pattern="^(en|ar)$"),
+    collection: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    service: HadithQueryService = Depends(get_hadith_query_service),
+):
+    try:
+        return await service.search_hadiths(
+            q,
+            language=lang,
+            collection_name=collection,
+            limit=limit,
+            offset=offset,
+        )
     except NotReadyError as exc:
         raise _to_http_error(exc) from exc
 

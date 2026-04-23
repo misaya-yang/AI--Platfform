@@ -683,6 +683,44 @@ class QuranRepository:
             for row in rows
         ]
 
+    async def get_juz_ayahs(
+        self,
+        juz_number: int,
+        *,
+        translation_id: int,
+        recitation_id: int,
+    ) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT verse_key, chapter_id, ayah_number, juz_number, hizb_number,
+                   rub_number, page_number, arabic_text, transliteration_text
+            FROM quran_ayahs
+            WHERE juz_number = $1
+            ORDER BY chapter_id, ayah_number
+            """,
+            juz_number,
+        )
+        verse_keys = [row["verse_key"] for row in rows]
+        words = await self._get_words_by_verse(verse_keys)
+        timings = await self._get_timings_by_verse(verse_keys, recitation_id=recitation_id)
+        translation_map = await self._get_translations_by_verse(
+            verse_keys,
+            translation_id=translation_id,
+        )
+        audio_map = await self._get_audio_by_verse(verse_keys, recitation_id=recitation_id)
+        return [
+            self._build_ayah_payload(
+                row,
+                translation_id=translation_id,
+                recitation_id=recitation_id,
+                translation_text=translation_map.get(row["verse_key"], ""),
+                audio_url=audio_map.get(row["verse_key"]),
+                words_by_verse=words,
+                timings_by_verse=timings,
+            )
+            for row in rows
+        ]
+
     async def get_ayah(
         self,
         verse_key: str,
@@ -738,6 +776,393 @@ class QuranRepository:
             }
             for row in rows
         ]
+
+    async def list_juz_summaries(self) -> list[dict[str, Any]]:
+        """Aggregate one row per Juz from ``quran_ayahs`` + ``quran_chapters``.
+
+        Returns a list sorted by juz_number, with start/end verse keys, per-chapter
+        ayah ranges, and the first ayah's chapter name joined in. No persistent
+        ``quran_juzs`` table — the 30-row aggregation runs in-process and is
+        cached by the service layer.
+        """
+        rows = await self.db.fetch(
+            """
+            WITH per_juz_chapter AS (
+                SELECT a.juz_number,
+                       a.chapter_id,
+                       MIN(a.ayah_number) AS first_ayah,
+                       MAX(a.ayah_number) AS last_ayah,
+                       COUNT(*) AS ayah_count
+                FROM quran_ayahs a
+                WHERE a.juz_number IS NOT NULL
+                GROUP BY a.juz_number, a.chapter_id
+            ),
+            juz_totals AS (
+                SELECT juz_number,
+                       SUM(ayah_count)::INTEGER AS verses_count
+                FROM per_juz_chapter
+                GROUP BY juz_number
+            ),
+            juz_bounds AS (
+                SELECT pc.juz_number,
+                       (SELECT pc2.chapter_id || ':' || pc2.first_ayah
+                          FROM per_juz_chapter pc2
+                         WHERE pc2.juz_number = pc.juz_number
+                         ORDER BY pc2.chapter_id ASC
+                         LIMIT 1) AS first_verse_key,
+                       (SELECT pc2.chapter_id || ':' || pc2.last_ayah
+                          FROM per_juz_chapter pc2
+                         WHERE pc2.juz_number = pc.juz_number
+                         ORDER BY pc2.chapter_id DESC
+                         LIMIT 1) AS last_verse_key,
+                       (SELECT pc2.chapter_id
+                          FROM per_juz_chapter pc2
+                         WHERE pc2.juz_number = pc.juz_number
+                         ORDER BY pc2.chapter_id ASC
+                         LIMIT 1) AS start_chapter_id,
+                       (SELECT pc2.first_ayah
+                          FROM per_juz_chapter pc2
+                         WHERE pc2.juz_number = pc.juz_number
+                         ORDER BY pc2.chapter_id ASC
+                         LIMIT 1) AS start_ayah_number
+                FROM per_juz_chapter pc
+                GROUP BY pc.juz_number
+            )
+            SELECT jt.juz_number,
+                   jt.verses_count,
+                   jb.first_verse_key,
+                   jb.last_verse_key,
+                   jb.start_chapter_id,
+                   jb.start_ayah_number,
+                   c.name_simple AS start_chapter_name_simple,
+                   c.name_arabic AS start_chapter_name_arabic
+            FROM juz_totals jt
+            JOIN juz_bounds jb USING (juz_number)
+            LEFT JOIN quran_chapters c ON c.chapter_id = jb.start_chapter_id
+            ORDER BY jt.juz_number
+            """
+        )
+
+        mapping_rows = await self.db.fetch(
+            """
+            SELECT juz_number,
+                   chapter_id,
+                   MIN(ayah_number) AS first_ayah,
+                   MAX(ayah_number) AS last_ayah
+            FROM quran_ayahs
+            WHERE juz_number IS NOT NULL
+            GROUP BY juz_number, chapter_id
+            ORDER BY juz_number, chapter_id
+            """
+        )
+        verse_mapping: dict[int, dict[str, str]] = defaultdict(dict)
+        for m in mapping_rows:
+            verse_mapping[m["juz_number"]][str(m["chapter_id"])] = (
+                f"{m['first_ayah']}-{m['last_ayah']}"
+                if m["first_ayah"] != m["last_ayah"]
+                else f"{m['first_ayah']}"
+            )
+
+        return [
+            {
+                "juz_number": row["juz_number"],
+                "verses_count": row["verses_count"],
+                "first_verse_key": row["first_verse_key"],
+                "last_verse_key": row["last_verse_key"],
+                "start_chapter_id": row["start_chapter_id"],
+                "start_ayah_number": row["start_ayah_number"],
+                "start_chapter_name_simple": row["start_chapter_name_simple"],
+                "start_chapter_name_arabic": row["start_chapter_name_arabic"],
+                "verse_mapping": dict(verse_mapping.get(row["juz_number"], {})),
+            }
+            for row in rows
+        ]
+
+    async def get_chapter(self, chapter_id: int) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT chapter_id, name_simple, name_complex, name_arabic, translated_name,
+                   revelation_place, verses_count
+            FROM quran_chapters
+            WHERE chapter_id = $1
+            """,
+            chapter_id,
+        )
+        return dict(row) if row else None
+
+    async def get_random_ayah(
+        self,
+        *,
+        translation_id: int,
+        recitation_id: int,
+    ) -> dict[str, Any] | None:
+        row = await self.db.fetchrow(
+            """
+            SELECT verse_key, chapter_id, ayah_number, juz_number, hizb_number,
+                   rub_number, page_number, arabic_text, transliteration_text
+            FROM quran_ayahs
+            ORDER BY random()
+            LIMIT 1
+            """
+        )
+        if row is None:
+            return None
+        verse_key = row["verse_key"]
+        words = await self._get_words_by_verse([verse_key])
+        timings = await self._get_timings_by_verse([verse_key], recitation_id=recitation_id)
+        translation_map = await self._get_translations_by_verse(
+            [verse_key], translation_id=translation_id,
+        )
+        audio_map = await self._get_audio_by_verse([verse_key], recitation_id=recitation_id)
+        return self._build_ayah_payload(
+            row,
+            translation_id=translation_id,
+            recitation_id=recitation_id,
+            translation_text=translation_map.get(verse_key, ""),
+            audio_url=audio_map.get(verse_key),
+            words_by_verse=words,
+            timings_by_verse=timings,
+        )
+
+    async def get_page_ayahs(
+        self,
+        page_number: int,
+        *,
+        translation_id: int,
+        recitation_id: int,
+    ) -> list[dict[str, Any]]:
+        rows = await self.db.fetch(
+            """
+            SELECT verse_key, chapter_id, ayah_number, juz_number, hizb_number,
+                   rub_number, page_number, arabic_text, transliteration_text
+            FROM quran_ayahs
+            WHERE page_number = $1
+            ORDER BY chapter_id, ayah_number
+            """,
+            page_number,
+        )
+        verse_keys = [row["verse_key"] for row in rows]
+        words = await self._get_words_by_verse(verse_keys)
+        timings = await self._get_timings_by_verse(verse_keys, recitation_id=recitation_id)
+        translation_map = await self._get_translations_by_verse(
+            verse_keys, translation_id=translation_id,
+        )
+        audio_map = await self._get_audio_by_verse(verse_keys, recitation_id=recitation_id)
+        return [
+            self._build_ayah_payload(
+                row,
+                translation_id=translation_id,
+                recitation_id=recitation_id,
+                translation_text=translation_map.get(row["verse_key"], ""),
+                audio_url=audio_map.get(row["verse_key"]),
+                words_by_verse=words,
+                timings_by_verse=timings,
+            )
+            for row in rows
+        ]
+
+    async def get_ayahs_range(
+        self,
+        *,
+        from_chapter: int,
+        from_ayah: int,
+        to_chapter: int,
+        to_ayah: int,
+        translation_id: int,
+        recitation_id: int,
+    ) -> list[dict[str, Any]]:
+        """Range across possibly multiple surahs using (chapter, ayah) tuple comparison."""
+        rows = await self.db.fetch(
+            """
+            SELECT verse_key, chapter_id, ayah_number, juz_number, hizb_number,
+                   rub_number, page_number, arabic_text, transliteration_text
+            FROM quran_ayahs
+            WHERE (chapter_id, ayah_number) >= ($1, $2)
+              AND (chapter_id, ayah_number) <= ($3, $4)
+            ORDER BY chapter_id, ayah_number
+            """,
+            from_chapter, from_ayah, to_chapter, to_ayah,
+        )
+        verse_keys = [row["verse_key"] for row in rows]
+        words = await self._get_words_by_verse(verse_keys)
+        timings = await self._get_timings_by_verse(verse_keys, recitation_id=recitation_id)
+        translation_map = await self._get_translations_by_verse(
+            verse_keys, translation_id=translation_id,
+        )
+        audio_map = await self._get_audio_by_verse(verse_keys, recitation_id=recitation_id)
+        return [
+            self._build_ayah_payload(
+                row,
+                translation_id=translation_id,
+                recitation_id=recitation_id,
+                translation_text=translation_map.get(row["verse_key"], ""),
+                audio_url=audio_map.get(row["verse_key"]),
+                words_by_verse=words,
+                timings_by_verse=timings,
+            )
+            for row in rows
+        ]
+
+    async def list_hizb_summaries(self) -> list[dict[str, Any]]:
+        """60 hizbs aggregated from ``quran_ayahs.hizb_number``."""
+        rows = await self.db.fetch(
+            """
+            WITH per_hizb_chapter AS (
+                SELECT hizb_number, chapter_id,
+                       MIN(ayah_number) AS first_ayah,
+                       MAX(ayah_number) AS last_ayah,
+                       COUNT(*) AS ayah_count
+                FROM quran_ayahs
+                WHERE hizb_number IS NOT NULL
+                GROUP BY hizb_number, chapter_id
+            ),
+            totals AS (
+                SELECT hizb_number, SUM(ayah_count)::INTEGER AS verses_count
+                FROM per_hizb_chapter GROUP BY hizb_number
+            ),
+            bounds AS (
+                SELECT h.hizb_number,
+                       (SELECT p.chapter_id || ':' || p.first_ayah
+                          FROM per_hizb_chapter p
+                         WHERE p.hizb_number = h.hizb_number
+                         ORDER BY p.chapter_id ASC LIMIT 1) AS first_verse_key,
+                       (SELECT p.chapter_id || ':' || p.last_ayah
+                          FROM per_hizb_chapter p
+                         WHERE p.hizb_number = h.hizb_number
+                         ORDER BY p.chapter_id DESC LIMIT 1) AS last_verse_key,
+                       (SELECT p.chapter_id
+                          FROM per_hizb_chapter p
+                         WHERE p.hizb_number = h.hizb_number
+                         ORDER BY p.chapter_id ASC LIMIT 1) AS start_chapter_id,
+                       (SELECT p.first_ayah
+                          FROM per_hizb_chapter p
+                         WHERE p.hizb_number = h.hizb_number
+                         ORDER BY p.chapter_id ASC LIMIT 1) AS start_ayah_number
+                FROM per_hizb_chapter h GROUP BY h.hizb_number
+            )
+            SELECT t.hizb_number, t.verses_count,
+                   b.first_verse_key, b.last_verse_key,
+                   b.start_chapter_id, b.start_ayah_number,
+                   c.name_simple AS start_chapter_name_simple,
+                   c.name_arabic AS start_chapter_name_arabic,
+                   ((t.hizb_number - 1) / 2 + 1) AS juz_number
+            FROM totals t
+            JOIN bounds b USING (hizb_number)
+            LEFT JOIN quran_chapters c ON c.chapter_id = b.start_chapter_id
+            ORDER BY t.hizb_number
+            """
+        )
+        return [dict(row) for row in rows]
+
+    async def get_ayahs_by_verse_keys(
+        self,
+        verse_keys: list[str],
+        *,
+        translation_id: int,
+        recitation_id: int,
+    ) -> list[dict[str, Any]]:
+        if not verse_keys:
+            return []
+        rows = await self.db.fetch(
+            """
+            SELECT verse_key, chapter_id, ayah_number, juz_number, hizb_number,
+                   rub_number, page_number, arabic_text, transliteration_text
+            FROM quran_ayahs
+            WHERE verse_key = ANY($1::varchar[])
+            ORDER BY chapter_id, ayah_number
+            """,
+            verse_keys,
+        )
+        words = await self._get_words_by_verse(verse_keys)
+        timings = await self._get_timings_by_verse(verse_keys, recitation_id=recitation_id)
+        translation_map = await self._get_translations_by_verse(
+            verse_keys, translation_id=translation_id,
+        )
+        audio_map = await self._get_audio_by_verse(verse_keys, recitation_id=recitation_id)
+        return [
+            self._build_ayah_payload(
+                row,
+                translation_id=translation_id,
+                recitation_id=recitation_id,
+                translation_text=translation_map.get(row["verse_key"], ""),
+                audio_url=audio_map.get(row["verse_key"]),
+                words_by_verse=words,
+                timings_by_verse=timings,
+            )
+            for row in rows
+        ]
+
+    async def search_ayahs(
+        self,
+        query: str,
+        *,
+        translation_id: int,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Case-insensitive search across arabic_text + given translation.
+
+        Returns (items, total). Each item is a minimal search hit with verse_key,
+        surah/ayah, the matched snippet, and the chapter name for UI display.
+        Ranking: arabic matches first, then translation matches.
+        """
+        pattern = f"%{query}%"
+        rows = await self.db.fetch(
+            """
+            WITH hits AS (
+                SELECT a.verse_key, a.chapter_id, a.ayah_number,
+                       a.arabic_text,
+                       COALESCE(t.translation_text, '') AS translation_text,
+                       CASE
+                           WHEN a.arabic_text ILIKE $1 THEN 1
+                           WHEN t.translation_text ILIKE $1 THEN 2
+                           ELSE 3
+                       END AS rank
+                FROM quran_ayahs a
+                LEFT JOIN quran_ayah_translations t
+                    ON t.verse_key = a.verse_key AND t.translation_id = $2
+                WHERE a.arabic_text ILIKE $1
+                   OR t.translation_text ILIKE $1
+            )
+            SELECT h.verse_key, h.chapter_id, h.ayah_number,
+                   h.arabic_text, h.translation_text, h.rank,
+                   c.name_simple, c.name_arabic
+            FROM hits h
+            LEFT JOIN quran_chapters c ON c.chapter_id = h.chapter_id
+            ORDER BY h.rank, h.chapter_id, h.ayah_number
+            LIMIT $3 OFFSET $4
+            """,
+            pattern,
+            translation_id,
+            limit,
+            offset,
+        )
+        total = await self.db.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM quran_ayahs a
+            LEFT JOIN quran_ayah_translations t
+                ON t.verse_key = a.verse_key AND t.translation_id = $2
+            WHERE a.arabic_text ILIKE $1
+               OR t.translation_text ILIKE $1
+            """,
+            pattern,
+            translation_id,
+        )
+        items = [
+            {
+                "verse_key": row["verse_key"],
+                "surah_number": row["chapter_id"],
+                "ayah_number": row["ayah_number"],
+                "chapter_name_simple": row["name_simple"],
+                "chapter_name_arabic": row["name_arabic"],
+                "arabic_text": row["arabic_text"],
+                "translation_text": row["translation_text"],
+                "match_field": "arabic" if row["rank"] == 1 else "translation",
+            }
+            for row in rows
+        ]
+        return items, int(total or 0)
 
     async def get_chapter_audio(
         self,

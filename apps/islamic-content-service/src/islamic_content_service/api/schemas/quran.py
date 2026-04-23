@@ -276,4 +276,171 @@ class QuranChapterAudioResponse(QuranChapterAudioTrackSchema):
     generated_at: str
 
 
+class QuranJuzSchema(BaseModel):
+    juz_number: int = Field(description="1..30")
+    name_arabic: str = Field(description="Traditional Juz name in Arabic (incipit)")
+    name_simple: str = Field(description="Simplified Latin spelling (e.g. 'Alif Lam Mim')")
+    name_transliteration: str = Field(description="Scholarly transliteration with diacritics")
+    first_verse_key: str = Field(description="verse_key of the first ayah in this Juz (e.g. '1:1')")
+    last_verse_key: str = Field(description="verse_key of the last ayah in this Juz (e.g. '2:141')")
+    start_chapter_id: int = Field(description="chapter_id of the first ayah")
+    start_chapter_name_simple: str | None = Field(default=None, description="Surah name of the first ayah (e.g. 'Al-Fatihah')")
+    start_chapter_name_arabic: str | None = None
+    start_ayah_number: int = Field(description="ayah_number of the first ayah")
+    verses_count: int = Field(description="Total ayahs in this Juz")
+    verse_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description="chapter_id -> ayah range string, e.g. {'1': '1-7', '2': '1-141'}",
+    )
+
+
+class QuranJuzsResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "generated_at": "2026-04-23T03:00:00+00:00",
+                "screen": "quran_juzs",
+                "source_api": "quran.foundation+internal",
+                "juzs": [
+                    {
+                        "juz_number": 1,
+                        "name_arabic": "الم",
+                        "name_simple": "Alif Lam Mim",
+                        "name_transliteration": "Alif Lām Mīm",
+                        "first_verse_key": "1:1",
+                        "last_verse_key": "2:141",
+                        "start_chapter_id": 1,
+                        "start_chapter_name_simple": "Al-Fatihah",
+                        "start_chapter_name_arabic": "ٱلْفَاتِحَة",
+                        "start_ayah_number": 1,
+                        "verses_count": 148,
+                        "verse_mapping": {"1": "1-7", "2": "1-141"},
+                    }
+                ],
+            }
+        }
+    )
+    generated_at: str
+    screen: str = "quran_juzs"
+    source_api: str
+    juzs: list[QuranJuzSchema]
+
+
+class QuranJuzDetailResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_juz_detail"
+    source_api: str
+    juz: QuranJuzSchema
+
+
+class QuranJuzAyahsResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_juz_ayahs"
+    source_api: str
+    juz: QuranJuzSchema
+    translation_id: int
+    recitation_id: int
+    ayahs: list[QuranAyahSchema]
+
+
+class QuranSearchHitSchema(BaseModel):
+    verse_key: str
+    surah_number: int
+    ayah_number: int
+    chapter_name_simple: str | None = None
+    chapter_name_arabic: str | None = None
+    arabic_text: str = ""
+    translation_text: str = ""
+    match_field: str = Field(description="Which field matched: 'arabic' or 'translation'")
+
+
+class QuranSearchResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_search"
+    source_api: str
+    query: str
+    translation_id: int
+    total: int
+    limit: int
+    offset: int
+    items: list[QuranSearchHitSchema]
+
+
+class QuranChapterDetailResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_chapter_detail"
+    source_api: str
+    chapter: QuranChapterSchema
+
+
+class QuranRandomAyahResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_random_ayah"
+    source_api: str
+    translation_id: int
+    recitation_id: int
+    ayah: QuranAyahSchema
+
+
+class QuranPageAyahsResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_page_ayahs"
+    source_api: str
+    page_number: int
+    translation_id: int
+    recitation_id: int
+    ayahs: list[QuranAyahSchema]
+
+
+class QuranAyahsRangeResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_ayahs_range"
+    source_api: str
+    from_verse_key: str
+    to_verse_key: str
+    translation_id: int
+    recitation_id: int
+    ayahs: list[QuranAyahSchema]
+
+
+class QuranSajdahPointSchema(BaseModel):
+    sajdah_number: int = Field(description="1..15 in recitation order")
+    verse_key: str
+    surah_number: int
+    ayah_number: int
+    sajdah_type: str = Field(description="'obligatory' or 'recommended'")
+    chapter_name_simple: str | None = None
+    chapter_name_arabic: str | None = None
+    arabic_text: str = ""
+    translation_text: str = ""
+
+
+class QuranSajdahsResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_sajdahs"
+    source_api: str
+    translation_id: int
+    total: int
+    sajdahs: list[QuranSajdahPointSchema]
+
+
+class QuranHizbSchema(BaseModel):
+    hizb_number: int = Field(description="1..60")
+    juz_number: int = Field(description="Parent Juz (each Juz = 2 Hizbs)")
+    first_verse_key: str
+    last_verse_key: str
+    start_chapter_id: int
+    start_chapter_name_simple: str | None = None
+    start_chapter_name_arabic: str | None = None
+    start_ayah_number: int
+    verses_count: int
+
+
+class QuranHizbsResponse(BaseModel):
+    generated_at: str
+    screen: str = "quran_hizbs"
+    source_api: str
+    hizbs: list[QuranHizbSchema]
+
+
 QuranWordSchema.model_rebuild()

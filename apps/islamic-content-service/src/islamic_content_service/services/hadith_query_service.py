@@ -131,6 +131,113 @@ class HadithQueryService:
             _load,
         )
 
+    async def get_collection_detail(self, collection_name: str) -> dict[str, Any]:
+        async def _load() -> dict[str, Any]:
+            collection = await self.repository.get_collection(collection_name)
+            if collection is None:
+                raise NotReadyError(f"No Hadith collection found for {collection_name}")
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "hadith_collection_detail",
+                "source_api": HADITH_SOURCE_API,
+                "collection": collection,
+            }
+
+        return await self._cached(
+            f"hadith:collection:{collection_name}",
+            self.cache_settings.meta_ttl_seconds,
+            _load,
+        )
+
+    async def get_random_hadith(
+        self, *, collection_name: str | None = None
+    ) -> dict[str, Any]:
+        picked = await self.repository.get_random_hadith(collection_name=collection_name)
+        if picked is None:
+            raise NotReadyError(
+                "No Hadith data available"
+                if collection_name is None
+                else f"No Hadiths found in collection {collection_name}"
+            )
+        coll, number = picked
+        detail = await self.repository.get_detail(coll, number)
+        if detail is None:
+            raise NotReadyError(f"Detail missing for {coll}:{number}")
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "screen": "hadith_random",
+            "source_api": HADITH_SOURCE_API,
+            "hadith": detail,
+        }
+
+    async def get_context(
+        self, collection_name: str, hadith_number: str
+    ) -> dict[str, Any]:
+        async def _load() -> dict[str, Any]:
+            # Confirm hadith exists so we 503 early on typos
+            detail = await self.repository.get_detail(collection_name, hadith_number)
+            if detail is None:
+                raise NotReadyError(
+                    f"No Hadith found for {collection_name}:{hadith_number}"
+                )
+            neighbors = await self.repository.get_neighbors(collection_name, hadith_number)
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "hadith_context",
+                "source_api": HADITH_SOURCE_API,
+                "collection": collection_name,
+                "hadith_number": hadith_number,
+                "neighbors": neighbors,
+            }
+
+        return await self._cached(
+            f"hadith:context:{collection_name}:{hadith_number}",
+            self.cache_settings.ttl_seconds,
+            _load,
+        )
+
+    async def search_hadiths(
+        self,
+        query: str,
+        *,
+        language: str = "en",
+        collection_name: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        query = (query or "").strip()
+        if not query:
+            raise NotReadyError("Query parameter 'q' must not be empty")
+        if language not in ("en", "ar"):
+            raise NotReadyError(f"Unsupported search language: {language}")
+
+        async def _load() -> dict[str, Any]:
+            items, total = await self.repository.search_hadiths(
+                query,
+                language=language,
+                collection_name=collection_name,
+                limit=limit,
+                offset=offset,
+            )
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "hadith_search",
+                "source_api": HADITH_SOURCE_API,
+                "query": query,
+                "language": language,
+                "collection": collection_name,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "items": items,
+            }
+
+        return await self._cached(
+            f"hadith:search:{query}:{language}:{collection_name or '-'}:{limit}:{offset}",
+            self.cache_settings.ttl_seconds,
+            _load,
+        )
+
     async def get_detail(self, collection_name: str, hadith_number: str) -> dict[str, Any]:
         async def _load() -> dict[str, Any]:
             detail = await self.repository.get_detail(collection_name, hadith_number)

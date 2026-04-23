@@ -8,11 +8,21 @@ from ..schemas.quran import (
     QuranAyahMinimalResponse,
     QuranAyahTranslationResponse,
     QuranAudioTextResponse,
+    QuranAyahsRangeResponse,
     QuranChapterAudioResponse,
     QuranChapterAyahsResponse,
+    QuranChapterDetailResponse,
     QuranChapterTranslationsResponse,
     QuranChaptersResponse,
+    QuranHizbsResponse,
+    QuranJuzAyahsResponse,
+    QuranJuzDetailResponse,
+    QuranJuzsResponse,
+    QuranPageAyahsResponse,
+    QuranRandomAyahResponse,
     QuranRecitationsResponse,
+    QuranSajdahsResponse,
+    QuranSearchResponse,
     QuranTranslationsResponse,
     QuranTripletsResponse,
 )
@@ -158,6 +168,206 @@ async def get_translations(service: QuranQueryService = Depends(get_quran_query_
 )
 async def get_recitations(service: QuranQueryService = Depends(get_quran_query_service)):
     return await service.get_recitations()
+
+
+@router.get(
+    "/juzs",
+    response_model=QuranJuzsResponse,
+    summary="List all 30 Juz with traditional names and start/end verse keys",
+    description=(
+        "Returns one row per Juz (1..30) aggregated from `quran_ayahs`. "
+        "Each row includes the traditional Arabic name (incipit), first/last "
+        "verse keys, and a per-chapter ayah-range mapping. Juz names are "
+        "service-side constants — upstream Quran Foundation does not expose them."
+    ),
+)
+async def get_juzs(service: QuranQueryService = Depends(get_quran_query_service)):
+    try:
+        return await service.get_juzs()
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/juzs/{juz_number}",
+    response_model=QuranJuzDetailResponse,
+    summary="Get detail for a single Juz",
+)
+async def get_juz_detail(
+    juz_number: int,
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_juz_detail(juz_number)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/juzs/{juz_number}/ayahs",
+    response_model=QuranJuzAyahsResponse,
+    summary="Get all ayahs in a Juz with translation + audio",
+    description=(
+        "Returns every ayah that belongs to the given Juz (1..30), ordered by "
+        "chapter then ayah. Ayah payload is identical to `/chapters/{id}/ayahs` — "
+        "word-level text, timings, translation, audio — so the same rendering "
+        "pipeline works for both chapter-view and juz-view."
+    ),
+)
+async def get_juz_ayahs(
+    juz_number: int,
+    translation_id: int | None = Query(default=None),
+    recitation_id: int | None = Query(default=None),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_juz_ayahs(
+            juz_number,
+            translation_id=translation_id,
+            recitation_id=recitation_id,
+        )
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/hizbs",
+    response_model=QuranHizbsResponse,
+    summary="List all 60 Hizbs (half-Juz divisions)",
+)
+async def get_hizbs(service: QuranQueryService = Depends(get_quran_query_service)):
+    try:
+        return await service.get_hizbs()
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/sajdahs",
+    response_model=QuranSajdahsResponse,
+    summary="List the 15 canonical sajdah (prostration) points",
+    description=(
+        "Returns the 15 verses of prostration, enriched with surah name, arabic "
+        "text and translation. `sajdah_type` is 'obligatory' or 'recommended' "
+        "depending on the verse (classification is canonical; schools may differ "
+        "on a few positions)."
+    ),
+)
+async def get_sajdahs(
+    translation_id: int | None = Query(default=None),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_sajdahs(translation_id=translation_id)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/pages/{page_number}",
+    response_model=QuranPageAyahsResponse,
+    summary="Get all ayahs on a standard Mushaf page (1..604)",
+)
+async def get_page_ayahs(
+    page_number: int,
+    translation_id: int | None = Query(default=None),
+    recitation_id: int | None = Query(default=None),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_page_ayahs(
+            page_number,
+            translation_id=translation_id,
+            recitation_id=recitation_id,
+        )
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/ayahs/random",
+    response_model=QuranRandomAyahResponse,
+    summary="Get one random ayah (Ayah of the Day)",
+)
+async def get_random_ayah(
+    translation_id: int | None = Query(default=None),
+    recitation_id: int | None = Query(default=None),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_random_ayah(
+            translation_id=translation_id,
+            recitation_id=recitation_id,
+        )
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/ayahs/range",
+    response_model=QuranAyahsRangeResponse,
+    summary="Batch-fetch ayahs in an inclusive range (may span multiple surahs)",
+    description="Pass `from` and `to` as verse_keys like `from=1:1&to=2:5`.",
+)
+async def get_ayahs_range(
+    from_key: str = Query(alias="from", description="Start verse_key, e.g. 1:1"),
+    to_key: str = Query(alias="to", description="End verse_key, e.g. 2:5"),
+    translation_id: int | None = Query(default=None),
+    recitation_id: int | None = Query(default=None),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_ayahs_range(
+            from_key, to_key,
+            translation_id=translation_id,
+            recitation_id=recitation_id,
+        )
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/chapters/{chapter_id}",
+    response_model=QuranChapterDetailResponse,
+    summary="Get metadata for a single Surah (no ayahs)",
+)
+async def get_chapter_detail(
+    chapter_id: int,
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.get_chapter_detail(chapter_id)
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
+
+
+@router.get(
+    "/search",
+    response_model=QuranSearchResponse,
+    summary="Search ayahs by Arabic text or translation",
+    description=(
+        "Case-insensitive substring search across `arabic_text` and the given "
+        "translation's `translation_text`. Ranks arabic matches first. Use "
+        "`translation_id` to pick which translation's body to search (defaults "
+        "to the service-configured default)."
+    ),
+)
+async def search_quran(
+    q: str = Query(description="Search query (Arabic letters or translation text)"),
+    translation_id: int | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    service: QuranQueryService = Depends(get_quran_query_service),
+):
+    try:
+        return await service.search_ayahs(
+            q,
+            translation_id=translation_id,
+            limit=limit,
+            offset=offset,
+        )
+    except NotReadyError as exc:
+        raise _to_http_error(exc) from exc
 
 
 @router.get(

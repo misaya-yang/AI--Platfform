@@ -55,3 +55,43 @@ class DuaDetailResponse(BaseModel):
     screen: str = "dua_detail"
     source: str
     dua: DuaItemSchema
+
+
+class DuaRandomResponse(BaseModel):
+    generated_at: str
+    screen: str = "dua_random"
+    source: str
+    dua: DuaItemSchema
+
+
+class DuaSearchResponse(BaseModel):
+    generated_at: str
+    screen: str = "dua_search"
+    source: str
+    query: str
+    total: int
+    limit: int
+    offset: int
+    items: list[DuaItemSchema]
+
+
+class DuaOccasionSchema(BaseModel):
+    occasion: str
+    dua_count: int
+
+
+class DuaOccasionListResponse(BaseModel):
+    generated_at: str
+    screen: str = "dua_occasions"
+    source: str
+    total_occasions: int
+    occasions: list[DuaOccasionSchema]
+
+
+class DuaByOccasionResponse(BaseModel):
+    generated_at: str
+    screen: str = "dua_by_occasion"
+    source: str
+    occasion: str
+    total: int
+    items: list[DuaItemSchema]

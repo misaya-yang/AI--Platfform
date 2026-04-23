@@ -98,3 +98,54 @@ class HadithDetailResponse(BaseModel):
     screen: str = "hadith_detail"
     source_api: str
     hadith: HadithDetailSchema
+
+
+class HadithSearchHitSchema(BaseModel):
+    collection: str
+    book_number: str
+    book_title: str | None = None
+    chapter_title: str | None = None
+    hadith_number: str
+    language: str
+    preview_text: str = ""
+
+
+class HadithCollectionDetailResponse(BaseModel):
+    generated_at: str
+    screen: str = "hadith_collection_detail"
+    source_api: str
+    collection: HadithCollectionSchema
+
+
+class HadithRandomResponse(BaseModel):
+    generated_at: str
+    screen: str = "hadith_random"
+    source_api: str
+    hadith: HadithDetailSchema
+
+
+class HadithNeighborsSchema(BaseModel):
+    previous: str | None = None
+    next: str | None = None
+
+
+class HadithContextResponse(BaseModel):
+    generated_at: str
+    screen: str = "hadith_context"
+    source_api: str
+    collection: str
+    hadith_number: str
+    neighbors: HadithNeighborsSchema
+
+
+class HadithSearchResponse(BaseModel):
+    generated_at: str
+    screen: str = "hadith_search"
+    source_api: str
+    query: str
+    language: str
+    collection: str | None = None
+    total: int
+    limit: int
+    offset: int
+    items: list[HadithSearchHitSchema]

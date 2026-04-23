@@ -89,6 +89,90 @@ class DuaQueryService:
 
         return await self._cached("dua:all_items", self.cache_settings.ttl_seconds, _load)
 
+    async def get_random(self) -> dict[str, Any]:
+        dua = await self.repository.get_random()
+        if dua is None:
+            raise NotReadyError("No Dua data available")
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "screen": "dua_random",
+            "source": DUA_SOURCE,
+            "dua": dua,
+        }
+
+    async def search_duas(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        query = (query or "").strip()
+        if not query:
+            raise NotReadyError("Query parameter 'q' must not be empty")
+
+        async def _load() -> dict[str, Any]:
+            items, total = await self.repository.search_items(
+                query, limit=limit, offset=offset
+            )
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "dua_search",
+                "source": DUA_SOURCE,
+                "query": query,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "items": items,
+            }
+
+        return await self._cached(
+            f"dua:search:{query}:{limit}:{offset}",
+            self.cache_settings.ttl_seconds,
+            _load,
+        )
+
+    async def get_items_by_occasion(self, occasion: str) -> dict[str, Any]:
+        occasion = (occasion or "").strip()
+        if not occasion:
+            raise NotReadyError("Occasion must not be empty")
+
+        async def _load() -> dict[str, Any]:
+            items = await self.repository.get_items_by_occasion(occasion)
+            if not items:
+                raise NotReadyError(f"No Duas found for occasion: {occasion}")
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "dua_by_occasion",
+                "source": DUA_SOURCE,
+                "occasion": occasion,
+                "total": len(items),
+                "items": items,
+            }
+
+        return await self._cached(
+            f"dua:occasion:{occasion}",
+            self.cache_settings.ttl_seconds,
+            _load,
+        )
+
+    async def list_occasions(self) -> dict[str, Any]:
+        async def _load() -> dict[str, Any]:
+            occasions = await self.repository.list_occasions()
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "screen": "dua_occasions",
+                "source": DUA_SOURCE,
+                "total_occasions": len(occasions),
+                "occasions": occasions,
+            }
+
+        return await self._cached(
+            "dua:occasions",
+            self.cache_settings.meta_ttl_seconds,
+            _load,
+        )
+
     async def get_detail(self, dua_id: str) -> dict[str, Any]:
         async def _load() -> dict[str, Any]:
             detail = await self.repository.get_detail(dua_id)
