@@ -12,7 +12,7 @@ This is a core component of the file upload analysis feature, integrating:
 - VLM service for image descriptions
 - KnowledgeClientLike for session-level temporary KB (long documents)
 
-Supports remote storage backends (S3/OSS) via FileStorageService:
+Supports remote storage backends (S3/OSS) via FileStorageLike:
 - Files are downloaded from remote storage when needed
 - Cached locally in temp directory during processing
 """
@@ -40,8 +40,7 @@ from .pdf_converter import PDFConversionError, create_pdf_converter
 
 if TYPE_CHECKING:
     from ai_gateway_core.knowledge import KnowledgeClientLike
-    from src.services.knowledge.vlm_service import DashScopeVLMService
-    from ..storage.file_storage import FileStorageService
+    from ai_gateway_core.storage import FileStorageLike
 
 # Type alias for progress callback
 ProgressCallback = Callable[[str, int, int, str], Awaitable[None]]
@@ -238,12 +237,12 @@ The description should be detailed enough for someone who hasn't seen the image 
 
     def __init__(
         self,
-        vlm_service: DashScopeVLMService | None = None,
+        vlm_service: Any | None = None,
         knowledge_service: KnowledgeClientLike | None = None,
         storage_base_path: Path | None = None,
         use_english_prompt: bool = False,
         max_pdf_pages: int = MAX_PDF_PAGES,
-        file_storage: FileStorageService | None = None,
+        file_storage: FileStorageLike | None = None,
         redis_client: Any | None = None,
     ):
         """
@@ -257,7 +256,7 @@ The description should be detailed enough for someone who hasn't seen the image 
             storage_base_path: Base path for file storage. Defaults to FILE_STORAGE_PATH.
             use_english_prompt: Use English prompts for VLM (default: Chinese).
             max_pdf_pages: Maximum PDF pages to convert (default 20).
-            file_storage: FileStorageService for remote storage (S3/OSS).
+            file_storage: FileStorageLike for remote storage (S3/OSS).
                 If provided, files will be downloaded from remote storage when not found locally.
             redis_client: Redis client for caching results.
         """
@@ -1442,10 +1441,10 @@ The description should be detailed enough for someone who hasn't seen the image 
 
 
 def create_file_processor(
-    vlm_service: DashScopeVLMService | None = None,
+    vlm_service: Any | None = None,
     knowledge_service: KnowledgeClientLike | None = None,
     storage_base_path: Path | None = None,
-    file_storage: FileStorageService | None = None,
+    file_storage: FileStorageLike | None = None,
     redis_client: Any | None = None,
 ) -> FileProcessor:
     """
@@ -1455,7 +1454,7 @@ def create_file_processor(
         vlm_service: VLM service for image descriptions
         knowledge_service: Knowledge service for session KB
         storage_base_path: Base path for file storage
-        file_storage: FileStorageService for remote storage (S3/OSS)
+        file_storage: FileStorageLike for remote storage (S3/OSS)
         redis_client: Redis client for caching
 
     Returns:

@@ -4460,7 +4460,7 @@ Please use this web search context to inform your response when relevant."""
             chunks = list(ctx.chunks)
             if authority_sort:
                 try:
-                    from src.services.knowledge.islamic_metadata import get_authority_order
+                    from ai_gateway_core.knowledge import get_authority_order
 
                     def _authority_key(ch: dict[str, Any]) -> int:
                         meta = ch.get("metadata") or {}

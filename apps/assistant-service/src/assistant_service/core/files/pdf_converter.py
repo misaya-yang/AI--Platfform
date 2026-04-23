@@ -19,7 +19,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ai_gateway_core.logging import get_logger
-from src.services.knowledge.common import import_pymupdf
+
+
+def import_pymupdf():
+    """Import PyMuPDF with compatibility for old/new module names.
+
+    Returns the ``fitz`` module regardless of whether the package was
+    installed as ``pymupdf`` (modern) or ``fitz`` (legacy).
+    """
+    try:
+        import pymupdf as fitz  # type: ignore
+        return fitz
+    except ImportError:
+        import fitz  # type: ignore
+        return fitz
+
 
 logger = get_logger(__name__)
 

@@ -1,15 +1,25 @@
-"""Knowledge-base client contract.
+"""Knowledge-base client contract + shared pure-data utilities.
 
-The assistant never runs KB retrieval in-process; it calls the KB service
-over HTTP. This Protocol describes the HTTP-client shape so downstream
-tests and fakes can substitute without importing the concrete
-``KBProxyClient``. The concrete client itself is a Phase-3 placeholder
-and may be promoted to live in this package if the gateway also uses it.
+- ``KnowledgeClientLike`` — structural Protocol for HTTP KB clients; use
+  for type annotations in business code.
+- ``ISLAMIC_SYNONYMS`` — pure data dictionary of Islamic-term synonyms
+  used by assistant quality policies. Moved here so the assistant
+  doesn't reach into ``src.services.knowledge`` for a static constant.
+- ``get_authority_order`` / ``AUTHORITY_ORDER`` — pure function +
+  backing dict for citation authority sorting. String-keyed for
+  service-agnostic use.
+
+These three items are the only ones the Phase-4 plan promoted from
+``src.services.knowledge.*``; everything else in that module runs in
+the KB service and is reached via HTTP (see KBProxyClient in gateway).
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+from ._authority import AUTHORITY_ORDER, get_authority_order
+from ._synonyms import ISLAMIC_SYNONYMS
 
 
 @runtime_checkable
@@ -26,4 +36,9 @@ class KnowledgeClientLike(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
-__all__ = ["KnowledgeClientLike"]
+__all__ = [
+    "AUTHORITY_ORDER",
+    "ISLAMIC_SYNONYMS",
+    "KnowledgeClientLike",
+    "get_authority_order",
+]
