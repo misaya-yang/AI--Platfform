@@ -143,15 +143,35 @@ class EmbeddingManager:
                 extra=embedding_config or {},
             )
         if provider_key in {"gemini", "google"}:
+            # Resolution order for Google embedding:
+            #   1. dataset embedding_config.api_key  (per-dataset override)
+            #   2. settings.knowledge.gemini.api_key (pydantic settings)
+            #   3. resolve_google("embedding")       (env helper — picks up
+            #      GOOGLE_EMBEDDING_BACKEND + VERTEX_EMBEDDING_API_KEY)
             if not api_key:
                 api_key = str(self.settings.knowledge.gemini.api_key or "").strip()
+            if not api_key:
+                from ai_gateway_core.config import resolve_google
+
+                resolved_key, _, _ = resolve_google("embedding")
+                api_key = resolved_key
             if not api_key:
                 raise ValidationFailedError(
                     "Gemini api_key is required in dataset embedding_config"
                 )
         elif provider_key in {"dashscope", "aliyun"}:
+            # Same three-step fallback as Gemini above. Also picks up
+            # DASHSCOPE_EMBEDDING_BASE_URL when no dataset override exists
+            # — lets operators swap CN↔Intl for embedding independently.
             if not api_key:
                 api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
+            if not api_key:
+                from ai_gateway_core.config import resolve_dashscope
+
+                resolved_key, resolved_url = resolve_dashscope("embedding")
+                api_key = resolved_key
+                if not base_url and resolved_url:
+                    base_url = resolved_url
             if not api_key:
                 raise ValidationFailedError(
                     "DashScope api_key is required in dataset embedding_config"

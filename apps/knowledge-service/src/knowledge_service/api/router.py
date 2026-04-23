@@ -218,6 +218,39 @@ async def retrieve(
     api_key = embed_cfg.api_key
     base_url = embed_cfg.base_url or ""
 
+    # Env-level fallback for the per-domain embedding swap. Mirrors
+    # ai_gateway_core.config.endpoints.resolve_{dashscope,google}
+    # inline — knowledge-service ships as a standalone image and
+    # doesn't pull in ai-gateway-core.
+    if provider in {"dashscope", "aliyun"} and not api_key:
+        import os as _os
+        api_key = (
+            _os.environ.get("DASHSCOPE_EMBEDDING_API_KEY", "").strip()
+            or _os.environ.get("DASHSCOPE_API_KEY", "").strip()
+        )
+        if not base_url:
+            dash_base = (
+                _os.environ.get("DASHSCOPE_EMBEDDING_BASE_URL", "").strip()
+                or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
+                or "https://dashscope.aliyuncs.com"
+            )
+            # The retrieve path calls {base_url}/embeddings directly —
+            # the DashScope OpenAI-compat route lives under /compatible-mode/v1.
+            base_url = dash_base.rstrip("/") + "/compatible-mode/v1"
+    elif provider in {"gemini", "google"} and not api_key:
+        import os as _os
+        backend = _os.environ.get("GOOGLE_EMBEDDING_BACKEND", "").strip().lower()
+        if backend == "vertex":
+            api_key = (
+                _os.environ.get("VERTEX_EMBEDDING_API_KEY", "").strip()
+                or _os.environ.get("VERTEX_API_KEY", "").strip()
+            )
+        if not api_key:
+            api_key = (
+                _os.environ.get("GEMINI_API_KEY", "").strip()
+                or _os.environ.get("GOOGLE_API_KEY", "").strip()
+            )
+
     query_vector = await _get_query_embedding(body.query, provider, model, api_key, dim, base_url)
     t_embed = time.perf_counter()
 

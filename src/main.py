@@ -1027,16 +1027,26 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     - DASHSCOPE_API_KEY (或复用 knowledge.dashscope.api_key)
     - GOOGLE_API_KEY
 
+    DashScope + Google chat routing (free/paid swap) is handled by
+    ``ai_gateway_core.config.endpoints.resolve_dashscope("chat")`` and
+    ``resolve_google("chat")`` — same helpers are used for image and
+    embedding elsewhere, so chat / image / embedding can be flipped
+    between free and paid endpoints independently.
+
     同时将配置同步到数据库，确保前端可以管理。
     """
     import os
 
+    from ai_gateway_core.config import resolve_dashscope, resolve_google
     from assistant_service.core import AssistantService, ModelProvider, ModelRegistry
 
     model_registry = ModelRegistry()
     configured_providers = []
 
-    # 默认 provider 配置定义
+    # 默认 provider 配置定义 — for providers whose endpoint selection is
+    # straightforward (single key, single base_url env). DashScope and
+    # Google are resolved below via the per-domain helper because they
+    # have free/paid swap semantics.
     DEFAULT_PROVIDER_CONFIGS = {
         "openai": {
             "display_name": "OpenAI",
@@ -1062,20 +1072,17 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         "dashscope": {
             "display_name": "Qwen/DashScope",
             "api_type": "openai",
+            # base_url / env_key are resolved dynamically via
+            # resolve_dashscope("chat") — the values below are just the
+            # defaults the DB row sees if env vars are unset.
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
             "env_key": "DASHSCOPE_API_KEY",
-            # Chat-specific base_url override. Lets the assistant route chat
-            # traffic to the Intl endpoint (free tier) while image_gen /
-            # embedding / rerank keep using DASHSCOPE_API_KEY against the
-            # CN native URLs they hardcode. See DASHSCOPE_CHAT_API_KEY below
-            # for the matching key override.
             "env_base_url": "DASHSCOPE_CHAT_BASE_URL",
         },
         "google": {
             "display_name": "Google Gemini",
             "api_type": "google",
             "base_url": "https://generativelanguage.googleapis.com",
-            # Prefer GEMINI_API_KEY, fallback to GOOGLE_API_KEY for backward compatibility.
             "env_key": "GEMINI_API_KEY",
             "env_base_url": None,
         },
@@ -1121,20 +1128,23 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     # 处理每个 provider
     for provider_id, config in DEFAULT_PROVIDER_CONFIGS.items():
-        # 从环境变量获取 API key
+        # Default: read the provider's single API key env + optional base_url env.
         api_key = os.environ.get(config["env_key"], "")
+        base_url = None
+        if config.get("env_base_url"):
+            base_url = os.environ.get(config["env_base_url"])
+        if not base_url:
+            base_url = config["base_url"]
+        google_backend = "ai_studio"
 
-        # DashScope 特殊处理：
-        #   1. chat-specific override (DASHSCOPE_CHAT_API_KEY) — lets chat
-        #      route to the Intl endpoint (free tier) while image_gen,
-        #      embedding and rerank keep using DASHSCOPE_API_KEY against
-        #      their hardcoded CN URLs. Paired with DASHSCOPE_CHAT_BASE_URL
-        #      above; use together when switching to Intl.
-        #   2. fallback: knowledge.dashscope.api_key (legacy path, still works)
+        # DashScope chat routing: domain-specific helper handles the CN ⇄
+        # Intl swap (DASHSCOPE_CHAT_API_KEY / DASHSCOPE_CHAT_BASE_URL).
+        # Legacy ``settings.knowledge.dashscope.api_key`` is still
+        # honored as a last-resort fallback for pre-env-var installs.
         if provider_id == "dashscope":
-            chat_key = os.environ.get("DASHSCOPE_CHAT_API_KEY", "").strip()
-            if chat_key:
-                api_key = chat_key
+            resolved_key, resolved_url = resolve_dashscope("chat")
+            api_key = resolved_key
+            base_url = resolved_url
             if not api_key:
                 knowledge_dashscope = getattr(
                     getattr(settings, "knowledge", None), "dashscope", None
@@ -1142,47 +1152,20 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
                 if knowledge_dashscope:
                     api_key = getattr(knowledge_dashscope, "api_key", "")
 
-        # Google Gemini: backward-compatible fallback to GOOGLE_API_KEY
-        if provider_id == "google" and not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY", "")
-
-        # Google Vertex routing. Two orthogonal knobs:
-        #   GOOGLE_API_BACKEND=vertex   — flip the global default for all
-        #                                 Google models.
-        #   VERTEX_API_KEY=AQ.xxx       — Express-Mode key; when present
-        #                                 (and backend is vertex) it wins
-        #                                 over GOOGLE_API_KEY / GEMINI_API_KEY,
-        #                                 because the two are different
-        #                                 token formats.
-        # Per-model A/B routing via GOOGLE_VERTEX_MODELS is handled inside
-        # ModelRegistry at request time, so we just seed the client config
-        # with whichever backend should be the *default*.
-        google_backend = "ai_studio"
+        # Google chat routing: domain-specific helper handles the
+        # AI Studio ⇄ Vertex backend flip and picks the matching key
+        # (GEMINI_API_KEY vs VERTEX_API_KEY / VERTEX_CHAT_API_KEY).
+        # Per-model A/B via GOOGLE_VERTEX_MODELS is still resolved inside
+        # ModelRegistry at request time; this only seeds the default.
         if provider_id == "google":
-            google_backend = os.environ.get("GOOGLE_API_BACKEND", "ai_studio").strip().lower()
-            if google_backend not in {"ai_studio", "vertex"}:
-                logger.warning(
-                    f"Unknown GOOGLE_API_BACKEND={google_backend!r}, "
-                    "falling back to ai_studio"
-                )
-                google_backend = "ai_studio"
+            resolved_key, resolved_url, google_backend = resolve_google("chat")
+            api_key = resolved_key
+            # Only override base_url when backend actually changed — an
+            # explicit DB override (base_url column) would be lost
+            # otherwise. AI Studio default matches config["base_url"],
+            # so leaving base_url alone is correct in that case.
             if google_backend == "vertex":
-                vertex_key = os.environ.get("VERTEX_API_KEY", "").strip()
-                if vertex_key:
-                    api_key = vertex_key
-
-        # 获取自定义 base_url
-        base_url = None
-        if config.get("env_base_url"):
-            base_url = os.environ.get(config["env_base_url"])
-        if not base_url:
-            base_url = config["base_url"]
-        # When running Google against Vertex, swap the default host so the
-        # pre-configured HTTP client points at aiplatform.googleapis.com.
-        # Per-model overrides (GOOGLE_VERTEX_MODELS) use absolute URLs at
-        # request time so they work regardless of this default.
-        if provider_id == "google" and google_backend == "vertex" and base_url == config["base_url"]:
-            base_url = None  # Let configure_provider pick VERTEX_BASE_URL.
+                base_url = None  # let configure_provider pick VERTEX_BASE_URL
 
         # 配置 ModelRegistry（内存中）
         if api_key:

@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Redis init failed: {e}")
 
     # ── Model Registry ──
+    from ai_gateway_core.config import resolve_dashscope, resolve_google
     from .core.models.model_registry import ModelRegistry, ModelProvider
     model_registry = ModelRegistry()
 
@@ -70,45 +71,47 @@ async def lifespan(app: FastAPI):
     # gateway ran assistant code in-process so its registry was used; now that
     # assistant-service is the real execution target, its registry has to know
     # every provider the gateway knows.
+    #
+    # DashScope + Google chat keys are resolved via the per-domain helper
+    # (ai_gateway_core.config.endpoints) so chat / image / embedding can be
+    # flipped between free and paid endpoints independently. See
+    # packages/ai-gateway-core/src/ai_gateway_core/config/endpoints.py.
+    dash_chat_key, dash_chat_url = resolve_dashscope("chat")
+    google_chat_key, google_chat_url, google_backend = resolve_google("chat")
+    # Vertex uses the shared vertex key fallback chain (the
+    # google-vertex provider is the "use Vertex all the time" entry;
+    # the legacy GOOGLE_API_BACKEND switch is honored via resolve_google).
+    vertex_key = os.environ.get("VERTEX_API_KEY", "").strip() or (
+        google_chat_key if google_backend == "vertex" else ""
+    )
+
     providers_config = {
-        "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL", "https://api.openai.com"),
-        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-        "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        "dashscope": ("DASHSCOPE_API_KEY", "DASHSCOPE_CHAT_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode"),
-        "google": ("GEMINI_API_KEY", None, "https://generativelanguage.googleapis.com"),
-        "google-vertex": ("VERTEX_API_KEY", None, "https://aiplatform.googleapis.com"),
+        "openai": (
+            os.environ.get("OPENAI_API_KEY", ""),
+            os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com",
+        ),
+        "anthropic": (
+            os.environ.get("ANTHROPIC_API_KEY", ""),
+            os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com",
+        ),
+        "deepseek": (
+            os.environ.get("DEEPSEEK_API_KEY", ""),
+            os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
+        ),
+        "dashscope": (dash_chat_key, dash_chat_url),
+        "google": (google_chat_key, google_chat_url),
+        "google-vertex": (
+            vertex_key,
+            os.environ.get("VERTEX_BASE_URL") or "https://aiplatform.googleapis.com",
+        ),
     }
-    google_backend = os.environ.get("GOOGLE_API_BACKEND", "ai_studio").strip().lower()
-    if google_backend not in {"ai_studio", "vertex"}:
-        google_backend = "ai_studio"
 
-    for pid, (env_key, env_url, default_url) in providers_config.items():
-        api_key = os.environ.get(env_key, "")
-
-        # DashScope chat-specific override (DASHSCOPE_CHAT_API_KEY) to route
-        # chat to Intl/free-tier endpoint while embedding+rerank stay on CN.
-        if pid == "dashscope":
-            chat_key = os.environ.get("DASHSCOPE_CHAT_API_KEY", "").strip()
-            if chat_key:
-                api_key = chat_key
-
-        # Google fallback: GOOGLE_API_KEY is the legacy env name.
-        if pid == "google" and not api_key:
-            api_key = os.environ.get("GOOGLE_API_KEY", "")
-
-        # google-vertex also seeds from GOOGLE_API_BACKEND=vertex + VERTEX_API_KEY
-        # so deployments that flipped the legacy switch still reach Vertex.
-        if pid == "google" and google_backend == "vertex":
-            vertex_key = os.environ.get("VERTEX_API_KEY", "").strip()
-            if vertex_key:
-                api_key = vertex_key
-
+    for pid, (api_key, base_url) in providers_config.items():
         if not api_key:
             continue
 
         try:
-            base_url = os.environ.get(env_url) if env_url else None
-            kwargs = dict(api_key=api_key, base_url=base_url or default_url)
+            kwargs = dict(api_key=api_key, base_url=base_url)
             if pid == "google":
                 kwargs["backend"] = google_backend
             model_registry.configure_provider(ModelProvider(pid), **kwargs)

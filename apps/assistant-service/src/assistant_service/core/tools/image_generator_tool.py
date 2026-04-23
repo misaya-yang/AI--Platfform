@@ -139,15 +139,39 @@ class ImageGenerationResult:
 
 
 class DashScopeImageGenerator:
-    """Image generator using DashScope Wanx API."""
+    """Image generator using DashScope Wanx API.
 
-    SUBMIT_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
-    TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+    Endpoint selection honours ``resolve_dashscope("image")`` so
+    operators can set ``DASHSCOPE_IMAGE_API_KEY`` /
+    ``DASHSCOPE_IMAGE_BASE_URL`` to swap image gen between the CN
+    paid endpoint and the Intl free-trial endpoint independently of
+    chat or embedding. Unset → falls back to DASHSCOPE_API_KEY +
+    DASHSCOPE_BASE_URL, same as before.
+    """
+
+    _SUBMIT_PATH = "/api/v1/services/aigc/text2image/image-synthesis"
+    _TASK_PATH_TPL = "/api/v1/tasks/{task_id}"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
-        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
+        from ai_gateway_core.config import resolve_dashscope
+
+        if api_key:
+            self.api_key = api_key
+            self.base_url = "https://dashscope.aliyuncs.com"
+        else:
+            resolved_key, resolved_base = resolve_dashscope("image")
+            self.api_key = resolved_key or None
+            self.base_url = resolved_base.rstrip("/")
         self.model = model or os.getenv("DASHSCOPE_IMAGE_MODEL", "wanx-v1")
         self._client: httpx.AsyncClient | None = None
+
+    @property
+    def SUBMIT_URL(self) -> str:  # noqa: N802 — kept for backwards-compat
+        return f"{self.base_url}{self._SUBMIT_PATH}"
+
+    @property
+    def TASK_URL(self) -> str:  # noqa: N802 — kept for backwards-compat
+        return f"{self.base_url}{self._TASK_PATH_TPL}"
 
     @property
     def is_configured(self) -> bool:

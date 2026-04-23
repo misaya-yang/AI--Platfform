@@ -145,6 +145,18 @@ class EmbeddingManager:
         if provider_key in {"gemini", "google"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.gemini.api_key or "").strip()
+            # Env-level fallback: DASHSCOPE_EMBEDDING_API_KEY /
+            # VERTEX_EMBEDDING_API_KEY are resolved inline here (mirrors
+            # ai_gateway_core.config.endpoints; duplicated intentionally
+            # because knowledge-service ships as a standalone image that
+            # does not depend on ai-gateway-core).
+            if not api_key:
+                import os as _os
+                api_key = (
+                    _os.environ.get("VERTEX_EMBEDDING_API_KEY", "").strip()
+                    if _os.environ.get("GOOGLE_EMBEDDING_BACKEND", "").strip().lower() == "vertex"
+                    else ""
+                ) or _os.environ.get("GEMINI_API_KEY", "").strip() or _os.environ.get("GOOGLE_API_KEY", "").strip()
             if not api_key:
                 raise ValidationFailedError(
                     "Gemini api_key is required in dataset embedding_config"
@@ -152,6 +164,20 @@ class EmbeddingManager:
         elif provider_key in {"dashscope", "aliyun"}:
             if not api_key:
                 api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
+            # Inline equivalent of resolve_dashscope("embedding") — see
+            # note on Gemini branch above.
+            if not api_key:
+                import os as _os
+                api_key = (
+                    _os.environ.get("DASHSCOPE_EMBEDDING_API_KEY", "").strip()
+                    or _os.environ.get("DASHSCOPE_API_KEY", "").strip()
+                )
+                if not base_url:
+                    base_url = (
+                        _os.environ.get("DASHSCOPE_EMBEDDING_BASE_URL", "").strip()
+                        or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
+                        or None
+                    )
             if not api_key:
                 raise ValidationFailedError(
                     "DashScope api_key is required in dataset embedding_config"

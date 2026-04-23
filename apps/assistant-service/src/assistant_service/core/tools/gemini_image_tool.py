@@ -13,13 +13,13 @@ this tool just sends it to Gemini generateContent API.
 from __future__ import annotations
 
 import base64
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from ai_gateway_core.config import resolve_google
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -46,13 +46,27 @@ class GeminiImageGenerator:
     Supports two calling modes:
     1. Simple: generate(prompt=...) — single turn text-to-image
     2. Multi-turn: generate_chat(contents=...) — full conversation with history
+
+    Endpoint selection honours the per-domain ``resolve_google("image")``
+    helper, so operators can route image gen to Vertex Express (free
+    trial) while keeping chat on AI Studio, or vice versa. See
+    ``ai_gateway_core.config.endpoints`` for the env-var contract.
     """
 
-    BASE_URL = "https://generativelanguage.googleapis.com"
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        # Resolve via helper when no explicit key is passed — picks up
+        # GOOGLE_IMAGE_BACKEND / VERTEX_IMAGE_API_KEY / shared fallbacks.
+        if api_key:
+            self.api_key = api_key
+            self.base_url = "https://generativelanguage.googleapis.com"
+            self.backend = "ai_studio"
+        else:
+            resolved_key, resolved_base_url, resolved_backend = resolve_google("image")
+            self.api_key = resolved_key
+            self.base_url = resolved_base_url
+            self.backend = resolved_backend
         self.model = model or self.DEFAULT_MODEL
         self._client: httpx.AsyncClient | None = None
 
@@ -122,7 +136,19 @@ class GeminiImageGenerator:
 
         try:
             client = await self._get_client()
-            endpoint = f"{self.BASE_URL}/v1beta/models/{self.model}:generateContent"
+            # Vertex Express Mode uses a different path shape than AI Studio —
+            # /v1/publishers/google/models/{model}:generateContent with the
+            # key as ?key=AQ.xxx query param (same as chat path in
+            # model_registry._google_endpoint). Falling back to AI Studio
+            # when backend isn't set keeps the public-facing behaviour
+            # unchanged.
+            if self.backend == "vertex":
+                endpoint = (
+                    f"{self.base_url}/v1/publishers/google/models/"
+                    f"{self.model}:generateContent?key={self.api_key}"
+                )
+            else:
+                endpoint = f"{self.base_url}/v1beta/models/{self.model}:generateContent"
 
             gen_config: dict[str, Any] = {
                 "responseModalities": ["TEXT", "IMAGE"],
@@ -146,12 +172,17 @@ class GeminiImageGenerator:
                 "Gemini image API: %d turns, model=%s", turns, self.model,
             )
 
+            # Vertex Express embeds the key in the URL (?key=) and must
+            # not also set x-goog-api-key — the server rejects duplicate
+            # auth. AI Studio accepts both but the header is the canonical
+            # form, so keep that path unchanged.
+            headers = {"Content-Type": "application/json"}
+            if self.backend != "vertex":
+                headers["x-goog-api-key"] = self.api_key
+
             response = await client.post(
                 endpoint,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": self.api_key,
-                },
+                headers=headers,
                 json=body,
             )
 
@@ -257,8 +288,15 @@ class GeminiImageGenerator:
         if not self.is_configured:
             raise RuntimeError("Gemini API key is not configured — cannot upload file")
 
+        # Files API is AI-Studio-only. Vertex Express Mode has no
+        # equivalent endpoint under aiplatform.googleapis.com, so we
+        # pin uploads to the AI Studio host even if image gen itself
+        # routes through Vertex. The caller can still reference the
+        # uploaded file URI from subsequent Vertex generateContent
+        # calls — Google accepts cross-host file URIs.
         client = await self._get_client()
-        url = f"{self.BASE_URL}/upload/v1beta/files"
+        upload_host = "https://generativelanguage.googleapis.com"
+        url = f"{upload_host}/upload/v1beta/files"
         response = await client.post(
             url,
             params={"key": self.api_key},
