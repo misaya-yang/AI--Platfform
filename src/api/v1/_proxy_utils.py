@@ -15,7 +15,15 @@ logger = logging.getLogger(__name__)
 KB_SERVICE_URL = os.getenv("KB_SERVICE_URL", "http://knowledge-service:8092")
 _TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=120.0, pool=30.0)
 _LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
-_STRIP_REQ = frozenset({"host", "connection", "transfer-encoding", "content-length"})
+# Strip every case-variant of the identity headers from the incoming
+# request before we inject the trusted ones. Otherwise an attacker can
+# smuggle ``X-USER-ID: victim`` and dict key-case mismatch lets it
+# survive alongside our injection, letting the downstream starlette
+# ``request.headers.get()`` return the attacker's value (first-match).
+_INJECTED_IDENTITY_HEADERS = frozenset({"x-user-id", "x-tenant-id", "x-user-tier"})
+_STRIP_REQ = frozenset({
+    "host", "connection", "transfer-encoding", "content-length",
+}) | _INJECTED_IDENTITY_HEADERS
 _STRIP_RESP = frozenset({"transfer-encoding", "connection", "content-encoding"})
 
 # --- Client with auto-reconnect (Bug 2) ---
@@ -97,8 +105,11 @@ async def proxy_to_kb_service(
             await resp.aclose()
             return Response(content=body, status_code=resp.status_code, headers=rh, media_type=mt)
         async def _stream() -> AsyncIterator[bytes]:
+            # aiter_bytes() with no chunk_size yields per network read —
+            # don't pass a size or ByteChunker will buffer until the
+            # threshold is reached. KB responses can also be SSE (QA stream).
             try:
-                async for chunk in resp.aiter_bytes(65536):
+                async for chunk in resp.aiter_bytes():
                     yield chunk
             finally:
                 await resp.aclose()

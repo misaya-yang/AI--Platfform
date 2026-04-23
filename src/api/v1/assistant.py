@@ -669,50 +669,52 @@ async def chat_stream(
     request: Request,
     user: UserContext = Depends(get_user_context),
 ):
-    """
-    Streaming chat completion (SSE) — pure HTTP proxy to assistant-service.
+    """Streaming chat completion (SSE) — HTTP proxy to assistant-service.
 
-    Gateway handles: rate limiting + X-User-* header injection.
-    Business logic (session, model routing, tool execution, streaming) all
-    runs in the assistant-service container at :8093. This means
-    ``docker compose stop assistant-service`` now returns a clean 502 for
-    this endpoint instead of crashing gateway — true microservice isolation
-    for the hot path.
+    Gateway responsibilities (preserved from the in-process version):
+      - JWT auth via ``get_user_context``
+      - Per-user rate limiting (``operation="assistant_chat"``)
+      - Model-permission check (users can only call models they're allowed to)
+      - Session-ownership check (users can only resume their own sessions)
 
-    Event types preserved end-to-end: context_retrieved, text_delta,
-    tool_call, artifact_created, usage, done, error.
+    Everything else — model routing, tool execution, SSE event assembly —
+    runs in the assistant-service container. Stopping assistant-service
+    returns a clean 502 for this endpoint; restarting it resumes chat
+    within the next request via the proxy's circuit breaker.
     """
     from ..deps import enforce_rate_limit
     from ._assistant_proxy import proxy_to_assistant_service
 
     await enforce_rate_limit(request, user, operation="assistant_chat")
-    return await proxy_to_assistant_service(request, user, path="chat/stream")
 
+    # Read request body ONCE. We need it for authz parsing and the proxy
+    # needs the same bytes — starlette's Request.stream() is single-use.
+    body_bytes = await request.body()
+    try:
+        body_json = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-@router.post("/chat/stream/_legacy_in_process", include_in_schema=False)
-async def chat_stream_legacy(
-    body: AssistantChatRequest,
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-    assistant: AssistantService = Depends(get_assistant_service),
-):
-    """Legacy in-process implementation. Kept for fallback + reference.
-
-    Hit-test only — the public path ``/chat/stream`` now proxies to
-    assistant-service. Remove this handler once we've shipped one stable
-    week on the proxy path.
-    """
-    from ..deps import enforce_rate_limit
-    await enforce_rate_limit(request, user, operation="assistant_chat")
-
-    # Check model permission
+    # Authz 1: model must be allowed for this user. The proxy target
+    # (assistant-service) has no access to gateway's model_registry, so
+    # this check MUST run here or users could specify any model_id.
+    model_id = body_json.get("model_id")
     model_registry = getattr(request.app.state, "model_registry", None)
-    if model_registry:
-        _check_model_permission(user, body.model_id, model_registry)
+    if model_id and model_registry:
+        _check_model_permission(user, model_id, model_registry)
 
-    session_id = body.session_id or str(uuid.uuid4())
-    if body.session_id:
-        await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+    # Authz 2: session ownership. Users resuming a conversation must own
+    # that session. assistant-service would also reject mismatches via
+    # its own session manager, but defence-in-depth belongs at the edge.
+    session_id = body_json.get("session_id")
+    if session_id:
+        await _validate_chat_session_access(
+            request=request, user=user, session_id=session_id
+        )
+
+    return await proxy_to_assistant_service(
+        request, user, path="chat/stream", body=body_bytes
+    )
 
     # Debug: Log incoming request parameters
     system_prompt_len = len(body.system_prompt) if body.system_prompt else 0

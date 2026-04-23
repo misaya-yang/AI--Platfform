@@ -34,7 +34,16 @@ ASSISTANT_SERVICE_URL = os.getenv("ASSISTANT_SERVICE_URL", "http://assistant-ser
 # tracks internally. 600s is a generous upper bound.
 _TIMEOUT = httpx.Timeout(connect=5.0, read=600.0, write=120.0, pool=30.0)
 _LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
-_STRIP_REQ = frozenset({"host", "connection", "transfer-encoding", "content-length"})
+# Trusted-identity headers we INJECT from the gateway-validated user.
+# MUST strip every case-variant of these from the incoming request first, or
+# an attacker can smuggle ``X-USER-ID: victim`` (different case than our
+# canonical ``X-User-Id``) — Python dicts are case-sensitive, so httpx
+# would send BOTH on the wire and starlette's header lookup returns the
+# first match, which in worst case is the attacker's value.
+_INJECTED_IDENTITY_HEADERS = frozenset({"x-user-id", "x-tenant-id", "x-user-tier"})
+_STRIP_REQ = frozenset({
+    "host", "connection", "transfer-encoding", "content-length",
+}) | _INJECTED_IDENTITY_HEADERS
 _STRIP_RESP = frozenset({"transfer-encoding", "connection", "content-encoding"})
 
 # --- Client with auto-reconnect ---
@@ -116,11 +125,16 @@ async def proxy_to_assistant_service(
     *,
     path: str = "",
     upstream_prefix: str = "/api/v1/assistant",
+    body: bytes | None = None,
 ) -> Response:
     """Forward the request to assistant-service, streaming both directions.
 
     SSE responses (``text/event-stream``) are streamed chunk-by-chunk so
     the frontend sees incremental events without buffering delays.
+
+    ``body`` lets the caller pre-read the request bytes — needed when the
+    gateway route parsed them for authz checks before proxying, because
+    ``request.stream()`` is single-consumption.
     """
     _cb_check()
     url = f"{upstream_prefix}/{path}" if path else upstream_prefix
@@ -134,7 +148,7 @@ async def proxy_to_assistant_service(
             method=request.method,
             url=url,
             headers=headers,
-            content=request.stream(),
+            content=body if body is not None else request.stream(),
         )
         resp = await client.send(req, stream=True)
         if resp.status_code < 500:
@@ -153,8 +167,13 @@ async def proxy_to_assistant_service(
             )
 
         async def _stream() -> AsyncIterator[bytes]:
+            # ``aiter_bytes()`` with no chunk_size yields each network chunk
+            # as it arrives. Passing a size wraps the stream in ByteChunker
+            # which BUFFERS until the threshold is hit — fatal for SSE, where
+            # a single ``text_delta`` event must reach the browser within
+            # milliseconds of the server emitting it.
             try:
-                async for chunk in resp.aiter_bytes(65536):
+                async for chunk in resp.aiter_bytes():
                     yield chunk
             finally:
                 await resp.aclose()
