@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.knowledge.vlm_ocr_service import VLMOCRService, _detect_media_type
+from knowledge_service.services.knowledge.vlm_ocr_service import VLMOCRService, _detect_media_type
 
 
 def _make_service(api_key="test-key", model="gemini-2.5-flash", concurrency=2):

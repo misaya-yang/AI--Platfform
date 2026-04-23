@@ -53,10 +53,10 @@ async def test_chunking_preview():
         from unittest.mock import MagicMock
 
         # Patch VectorStore
-        import src.services.knowledge.knowledge_service
-        from src.services.knowledge.knowledge_service import KnowledgeService
+        import knowledge_service.services.knowledge.knowledge_service
+        from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 
-        src.services.knowledge.knowledge_service.VectorStore = MagicMock()
+        knowledge_service.services.knowledge.knowledge_service.VectorStore = MagicMock()
 
         svc = KnowledgeService(MockSettings(), MockDatabase())
 

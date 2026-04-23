@@ -90,7 +90,7 @@ async def main():
 
     from qdrant_client import models as qmodels
 
-    from src.services.knowledge.vector_store import VectorStore
+    from knowledge_service.services.knowledge.vector_store import VectorStore
 
     vector_store = VectorStore(url=settings.knowledge.qdrant.url)
     segment_id = str(uuid.uuid4())

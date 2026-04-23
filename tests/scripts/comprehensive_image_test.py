@@ -160,7 +160,7 @@ async def test_embedding_and_storage(description):
 
     from src.config.settings import Settings
     from src.services.knowledge.embedding import DashScopeEmbedding
-    from src.services.knowledge.vector_store import VectorStore
+    from knowledge_service.services.knowledge.vector_store import VectorStore
 
     settings = Settings()
 
@@ -205,7 +205,7 @@ async def test_search_queries():
 
     from src.config.settings import Settings
     from src.services.knowledge.embedding import DashScopeEmbedding
-    from src.services.knowledge.vector_store import VectorStore
+    from knowledge_service.services.knowledge.vector_store import VectorStore
 
     settings = Settings()
 
@@ -293,7 +293,7 @@ async def test_sync_service_image_processor():
     from src.config.settings import Settings
     from src.persistence.database import DatabaseStorage
     from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
-    from src.services.knowledge.knowledge_service import KnowledgeService
+    from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
     from src.services.knowledge.vlm_service import DashScopeVLMService
     from src.services.storage.image_storage import (
         ImageStorageService,

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.knowledge.knowledge_service import KnowledgeService
+from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 
 
 def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:

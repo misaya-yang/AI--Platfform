@@ -15,17 +15,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.knowledge.chunking import (
+from knowledge_service.services.knowledge.chunking import (
     AssociatedImage,
     Chunk,
     ContentType,
 )
-from src.services.knowledge.multimodal_reranker import (
+from knowledge_service.services.knowledge.multimodal_reranker import (
     MultimodalReranker,
     RerankCandidate,
     create_multimodal_reranker,
 )
-from src.services.knowledge.retrieval_v2 import (
+from knowledge_service.services.knowledge.retrieval_v2 import (
     AssociatedImageInfo,
     RetrievalCandidate,
 )

@@ -1,7 +1,7 @@
 import pytest
 import httpx
 
-from src.services.knowledge.text_reranker import (
+from knowledge_service.services.knowledge.text_reranker import (
     AsyncTextReranker,
     BGEReranker,
     _provider_failure_state,
@@ -58,7 +58,7 @@ async def test_dashscope_reranker_opens_failure_circuit_on_permanent_error(monke
         return _FailingClient()
 
     monkeypatch.setattr(
-        "src.services.knowledge.text_reranker._get_http_client",
+        "knowledge_service.services.knowledge.text_reranker._get_http_client",
         _fake_get_http_client,
     )
 

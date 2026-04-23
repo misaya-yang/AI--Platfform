@@ -9,7 +9,7 @@ Tests for the PDF image extraction functionality:
 
 from unittest.mock import Mock, patch
 
-from src.services.knowledge.pdf_image_processor import (
+from knowledge_service.services.knowledge.pdf_image_processor import (
     EMBEDDABLE_IMAGE_TYPES,
     EXTENSION_TO_MIME,
     MAX_IMAGE_SIZE_BYTES,

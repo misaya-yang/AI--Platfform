@@ -18,7 +18,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.core.auth.user_resolver import UserContext
-from ai_gateway_core.exceptions import AuthenticationRequiredError
+
+# AuthenticationRequiredError is now raised by the kb-service modules under test
+# (kb-service ships standalone and does not depend on ai_gateway_core, so it has
+# its own copy of the exception class). See plans/kb-fork-merge-report.md.
+from knowledge_service.core.exceptions import AuthenticationRequiredError
 
 
 def _rbac_has_permission(subjects, permission: str) -> bool:
@@ -280,7 +284,7 @@ class TestKnowledgeRetrieverACL:
 
     def test_retriever_requires_user_context(self):
         """测试：KnowledgeRetriever 必须提供 user_context"""
-        from src.services.knowledge.langgraph_tools import KnowledgeRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import KnowledgeRetriever
 
         mock_kb_service = MagicMock()
 
@@ -295,7 +299,7 @@ class TestKnowledgeRetrieverACL:
 
     def test_retriever_requires_authenticated_user(self, guest_user):
         """测试：KnowledgeRetriever 必须是已认证用户"""
-        from src.services.knowledge.langgraph_tools import KnowledgeRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import KnowledgeRetriever
 
         mock_kb_service = MagicMock()
 
@@ -310,7 +314,7 @@ class TestKnowledgeRetrieverACL:
 
     def test_retriever_accepts_authenticated_user(self, user_alice):
         """测试：已认证用户可以创建 Retriever"""
-        from src.services.knowledge.langgraph_tools import KnowledgeRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import KnowledgeRetriever
 
         mock_kb_service = MagicMock()
 
@@ -329,7 +333,7 @@ class TestMultiDatasetRetrieverACL:
 
     def test_multi_retriever_requires_user_context(self):
         """测试：MultiDatasetRetriever 必须提供 user_context"""
-        from src.services.knowledge.langgraph_tools import MultiDatasetRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import MultiDatasetRetriever
 
         mock_kb_service = MagicMock()
 
@@ -342,7 +346,7 @@ class TestMultiDatasetRetrieverACL:
 
     def test_multi_retriever_requires_authenticated_user(self, guest_user):
         """测试：MultiDatasetRetriever 必须是已认证用户"""
-        from src.services.knowledge.langgraph_tools import MultiDatasetRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import MultiDatasetRetriever
 
         mock_kb_service = MagicMock()
 
@@ -355,7 +359,7 @@ class TestMultiDatasetRetrieverACL:
 
     def test_multi_retriever_accepts_authenticated_user(self, user_alice):
         """测试：已认证用户可以创建 MultiDatasetRetriever"""
-        from src.services.knowledge.langgraph_tools import MultiDatasetRetriever
+        from knowledge_service.services.knowledge.langgraph_tools import MultiDatasetRetriever
 
         mock_kb_service = MagicMock()
 
@@ -373,7 +377,7 @@ class TestDifyCompatibleKBAPIACL:
 
     def test_dify_api_requires_user_context(self):
         """测试：DifyCompatibleKBAPI 必须提供 user_context"""
-        from src.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
+        from knowledge_service.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
 
         mock_kb_service = MagicMock()
 
@@ -385,7 +389,7 @@ class TestDifyCompatibleKBAPIACL:
 
     def test_dify_api_requires_authenticated_user(self, guest_user):
         """测试：DifyCompatibleKBAPI 必须是已认证用户"""
-        from src.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
+        from knowledge_service.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
 
         mock_kb_service = MagicMock()
 
@@ -397,7 +401,7 @@ class TestDifyCompatibleKBAPIACL:
 
     def test_dify_api_accepts_authenticated_user(self, user_alice):
         """测试：已认证用户可以创建 DifyCompatibleKBAPI"""
-        from src.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
+        from knowledge_service.services.knowledge.langgraph_tools import DifyCompatibleKBAPI
 
         mock_kb_service = MagicMock()
 
@@ -413,7 +417,7 @@ class TestCreateRetrievalToolACL:
 
     def test_create_tool_requires_user_context(self):
         """测试：create_retrieval_tool 必须提供 user_context"""
-        from src.services.knowledge.langgraph_tools import create_retrieval_tool
+        from knowledge_service.services.knowledge.langgraph_tools import create_retrieval_tool
 
         mock_kb_service = MagicMock()
 
@@ -426,7 +430,7 @@ class TestCreateRetrievalToolACL:
 
     def test_create_tool_accepts_authenticated_user(self, user_alice):
         """测试：已认证用户可以创建 retrieval tool"""
-        from src.services.knowledge.langgraph_tools import create_retrieval_tool
+        from knowledge_service.services.knowledge.langgraph_tools import create_retrieval_tool
 
         mock_kb_service = MagicMock()
 

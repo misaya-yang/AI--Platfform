@@ -49,7 +49,7 @@ class TestAssistantServiceInit:
         """Should initialize with knowledge service."""
         from assistant_service.core.assistant_service import AssistantService
         from assistant_service.core.models.model_registry import ModelRegistry
-        from src.services.knowledge.knowledge_service import KnowledgeService
+        from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 
         mock_registry = MagicMock(spec=ModelRegistry)
         mock_kb = MagicMock(spec=KnowledgeService)

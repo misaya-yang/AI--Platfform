@@ -1,7 +1,7 @@
 import pytest
 
-from src.services.knowledge.hierarchical_retriever import HierarchicalRetriever
-from src.services.knowledge.vector_store import VectorSearchHit
+from knowledge_service.services.knowledge.hierarchical_retriever import HierarchicalRetriever
+from knowledge_service.services.knowledge.vector_store import VectorSearchHit
 
 
 class StubEmbedder:

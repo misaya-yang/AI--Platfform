@@ -14,7 +14,7 @@ async def main():
     from src.persistence.database import DatabaseStorage
     from src.services.knowledge.confluence.sync_service import ConfluenceSyncService
     from src.services.knowledge.embedding import DashScopeEmbedding
-    from src.services.knowledge.vector_store import VectorStore
+    from knowledge_service.services.knowledge.vector_store import VectorStore
     from src.services.knowledge.vlm_service import DashScopeVLMService
     from src.services.storage.image_storage import (
         ImageStorageService,

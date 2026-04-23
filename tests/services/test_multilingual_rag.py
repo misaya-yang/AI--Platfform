@@ -53,7 +53,7 @@ class TestArabicTokenCalibration:
 
     def test_detect_language_arabic(self, sample_arabic_text):
         """Detect Arabic as primary language."""
-        from src.services.knowledge.chunking import detect_text_language
+        from knowledge_service.services.knowledge.chunking import detect_text_language
 
         lang, confidence = detect_text_language(sample_arabic_text)
         assert lang == "ar"
@@ -61,7 +61,7 @@ class TestArabicTokenCalibration:
 
     def test_detect_language_english(self, sample_english_text):
         """Detect English as primary language."""
-        from src.services.knowledge.chunking import detect_text_language
+        from knowledge_service.services.knowledge.chunking import detect_text_language
 
         lang, confidence = detect_text_language(sample_english_text)
         assert lang == "en"
@@ -69,14 +69,14 @@ class TestArabicTokenCalibration:
 
     def test_detect_language_mixed(self, sample_mixed_text):
         """Detect mixed content."""
-        from src.services.knowledge.chunking import detect_text_language
+        from knowledge_service.services.knowledge.chunking import detect_text_language
 
         lang, _ = detect_text_language(sample_mixed_text)
         assert lang in ("ar", "en", "mixed")
 
     def test_arabic_token_multiplier(self):
         """Arabic should have higher token multiplier."""
-        from src.services.knowledge.chunking import get_chunk_size_for_language
+        from knowledge_service.services.knowledge.chunking import get_chunk_size_for_language
 
         ar_size = get_chunk_size_for_language("ar", base_chunk_size=1000)
         en_size = get_chunk_size_for_language("en", base_chunk_size=1000)
@@ -87,7 +87,7 @@ class TestArabicTokenCalibration:
 
     def test_chunk_arabic_respects_boundaries(self, sample_arabic_text):
         """Chunking should respect Arabic sentence boundaries."""
-        from src.services.knowledge.chunking import chunk_text
+        from knowledge_service.services.knowledge.chunking import chunk_text
 
         chunks = chunk_text(sample_arabic_text, chunk_size=100, chunk_overlap=20, language="ar")
 
@@ -109,7 +109,7 @@ class TestRRFFusion:
 
     def test_rrf_basic_fusion(self):
         """RRF should combine rankings correctly."""
-        from src.services.knowledge.retrieval_v2 import rrf_fusion
+        from knowledge_service.services.knowledge.retrieval_v2 import rrf_fusion
 
         # Simulate two retrieval methods
         dense_results = [
@@ -132,7 +132,7 @@ class TestRRFFusion:
 
     def test_rrf_k_parameter(self):
         """K parameter should affect score smoothing."""
-        from src.services.knowledge.retrieval_v2 import rrf_fusion
+        from knowledge_service.services.knowledge.retrieval_v2 import rrf_fusion
 
         results = [[{"id": f"doc{i}", "score": 1.0 - i * 0.1} for i in range(5)]]
 
@@ -148,7 +148,7 @@ class TestRRFFusion:
 
     def test_rrf_with_empty_results(self):
         """RRF should handle empty result lists."""
-        from src.services.knowledge.retrieval_v2 import rrf_fusion
+        from knowledge_service.services.knowledge.retrieval_v2 import rrf_fusion
 
         fused = rrf_fusion([[], [{"id": "doc1", "score": 0.9}]], k=60)
 
@@ -157,7 +157,7 @@ class TestRRFFusion:
 
     def test_rrf_score_formula(self):
         """Verify RRF score formula: 1 / (k + rank)."""
-        from src.services.knowledge.retrieval_v2 import rrf_fusion
+        from knowledge_service.services.knowledge.retrieval_v2 import rrf_fusion
 
         results = [
             [
@@ -189,7 +189,7 @@ class TestCrossLanguageQueryExpansion:
     @pytest.fixture
     def query_expander(self):
         """Create query expander instance."""
-        from src.services.knowledge.retrieval_service import CrossLanguageQueryExpander
+        from knowledge_service.services.knowledge.retrieval_service import CrossLanguageQueryExpander
 
         return CrossLanguageQueryExpander()
 
@@ -263,7 +263,7 @@ class TestMultilingualEmbedding:
 
     @pytest.fixture
     def embedding_config(self):
-        from src.services.knowledge.multilingual_embedding import MultilingualEmbeddingConfig
+        from knowledge_service.services.knowledge.multilingual_embedding import MultilingualEmbeddingConfig
 
         return MultilingualEmbeddingConfig(
             provider="bge-m3",
@@ -280,7 +280,7 @@ class TestMultilingualEmbedding:
 
     def test_embedding_result_structure(self):
         """Embedding result should have correct structure."""
-        from src.services.knowledge.multilingual_embedding import MultilingualEmbeddingResult
+        from knowledge_service.services.knowledge.multilingual_embedding import MultilingualEmbeddingResult
 
         result = MultilingualEmbeddingResult(
             dense_vector=[0.1] * 1024,
@@ -295,7 +295,7 @@ class TestMultilingualEmbedding:
 
     def test_sparse_score_computation(self):
         """Sparse score should be dot product of overlapping tokens."""
-        from src.services.knowledge.multilingual_embedding import compute_sparse_score
+        from knowledge_service.services.knowledge.multilingual_embedding import compute_sparse_score
 
         query_sparse = {"hello": 0.5, "world": 0.3, "test": 0.2}
         doc_sparse = {"hello": 0.8, "world": 0.4, "other": 0.1}
@@ -308,7 +308,7 @@ class TestMultilingualEmbedding:
 
     def test_sparse_score_no_overlap(self):
         """No overlap should give zero score."""
-        from src.services.knowledge.multilingual_embedding import compute_sparse_score
+        from knowledge_service.services.knowledge.multilingual_embedding import compute_sparse_score
 
         query_sparse = {"a": 0.5, "b": 0.3}
         doc_sparse = {"c": 0.8, "d": 0.4}
@@ -318,7 +318,7 @@ class TestMultilingualEmbedding:
 
     def test_hybrid_score_computation(self):
         """Hybrid score should combine dense and sparse."""
-        from src.services.knowledge.multilingual_embedding import (
+        from knowledge_service.services.knowledge.multilingual_embedding import (
             MultilingualEmbeddingResult,
             compute_hybrid_score,
         )
@@ -344,7 +344,7 @@ class TestMultilingualEmbedding:
 
     def test_factory_creates_bge_embedder(self, embedding_config):
         """Factory should create BGE-M3 embedder."""
-        from src.services.knowledge.multilingual_embedding import (
+        from knowledge_service.services.knowledge.multilingual_embedding import (
             BGEM3Embedding,
             create_multilingual_embedding,
         )
@@ -354,7 +354,7 @@ class TestMultilingualEmbedding:
 
     def test_factory_creates_e5_embedder(self):
         """Factory should create E5 embedder for e5 provider."""
-        from src.services.knowledge.multilingual_embedding import (
+        from knowledge_service.services.knowledge.multilingual_embedding import (
             MultilingualE5Embedding,
             MultilingualEmbeddingConfig,
             create_multilingual_embedding,
@@ -379,7 +379,7 @@ class TestMultilingualReranker:
 
     def test_rerank_result_structure(self):
         """RerankResult should have correct structure."""
-        from src.services.knowledge.text_reranker import RerankResult
+        from knowledge_service.services.knowledge.text_reranker import RerankResult
 
         result = RerankResult(index=0, relevance_score=0.95)
         assert result.index == 0
@@ -387,7 +387,7 @@ class TestMultilingualReranker:
 
     def test_create_dashscope_reranker(self):
         """Factory should create DashScope reranker."""
-        from src.services.knowledge.text_reranker import (
+        from knowledge_service.services.knowledge.text_reranker import (
             AsyncTextReranker,
             create_reranker,
         )
@@ -402,7 +402,7 @@ class TestMultilingualReranker:
 
     def test_create_bge_reranker(self):
         """Factory should create BGE reranker."""
-        from src.services.knowledge.text_reranker import (
+        from knowledge_service.services.knowledge.text_reranker import (
             BGEReranker,
             create_reranker,
         )
@@ -416,7 +416,7 @@ class TestMultilingualReranker:
 
     def test_create_cohere_reranker(self):
         """Factory should create Cohere reranker."""
-        from src.services.knowledge.text_reranker import (
+        from knowledge_service.services.knowledge.text_reranker import (
             CohereReranker,
             create_reranker,
         )
@@ -431,7 +431,7 @@ class TestMultilingualReranker:
 
     def test_create_local_reranker(self):
         """Factory should create local cross-encoder reranker."""
-        from src.services.knowledge.text_reranker import (
+        from knowledge_service.services.knowledge.text_reranker import (
             LocalCrossEncoderReranker,
             create_reranker,
         )
@@ -445,7 +445,7 @@ class TestMultilingualReranker:
 
     def test_factory_requires_api_key_for_cloud(self):
         """Cloud providers should require API key."""
-        from src.services.knowledge.text_reranker import create_reranker
+        from knowledge_service.services.knowledge.text_reranker import create_reranker
 
         with pytest.raises(ValueError, match="API key required"):
             create_reranker(provider="dashscope")
@@ -456,7 +456,7 @@ class TestMultilingualReranker:
     @pytest.mark.asyncio
     async def test_dashscope_rerank_empty_docs(self):
         """Empty document list should return empty results."""
-        from src.services.knowledge.text_reranker import AsyncTextReranker
+        from knowledge_service.services.knowledge.text_reranker import AsyncTextReranker
 
         reranker = AsyncTextReranker(api_key="test_key")
         results = await reranker.rerank("test query", [])
@@ -466,7 +466,7 @@ class TestMultilingualReranker:
     @pytest.mark.asyncio
     async def test_bge_rerank_empty_docs(self):
         """Empty document list should return empty results."""
-        from src.services.knowledge.text_reranker import BGEReranker
+        from knowledge_service.services.knowledge.text_reranker import BGEReranker
 
         reranker = BGEReranker()
         results = await reranker.rerank("test query", [])
@@ -516,7 +516,7 @@ class TestMultilingualRAGBenchmarks:
         """RRF fusion should be fast even with many results."""
         import time
 
-        from src.services.knowledge.retrieval_v2 import rrf_fusion
+        from knowledge_service.services.knowledge.retrieval_v2 import rrf_fusion
 
         # Create large result sets
         results_a = [{"id": f"doc_a_{i}", "score": 1.0 - i * 0.001} for i in range(1000)]
@@ -535,7 +535,7 @@ class TestMultilingualRAGBenchmarks:
         """Sparse score computation should be fast."""
         import time
 
-        from src.services.knowledge.multilingual_embedding import compute_sparse_score
+        from knowledge_service.services.knowledge.multilingual_embedding import compute_sparse_score
 
         # Create large sparse vectors
         query_sparse = {f"term_{i}": 0.5 for i in range(1000)}

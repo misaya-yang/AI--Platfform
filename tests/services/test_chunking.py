@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from src.services.knowledge.chunking import (
+from knowledge_service.services.knowledge.chunking import (
     AutomaticChunker,
     Chunk,
     ChunkingConfig,

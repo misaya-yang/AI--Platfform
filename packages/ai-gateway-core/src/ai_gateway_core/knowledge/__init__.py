@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ._authority import AUTHORITY_ORDER, get_authority_order
 from ._synonyms import ISLAMIC_SYNONYMS
+from .utils import MULTIMODAL_EMBEDDING_MODELS, is_multimodal_embedding_model
 
 
 @runtime_checkable
@@ -39,6 +40,8 @@ class KnowledgeClientLike(Protocol):
 __all__ = [
     "AUTHORITY_ORDER",
     "ISLAMIC_SYNONYMS",
+    "MULTIMODAL_EMBEDDING_MODELS",
     "KnowledgeClientLike",
     "get_authority_order",
+    "is_multimodal_embedding_model",
 ]

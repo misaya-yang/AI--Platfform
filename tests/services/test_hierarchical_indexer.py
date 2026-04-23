@@ -1,6 +1,6 @@
 import pytest
 
-from src.services.knowledge.hierarchical_indexer import HierarchicalIndexer, IndexLevel
+from knowledge_service.services.knowledge.hierarchical_indexer import HierarchicalIndexer, IndexLevel
 
 
 class StubEmbedder:

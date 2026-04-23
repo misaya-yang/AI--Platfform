@@ -53,7 +53,7 @@ from assistant_service.core.tools.style_presets import (
     resolve_negative_prompt,
     resolve_style_preset,
 )
-from ...services.knowledge.embedding import is_multimodal_embedding_model
+from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
 from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse

@@ -8,7 +8,7 @@
 - MMR 多样化
 """
 
-from src.services.knowledge.retrieval import (
+from knowledge_service.services.knowledge.retrieval import (
     bm25_scores,
     mmr_select,
     reciprocal_rank_fusion,

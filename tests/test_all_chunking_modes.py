@@ -2,7 +2,7 @@
 Test all 9 chunking modes to verify they work correctly with user config.
 """
 
-from src.services.knowledge.chunking import (
+from knowledge_service.services.knowledge.chunking import (
     ChunkingConfig,
     ChunkingMode,
     create_chunker,

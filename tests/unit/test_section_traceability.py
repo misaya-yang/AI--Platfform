@@ -7,9 +7,9 @@ for Imam-type datasets requiring chapter/section citations.
 
 import pytest
 
-from src.services.knowledge.chunking import Chunk, ChunkingConfig
-from src.services.knowledge.islamic_chunking import IslamicTextChunker
-from src.services.knowledge.section_extractor import (
+from knowledge_service.services.knowledge.chunking import Chunk, ChunkingConfig
+from knowledge_service.services.knowledge.islamic_chunking import IslamicTextChunker
+from knowledge_service.services.knowledge.section_extractor import (
     SectionExtractor,
     get_section_aware_citation,
 )
@@ -252,7 +252,7 @@ class TestRetrievalConfig:
 
     def test_islamic_strict_traceability_preset(self):
         """Test the islamic_strict_traceability preset."""
-        from src.services.knowledge.retrieval_config import get_preset_config
+        from knowledge_service.services.knowledge.retrieval_config import get_preset_config
 
         config = get_preset_config("islamic_strict_traceability")
         assert config.islamic.strict_section_traceability is True

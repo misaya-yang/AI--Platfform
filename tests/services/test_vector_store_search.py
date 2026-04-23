@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pytest
 from qdrant_client.http import models as qmodels
 
-from src.services.knowledge import vector_store
-from src.services.knowledge.vector_store import VectorStore
+from knowledge_service.services.knowledge import vector_store
+from knowledge_service.services.knowledge.vector_store import VectorStore
 
 
 @pytest.mark.asyncio

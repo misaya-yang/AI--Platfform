@@ -13,13 +13,13 @@ import sys
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.services.knowledge.chunking import (
+from knowledge_service.services.knowledge.chunking import (
     ChunkingConfig,
     ChunkingMode,
     FixedSizeChunker,
     TokenCounter,
 )
-from src.services.knowledge.retrieval import (
+from knowledge_service.services.knowledge.retrieval import (
     ScoreNormalization,
     compute_language_weights,
     detect_language,

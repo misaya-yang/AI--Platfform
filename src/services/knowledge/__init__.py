@@ -1,124 +1,25 @@
-"""
-Knowledge Base (KBMS) service package.
+"""Gateway-side Knowledge Base shim.
 
-Provides a production-grade RAG system with:
-- Configurable document chunking strategies (9 modes)
-- Hybrid retrieval (vector + keyword)
-- Fusion strategies (RRF, weighted)
-- Reranking (DashScope, Cohere, etc.)
-- MMR diversity
-- LLM-based QA testing
-- LangGraph-compatible tools
+KB business logic now lives in ``apps/knowledge-service`` and is reached
+over HTTP via ``KBProxyClient``. The gateway side keeps:
 
-Quick Start for LangGraph Agents:
+- ``kb_proxy_client.py`` — thin HTTP client to the KB microservice (:8092).
+- ``embedding.py`` / ``vlm_service.py`` — kept as **shared utilities** until
+  K5c reconciles the Confluence integration. ``confluence/`` calls
+  ``..embedding.create_embedding`` and ``..vlm_service.DashScopeVLMService``
+  at runtime; deleting them here would break Confluence sync. Both files
+  are byte-identical with their kb-service counterparts.
+- ``confluence/`` — out of scope for K5b, deferred to K5c.
 
-    from agent_gateway.services.knowledge import create_kb_tool
-
-    # Create a KB tool for your agent
-    kb_tool = create_kb_tool(kb_service, "my_dataset", user_context)
-
-    # Use with LangGraph ToolNode
-    from langgraph.prebuilt import ToolNode
-    tool_node = ToolNode([kb_tool])
+For pure utilities like ``is_multimodal_embedding_model`` see
+``ai_gateway_core.knowledge.utils``.
 """
 
-from .chunking import (
-    AutomaticChunker,
-    BaseChunker,
-    Chunk,
-    ChunkingConfig,
-    ChunkingMode,
-    FixedSizeChunker,
-    HeadingChunker,
-    HierarchicalChunker,
-    PageChunker,
-    ParagraphChunker,
-    RecursiveChunker,
-    RegexChunker,
-    SeparatorChunker,
-    TextPreprocessor,
-    chunk_text,
-    create_chunker,
-    flatten_chunks,
-    process_document,
-)
+from __future__ import annotations
 
-# LangGraph Tools - Primary API for agent integration
-from .langgraph_tools import (
-    # Dify compatibility
-    DifyCompatibleKBAPI,
-    KBSearchResult,
-    # Configuration
-    KBToolConfig,
-    # Tool classes
-    KnowledgeBaseTool,
-    KnowledgeRetriever,
-    MultiDatasetRetriever,
-    MultiKnowledgeBaseTool,
-    # Factory functions (recommended)
-    create_kb_tool,
-    create_langchain_kb_tool,
-    create_multi_kb_tool,
-    create_retrieval_tool,
-)
-from .retrieval_config import (
-    DEFAULT_CONFIGS,
-    DatasetIndexConfig,
-    FusionConfig,
-    FusionStrategy,
-    KeywordRetrievalConfig,
-    MMRConfig,
-    RerankConfig,
-    RerankProvider,
-    RetrievalConfig,
-    RetrievalMode,
-    VectorRetrievalConfig,
-    get_preset_config,
-)
+from .kb_proxy_client import KBProxyClient, ProxyRetrieveResult
 
 __all__ = [
-    # Chunking
-    "ChunkingConfig",
-    "ChunkingMode",
-    "Chunk",
-    "TextPreprocessor",
-    "BaseChunker",
-    "FixedSizeChunker",
-    "ParagraphChunker",
-    "PageChunker",
-    "HeadingChunker",
-    "RegexChunker",
-    "SeparatorChunker",
-    "RecursiveChunker",
-    "HierarchicalChunker",
-    "AutomaticChunker",
-    "create_chunker",
-    "process_document",
-    "flatten_chunks",
-    "chunk_text",
-    # Retrieval Config
-    "RetrievalConfig",
-    "RetrievalMode",
-    "FusionStrategy",
-    "FusionConfig",
-    "VectorRetrievalConfig",
-    "KeywordRetrievalConfig",
-    "RerankConfig",
-    "RerankProvider",
-    "MMRConfig",
-    "DatasetIndexConfig",
-    "DEFAULT_CONFIGS",
-    "get_preset_config",
-    # LangGraph Tools
-    "create_kb_tool",
-    "create_multi_kb_tool",
-    "create_langchain_kb_tool",
-    "create_retrieval_tool",
-    "KnowledgeBaseTool",
-    "MultiKnowledgeBaseTool",
-    "KnowledgeRetriever",
-    "MultiDatasetRetriever",
-    "KBToolConfig",
-    "KBSearchResult",
-    "DifyCompatibleKBAPI",
+    "KBProxyClient",
+    "ProxyRetrieveResult",
 ]

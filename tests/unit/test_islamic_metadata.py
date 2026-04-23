@@ -1,5 +1,5 @@
-from src.services.knowledge.islamic_metadata import IslamicMetadataExtractor
-from src.services.knowledge.knowledge_service import KnowledgeService
+from knowledge_service.services.knowledge.islamic_metadata import IslamicMetadataExtractor
+from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 
 
 def test_extract_quran_reference_valid_range():

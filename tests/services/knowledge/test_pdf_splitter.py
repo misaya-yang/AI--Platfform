@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.services.knowledge.pdf_splitter import PDFSplitter, SplitResult
+from knowledge_service.services.knowledge.pdf_splitter import PDFSplitter, SplitResult
 
 
 @pytest.fixture
