@@ -1,0 +1,74 @@
+"""GATE-ADR004-1 + -6 — silent-regression detector for in-memory reads.
+
+Every ``self._{runs,approvals,commands}.(get|values|items)`` access in
+``apps/assistant-service/.../core/gateway/execution_gateway.py`` must
+be tagged ``# AUDIT-OK`` with an explicit justification (DB-less
+fallback / write-through mirror). Untagged reads regress the ADR-004
+decision to "DB is authoritative" and would reintroduce the
+cross-instance split-brain that blocks Polaris items #4 and #5.
+
+This test guards the invariant so a future refactor can't silently
+re-introduce an in-memory read.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+EXEC_GW_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "assistant-service"
+    / "src"
+    / "assistant_service"
+    / "core"
+    / "gateway"
+    / "execution_gateway.py"
+)
+
+PATTERN = re.compile(r"self\._(runs|approvals|commands)\.(get|values|items)")
+
+
+def test_every_in_memory_read_is_audit_ok_tagged():
+    assert EXEC_GW_PATH.exists(), f"missing file: {EXEC_GW_PATH}"
+    unauthorized: list[tuple[int, str]] = []
+    for lineno, line in enumerate(EXEC_GW_PATH.read_text().splitlines(), start=1):
+        if PATTERN.search(line) and "# AUDIT-OK" not in line:
+            unauthorized.append((lineno, line.strip()))
+    assert not unauthorized, (
+        "ADR-004 silent regression: untagged in-memory reads in execution_gateway.py:\n"
+        + "\n".join(f"  L{ln}: {t}" for ln, t in unauthorized)
+        + "\n\nEach untagged read must be either:\n"
+        "  (a) replaced with a DB SELECT, OR\n"
+        "  (b) tagged `# AUDIT-OK: <justification>` — allowed justifications:\n"
+        "      - 'write-through mirror' (the line mutates, does not branch on read)\n"
+        "      - 'DB-less / DB-error fallback only' (runs after a successful DB path)\n"
+    )
+
+
+def test_audit_ok_justifications_are_from_the_allowed_set():
+    """AUDIT-OK comments must use one of the approved reasons — not
+    ad-hoc "this is fine" hand-waves.
+    """
+    allowed = {
+        "write-through mirror",
+        "write-through mirror, not a read source",
+        "DB-less / DB-error fallback only",
+    }
+    suspicious: list[tuple[int, str]] = []
+    for lineno, line in enumerate(EXEC_GW_PATH.read_text().splitlines(), start=1):
+        if "# AUDIT-OK" not in line:
+            continue
+        if not PATTERN.search(line):
+            continue
+        # Extract the justification text after "AUDIT-OK:"
+        marker = line.find("# AUDIT-OK")
+        justification = line[marker:].replace("# AUDIT-OK:", "").strip()
+        if not any(j in justification for j in allowed):
+            suspicious.append((lineno, justification))
+    assert not suspicious, (
+        "AUDIT-OK justifications outside the approved set:\n"
+        + "\n".join(f"  L{ln}: {j!r}" for ln, j in suspicious)
+        + f"\n\nApproved set: {sorted(allowed)}"
+    )

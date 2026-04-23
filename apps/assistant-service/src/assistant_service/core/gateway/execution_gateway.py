@@ -183,7 +183,11 @@ class AssistantExecutionGateway:
         error: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        run = self._runs.get(run_id)
+        # Write-through mirror for the DB-less fallback path only. When the
+        # database is configured (prod) the DB UPDATE below is authoritative;
+        # updating the in-memory record too keeps the fallback shape accurate
+        # if the DB later errors mid-chat. Not a read source (ADR-004 §B).
+        run = self._runs.get(run_id)  # AUDIT-OK: write-through mirror, not a read source
         if run:
             run.status = status
             run.usage = usage or {}
@@ -220,30 +224,53 @@ class AssistantExecutionGateway:
         tenant_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        run = self._runs.get(run_id)
-        if run and run.tenant_id == tenant_id and run.user_id == user_id:
-            return {
-                "run_id": run.run_id,
-                "tenant_id": run.tenant_id,
-                "user_id": run.user_id,
-                "session_id": run.session_id,
-                "status": run.status,
-                "engine": run.engine,
-                "execution_profile": run.execution_profile,
-                "memory_mode": run.memory_mode,
-                "os_agent_enabled": run.os_agent_enabled,
-                "queue_mode": run.queue_mode,
-                "openclaw_mode": run.openclaw_mode,
-                "request_preview": run.request_preview,
-                "usage": run.usage,
-                "error": run.error,
-                "started_at": run.started_at.isoformat() if run.started_at else None,
-                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-            }
+        """Fetch a run by id, DB-authoritative per ADR-004 §B.
 
-        if not self.database:
+        Read order: if the database is configured, the DB is the single
+        source of truth — a miss returns ``None`` (we do NOT silently
+        fall back to the in-memory mirror, which could serve stale or
+        instance-local state). The in-memory path is consulted ONLY
+        when the database is absent (DB-less dev) or the DB errors
+        mid-call (graceful degradation).
+        """
+        if self.database:
+            try:
+                return await self._fetch_run_from_db(run_id, tenant_id, user_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "get_run DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+        return self._get_run_from_memory(run_id, tenant_id, user_id)
+
+    def _get_run_from_memory(
+        self, run_id: str, tenant_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        run = self._runs.get(run_id)  # AUDIT-OK: DB-less / DB-error fallback only
+        if not run or run.tenant_id != tenant_id or run.user_id != user_id:
             return None
+        return {
+            "run_id": run.run_id,
+            "tenant_id": run.tenant_id,
+            "user_id": run.user_id,
+            "session_id": run.session_id,
+            "status": run.status,
+            "engine": run.engine,
+            "execution_profile": run.execution_profile,
+            "memory_mode": run.memory_mode,
+            "os_agent_enabled": run.os_agent_enabled,
+            "queue_mode": run.queue_mode,
+            "openclaw_mode": run.openclaw_mode,
+            "request_preview": run.request_preview,
+            "usage": run.usage,
+            "error": run.error,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        }
 
+    async def _fetch_run_from_db(
+        self, run_id: str, tenant_id: str, user_id: str
+    ) -> dict[str, Any] | None:
         query = """
             SELECT run_id, tenant_id, user_id, session_id, status, engine,
                    execution_profile, memory_mode, os_agent_enabled,
@@ -294,7 +321,11 @@ class AssistantExecutionGateway:
         status = "approved" if approved else "rejected"
         now = datetime.now(timezone.utc)
 
-        record = self._approvals.get(approval_id)
+        # Write-through mirror for the DB-less fallback path only.
+        # ADR-004 §B: DB is authoritative for reads; the in-memory
+        # mutation here keeps the mirror coherent if we later fall
+        # back due to DB error. Not a read source.
+        record = self._approvals.get(approval_id)  # AUDIT-OK: write-through mirror
         if record and record.tenant_id == tenant_id and record.user_id == user_id:
             record.status = status
             record.approved_by = approver_user_id
@@ -316,16 +347,24 @@ class AssistantExecutionGateway:
                           tool_name, arguments, status, reason, approved_by,
                           approved_at, expires_at, created_at;
             """
-            row = await self.database.fetchrow(
-                query,
-                approval_id,
-                tenant_id,
-                user_id,
-                status,
-                approver_user_id,
-                now,
-                reason,
-            )
+            try:
+                row = await self.database.fetchrow(
+                    query,
+                    approval_id,
+                    tenant_id,
+                    user_id,
+                    status,
+                    approver_user_id,
+                    now,
+                    reason,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "approve DB update failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+                row = None
+
             if row:
                 args = row.get("arguments")
                 if isinstance(args, str):
@@ -354,7 +393,12 @@ class AssistantExecutionGateway:
                     if row.get("created_at")
                     else None,
                 }
+            # DB configured AND no row → authoritative miss: do NOT silently
+            # return in-memory data. Ambiguity resolves downstream (404).
+            if self.database:
+                return None
 
+        # DB-less path: in-memory is the only source of truth.
         if not record:
             return None
 
@@ -689,7 +733,8 @@ class AssistantExecutionGateway:
         result: Any | None = None,
         error: str | None = None,
     ) -> None:
-        item = self._commands.get(command_id)
+        # Write-through mirror. DB UPDATE below is authoritative per ADR-004.
+        item = self._commands.get(command_id)  # AUDIT-OK: write-through mirror
         if item:
             item["status"] = status
             item["result"] = result
@@ -785,35 +830,63 @@ class AssistantExecutionGateway:
         if not approval_id:
             return False
 
-        record = self._approvals.get(approval_id)
-        if record:
-            if record.tenant_id != tenant_id or record.user_id != user_id:
+        # DB-authoritative per ADR-004 §B. DB miss = not approved (no
+        # silent fall-through to in-memory, which could serve stale
+        # state from a sibling AS instance). DB error degrades to the
+        # in-memory mirror so a transient outage doesn't block every
+        # approval grant.
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT status, expires_at, tool_name
+                    FROM assistant_tool_approvals
+                    WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
+                    LIMIT 1;
+                    """,
+                    approval_id,
+                    tenant_id,
+                    user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_approval_granted DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+                return self._approval_granted_from_memory(
+                    approval_id, tenant_id, user_id, tool_name
+                )
+            if not row:
                 return False
-            if record.tool_name != tool_name:
+            if row.get("tool_name") != tool_name:
                 return False
-            if record.expires_at and record.expires_at < datetime.now(timezone.utc):
+            expires_at = row.get("expires_at")
+            if expires_at and expires_at < datetime.now(timezone.utc):
                 return False
-            return record.status == "approved"
+            return row.get("status") == "approved"
 
-        if not self.database:
-            return False
+        # DB-less path
+        return self._approval_granted_from_memory(
+            approval_id, tenant_id, user_id, tool_name
+        )
 
-        query = """
-            SELECT status, expires_at, tool_name
-            FROM assistant_tool_approvals
-            WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
-            LIMIT 1;
-        """
-        row = await self.database.fetchrow(query, approval_id, tenant_id, user_id)
-        if not row:
+    def _approval_granted_from_memory(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        tool_name: str,
+    ) -> bool:
+        record = self._approvals.get(approval_id)  # AUDIT-OK: DB-less / DB-error fallback only
+        if not record:
             return False
-
-        if row.get("tool_name") != tool_name:
+        if record.tenant_id != tenant_id or record.user_id != user_id:
             return False
-        expires_at = row.get("expires_at")
-        if expires_at and expires_at < datetime.now(timezone.utc):
+        if record.tool_name != tool_name:
             return False
-        return row.get("status") == "approved"
+        if record.expires_at and record.expires_at < datetime.now(timezone.utc):
+            return False
+        return record.status == "approved"
 
     async def _find_active_command(self, command_key: str) -> str | None:
         """Return the command_id of an active dedup match, or None.
@@ -850,7 +923,7 @@ class AssistantExecutionGateway:
                     exc,
                 )
         # In-memory fallback — tests and DB-less dev only.
-        for command_id, item in self._commands.items():
+        for command_id, item in self._commands.items():  # AUDIT-OK: DB-less / DB-error fallback only
             if item.get("command_key") != command_key:
                 continue
             if item.get("status") in {"queued", "running", "awaiting_approval"}:
