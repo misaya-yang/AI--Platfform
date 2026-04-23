@@ -34,19 +34,19 @@ from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.exceptions import PermissionDeniedError
-from ...services.assistant import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
-from ...services.assistant.assistant_service import RAGMode
-from ...services.assistant.tools.gemini_image_tool import get_gemini_image_generator
-from ...services.assistant.tools.image_callback import send_image_callback
-from ...services.assistant.tools.image_helpers import (
+from assistant_service.core import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
+from assistant_service.core.assistant_service import RAGMode
+from assistant_service.core.tools.gemini_image_tool import get_gemini_image_generator
+from assistant_service.core.tools.image_callback import send_image_callback
+from assistant_service.core.tools.image_helpers import (
     append_image_turns,
     build_gemini_contents_from_history,
     parse_image_size,
     resolve_image_routing,
 )
-from ...services.assistant.tools.image_watermark import apply_watermark_b64
-from ...services.assistant.tools.smart_image_generator import get_smart_image_generator
-from ...services.assistant.tools.style_presets import (
+from assistant_service.core.tools.image_watermark import apply_watermark_b64
+from assistant_service.core.tools.smart_image_generator import get_smart_image_generator
+from assistant_service.core.tools.style_presets import (
     StylePreset,
     compose_styled_prompt,
     resolve_dashscope_style_tag,
@@ -258,7 +258,7 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     - premium: Users with tier=premium/enterprise/admin or role=admin
     - admin: Only users with tier=admin or role=admin
     """
-    from ...services.assistant.models.model_registry import ModelAccessLevel
+    from assistant_service.core.models.model_registry import ModelAccessLevel
 
     # Admin users can access everything
     if user.tier == "admin" or "admin" in user.roles:
@@ -1049,7 +1049,7 @@ async def cancel_task(
     Returns:
         TaskCancelResponse with cancellation status
     """
-    from ...services.assistant.tasks.task_manager import get_task_manager
+    from assistant_service.core.tasks.task_manager import get_task_manager
 
     task_manager = get_task_manager()
 
@@ -2009,7 +2009,7 @@ async def get_session_metrics(
     limit: int = Query(default=50, ge=1, le=200),
 ):
     """Get context metrics for a session."""
-    from ...services.assistant import get_context_metrics_collector
+    from assistant_service.core import get_context_metrics_collector
 
     # Verify session ownership (security: prevent access to other users' metrics)
     session_manager = get_session_manager(request)
@@ -2044,7 +2044,7 @@ async def get_tenant_metrics(
     hours: int = Query(default=24, ge=1, le=168),
 ):
     """Get aggregated metrics for the current tenant."""
-    from ...services.assistant import get_context_metrics_collector
+    from assistant_service.core import get_context_metrics_collector
 
     collector = get_context_metrics_collector()
     stats = await collector.get_tenant_stats(user.tenant_id, hours=hours)

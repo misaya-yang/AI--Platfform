@@ -354,7 +354,7 @@ class Container:
 
     def _create_memory_service(self):
         """创建记忆服务"""
-        from .services.assistant.memory_service import MemoryService
+        from assistant_service.core.memory_service import MemoryService
 
         database = self._providers["database"].get_sync()
         return MemoryService(database)

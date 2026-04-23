@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
-from ...services.assistant.quiz.exam_service import ExamService
+from assistant_service.core.quiz.exam_service import ExamService
 
 logger = logging.getLogger(__name__)
 

@@ -36,7 +36,7 @@ async def list_mcp_tools(
     user: UserContext = Depends(get_user_context),
 ):
     """List all tools registered from MCP servers."""
-    from ...services.assistant.tools.tool_registry import ToolCategory, get_tool_registry
+    from assistant_service.core.tools.tool_registry import ToolCategory, get_tool_registry
     registry = get_tool_registry()
     mcp_tools = [
         {"name": t.name, "description": t.description, "category": t.category.value}

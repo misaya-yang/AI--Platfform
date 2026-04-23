@@ -757,7 +757,7 @@ def create_app() -> FastAPI:
         await _init_assistant_service(app, settings)
 
         # Initialize Assistant TaskManager lifecycle explicitly
-        from .services.assistant.tasks.task_manager import init_task_manager
+        from assistant_service.core.tasks.task_manager import init_task_manager
 
         app.state.assistant_task_manager = await init_task_manager()
 
@@ -822,7 +822,7 @@ def create_app() -> FastAPI:
         # Islamic Content: now handled by microservice at :8091, no cleanup needed
 
         # Stop Assistant TaskManager lifecycle
-        from .services.assistant.tasks.task_manager import shutdown_task_manager
+        from assistant_service.core.tasks.task_manager import shutdown_task_manager
 
         await shutdown_task_manager()
 
@@ -866,7 +866,7 @@ def create_app() -> FastAPI:
 def _make_process_file_handler(app: FastAPI, process_file_task=None):
     """Create a task handler that resolves assistant_service from app.state at runtime."""
     if process_file_task is None:
-        from .services.assistant.tasks.task_types import process_file_task as _process_file_task
+        from assistant_service.core.tasks.task_types import process_file_task as _process_file_task
 
         process_file_task = _process_file_task
 
@@ -1031,7 +1031,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     """
     import os
 
-    from .services.assistant import AssistantService, ModelProvider, ModelRegistry
+    from assistant_service.core import AssistantService, ModelProvider, ModelRegistry
 
     model_registry = ModelRegistry()
     configured_providers = []
@@ -1283,12 +1283,12 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
 
     # Create Tavily tool instance
-    from .services.assistant.tools import TavilySearchTool
+    from assistant_service.core.tools import TavilySearchTool
 
     tavily_tool = TavilySearchTool(api_key=tavily_api_key or None)
 
     # Initialize code executor if Docker is available
-    from .services.assistant.code_executor import CodeExecutionConfig, CodeExecutorService
+    from assistant_service.core.code_executor import CodeExecutionConfig, CodeExecutorService
 
     code_executor = None
     try:
@@ -1340,12 +1340,12 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     )
 
     # Initialize Tool Registry (Phase 2)
-    from .services.assistant.tools import (
+    from assistant_service.core.tools import (
         get_tool_registry,
         register_builtin_tools,
         register_code_executor_tool,
     )
-    from .services.assistant.tools.image_generator_tool import register_image_generation_tool
+    from assistant_service.core.tools.image_generator_tool import register_image_generation_tool
 
     tool_registry = get_tool_registry()
     effective_kb_service = kb_service or getattr(app.state, "kb_proxy", None)
@@ -1371,7 +1371,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # don't break, but they're not connected to the request path.
 
     # Register quiz generation tool (KB → LLM → interactive quiz)
-    from .services.assistant.tools.quiz_tool import register_quiz_tool
+    from assistant_service.core.tools.quiz_tool import register_quiz_tool
     register_quiz_tool(
         kb_service=kb_service,
         model_registry=model_registry,
@@ -1380,7 +1380,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     )
 
     # Register sub-agent tool (ADR-003)
-    from .services.assistant.tools.subagent_tool import register_subagent_tool
+    from assistant_service.core.tools.subagent_tool import register_subagent_tool
     register_subagent_tool()
     logger.info("Registered spawn_subagent tool")
 
@@ -1393,7 +1393,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     database_for_rehydrate = getattr(app.state, "database", None)
     if database_for_rehydrate:
         try:
-            from .services.assistant.tools.confluence_tool import register_confluence_tools
+            from assistant_service.core.tools.confluence_tool import register_confluence_tools
 
             register_confluence_tools(database=database_for_rehydrate)
             # Sanity count with one retry — DB pool may still be warming up.
@@ -1443,7 +1443,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     app.state.tool_registry = tool_registry
 
     # Create assistant client (Protocol-based abstraction for future microservice extraction)
-    from .services.assistant.client import create_assistant_client
+    from assistant_service.core.client import create_assistant_client
     assistant_mode = os.environ.get("ASSISTANT_MODE", "in_process")
     assistant_remote_url = os.environ.get("ASSISTANT_SERVICE_URL", "http://assistant-service:8093")
     app.state.assistant_client = create_assistant_client(
@@ -1454,7 +1454,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     # Initialize MCP (Model Context Protocol) connections
     try:
-        from .services.assistant.mcp import MCPManager, load_mcp_config
+        from assistant_service.core.mcp import MCPManager, load_mcp_config
         mcp_configs = load_mcp_config()
         if mcp_configs:
             mcp_manager = MCPManager(configs=mcp_configs)
@@ -1471,9 +1471,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # ADR-002 Phase 1: Initialize tenant isolation services
     database = getattr(app.state, "database", None)
     try:
-        from .services.assistant.tools.tenant_tool_policy import TenantToolPolicyService
-        from .services.assistant.mcp.tenant_mcp_config import TenantMCPConfigService
-        from .services.assistant.audit import ToolAuditService
+        from assistant_service.core.tools.tenant_tool_policy import TenantToolPolicyService
+        from assistant_service.core.mcp.tenant_mcp_config import TenantMCPConfigService
+        from assistant_service.core.audit import ToolAuditService
 
         app.state.tenant_tool_policy = TenantToolPolicyService(database=database)
         app.state.tool_audit = ToolAuditService(database=database)
@@ -1492,7 +1492,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         assistant_service.tool_audit = app.state.tool_audit
         # Rebuild execution_gateway tool_invoker with tenant services
         if hasattr(assistant_service, "execution_gateway") and assistant_service.execution_gateway:
-            from .services.assistant.tool_invoker import create_tool_invoker
+            from assistant_service.core.tool_invoker import create_tool_invoker
             assistant_service.execution_gateway.tool_invoker = create_tool_invoker(
                 tenant_tool_policy=app.state.tenant_tool_policy,
                 tenant_mcp_config=app.state.tenant_mcp_config,

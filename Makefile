@@ -147,7 +147,8 @@ test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phas
 	@uv run pytest -q --no-cov \
 		tests/integration/test_assistant_isolation_contract.py \
 		tests/integration/test_assistant_openapi_contract.py \
-		tests/integration/test_assistant_core_isolation.py
+		tests/integration/test_assistant_core_isolation.py \
+		tests/integration/test_gateway_boot.py
 
 snapshot-assistant-openapi: ## 重新生成 assistant-service OpenAPI 基线快照
 	@uv run python scripts/snapshot_assistant_openapi.py

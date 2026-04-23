@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.logging import get_logger
-from ...services.assistant.quiz.quiz_grader import QuizGrader
+from assistant_service.core.quiz.quiz_grader import QuizGrader
 from ..deps import enforce_rate_limit, get_user_context
 
 logger = get_logger(__name__)

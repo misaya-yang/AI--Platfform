@@ -24,7 +24,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from ...core.auth.user_resolver import UserContext
-from ...services.assistant.tools.tool_registry import get_tool_registry
+from assistant_service.core.tools.tool_registry import get_tool_registry
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/debug", tags=["Debug"])

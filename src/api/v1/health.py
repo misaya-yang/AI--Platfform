@@ -136,7 +136,7 @@ async def all_providers_health(
     Requires admin authentication to prevent provider enumeration.
     """
     require_admin(user)
-    from ...services.assistant.models.model_registry import ModelProvider
+    from assistant_service.core.models.model_registry import ModelProvider
 
     model_registry = getattr(request.app.state, "model_registry", None)
     if not model_registry:
