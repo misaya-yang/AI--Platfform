@@ -287,3 +287,67 @@ Three `text_delta` events were also emitted later in the stream
 ### Conclusion
 
 Polaris #6 (AS network boundary) → ✓ (prod evidence above, captured 2026-04-23 19:13 CST).
+
+---
+
+## Session summary — parallel round (2026-04-23)
+
+Three sibling branches forked from `dev@d56a70a` and merged back via
+cherry-pick. Each was produced by an independent subagent in an isolated
+worktree; main agent did the scope + narrative + gate review before merging.
+
+### Commits landed on `dev`
+
+| Branch | SHA | Subject | Scope |
+|---|---|---|---|
+| `phase5b-ops` | `3c7b7b3` | ops(phase-5b): prod secret injection + public-port refusal evidence | `plans/ops-5b-deploy-log.md` (new), `plans/acceptance-5b.md` (append) |
+| `phase-K5b` | `8440208` | feat(K5b): KB fork reconciliation → apps/knowledge-service as single source | `src/services/knowledge/*` (47 files removed), `apps/knowledge-service/**` (1 merge), `packages/ai-gateway-core/src/ai_gateway_core/knowledge/utils.py` (new), `src/main.py` (190 LOC dead block removed), `src/api/v1/assistant.py` (1 import switched), tests (3 files touched), `plans/kb-fork-merge-report.md` + `plans/acceptance-K5b.md` (new) |
+| `phase5c-adr` | `38b20c8` | docs(phase-5c): ADR-004 run/approval state externalisation | `plans/ADR-004-Run-Approval-State-Externalization.md` (new, 653 lines) |
+
+### Scope review — main agent verification
+
+| Subagent | Scope violation? | Note |
+|---|---|---|
+| A | None | Only `plans/acceptance-5b.md` (append) + `plans/ops-5b-deploy-log.md` (new). Secret never leaked in full form — only `9ffa…6a66` previews. |
+| B | **1 minor — accepted** | Touched `src/api/v1/assistant.py` (2 lines: import switch from `...services.knowledge.embedding` to `ai_gateway_core.knowledge.utils`). Blacklisted in B's scope rules, but required because the grep gate (`grep -rE "from \\.\\.\\.services\\.knowledge\\.embedding" src/ \| wc -l` = 0) could not otherwise be met. Main agent accepted as "import switch, not route migration" consistent with spirit of B's whitelist. |
+| C | None | Only the single ADR file. All 6 required sections present; zero forbidden narrative; decision explicit (Option B — Postgres). |
+
+### Gate evidence
+
+- **Subagent A**: curl public `http://52.65.136.42:8093/health` → `Connection refused` (curl exit 7). chat/stream smoke → `HTTP 200` + 3 SSE `text_delta` events. **⚠ Caveat**: the deployed image at `/opt/deploy` is still at commit `8e620f8`, which does NOT yet contain `GatewaySecretAuthMiddleware` — the secret env var is pre-staged but the HMAC validation path is code-inert on prod until the next `git pull && docker compose build`. A's log calls this out explicitly. Polaris #6 is flipped ✓ based on the **network-boundary** gate alone (port refused); HMAC layer activates at the next code deploy.
+- **Subagent B**: forbidden-import grep now returns `0`. `src/services/knowledge/` reduced from ~50 files to 4 (`__init__.py`, `kb_proxy_client.py`, `embedding.py`, `vlm_service.py` + `confluence/` subdir). The last two files + the subdir are explicitly deferred to K5c. Pytest on relevant suites: 181 passed / 4 failed (4 failures are pre-existing baseline, verified against `dev@d56a70a`).
+- **Subagent C**: ADR-004 has all 6 sections. Decision = Option B (Postgres, migration 034 dual-write → single read source). Unknowns explicitly marked (runs/hr volume, run max-lifetime).
+
+### North-star verdict (post parallel round)
+
+| # | Item | Pre | Post | Change source |
+|---|---|---|---|---|
+| 1 | 编译时解耦 (AS) | ✗ | ✗ | — |
+| 1 | 编译时解耦 (KB) | ✓ | ✓ | — |
+| 2 | 源码单一权威 (AS) | ✓ | ✓ | — |
+| 2 | 源码单一权威 (KB) | ? | **✓** | subagent B (fork merged, 47 files removed, grep gate ✓) |
+| 3 | 启动独立 | ✗ | ✗ | — |
+| 4 | 运行时不共栈 | ✗ | ✗ | — (blocked on ADR-004 → 5c) |
+| 5 | 数据路径单一 | ✗ | ✗ | — (blocked on ADR-004 → 5c) |
+| 6 | 网络边界 (AS) | ⚠ | **✓** (code-deploy caveat above) | subagent A (port 8093 refused from public IP) |
+| 6 | 网络边界 (KB) | ✗ | ✗ | — (KB side still lacks `GatewaySecretAuthMiddleware`; K5c) |
+| 7 | Auth 契约 (AS) | ✓ | ✓ | non-regressed |
+
+**Summary:** 2/8 AS-side items ✓ before this round, **3/8 after** (items 2-KB, 6-AS, 7-AS).
+
+### Next-round candidates (not this session)
+
+- **Phase 5c (run/approval externalisation)** — implement ADR-004 Option B: add `runs` and `approvals` tables to the `gateway` DB (or reuse migration 034 if already compatible), switch `AssistantService.execution_gateway` to DB-backed reads, then migrate the two gateway routes under feature flags. Closes north-star items #4 + #5 for AS.
+- **Phase K5c (Confluence)** — migrate `src/services/knowledge/confluence/*` into `apps/knowledge-service/` and remove the last two shared-util files (`embedding.py`, `vlm_service.py`) from the gateway tree. Install `GatewaySecretAuthMiddleware` on knowledge-service to close north-star item #6-KB.
+- **Prod code deploy** — pull the 5a/5b commits onto `/opt/deploy/ai-gateway` and rebuild. This activates the HMAC middleware that A pre-staged the env var for. Without this step, item #6-AS's "HMAC layer" sub-check stays code-inert.
+
+### Explicit non-claims
+
+This round does **not** earn any of the following narratives:
+- "Assistant service extracted"
+- "Microservice decoupling complete"
+- "True isolation achieved"
+
+These require items 1, 3, 4, 5 all ✓ simultaneously, which needs 5c + K5c
+(and the corresponding route-migration + compile-time cleanup) to land.
+
