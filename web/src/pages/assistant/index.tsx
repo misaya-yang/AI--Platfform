@@ -468,6 +468,12 @@ export function AssistantPage() {
       filename: f.file.name,
     }));
 
+    // Sending a new message makes any open Activity drawer stale (it's
+    // pinned to a prior message's id). Close it; the user reopens it for
+    // the new message by clicking its Activity pill. Artifacts are
+    // session-scoped, so leave them alone.
+    setActivityMessageId(null);
+
     sendMessage({
       messageContent,
       filePaths,
@@ -493,6 +499,8 @@ export function AssistantPage() {
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
+     // Same rationale as handleSend: close stale Activity drawer before a new send.
+     setActivityMessageId(null);
      sendImageGeneration(input, selectedStyle);
      setInput("");
   }, [input, selectedStyle, sendImageGeneration]);

@@ -1,7 +1,8 @@
 """Gateway → KB Service streaming proxy with circuit breaker and auto-reconnect."""
 from __future__ import annotations
 
-import logging, os, time
+import logging
+import os
 from typing import AsyncIterator
 
 import httpx
@@ -45,27 +46,43 @@ async def _reset_client() -> None:
         try: await old.aclose()
         except Exception: pass
 
-# --- Circuit breaker (Bug 3) ---
-_CB_THRESHOLD, _CB_RECOVERY = 3, 30.0
-_cb_fails, _cb_opened = 0, 0.0
+# --- Circuit breaker ---
+# Mirrors the state machine in ``_assistant_proxy.py``: CLOSED →
+# (N failures) → OPEN; while OPEN, the next request becomes a half-open
+# probe whose outcome closes or re-opens the breaker. No wall-clock
+# recovery window (the previous 30s dead-zone meant a fast KB restart
+# still bounced every request for 30s even though the upstream was back).
+_CB_THRESHOLD = 3
+_cb_fails = 0
+_cb_probe_in_flight = False
+
 
 def _cb_check() -> None:
-    if _cb_fails >= _CB_THRESHOLD:
-        elapsed = time.monotonic() - _cb_opened
-        if elapsed < _CB_RECOVERY:
-            raise HTTPException(503, "KB Service temporarily unavailable",
-                                headers={"Retry-After": str(int(_CB_RECOVERY - elapsed))})
+    """Gate the request. Allow one probe through while OPEN; fast-fail the rest."""
+    global _cb_probe_in_flight
+    if _cb_fails < _CB_THRESHOLD:
+        return
+    if _cb_probe_in_flight:
+        raise HTTPException(
+            503,
+            "KB Service recovering — probe in flight",
+            headers={"Retry-After": "2"},
+        )
+    _cb_probe_in_flight = True
+
 
 def _cb_success() -> None:
-    global _cb_fails, _cb_opened
-    _cb_fails, _cb_opened = 0, 0.0
+    global _cb_fails, _cb_probe_in_flight
+    _cb_fails = 0
+    _cb_probe_in_flight = False
+
 
 def _cb_fail() -> None:
-    global _cb_fails, _cb_opened
+    global _cb_fails, _cb_probe_in_flight
     _cb_fails += 1
-    if _cb_fails >= _CB_THRESHOLD:
-        _cb_opened = time.monotonic()
-        logger.warning("Circuit breaker OPEN after %d failures", _cb_fails)
+    _cb_probe_in_flight = False
+    if _cb_fails == _CB_THRESHOLD:
+        logger.warning("KB Service circuit breaker OPEN after %d failures", _cb_fails)
 
 # --- Header helpers (Bug 4: preserve Content-Type with multipart boundary) ---
 def _fwd_headers(request: Request, user: UserContext) -> dict[str, str]:
@@ -115,11 +132,14 @@ async def proxy_to_kb_service(
                 await resp.aclose()
         return StreamingResponse(content=_stream(), status_code=resp.status_code, headers=rh, media_type=mt)
 
+    # One external failure = one _cb_fail() call. The retry path previously
+    # called _cb_fail() twice (once on ConnectError, once on the retry's
+    # exception), halving the effective 3-strike threshold.
     try:
         return await _do()
     except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:
         logger.warning("KB proxy connection error, resetting: %s", exc)
-        _cb_fail(); await _reset_client()
+        await _reset_client()
         try:
             return await _do()
         except Exception as e:

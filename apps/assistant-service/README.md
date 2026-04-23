@@ -4,7 +4,10 @@ Independent FastAPI microservice for AI chat, streaming, tools, RAG, memory,
 and agent loops. Runs on port 8093.
 
 Trusts gateway-forwarded `X-User-*` headers for authentication. The upstream
-`ai-gateway` proxies `/api/v1/assistant/*` here via `AssistantProxyClient`.
+`ai-gateway` proxies `/api/v1/assistant/chat/stream` here via the streaming
+HTTP proxy at `src/api/v1/_assistant_proxy.py`. Other `/api/v1/assistant/*`
+routes still run in-process inside the gateway (Phase 4 scope); the
+gateway image bundles this package to serve them.
 
 ## Start (dev)
 
