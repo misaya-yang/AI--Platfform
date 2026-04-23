@@ -105,19 +105,100 @@ ssh <prod> 'cd /opt/deploy && docker compose up -d --force-recreate gateway'
 
 ## Remaining Phase 5b work (not in this commit)
 
-- [ ] Migrate `/tools` (GET list) — depends on AS-side implementation of
-      `list_tools()` matching gateway's `ToolInfoResponse` shape
-- [ ] Migrate `/policies` (GET) — depends on `tenant_tool_policy` service
-      being reachable from AS
-- [ ] Migrate `/runs/{id}` (GET) — needs run registry on AS side
-- [ ] Migrate `/approvals/{id}` (POST) — needs approval manager on AS side
-- [ ] Migrate `/chat` (non-stream POST) — larger; touches model_registry +
-      session_manager; realistically a separate PR
-- [ ] Run runbook step 4 and paste stdout to close Polaris item 6
+- [x] Migrate `/tools` (GET) — done in round 2 below
+- [x] Migrate `/policies` (GET) — done in round 2 below
+- [x] Migrate `/chat` (POST, non-stream) — done in round 2 below
+- [ ] ~~Migrate `/runs/{id}` (GET)~~ — **deferred to 5c** (see round-2 rationale)
+- [ ] ~~Migrate `/approvals/{id}` (POST)~~ — **deferred to 5c** (see round-2 rationale)
+- [ ] Run runbook step 4 and paste stdout to close Polaris item 6 (still operator task)
 
-Once the 5 items above are ✓ and Polaris item 6 has prod evidence, update
+Once the items above are ✓ and Polaris item 6 has prod evidence, update
 this doc's "Polaris verdict" section and run a second pass of the e2e auth
 test against prod (with a prod-synthesized admin JWT) to close item 7 end-to-end.
+
+---
+
+## Round 2 (same commit series, follow-up PR): /chat + /tools + /policies
+
+### What shipped
+
+| Route | GW side | AS side | Equivalence test |
+|---|---|---|---|
+| `POST /assistant/chat` | 7-line proxy branch (authz above stays) under `ASSISTANT_ROUTE_CHAT_PROXIED` | Already had full `AssistantService.chat(...)` call in `apps/assistant-service/.../api/routes/chat.py` — re-used | `test_chat_response_has_required_keys` + `test_as_chat_returns_gateway_schema_keys` |
+| `GET /assistant/tools` | 4-line proxy branch under `ASSISTANT_ROUTE_TOOLS_PROXIED` | Upgraded stub to full gateway shape: added `when_to_use`, `when_not_to_use`; passes `user=user` to `list_tools()` for permission filter parity | `test_tools_response_has_required_keys` + `test_as_tools_returns_gateway_schema_keys` |
+| `GET /assistant/policies` | 5-line proxy branch under `ASSISTANT_ROUTE_POLICIES_PROXIED` | New AS route calling `assistant.get_gateway_policies()` — same data source as GW side | `test_policies_response_has_required_keys` + `test_as_policies_returns_top_level_policies_key` |
+
+Gateway new-code line counts (proxy branches):
+
+```
+/chat      — 7 lines (authz already above; + body-bytes read + proxy.forward)
+/tools     — 4 lines
+/policies  — 5 lines
+```
+
+All under the 15-line budget from the Roadmap.
+
+### Why `/runs/{id}` and `/approvals/{id}` are TODO 5c, not 5b
+
+Both routes read from `AssistantService.execution_gateway` — an in-memory
+run/approval registry **scoped to the AssistantService instance that served
+the originating chat call**. In the Phase 5b transitional state there are two
+separate `AssistantService` instances:
+
+1. Gateway's in-process one (`app.state.assistant_service` in `src/main.py`)
+2. AS container's one (`apps/assistant-service/.../main.py` lifespan)
+
+A run started on the GW side is invisible on the AS side and vice versa. A
+per-route feature flag on `/runs/{id}` or `/approvals/{id}` would therefore
+**leak 404s as soon as `/chat` starts proxying** — the run_id would be
+registered in the AS AssistantService's execution_gateway while the client
+queries the GW's, which has no knowledge of it.
+
+The only honest migrations are:
+
+- Externalise run / approval state (DB or shared redis) before flipping either
+  route — **Phase 5c territory** (north star #5 "数据路径单一" covers this).
+- OR migrate `/chat` + `/runs/{id}` + `/approvals/{id}` as a single atomic
+  flip (all-or-nothing) so the state stays on one side.
+
+Explicit `TODO(5c)` docstring comments landed on both gateway handlers
+referencing this acceptance doc.
+
+### Polaris north star (post-round-2)
+
+| 北极星 | pre-round-2 | post-round-2 | 本轮变动 |
+|---|---|---|---|
+| 1 编译时解耦 (AS) | ✗ | ✗ | — |
+| 2 源码单一权威 | ✓ / ? | ✓ / ? | — |
+| 3 启动独立 | ✗ | ✗ | — |
+| 4 运行时不共栈 | ✗ | ✗ | — (5c territory) |
+| 5 数据路径单一 | ✗ | ✗ | — (run/approval state deferred, exactly this item) |
+| 6 网络边界 (AS) | ✓ (pending runbook step 4) | ✓ (pending runbook step 4) | — |
+| 6 网络边界 (KB) | ✗ | ✗ | — |
+| 7 Auth 契约 (AS) | ✓ (admin + smuggle + 7 headers) | ✓ (unchanged, and hard contract tests still green) | **non-regression** across 3 more routes |
+
+**Verdict:** Round 2 does **not** flip a new north-star item green — that's
+intentional. It closes out the remaining Phase 5b "AS-as-real-target" work so
+Phase 5c can start from a clean base with every simple GET + basic POST already
+proxyable (default OFF, zero behaviour change for prod).
+
+### Tests
+
+Total migrated-route tests now: 12 (up from 6).
+Full Phase-5 new-test surface: **55 green**
+(e2e auth 6 + route flags 7 + equivalence 12 + proxy 12 + gateway_secret 12 + gateway_secret middleware 6 = 55).
+
+Run:
+```
+uv run pytest tests/contract tests/proxy/test_service_proxy.py -v --no-cov
+```
+
+### Disallowed narrative reminder
+
+Still forbidden in any commit message / PR body until Phase 5c+ close
+north-star items 1/3/4/5: "extracted", "microservice complete",
+"true isolation". Allowed: "routes proxied with in-process fallback",
+"auth contract locked", "shape-equivalence verified".
 
 ## North star (post this commit, same structure as acceptance-5a.md)
 

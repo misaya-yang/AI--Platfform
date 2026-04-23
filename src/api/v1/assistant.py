@@ -491,7 +491,15 @@ async def list_tools(
     List available tools for the assistant.
 
     Returns tools with their descriptions and usage guidance.
+
+    Phase 5b: proxies under ``ASSISTANT_ROUTE_TOOLS_PROXIED=true``.
     """
+    from ._route_flags import proxied
+
+    if proxied("TOOLS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(request, user, path="tools")
+
     tool_registry = getattr(request.app.state, "tool_registry", None)
     if not tool_registry:
         return ToolsListResponse(tools=[])
@@ -514,10 +522,20 @@ async def list_tools(
 
 @router.get("/policies", response_model=AssistantPoliciesResponse)
 async def get_policies(
+    request: Request,
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> AssistantPoliciesResponse:
-    """Get assistant gateway policies and defaults."""
+    """Get assistant gateway policies and defaults.
+
+    Phase 5b: proxies under ``ASSISTANT_ROUTE_POLICIES_PROXIED=true``.
+    """
+    from ._route_flags import proxied
+
+    if proxied("POLICIES"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        return await proxy_to_assistant_service(request, user, path="policies")
+
     _ = user  # Ensure endpoint is authenticated
     return AssistantPoliciesResponse(policies=assistant.get_gateway_policies())
 
@@ -529,7 +547,17 @@ async def approve_tool_call(
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> ApprovalResponse:
-    """Approve or reject a pending tool invocation."""
+    """Approve or reject a pending tool invocation.
+
+    TODO(5c): migrate to proxy. Deferred from 5b because the
+    ``approval_id`` is registered inside ``execution_gateway`` on the
+    side that served the triggering chat call. With two separate
+    ``AssistantService`` instances (gateway in-process vs AS container)
+    an approval raised by one side is invisible to the other, so a
+    per-route feature flag would leak 404s as soon as /chat flips to
+    proxy mode. Proper migration requires externalising approval
+    state (DB or shared redis) first.
+    """
     approval = await assistant.approve_tool_request(
         approval_id=approval_id,
         tenant_id=user.tenant_id,
@@ -549,7 +577,13 @@ async def get_run_status(
     user: UserContext = Depends(get_user_context),
     assistant: AssistantService = Depends(get_assistant_service),
 ) -> RunStatusResponse:
-    """Get run status for current user/tenant."""
+    """Get run status for current user/tenant.
+
+    TODO(5c): same deferral reason as /approvals/{id}. ``run_id`` is
+    registered in the ``execution_gateway`` that handled the chat call
+    that started it. Two ``AssistantService`` instances → split brain.
+    Migrate once run state is externalised.
+    """
     run = await assistant.get_run_status(
         run_id=run_id,
         tenant_id=user.tenant_id,
@@ -620,6 +654,17 @@ async def chat(
     session_id = body.session_id or str(uuid.uuid4())
     if body.session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+
+    # Phase 5b: proxy to assistant-service when flag is ON. Authz above
+    # stays at the edge for defence-in-depth — mirror of /chat/stream.
+    from ._route_flags import proxied
+
+    if proxied("CHAT"):
+        from ._assistant_proxy import proxy_to_assistant_service
+        body_bytes = await request.body()
+        return await proxy_to_assistant_service(
+            request, user, path="chat", body=body_bytes
+        )
 
     # Map string mode to enum
     kb_mode = RAGMode.AUTO
