@@ -97,15 +97,60 @@ class MCPManager:
             from ..tools.tool_registry import ToolCallResult
             args = getattr(request, "arguments", None) or getattr(request, "tool_args", {}) or {}
             result = await client.call_tool(mcp_tool.name, args)
-            text_parts = []
+            text_parts: list[str] = []
+            # File-producing MCP tools return ``type:"resource"`` content with
+            # a uri/name/mimeType. We surface these through ToolCallResult.
+            # output_files so the standard artifact_persister pipeline emits
+            # an ARTIFACT_CREATED event — independent of whether the model
+            # correctly transcribes the URL into its text response.
+            file_outputs: list[dict[str, Any]] = []
             for c in result.content:
-                if isinstance(c, dict) and c.get("type") == "text":
+                if not isinstance(c, dict):
+                    continue
+                ctype = c.get("type")
+                if ctype == "text":
                     text_parts.append(str(c.get("text", "")))
+                elif ctype == "resource_link":
+                    # MCP "resource_link" content — URL pointer to a file the
+                    # tool produced. Flat shape (uri/name/mimeType at top level).
+                    uri = c.get("uri") or ""
+                    if uri:
+                        file_outputs.append({
+                            "url": uri,
+                            "filename": c.get("name") or c.get("title") or "artifact",
+                            "mime_type": c.get("mimeType") or c.get("mime_type"),
+                            "size_bytes": c.get("size") or c.get("size_bytes"),
+                            "source": "mcp",
+                        })
+                elif ctype == "resource":
+                    # MCP "embedded resource" content — nested resource object.
+                    r = c.get("resource") or {}
+                    uri = r.get("uri") or ""
+                    if uri:
+                        file_outputs.append({
+                            "url": uri,
+                            "filename": r.get("name") or r.get("title") or "artifact",
+                            "mime_type": r.get("mimeType") or r.get("mime_type"),
+                            "size_bytes": r.get("size") or r.get("size_bytes"),
+                            "source": "mcp",
+                        })
+                elif ctype == "image":
+                    # Inline image content — treat as file with data URL.
+                    data = c.get("data")
+                    mime = c.get("mimeType") or "image/png"
+                    if data:
+                        file_outputs.append({
+                            "url": f"data:{mime};base64,{data}",
+                            "filename": "image",
+                            "mime_type": mime,
+                            "source": "mcp_inline",
+                        })
             return ToolCallResult(
                 call_id=getattr(request, "call_id", ""),
                 tool_name=registry_name,
                 success=not result.is_error,
                 result="\n".join(text_parts) if text_parts else str(result.content),
+                output_files=file_outputs,
                 metadata={"mcp_server": mcp_tool.server_name, "mcp_tool": mcp_tool.name},
             )
 

@@ -1786,8 +1786,20 @@ class ModelRegistry:
                     tool_calls_batch = []
                     for part in parts:
                         if part.get("thought") and "text" in part:
-                            # Gemini 3 thinking content (thought parts)
-                            yield StreamDelta(thinking_content=part["text"])
+                            # Gemini 3 thinking content (thought parts).
+                            # Guard against a Gemini quirk where thought text
+                            # arrives with literal ``\n`` escape sequences
+                            # instead of real newlines. Thought summaries are
+                            # natural-language prose — legitimate occurrences
+                            # of literal ``\n`` don't happen — so when we see
+                            # ``\n`` strings AND no real newlines, unescape.
+                            _thought_text = part["text"]
+                            if "\\n" in _thought_text and "\n" not in _thought_text:
+                                try:
+                                    _thought_text = _thought_text.encode("utf-8").decode("unicode_escape")
+                                except (UnicodeDecodeError, UnicodeEncodeError):
+                                    pass  # fall through to raw text
+                            yield StreamDelta(thinking_content=_thought_text)
                         elif "text" in part:
                             yield StreamDelta(content=part["text"])
                         elif "functionCall" in part:

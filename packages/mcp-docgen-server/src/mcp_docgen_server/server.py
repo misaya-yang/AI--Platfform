@@ -137,6 +137,29 @@ def _default_service(base_download_url: str = "file://") -> Any:
     return DocgenService(artifact_store=store, llm=build_default_llm())
 
 
+# MIME types for the four docgen formats. Used when emitting the
+# MCP ``resource_link`` content item so downstream consumers can render
+# a typed artifact card without sniffing the URL extension.
+_DOC_MIME_TYPES = {
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pdf": "application/pdf",
+}
+
+
+def _build_resource_link_dict(result: dict, doc_format: str) -> dict:
+    """Build the MCP resource_link content payload for a generated doc."""
+    return {
+        "type": "resource_link",
+        "uri": result["download_url"],
+        "name": result["filename"],
+        "mimeType": _DOC_MIME_TYPES.get(doc_format.lower(), "application/octet-stream"),
+        "description": f"Generated {doc_format.upper()} document",
+        "size": result.get("size_bytes"),
+    }
+
+
 async def _run_generate(
     service: Any,
     payload: dict,
@@ -187,6 +210,7 @@ async def _run_generate(
         "artifact_id": artifact.artifact_id,
         "download_url": resp.download_url,
         "filename": artifact.filename,
+        "format": validated.format,
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "plan_outline": resp.plan_text or "",
@@ -237,11 +261,24 @@ def build_server(service: Any) -> Any:
         if name != "generate_document":
             raise ValueError(f"unknown tool: {name!r}")
         result = await _run_generate(service, arguments or {})
+        doc_format = result.get("format") or (arguments or {}).get("format", "docx")
+        # Return TWO content items:
+        #   1. TextContent — JSON summary for the model's context window.
+        #   2. ResourceLink — MCP-native URL pointer so the agent pipeline
+        #      emits an ARTIFACT_CREATED event independent of whether the
+        #      model remembers to transcribe the URL into its text reply.
         return [
             mcp_types.TextContent(
                 type="text",
                 text=json.dumps(result, ensure_ascii=False, indent=2),
-            )
+            ),
+            mcp_types.ResourceLink(
+                type="resource_link",
+                uri=result["download_url"],
+                name=result["filename"],
+                mimeType=_DOC_MIME_TYPES.get(doc_format.lower(), "application/octet-stream"),
+                description=f"Generated {doc_format.upper()} document",
+            ),
         ]
 
     @server.list_resources()
@@ -489,11 +526,15 @@ async def main_http() -> None:
                     "content": [{"type": "text", "text": f"Tool call failed: {exc}"}],
                     "isError": True,
                 })
+            doc_format = result.get("format") or (arguments or {}).get("format", "docx")
             return _result(req_id, {
-                "content": [{
-                    "type": "text",
-                    "text": json.dumps(result, ensure_ascii=False, indent=2),
-                }],
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(result, ensure_ascii=False, indent=2),
+                    },
+                    _build_resource_link_dict(result, doc_format),
+                ],
                 "isError": False,
             })
 
