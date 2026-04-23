@@ -122,7 +122,7 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const SIDER_WIDTH = 176;
+  const SIDER_WIDTH = 167;
   const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
   const pageTitleKey = getPageTitleKey(location.pathname);
@@ -135,62 +135,43 @@ export function AppLayout() {
         width={SIDER_WIDTH} collapsedWidth={isMobile ? 0 : 64}
         style={{
           position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
-          borderRight: darkMode ? '1px solid hsl(var(--border))' : '1px solid #dde1de',
+          borderRight: '1px solid hsl(var(--border))',
           background: 'hsl(var(--sidebar-bg))',
           transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
         theme={resolvedTheme}
       >
         <div className="flex flex-col h-full">
-          {/* Logo */}
-          <div className="h-[48px] flex items-center px-4">
+          {/* Logo + wordmark */}
+          <div className="px-4 pt-5 pb-5">
             <Logo collapsed={collapsed} />
           </div>
 
-          {/* Navigation — vertically centered within the flex-1 region so
-              the nav block doesn't cling to the top of a tall sider. */}
-          <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide flex flex-col justify-center">
-            <div className="space-y-1.5 py-4">
+          {/* Navigation */}
+          <nav className="flex-1 overflow-y-auto px-2 scrollbar-hide">
+            <div className="space-y-0.5 pt-2">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
-                    `relative group flex items-center gap-3 rounded-md transition-colors duration-150 ease-out ${
-                      collapsed ? 'justify-center px-0 py-2.5' : 'px-3 py-2.5'
-                    } ${
-                      isActive
-                        ? 'app-nav-item-active'
-                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
-                    }`
+                    `app-nav-link relative group flex items-center rounded-lg transition-all duration-150 ease-out ${
+                      collapsed ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2'
+                    } ${isActive ? 'app-nav-item-active' : ''}`
                   }
                 >
                   {({ isActive }) => (
                     <>
-                      <span
-                        className="flex-shrink-0"
-                        style={isActive ? { color: 'hsl(var(--assistant-accent))' } : undefined}
-                      >
-                        {item.icon}
-                      </span>
-                      {!collapsed && (
+                      {isActive && !collapsed && (
                         <span
-                          className="truncate"
-                          style={{
-                            // Stack the CJK light face FIRST so Chinese
-                            // characters actually pick up weight 300 (Inter
-                            // alone ignores sub-400 for CJK glyphs because
-                            // it has no Han coverage and falls back to the
-                            // OS font). PingFang SC Light / Source Han Sans
-                            // Light / Noto Sans CJK SC Light are the Han
-                            // faces that carry a true Light cut.
-                            fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
-                            fontSize: '14px',
-                            fontWeight: isActive ? 400 : 300,
-                            letterSpacing: 0,
-                            color: isActive ? 'hsl(var(--assistant-accent))' : undefined,
-                          }}
-                        >
+                          aria-hidden
+                          className="absolute left-0 top-1/2 -translate-y-1/2 h-5 w-[3px] rounded-full"
+                          style={{ background: 'hsl(var(--primary))' }}
+                        />
+                      )}
+                      <span className="app-nav-icon flex-shrink-0">{item.icon}</span>
+                      {!collapsed && (
+                        <span className="app-nav-label truncate">
                           {t(item.labelKey)}
                         </span>
                       )}
@@ -207,24 +188,19 @@ export function AppLayout() {
           </nav>
 
           {/* Footer */}
-          <div className={`border-t px-2.5 py-2 space-y-0.5 ${darkMode ? 'border-[hsl(var(--border))]' : 'border-[#dde1de]'}`}>
+          <div className="px-2 py-3 border-t border-border/60 space-y-0.5">
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
-                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2.5'
+              className={`app-nav-link flex items-center w-full rounded-lg transition-colors duration-150 ease-out ${
+                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2'
               }`}
             >
-              {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
+              <span className="app-nav-icon flex-shrink-0">
+                {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
+              </span>
               {!collapsed && (
-                <span
-                  style={{
-                    fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
-                    fontSize: '14px',
-                    fontWeight: 300,
-                    letterSpacing: 0,
-                  }}
-                >
+                <span className="app-nav-label">
                   {darkMode ? t("theme.mode.dark") : t("theme.mode.light")}
                 </span>
               )}
@@ -232,22 +208,15 @@ export function AppLayout() {
             <button
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
-              className={`flex items-center w-full rounded-md transition-colors duration-150 ease-out text-muted-foreground hover:text-foreground hover:bg-muted/60 ${
-                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2.5'
+              className={`app-nav-link flex items-center w-full rounded-lg transition-colors duration-150 ease-out ${
+                collapsed ? 'justify-center py-2.5' : 'gap-3 px-3 py-2'
               }`}
             >
-              {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
+              <span className="app-nav-icon flex-shrink-0">
+                {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
+              </span>
               {!collapsed && (
-                <span
-                  style={{
-                    fontFamily: '"PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif',
-                    fontSize: '14px',
-                    fontWeight: 300,
-                    letterSpacing: 0,
-                  }}
-                >
-                  {t('nav.collapseSidebar')}
-                </span>
+                <span className="app-nav-label">{t('nav.collapseSidebar')}</span>
               )}
             </button>
           </div>
@@ -299,8 +268,40 @@ export function AppLayout() {
         .ant-layout-sider-children { box-shadow: none !important; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-        .app-nav-item-active { background: hsl(var(--muted) / 0.65); }
-        .dark .app-nav-item-active { background: hsl(var(--muted) / 0.7); }
+
+        /* Base nav link */
+        .app-nav-link { color: hsl(var(--muted-foreground)); cursor: pointer; }
+        .app-nav-link:hover { background: hsl(var(--muted) / 0.55); color: hsl(var(--foreground)); }
+        .app-nav-link:hover .app-nav-icon { color: hsl(var(--foreground)); }
+        .app-nav-icon { color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; }
+        .app-nav-label {
+          font-family: "PingFang SC", "Source Han Sans SC", "Noto Sans CJK SC", Inter, var(--font-sans, system-ui), sans-serif;
+          font-size: 13.5px;
+          font-weight: 400;
+          letter-spacing: 0;
+          line-height: 1.2;
+        }
+
+        /* Active state — violet tint bg + violet icon & text */
+        .app-nav-item-active {
+          background: hsl(var(--primary) / 0.10);
+          color: hsl(var(--primary));
+        }
+        .app-nav-item-active:hover {
+          background: hsl(var(--primary) / 0.14);
+          color: hsl(var(--primary));
+        }
+        .app-nav-item-active .app-nav-icon,
+        .app-nav-item-active:hover .app-nav-icon {
+          color: hsl(var(--primary));
+        }
+        .app-nav-item-active .app-nav-label {
+          color: hsl(var(--primary));
+          font-weight: 600;
+        }
+
+        .dark .app-nav-item-active { background: hsl(var(--primary) / 0.16); }
+        .dark .app-nav-item-active:hover { background: hsl(var(--primary) / 0.22); }
       `}</style>
     </Layout>
   );
