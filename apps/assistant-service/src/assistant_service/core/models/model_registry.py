@@ -1029,15 +1029,24 @@ class ModelRegistry:
             if not body.get("max_tokens") or body["max_tokens"] < 16384:
                 body["max_tokens"] = 16384
         if native_search_config and native_search_config.get("enable_search"):
-            # DashScope Intl endpoint (dashscope-intl.aliyuncs.com) does NOT
-            # support the ``enable_search`` flag — the server returns 500 when
-            # it arrives. Detect via the configured base_url and silently drop
-            # the flag for Intl; the agent loop will have already swapped in
-            # the Tavily search_web tool as a fallback.
+            # DashScope CN vs Intl differ in where ``enable_search`` belongs:
+            #   CN (dashscope.aliyuncs.com):   body.enable_search = True (top-level)
+            #     Verified 2026-04-21 — extra_body form is IGNORED on CN.
+            #   Intl (dashscope-intl.aliyuncs.com):  body.extra_body.enable_search = True
+            #     Verified 2026-04-23 — top-level form returns HTTP 500.
+            # Also documented at https://www.alibabacloud.com/help/en/model-studio/web-search —
+            # the Intl doc explicitly uses ``extra_body={"enable_search": True,
+            # "search_options": {"search_strategy": "agent"}}``.
             provider = ModelProvider.DASHSCOPE
             cfg = self._configs.get(provider) if provider in self._configs else None
             cfg_base = (cfg.base_url if cfg else "") or ""
-            if "-intl" not in cfg_base:
+            if "-intl" in cfg_base:
+                body["extra_body"] = {
+                    **(body.get("extra_body") or {}),
+                    "enable_search": True,
+                    "search_options": {"search_strategy": "agent"},
+                }
+            else:
                 body["enable_search"] = True
         return body
 
