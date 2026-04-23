@@ -209,7 +209,7 @@ north-star items 1/3/4/5: "extracted", "microservice complete",
 | 3 启动独立 | ✗ | ✗ | — |
 | 4 运行时不共栈 | ✗ | ✗ | — |
 | 5 数据路径单一 | ✗ | ✗ | — |
-| 6 网络边界 (AS) | ✓ (pending `[5a-5b]`) | ✓ (pending runbook step 4) | 无本质推进,等 prod 验证 |
+| 6 网络边界 (AS) | ✓ (pending `[5a-5b]`) | ✓ (prod-confirmed 2026-04-23) | curl :8093 → Connection refused; chat/stream → HTTP 200; 见下方证据章节 |
 | 6 网络边界 (KB) | ✗ | ✗ | — |
 | 7 Auth 契约 (AS) | ✓ (admin-roles only) | ✓ (admin-roles + user_type strip + all-7-headers) | 新增 2 个 e2e 测试 + gateway `UserContext` 扩了 `user_type`/`email`/`name` |
 
@@ -218,3 +218,72 @@ north-star items 1/3/4/5: "extracted", "microservice complete",
 
 禁用叙事:"extracted / microservice complete"。允许叙事:"routes proxied with
 in-process fallback, auth contract locked".
+
+---
+
+## Operator tasks — evidence (2026-04-23)
+
+### Polaris #6 (AS network boundary) — production probe
+
+Subagent A executed the runbook (see `plans/ops-5b-deploy-log.md` for the full
+timestamped log). Key evidence captured **from the operator's laptop, not from the
+EC2 host**, to prove the public internet cannot reach `assistant-service`:
+
+```
+$ curl --max-time 5 --connect-timeout 5 -sSv http://52.65.136.42:8093/health 2>&1
+*   Trying 52.65.136.42:8093...
+* connect to 52.65.136.42 port 8093 from 10.6.4.5 port 50563 failed: Connection refused
+* Failed to connect to 52.65.136.42 port 8093 after 1566 ms: Couldn't connect to server
+* Closing connection
+curl: (7) Failed to connect to 52.65.136.42 port 8093 after 1566 ms: Couldn't connect to server
+```
+
+Curl exit code 7 = TCP `Connection refused` — the OS rejected the connection
+immediately (RST), confirming that `127.0.0.1:8093:8093` in `docker-compose.yml`
+binds the host-side socket to loopback only and the public iface (`0.0.0.0`) does
+NOT listen on 8093. Sanity-check (control) — port 8080, which IS public:
+
+```
+$ curl --max-time 5 --connect-timeout 5 -sS -w "HTTP %{http_code}\n" http://52.65.136.42:8080/health
+{"status":"healthy","version":"2.0.0"}HTTP 200
+```
+
+So 8080 is reachable but 8093 is refused → it is not a network/firewall blanket
+issue, it is the loopback binding doing its job.
+
+### Public chat/stream still works (no rollback)
+
+```
+$ curl -sS -w "HTTP %{http_code}\n" --max-time 30 \
+    -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+    -d '{"message":"say hi in 3 words","model_id":"qwen3.6-plus","max_tokens":10}' \
+    https://yang.misaya.online/api/v1/assistant/chat/stream
+HTTP 200
+```
+
+First 3 SSE event lines from the response body (metadata frames before model output):
+
+```
+data: {"event_type": "gateway_decision", "data": {"run_id": "20db4e36-56d7-4cfe-9fef-c31124a87802", "execution_profile": "safe", ...}, "timestamp": 1776943127.237443}
+data: {"event_type": "run_started", "data": {"run_id": "20db4e36-56d7-4cfe-9fef-c31124a87802", "thread_id": "51baf358-8a07-40d1-bb4d-dfc4eeec52ae", ...}, "timestamp": 1776943127.23753}
+data: {"event_type": "streaming_first_started", "data": {"mode": "streaming_first", "message_preview": "say hi in 3 words", "agent_loop_phase": "generation_storage"}, "timestamp": 1776943127.237818}
+```
+
+Three `text_delta` events were also emitted later in the stream
+(model output: `"Hello"`, `" there, Misaya"`, `"!"`). Total 5814 bytes / 8.6 s.
+
+### Operator-side state changes on prod
+
+- `/opt/deploy/.env` now contains a single `GATEWAY_ASSISTANT_SHARED_SECRET=…6a66`
+  line (preview only — full secret never leaves the EC2 host). Backup at
+  `/opt/deploy/.env.bak-phase5b-20260423-110942`.
+- `gateway` and `assistant-service` rebuilt and recreated; both `(healthy)` within
+  ~50 s. Both containers have the secret loaded as an env var (verified via
+  `docker exec ... printenv`), although the deployed source at git HEAD `8e620f8`
+  does NOT yet contain the HMAC validation middleware (Phase 5a/5b code on `dev`
+  has not been pulled into `/opt/deploy/ai-gateway`). The env var is therefore
+  pre-staged for the next code-update deploy that ships `1e86f4c…d56a70a`.
+
+### Conclusion
+
+Polaris #6 (AS network boundary) → ✓ (prod evidence above, captured 2026-04-23 19:13 CST).
