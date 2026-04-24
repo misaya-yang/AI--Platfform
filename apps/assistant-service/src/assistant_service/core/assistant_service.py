@@ -112,12 +112,12 @@ from .working_memory import WorkingMemory
 logger = get_logger(__name__)
 
 
-class RAGMode(str, Enum):
-    """RAG behavior mode."""
+from ai_gateway_core.enums import RAGMode  # noqa: E402 — re-export for AS-internal sites
 
-    AUTO = "auto"  # Auto-retrieve on each message
-    TOOL = "tool"  # KB exposed as callable tool
-    DISABLED = "off"  # No KB retrieval
+# ``RAGMode`` is now defined in ``ai_gateway_core.enums`` so gateway routes
+# (assistant.py) can import the enum without pulling in ``assistant_service``.
+# Kept as a local re-export until AS-internal imports migrate to the shared
+# module directly.
 
 
 class StreamEventType(str, Enum):

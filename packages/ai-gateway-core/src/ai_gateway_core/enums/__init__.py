@@ -11,10 +11,15 @@ from ._core import (
     DatasetVisibility,
     DocumentStatus,
     InvocationMode,
+    ModelAccessLevel,
+    ModelProvider,
+    RAGMode,
     RetrievalMethod,
     SegmentStatus,
     ServiceType,
     StreamEventType,
+    StylePreset,
+    ToolCategory,
 )
 
 __all__ = [
@@ -25,8 +30,13 @@ __all__ = [
     "DatasetVisibility",
     "DocumentStatus",
     "InvocationMode",
+    "ModelAccessLevel",
+    "ModelProvider",
+    "RAGMode",
     "RetrievalMethod",
     "SegmentStatus",
     "ServiceType",
     "StreamEventType",
+    "StylePreset",
+    "ToolCategory",
 ]

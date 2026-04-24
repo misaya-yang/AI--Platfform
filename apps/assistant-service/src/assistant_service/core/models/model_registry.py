@@ -15,40 +15,20 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 import httpx
 
+from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
 from ai_gateway_core.logging import get_logger
 
+# Re-export so existing ``from ...model_registry import ModelProvider`` sites
+# keep working. Phase 5d moved the enum definitions to ``ai_gateway_core``
+# so gateway routes (health, assistant) can import the enum without pulling
+# in the full registry. Delete re-export once AS-internal call sites migrate.
+__all__ = ["ModelAccessLevel", "ModelProvider", "ModelInfo", "ModelRegistry"]
+
 logger = get_logger(__name__)
-
-
-class ModelProvider(str, Enum):
-    """Supported LLM providers."""
-
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    DEEPSEEK = "deepseek"
-    DASHSCOPE = "dashscope"
-    GOOGLE = "google"
-    # Vertex AI — same wire protocol as Google Gemini (``_build_google_body``
-    # emits an identical body), only the host + path prefix differ. Kept as
-    # its own enum value so operators can add it through the Provider UI the
-    # same way they add any other provider, with its own API key, its own
-    # DB row, and its own set of models. The legacy env-driven flip
-    # (``GOOGLE_API_BACKEND=vertex``) still works but logs a deprecation
-    # warning at startup — prefer configuring the ``google-vertex`` provider.
-    GOOGLE_VERTEX = "google-vertex"
-
-
-class ModelAccessLevel(str, Enum):
-    """Model access permission levels."""
-
-    PUBLIC = "public"  # Available to all authenticated users
-    PREMIUM = "premium"  # Available to premium/paid users only
-    ADMIN = "admin"  # Admin-only models (expensive or experimental)
 
 
 @dataclass

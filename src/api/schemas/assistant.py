@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from assistant_service.core.tools.style_presets import StylePreset, resolve_style_preset
+from ai_gateway_core.style_presets import StylePreset, resolve_style_preset
 
 # =============================================================================
 # Tool Call Structures (for Agentic workflows)

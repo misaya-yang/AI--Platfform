@@ -33,9 +33,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
+from ai_gateway_core.enums import ModelProvider, RAGMode
 from ai_gateway_core.exceptions import PermissionDeniedError
-from assistant_service.core import AssistantConfig, AssistantService, ModelProvider, ModelRegistry
-from assistant_service.core.assistant_service import RAGMode
+from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
+from ai_gateway_core.style_presets import (
+    StylePreset,
+    compose_styled_prompt,
+    resolve_dashscope_style_tag,
+    resolve_negative_prompt,
+    resolve_style_preset,
+)
+from assistant_service.core import AssistantConfig, AssistantService, ModelRegistry
 from assistant_service.core.tools.gemini_image_tool import get_gemini_image_generator
 from assistant_service.core.tools.image_callback import send_image_callback
 from assistant_service.core.tools.image_helpers import (
@@ -46,14 +54,6 @@ from assistant_service.core.tools.image_helpers import (
 )
 from assistant_service.core.tools.image_watermark import apply_watermark_b64
 from assistant_service.core.tools.smart_image_generator import get_smart_image_generator
-from assistant_service.core.tools.style_presets import (
-    StylePreset,
-    compose_styled_prompt,
-    resolve_dashscope_style_tag,
-    resolve_negative_prompt,
-    resolve_style_preset,
-)
-from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
 from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
@@ -258,7 +258,7 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     - premium: Users with tier=premium/enterprise/admin or role=admin
     - admin: Only users with tier=admin or role=admin
     """
-    from assistant_service.core.models.model_registry import ModelAccessLevel
+    from ai_gateway_core.enums import ModelAccessLevel
 
     # Admin users can access everything
     if user.tier == "admin" or "admin" in user.roles:

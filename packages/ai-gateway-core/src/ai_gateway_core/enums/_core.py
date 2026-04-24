@@ -195,3 +195,70 @@ class DataSourceType(str, Enum):
     WEBSITE_CRAWL = "website_crawl"
     TEXT_INPUT = "text"
     URL_IMPORT = "url"
+
+
+class ModelProvider(str, Enum):
+    """Supported LLM providers. Shared across gateway and assistant-service
+    so gateway routes (e.g. ``/health/providers``) can enumerate them
+    without importing from ``assistant_service``."""
+
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
+    DASHSCOPE = "dashscope"
+    GOOGLE = "google"
+    GOOGLE_VERTEX = "google-vertex"
+
+
+class ModelAccessLevel(str, Enum):
+    """Model access permission tiers. Shared to keep gateway's admin
+    role-check consistent with assistant-service's runtime gating."""
+
+    PUBLIC = "public"
+    PREMIUM = "premium"
+    ADMIN = "admin"
+
+
+class RAGMode(str, Enum):
+    """RAG behavior modes used by the assistant chat flow.
+
+    ``AUTO`` = retrieve on every user turn. ``TOOL`` = expose KB as a
+    callable tool and let the model decide. ``DISABLED`` = no KB
+    retrieval regardless of dataset selection."""
+
+    AUTO = "auto"
+    TOOL = "tool"
+    DISABLED = "off"
+
+
+class StylePreset(str, Enum):
+    """User-facing image style presets accepted by ``/generate-image``.
+
+    Values are the wire-format strings exchanged with the frontend; keep
+    original naming (``3d_render`` not ``render_3d``)."""
+
+    DEFAULT = "default"
+    REALISTIC = "realistic"
+    ANIME = "anime"
+    ABSTRACT = "abstract"
+    OIL_PAINT = "oil_paint"
+    WATERCOLOR = "watercolor"
+    RENDER_3D = "3d_render"
+    PIXEL_ART = "pixel_art"
+    SKETCH = "sketch"
+    COMIC = "comic"
+
+
+class ToolCategory(str, Enum):
+    """Tool categorisation used by the assistant tool registry + admin policy UI.
+
+    Values are the serialised strings exchanged over the wire; do not
+    rename without updating frontend filters."""
+
+    RETRIEVAL = "retrieval"
+    GENERATION = "generation"
+    ANALYSIS = "analysis"
+    INTEGRATION = "integration"
+    UTILITY = "utility"
+    SKILL = "skill"
+    MCP = "mcp"

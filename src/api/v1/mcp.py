@@ -36,8 +36,10 @@ async def list_mcp_tools(
     user: UserContext = Depends(get_user_context),
 ):
     """List all tools registered from MCP servers."""
-    from assistant_service.core.tools.tool_registry import ToolCategory, get_tool_registry
-    registry = get_tool_registry()
+    from ai_gateway_core.enums import ToolCategory
+    registry = getattr(request.app.state, "tool_registry", None)
+    if registry is None:
+        return {"tools": [], "total": 0}
     mcp_tools = [
         {"name": t.name, "description": t.description, "category": t.category.value}
         for t in registry.list_tools()

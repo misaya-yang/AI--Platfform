@@ -21,10 +21,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from ...core.auth.user_resolver import UserContext
-from assistant_service.core.tools.tool_registry import get_tool_registry
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/debug", tags=["Debug"])
@@ -32,6 +31,7 @@ router = APIRouter(prefix="/debug", tags=["Debug"])
 
 @router.get("/tools")
 async def list_registered_tools(
+    request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> dict[str, Any]:
     """Return the live in-process tool registry contents.
@@ -48,7 +48,22 @@ async def list_registered_tools(
     if not getattr(user, "is_authenticated", False):
         from fastapi import HTTPException
         raise HTTPException(status_code=401, detail="authentication required")
-    reg = get_tool_registry()
+    reg = getattr(request.app.state, "tool_registry", None)
+    if reg is None:
+        return {
+            "total": 0,
+            "by_category": {},
+            "confluence": {
+                "tools": [],
+                "new_meta_tools_present": False,
+                "stale_single_purpose_tools_present": False,
+                "status": (
+                    "MISSING — in-process tool_registry is not initialised. "
+                    "This gateway is running in proxy-only mode; call the "
+                    "equivalent endpoint on assistant-service to introspect tools."
+                ),
+            },
+        }
     tools = reg.list_tools()
 
     by_category: dict[str, list[str]] = {}
