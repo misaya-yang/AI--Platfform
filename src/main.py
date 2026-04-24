@@ -524,7 +524,7 @@ def create_app() -> FastAPI:
         await _init_assistant_service(app, settings)
 
         # Initialize Assistant TaskManager lifecycle explicitly
-        from assistant_service.core.tasks.task_manager import init_task_manager
+        from ai_gateway_core.tasks import init_task_manager
 
         app.state.assistant_task_manager = await init_task_manager()
 
@@ -580,7 +580,7 @@ def create_app() -> FastAPI:
         # Islamic Content: now handled by microservice at :8091, no cleanup needed
 
         # Stop Assistant TaskManager lifecycle
-        from assistant_service.core.tasks.task_manager import shutdown_task_manager
+        from ai_gateway_core.tasks import shutdown_task_manager
 
         await shutdown_task_manager()
 
@@ -624,7 +624,7 @@ def create_app() -> FastAPI:
 def _make_process_file_handler(app: FastAPI, process_file_task=None):
     """Create a task handler that resolves assistant_service from app.state at runtime."""
     if process_file_task is None:
-        from assistant_service.core.tasks.task_types import process_file_task as _process_file_task
+        from ai_gateway_core.tasks import process_file_task as _process_file_task
 
         process_file_task = _process_file_task
 

@@ -1,44 +1,13 @@
+"""Task types — re-export shim.
+
+Phase 5d moved ``process_file_task`` to
+``ai_gateway_core.tasks.task_types`` (with FileProcessor annotation
+TYPE_CHECKING-only so the shared package doesn't drag AS's document
+pipeline in).
+"""
+
 from __future__ import annotations
 
-import logging
-from typing import Any
+from ai_gateway_core.tasks.task_types import process_file_task
 
-from ai_gateway_core.auth import UserContext
-from ..files.file_processor import FileProcessor
-
-logger = logging.getLogger(__name__)
-
-
-async def process_file_task(payload: dict[str, Any], file_processor: FileProcessor) -> None:
-    """
-    Background task to process an uploaded file.
-
-    Payload:
-    - file_path: str
-    - user_id: str
-    - tenant_id: str
-    """
-    file_path = payload.get("file_path")
-    user_id = payload.get("user_id")
-    tenant_id = payload.get("tenant_id")
-
-    if not file_path or not user_id:
-        logger.error("Missing required fields in process_file_task payload")
-        return
-
-    # Construct minimal user context
-    user = UserContext(
-        user_id=user_id,
-        tenant_id=tenant_id or "default",
-        roles=[],  # Roles not needed for file processing
-    )
-
-    try:
-        # Preprocess file (PDF conversion, etc.) and cache result
-        # By default we enable vision support to pre-generate images
-        await file_processor.preprocess_file(
-            file_path=file_path, user=user, model_supports_vision=True
-        )
-        logger.info(f"Async processing completed for {file_path}")
-    except Exception as e:
-        logger.error(f"Async processing failed for {file_path}: {e}")
+__all__ = ["process_file_task"]

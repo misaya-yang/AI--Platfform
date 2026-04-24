@@ -777,7 +777,7 @@ async def cancel_task(
     Returns:
         TaskCancelResponse with cancellation status
     """
-    from assistant_service.core.tasks.task_manager import get_task_manager
+    from ai_gateway_core.tasks import get_task_manager
 
     task_manager = get_task_manager()
 
