@@ -35,6 +35,14 @@ from pydantic import BaseModel
 from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.enums import ModelProvider, RAGMode
 from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.image import (
+    append_image_turns,
+    apply_watermark_b64,
+    build_gemini_contents_from_history,
+    parse_image_size,
+    resolve_image_routing,
+    send_image_callback,
+)
 from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
 from ai_gateway_core.style_presets import (
     StylePreset,
@@ -45,14 +53,6 @@ from ai_gateway_core.style_presets import (
 )
 from assistant_service.core import AssistantConfig, AssistantService, ModelRegistry
 from assistant_service.core.tools.gemini_image_tool import get_gemini_image_generator
-from assistant_service.core.tools.image_callback import send_image_callback
-from assistant_service.core.tools.image_helpers import (
-    append_image_turns,
-    build_gemini_contents_from_history,
-    parse_image_size,
-    resolve_image_routing,
-)
-from assistant_service.core.tools.image_watermark import apply_watermark_b64
 from assistant_service.core.tools.smart_image_generator import get_smart_image_generator
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
