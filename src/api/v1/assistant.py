@@ -33,7 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.enums import ModelProvider, RAGMode
+from ai_gateway_core.enums import ModelProvider
 from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.image import (
     append_image_turns,
@@ -51,7 +51,7 @@ from ai_gateway_core.style_presets import (
     resolve_negative_prompt,
     resolve_style_preset,
 )
-from assistant_service.core import AssistantConfig, AssistantService, ModelRegistry
+from assistant_service.core import ModelRegistry
 from assistant_service.core.tools.gemini_image_tool import get_gemini_image_generator
 from assistant_service.core.tools.smart_image_generator import get_smart_image_generator
 from ...services.storage import get_artifact_storage
@@ -124,17 +124,6 @@ class SessionHistoryResponse(BaseModel):
     session_id: str
     messages: list[SessionHistoryMessage]
     total: int
-
-
-def get_assistant_service(request: Request) -> AssistantService:
-    """Get AssistantService from app state."""
-    svc = getattr(request.app.state, "assistant_service", None)
-    if svc is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Assistant service is not initialized. Check LLM provider configuration.",
-        )
-    return svc
 
 
 def get_model_registry(request: Request) -> ModelRegistry:
@@ -278,161 +267,30 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
 async def list_models(
     request: Request,
     user: UserContext = Depends(get_user_context),
-    model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ModelsListResponse:
-    """
-    List available LLM models.
-
-    Returns models from all configured providers (OpenAI, Anthropic, DeepSeek, DashScope, Google).
-    Only models from providers with valid API keys are returned.
-    Models are filtered based on user's permission level:
-    - public: Available to all authenticated users
-    - premium: Available to premium/enterprise/admin users only
-    - admin: Available to admin users only (e.g., expensive Google Gemini 3 models)
-
-    Phase 5b: under ``ASSISTANT_ROUTE_MODELS_PROXIED=true`` this handler
-    proxies to assistant-service instead of running the in-process logic
-    below. The in-process path is kept as rollback fallback.
-    """
-    from ._route_flags import proxied
-
-    if proxied("MODELS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(request, user, path="models")
-
-    all_models = model_registry.get_available_models()
-
-    # Filter models based on user's access level
-    accessible_models = [
-        m for m in all_models if _user_can_access_model(user, m.access_level.value)
-    ]
-
-    return ModelsListResponse(
-        models=[
-            ModelInfoResponse(
-                id=m.id,
-                name=m.name,
-                provider=m.provider.value,
-                context_window=m.context_window,
-                max_output_tokens=m.max_output_tokens,
-                supports_vision=m.supports_vision,
-                supports_tools=m.supports_tools,
-                access_level=m.access_level.value,
-                input_price_per_1k=m.input_price_per_1k,
-                output_price_per_1k=m.output_price_per_1k,
-            )
-            for m in accessible_models
-        ]
-    )
+    """Thin proxy — assistant-service owns the model catalogue."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(request, user, path="models")
 
 
 @router.get("/datasets", response_model=DatasetsListResponse)
 async def list_datasets(
+    request: Request,
     user: UserContext = Depends(get_user_context),
-    request: Request = None,
 ) -> DatasetsListResponse:
-    """
-    List available knowledge base datasets.
-
-    Returns datasets the user has access to for RAG integration.
-
-    Phase 5b: proxies under ``ASSISTANT_ROUTE_DATASETS_PROXIED=true``.
-    """
-    from ._route_flags import proxied
-
-    if proxied("DATASETS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(request, user, path="datasets")
-
-    kb_service = getattr(request.app.state, "knowledge_service", None)
-    kb_proxy = getattr(request.app.state, "kb_proxy", None)
-
-    if not kb_service and not kb_proxy:
-        return DatasetsListResponse(datasets=[])
-
-    try:
-        # Use local service or HTTP proxy
-        if kb_service:
-            datasets_raw = await kb_service.list_datasets(user=user)
-        else:
-            datasets_raw = await kb_proxy.list_datasets(user=user)
-
-        datasets = []
-        for ds in datasets_raw:
-            dataset_id = ds.get("dataset_id", "")
-            document_count = 0
-            chunk_count = 0
-            embedding_model = ds.get("embedding_model", "")
-
-            # Use counts from list response — statistics sub-dict or top-level
-            stats = ds.get("statistics", {})
-            document_count = stats.get("document_count", ds.get("document_count", 0))
-            chunk_count = stats.get("segment_count", ds.get("segment_count", ds.get("chunk_count", 0)))
-
-            # Determine if multimodal based on embedding model
-            # Uses centralized model registry from services/knowledge/embedding.py
-            is_multimodal = is_multimodal_embedding_model(embedding_model)
-
-            datasets.append(
-                DatasetInfoResponse(
-                    dataset_id=dataset_id,
-                    name=ds.get("name", ""),
-                    description=ds.get("description"),
-                    document_count=document_count,
-                    chunk_count=chunk_count,
-                    embedding_model=embedding_model or None,
-                    is_multimodal=is_multimodal,
-                )
-            )
-
-        return DatasetsListResponse(datasets=datasets)
-    except Exception as e:
-        logger.warning(f"Failed to list datasets: {e}")
-        return DatasetsListResponse(datasets=[])
+    """Thin proxy — assistant-service resolves KB datasets via knowledge-service."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(request, user, path="datasets")
 
 
 @router.get("/config", response_model=AssistantConfigResponse)
 async def get_config(
-    model_registry: ModelRegistry = Depends(get_model_registry),
-    request: Request = None,
+    request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AssistantConfigResponse:
-    """
-    Get assistant configuration.
-
-    Returns default settings and available features.
-
-    Phase 5b: proxies under ``ASSISTANT_ROUTE_CONFIG_PROXIED=true``.
-    """
-    from ._route_flags import proxied
-
-    if proxied("CONFIG"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(request, user, path="config")
-
-    import os
-
-    available_providers = [
-        p.value for p in ModelProvider if model_registry.is_provider_configured(p)
-    ]
-
-    kb_service = getattr(request.app.state, "knowledge_service", None)
-    kb_proxy = getattr(request.app.state, "kb_proxy", None)
-    tavily_api_key = os.getenv("TAVILY_API_KEY")
-
-    # Get available tools
-    tool_registry = getattr(request.app.state, "tool_registry", None)
-    tools_available = []
-    if tool_registry:
-        tools_available = [t.name for t in tool_registry.list_tools()]
-
-    return AssistantConfigResponse(
-        default_model_id="qwen3.6-plus",
-        available_providers=available_providers,
-        kb_enabled=kb_service is not None or kb_proxy is not None,
-        web_search_enabled=bool(tavily_api_key),
-        tools_available=tools_available,
-    )
+    """Thin proxy — assistant-service owns provider configuration."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(request, user, path="config")
 
 
 # =========================================================================
@@ -484,60 +342,22 @@ class RunStatusResponse(BaseModel):
 
 @router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
+    request: Request,
     user: UserContext = Depends(get_user_context),
-    request: Request = None,
 ) -> ToolsListResponse:
-    """
-    List available tools for the assistant.
-
-    Returns tools with their descriptions and usage guidance.
-
-    Phase 5b: proxies under ``ASSISTANT_ROUTE_TOOLS_PROXIED=true``.
-    """
-    from ._route_flags import proxied
-
-    if proxied("TOOLS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(request, user, path="tools")
-
-    tool_registry = getattr(request.app.state, "tool_registry", None)
-    if not tool_registry:
-        return ToolsListResponse(tools=[])
-
-    tools = tool_registry.list_tools(user=user)
-    return ToolsListResponse(
-        tools=[
-            ToolInfoResponse(
-                name=t.name,
-                description=t.description,
-                category=t.category.value,
-                risk_level=t.risk_level.value,
-                when_to_use=t.when_to_use,
-                when_not_to_use=t.when_not_to_use,
-            )
-            for t in tools
-        ]
-    )
+    """Thin proxy — assistant-service owns the tool registry."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(request, user, path="tools")
 
 
 @router.get("/policies", response_model=AssistantPoliciesResponse)
 async def get_policies(
     request: Request,
     user: UserContext = Depends(get_user_context),
-    assistant: AssistantService = Depends(get_assistant_service),
 ) -> AssistantPoliciesResponse:
-    """Get assistant gateway policies and defaults.
-
-    Phase 5b: proxies under ``ASSISTANT_ROUTE_POLICIES_PROXIED=true``.
-    """
-    from ._route_flags import proxied
-
-    if proxied("POLICIES"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(request, user, path="policies")
-
-    _ = user  # Ensure endpoint is authenticated
-    return AssistantPoliciesResponse(policies=assistant.get_gateway_policies())
+    """Thin proxy — policy snapshot comes from assistant-service."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(request, user, path="policies")
 
 
 @router.post("/approvals/{approval_id}", response_model=ApprovalResponse)
@@ -546,37 +366,14 @@ async def approve_tool_call(
     body: ApprovalRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
-    assistant: AssistantService = Depends(get_assistant_service),
 ) -> ApprovalResponse:
-    """Approve or reject a pending tool invocation.
-
-    Phase 5c: proxies under ``ASSISTANT_ROUTE_APPROVALS_PROXIED=true``.
-    The 5b blocker (approval state scoped to a single
-    ``AssistantService`` instance) was removed by ADR-004 step 2 —
-    both the gateway's in-process execution_gateway and the AS
-    container's one read from ``assistant_tool_approvals``
-    authoritatively, so a flag flip no longer leaks 404s.
-    """
-    from ._route_flags import proxied
-
-    if proxied("APPROVALS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        body_bytes = await request.body()
-        return await proxy_to_assistant_service(
-            request, user, path=f"approvals/{approval_id}", body=body_bytes
-        )
-
-    approval = await assistant.approve_tool_request(
-        approval_id=approval_id,
-        tenant_id=user.tenant_id,
-        user_id=user.user_id,
-        approved=body.approved,
-        approver_user_id=user.user_id,
-        reason=body.reason,
+    """Thin proxy — approval state lives in ``assistant_tool_approvals``
+    (ADR-004). Gateway forwards the request body to assistant-service."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path=f"approvals/{approval_id}", body=body_bytes
     )
-    if not approval:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    return ApprovalResponse(approval=approval)
 
 
 @router.get("/runs/{run_id}", response_model=RunStatusResponse)
@@ -584,29 +381,12 @@ async def get_run_status(
     run_id: str,
     request: Request,
     user: UserContext = Depends(get_user_context),
-    assistant: AssistantService = Depends(get_assistant_service),
 ) -> RunStatusResponse:
-    """Get run status for current user/tenant.
-
-    Phase 5c: proxies under ``ASSISTANT_ROUTE_RUNS_PROXIED=true``.
-    Split-brain removed by ADR-004 step 2 (see /approvals/{id}).
-    """
-    from ._route_flags import proxied
-
-    if proxied("RUNS"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        return await proxy_to_assistant_service(
-            request, user, path=f"runs/{run_id}"
-        )
-
-    run = await assistant.get_run_status(
-        run_id=run_id,
-        tenant_id=user.tenant_id,
-        user_id=user.user_id,
+    """Thin proxy — run state lives in ``assistant_runs`` (ADR-004)."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(
+        request, user, path=f"runs/{run_id}"
     )
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return RunStatusResponse(run=run)
 
 
 def _check_model_permission(
@@ -650,18 +430,23 @@ async def chat(
     body: AssistantChatRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
-    assistant: AssistantService = Depends(get_assistant_service),
 ) -> AssistantChatResponse:
     """
-    Non-streaming chat completion.
+    Non-streaming chat completion — thin proxy to assistant-service.
 
-    Sends a message and receives the complete response at once.
-    Suitable for simple integrations that don't need streaming.
+    Gateway responsibilities (defence-in-depth, mirror of /chat/stream):
+      - per-user rate limit
+      - model-permission check (users can only call their allowed models)
+      - session-ownership check (users can only resume their own sessions)
+
+    Everything else — model routing, tool execution, persistence — runs
+    inside the assistant-service container.
     """
     from ..deps import enforce_rate_limit
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
-    # Check model permission
+    # Model-permission authz. assistant-service has no access to gateway's
+    # model_registry, so this check MUST run at the edge.
     model_registry = getattr(request.app.state, "model_registry", None)
     if model_registry:
         _check_model_permission(user, body.model_id, model_registry)
@@ -670,86 +455,11 @@ async def chat(
     if body.session_id:
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
-    # Phase 5b: proxy to assistant-service when flag is ON. Authz above
-    # stays at the edge for defence-in-depth — mirror of /chat/stream.
-    from ._route_flags import proxied
-
-    if proxied("CHAT"):
-        from ._assistant_proxy import proxy_to_assistant_service
-        body_bytes = await request.body()
-        return await proxy_to_assistant_service(
-            request, user, path="chat", body=body_bytes
-        )
-
-    # Map string mode to enum
-    kb_mode = RAGMode.AUTO
-    if body.kb_mode == "tool":
-        kb_mode = RAGMode.TOOL
-    elif body.kb_mode == "off":
-        kb_mode = RAGMode.DISABLED
-
-    # Get model provider from registry
-    model_provider = ModelProvider.OPENAI  # default fallback
-    if model_registry:
-        model_info = model_registry.get_model(body.model_id)
-        if model_info:
-            model_provider = model_info.provider
-
-    config = AssistantConfig(
-        model_provider=model_provider,
-        model_id=body.model_id,
-        temperature=body.temperature,
-        max_tokens=body.max_tokens,
-        kb_dataset_ids=body.kb_dataset_ids,
-        kb_mode=kb_mode,
-        kb_top_k=body.kb_top_k,
-        kb_score_threshold=body.kb_score_threshold,
-        kb_include_images=body.kb_include_images,
-        web_search_enabled=body.web_search_enabled,
-        web_search_max_results=body.web_search_max_results,
-        file_paths=body.file_paths,
-        system_prompt=body.system_prompt,
-        enable_task_planning=body.enable_task_planning,
-        confirm_plan=body.confirm_plan,
-        execution_profile=body.execution_profile,
-        memory_mode=body.memory_mode,
-        os_agent_enabled=body.os_agent_enabled,
-        openclaw_mode=body.openclaw_mode,
-        queue_mode=body.queue_mode,
-        context_detail=body.context_detail,
-        skills_enabled=body.skills_enabled,
-        memory_profile=body.memory_profile,
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="chat", body=body_bytes
     )
-
-    # Convert history to dict format, or None to trigger auto-load from session
-    history = (
-        [{"role": m.role, "content": m.content} for m in body.history] if body.history else None
-    )
-
-    try:
-        result = await assistant.chat(
-            user=user,
-            session_id=session_id,
-            message=body.message,
-            config=config,
-            history=history,
-        )
-        return AssistantChatResponse(
-            content=result["content"],
-            usage=result["usage"],
-            contexts=result["contexts"],
-            duration_ms=result["duration_ms"],
-            model_id=result["model_id"],
-            session_id=session_id,
-            run_id=result.get("run_id"),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except PermissionDeniedError:
-        raise HTTPException(status_code=404, detail="Session not found")
-    except Exception as e:
-        logger.error(f"Chat failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
 
 
 @router.post("/chat/stream")
