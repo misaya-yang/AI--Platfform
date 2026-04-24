@@ -6,6 +6,7 @@ pool, Qdrant client, and background worker.
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -335,6 +336,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # --- Phase K5c: Gateway HMAC verification (closes Polaris #6-KB) ---
+    # Reject requests that didn't pass through the gateway signer. Sibling
+    # containers on the Docker bridge network previously could craft
+    # ``X-User-Id``/``X-Tenant-Id`` headers and impersonate users by calling
+    # knowledge-service directly. With this middleware enabled (and
+    # ``allow_anonymous=false``) knowledge-service refuses such traffic.
+    #
+    # Shares ``GATEWAY_ASSISTANT_SHARED_SECRET`` with assistant-service — a
+    # single rotated secret covers both gateway→microservice hops (simpler
+    # deployment; same trust boundary).
+    _gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+    if _gateway_secret_env:
+        from ai_gateway_core.auth.gateway_secret import GatewaySecret
+
+        from .auth import GatewaySecretAuthMiddleware
+
+        app.add_middleware(
+            GatewaySecretAuthMiddleware,
+            gateway_secret=GatewaySecret(secret=_gateway_secret_env),
+            allow_anonymous=resolved.app.allow_anonymous,
+        )
+        logger.info(
+            "gateway_secret_middleware_active",
+            allow_anonymous=resolved.app.allow_anonymous,
+        )
+    elif not resolved.app.allow_anonymous:
+        logger.warning(
+            "gateway_secret_unset_but_anonymous_disabled",
+            hint="Set GATEWAY_ASSISTANT_SHARED_SECRET (prod) or KNOWLEDGE_APP__ALLOW_ANONYMOUS=true (dev).",
+        )
 
     # --- Health ---
     @app.middleware("http")

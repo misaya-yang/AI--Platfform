@@ -244,6 +244,9 @@ services:
       KNOWLEDGE_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
       KNOWLEDGE_STORAGE__S3__ENDPOINT_URL: "${GATEWAY_STORAGE__S3__ENDPOINT_URL:-}"
       KNOWLEDGE_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
+      # Phase K5c: gateway HMAC verification (Polaris #6-KB). Same secret as
+      # assistant-service — single shared value across both gateway hops.
+      GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for knowledge-service HMAC auth}"
     command: ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "3"]
     volumes:
       - kb-data:/app/data
