@@ -796,7 +796,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     import os
 
     from ai_gateway_core.config import resolve_dashscope, resolve_google
-    from assistant_service.core import AssistantService, ModelProvider, ModelRegistry
+    from ai_gateway_core.enums import ModelProvider
+    from assistant_service.core import ModelRegistry
 
     model_registry = ModelRegistry()
     configured_providers = []
@@ -1023,228 +1024,30 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # Get Tavily API key for web search
     tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
 
-    # Create Tavily tool instance
-    from assistant_service.core.tools import TavilySearchTool
+    # Phase 5d: Tavily + code-executor + VLM tool instances moved to
+    # assistant-service. Gateway no longer builds them.
 
-    tavily_tool = TavilySearchTool(api_key=tavily_api_key or None)
+    # Phase 5d: Gateway no longer constructs an in-process AssistantService,
+    # tool_registry, MCPManager, or tenant isolation services. All of those
+    # live in the assistant-service container and are reached via HTTP proxy.
+    # The gateway keeps ``app.state.model_registry`` because /chat/stream
+    # runs an edge-side model-permission check, /generate-image resolves
+    # providers from the registry, and /api/v1/models CRUD refreshes it
+    # after admin writes. Tool invocation, MCP enumeration, tenant policy
+    # enforcement — all run over the wire against assistant-service.
+    _ = session_manager, tavily_api_key, knowledge_vlm_service  # kept for sibling code paths
 
-    # Initialize code executor if Docker is available
-    from assistant_service.core.code_executor import CodeExecutionConfig, CodeExecutorService
-
-    code_executor = None
-    try:
-        code_executor = CodeExecutorService(
-            config=CodeExecutionConfig(
-                image="ai-gateway-code-interpreter:latest",
-            )
-        )
-        if code_executor.is_docker_available():
-            logger.info("Code executor initialized with Docker support")
-        else:
-            code_executor = None
-            logger.warning("Docker not available, code execution disabled")
-    except Exception as e:
-        logger.warning(f"Failed to initialize code executor: {e}")
-
-    # Create assistant service with session persistence
-    assistant_vlm_service = knowledge_vlm_service
-
-    # If no VLM service but DashScope is configured for assistant, try to initialize it
-    if not assistant_vlm_service:
-        dashscope_config = model_registry._configs.get(ModelProvider.DASHSCOPE)
-        if dashscope_config and dashscope_config.api_key:
-            try:
-                from .services.knowledge.vlm_service import DashScopeVLMService
-
-                assistant_vlm_service = DashScopeVLMService(
-                    api_key=dashscope_config.api_key,
-                    model="qwen-vl-max",
-                )
-                logger.info("Assistant VLM 服务已独立初始化 (qwen-vl-max)")
-            except Exception as e:
-                logger.warning(f"Assistant VLM 服务初始化失败: {e}")
-
-    # Get memory service for long-term memory
-    memory_service = getattr(app.state, "memory_service", None)
-
-    assistant_service = AssistantService(
-        model_registry=model_registry,
-        kb_service=kb_service,
-        kb_proxy=getattr(app.state, "kb_proxy", None),
-        tavily_api_key=tavily_api_key or None,
-        session_manager=session_manager,
-        code_executor=code_executor,
-        vlm_service=assistant_vlm_service,
-        redis_client=app.state.redis,
-        memory_service=memory_service,
-        db=app.state.database,
-    )
-
-    # Initialize Tool Registry (Phase 2)
-    from assistant_service.core.tools import (
-        get_tool_registry,
-        register_builtin_tools,
-        register_code_executor_tool,
-    )
-    from assistant_service.core.tools.image_generator_tool import register_image_generation_tool
-
-    tool_registry = get_tool_registry()
-    effective_kb_service = kb_service or getattr(app.state, "kb_proxy", None)
-    register_builtin_tools(
-        kb_service=effective_kb_service, tavily_tool=tavily_tool, memory_service=memory_service,
-        database=getattr(app.state, "database", None),
-    )
-
-    # Register code executor tool if available
-    if code_executor:
-        register_code_executor_tool(code_executor=code_executor)
-
-    # Register image generation tool if at least one provider is configured (Gemini preferred, DashScope fallback)
-    image_gen_registered = register_image_generation_tool()
-
-    # Document + PowerPoint generation are now served by the ``mcp-docgen-server``
-    # MCP service (packages/mcp-docgen-server), registered as
-    # ``mcp_docgen__generate_document``. That tool spans docx / pptx / xlsx / pdf
-    # through a design-system-driven pipeline and a vision-critic loop — strictly
-    # better than the legacy builtins which only supported docx/pdf/md and had a
-    # broken weasyprint dependency. The old builtin registration call sites are
-    # intentionally left out; the modules themselves stay in the tree so imports
-    # don't break, but they're not connected to the request path.
-
-    # Register quiz generation tool (KB → LLM → interactive quiz)
-    from assistant_service.core.tools.quiz_tool import register_quiz_tool
-    register_quiz_tool(
-        kb_service=kb_service,
-        model_registry=model_registry,
-        database=getattr(app.state, "database", None),
-        kb_proxy=getattr(app.state, "kb_proxy", None),
-    )
-
-    # Register sub-agent tool (ADR-003)
-    from assistant_service.core.tools.subagent_tool import register_subagent_tool
-    register_subagent_tool()
-    logger.info("Registered spawn_subagent tool")
-
-    # ── Register DB-backed Confluence tools ──
-    # Register ONCE with a database reference; the executor resolves
-    # per-call credentials from `confluence_connections` via the request's
-    # tenant_id. Fixes the cross-tenant leak where earlier startup loops
-    # left whichever tenant ran last in control of the process-global
-    # executor.
-    database_for_rehydrate = getattr(app.state, "database", None)
-    if database_for_rehydrate:
-        try:
-            from assistant_service.core.tools.confluence_tool import register_confluence_tools
-
-            register_confluence_tools(database=database_for_rehydrate)
-            # Sanity count with one retry — DB pool may still be warming up.
-            import asyncio as _asyncio
-            count = -1
-            for attempt in (1, 2):
-                try:
-                    rows = await database_for_rehydrate.list_confluence_connections(
-                        status="active", limit=500
-                    )
-                    count = len(rows)
-                    if count > 0 or attempt == 2:
-                        break
-                    await _asyncio.sleep(1.0)
-                except Exception:
-                    logger.exception(
-                        "Confluence startup sanity query failed (attempt %d)",
-                        attempt,
-                    )
-                    if attempt == 2:
-                        break
-                    await _asyncio.sleep(1.0)
-
-            if count == 0:
-                logger.warning(
-                    "⚠️  Confluence tools registered (DB-backed), but "
-                    "0 active connections in confluence_connections after "
-                    "retry. Tool calls will reject until a tenant connects "
-                    "via the Integrations panel. If you expected active "
-                    "connections, check DB connectivity and the "
-                    "`confluence_connections.status='active'` filter."
-                )
-            elif count > 0:
-                logger.info(
-                    "Confluence tools registered (DB-backed) — %d active tenant connection(s)",
-                    count,
-                )
-        except Exception:
-            logger.exception(
-                "Confluence tool registration failed — all Confluence calls will error"
-            )
-
-    # Store in app.state
+    # Store in app.state. ``None`` placeholders so legacy getattr readers
+    # in /services and /health see a consistent shape.
     app.state.model_registry = model_registry
-    app.state.assistant_service = assistant_service
-    app.state.assistant_gateway = assistant_service.execution_gateway
-    app.state.tool_registry = tool_registry
-
-    # Create assistant client (Protocol-based abstraction for future microservice extraction)
-    from assistant_service.core.client import create_assistant_client
-    assistant_mode = os.environ.get("ASSISTANT_MODE", "in_process")
-    assistant_remote_url = os.environ.get("ASSISTANT_SERVICE_URL", "http://assistant-service:8093")
-    app.state.assistant_client = create_assistant_client(
-        mode=assistant_mode,
-        service=assistant_service if assistant_mode == "in_process" else None,
-        remote_url=assistant_remote_url,
-    )
-
-    # Initialize MCP (Model Context Protocol) connections
-    try:
-        from assistant_service.core.mcp import MCPManager, load_mcp_config
-        mcp_configs = load_mcp_config()
-        if mcp_configs:
-            mcp_manager = MCPManager(configs=mcp_configs)
-            results = await mcp_manager.initialize_all()
-            app.state.mcp_manager = mcp_manager
-            total_tools = sum(v for v in results.values() if v > 0)
-            logger.info(f"MCP: {len(results)} servers, {total_tools} tools registered")
-        else:
-            app.state.mcp_manager = None
-    except Exception as e:
-        logger.warning(f"MCP initialization failed: {e}")
-        app.state.mcp_manager = None
-
-    # ADR-002 Phase 1: Initialize tenant isolation services
-    database = getattr(app.state, "database", None)
-    try:
-        from assistant_service.core.tools.tenant_tool_policy import TenantToolPolicyService
-        from assistant_service.core.mcp.tenant_mcp_config import TenantMCPConfigService
-        from assistant_service.core.audit import ToolAuditService
-
-        app.state.tenant_tool_policy = TenantToolPolicyService(database=database)
-        app.state.tool_audit = ToolAuditService(database=database)
-
-        mcp_server_names = []
-        mcp_mgr = getattr(app.state, "mcp_manager", None)
-        if mcp_mgr:
-            mcp_server_names = mcp_mgr.server_names
-        app.state.tenant_mcp_config = TenantMCPConfigService(
-            database=database,
-            all_server_names=mcp_server_names,
-        )
-        # Inject into AssistantService (created before MCP init)
-        assistant_service.tenant_tool_policy = app.state.tenant_tool_policy
-        assistant_service.tenant_mcp_config = app.state.tenant_mcp_config
-        assistant_service.tool_audit = app.state.tool_audit
-        # Rebuild execution_gateway tool_invoker with tenant services
-        if hasattr(assistant_service, "execution_gateway") and assistant_service.execution_gateway:
-            from assistant_service.core.tool_invoker import create_tool_invoker
-            assistant_service.execution_gateway.tool_invoker = create_tool_invoker(
-                tenant_tool_policy=app.state.tenant_tool_policy,
-                tenant_mcp_config=app.state.tenant_mcp_config,
-                tool_audit=app.state.tool_audit,
-            )
-        logger.info("ADR-002: Tenant isolation services initialized")
-    except Exception as e:
-        logger.warning(f"Tenant isolation init failed (non-fatal): {e}")
-        app.state.tenant_tool_policy = None
-        app.state.tenant_mcp_config = None
-        app.state.tool_audit = None
+    app.state.assistant_service = None
+    app.state.assistant_gateway = None
+    app.state.tool_registry = None
+    app.state.assistant_client = None
+    app.state.mcp_manager = None
+    app.state.tenant_tool_policy = None
+    app.state.tenant_mcp_config = None
+    app.state.tool_audit = None
 
     # Load models from database (if available)
     model_service = getattr(app.state, "model_service", None)
