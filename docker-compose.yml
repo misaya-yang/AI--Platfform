@@ -219,8 +219,10 @@ services:
   # Knowledge Base Service (KB CRUD + Retrieval)
   knowledge-service:
     build:
-      context: ./apps/knowledge-service
-      dockerfile: Dockerfile
+      # Build from repo root so the Dockerfile can COPY packages/
+      # (shared ai-gateway-core). Matches the assistant-service pattern.
+      context: .
+      dockerfile: apps/knowledge-service/Dockerfile
     image: knowledge-service:${TAG:-latest}
     container_name: ai-gateway-knowledge
     environment:

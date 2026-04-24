@@ -1,12 +1,20 @@
 FROM python:3.12-slim AS builder
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
-COPY src ./src
 
-# Use pip cache mount for faster builds
+# Install workspace member package first (ai-gateway-core). Pip doesn't
+# understand uv workspaces so installing from path satisfies the
+# ``ai-gateway-core`` entry in the knowledge-service pyproject below.
+# Build context is the repo root (docker-compose ``context: ./ai-gateway``)
+# so packages/ sits next to apps/.
+COPY packages/ /build/packages/
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir /build/packages/ai-gateway-core
+
+COPY apps/knowledge-service/pyproject.toml apps/knowledge-service/README.md ./
+COPY apps/knowledge-service/src ./src
+
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip && \
     pip install .
 
 FROM python:3.12-slim
@@ -20,7 +28,7 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY src ./src
+COPY apps/knowledge-service/src ./src
 
 EXPOSE 8092
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
