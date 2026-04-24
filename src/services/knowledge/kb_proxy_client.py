@@ -14,10 +14,36 @@ from typing import Any
 
 import httpx
 
+from ai_gateway_core.auth.gateway_secret import GatewaySecret
+
 logger = logging.getLogger(__name__)
 
 KB_SERVICE_URL = os.getenv("KB_SERVICE_URL", "http://knowledge-service:8092")
 _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0)
+
+# Lazy singleton — constructed the first time a request is signed so that
+# deployments without the env set still crash loudly on the first call
+# rather than at import time (matches the pattern gateway uses for its
+# assistant-service proxy).
+_gateway_secret_signer: GatewaySecret | None = None
+
+
+def _get_signer() -> GatewaySecret | None:
+    """Return a signer if ``GATEWAY_ASSISTANT_SHARED_SECRET`` is set.
+
+    Returns ``None`` in dev environments without the secret configured;
+    callers then skip the HMAC header and rely on
+    ``KNOWLEDGE_APP__ALLOW_ANONYMOUS=true`` on the KB side. In prod the
+    secret is always set, so the signer is always constructed.
+    """
+    global _gateway_secret_signer
+    if _gateway_secret_signer is not None:
+        return _gateway_secret_signer
+    secret = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET")
+    if not secret:
+        return None
+    _gateway_secret_signer = GatewaySecret(secret=secret)
+    return _gateway_secret_signer
 
 
 @dataclass
@@ -56,12 +82,21 @@ class KBProxyClient:
             await self._client.aclose()
 
     def _user_headers(self, user: Any) -> dict[str, str]:
-        """Build headers to pass user context to KB microservice."""
+        """Build headers to pass user context to KB microservice.
+
+        Includes an HMAC ``X-Gateway-Secret`` header (signed with
+        ``GATEWAY_ASSISTANT_SHARED_SECRET``) so the KB service's
+        ``GatewaySecretAuthMiddleware`` accepts the request. Without
+        the header KB returns 401 once the middleware is active
+        (K5c prod deploy, 2026-04-24)."""
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if user:
             headers["X-User-Id"] = getattr(user, "user_id", "") or ""
             headers["X-Tenant-Id"] = getattr(user, "tenant_id", "") or ""
             headers["X-User-Tier"] = getattr(user, "tier", "") or ""
+        signer = _get_signer()
+        if signer is not None:
+            headers["X-Gateway-Secret"] = signer.sign()
         return headers
 
     async def health_check(self) -> bool:
