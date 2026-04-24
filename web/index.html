@@ -57,12 +57,17 @@
     </div>
     <script>
       // Boot-timeout watchdog. React's root.render() wipes #app-boot-fallback
-      // on successful mount. If that didn't happen within 10s, the bundle
+      // on successful mount. If that didn't happen within 15s, the bundle
       // almost certainly failed to download — swap the spinner for an
       // error panel + reload button. Removes the silent white screen
       // symptom on flaky networks.
+      //
+      // 15s was chosen over 10s after the 2026-04-24 deploy: a cold-start
+      // TCP+TLS handshake from a loaded connection to AWS Sydney can run
+      // 7-9s end-to-end before the bundle arrives; 10s fired spurious
+      // "Couldn't load" panels on slow-but-working connections.
       (function appBootWatchdog() {
-        var TIMEOUT_MS = 10000;
+        var TIMEOUT_MS = 15000;
         setTimeout(function () {
           var fallback = document.getElementById('app-boot-fallback');
           if (!fallback) return; // React already mounted; nothing to do.
