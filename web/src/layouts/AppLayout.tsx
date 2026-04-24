@@ -168,7 +168,7 @@ export function AppLayout() {
                   to={item.key}
                   className={({ isActive }) =>
                     `app-nav-link relative group flex items-center rounded-lg transition-colors duration-140 ease-out ${
-                      collapsed ? 'justify-center py-[11px]' : 'gap-3 px-3 py-[11px]'
+                      collapsed ? 'justify-center py-[11px]' : 'gap-[10px] px-[10px] py-[11px]'
                     } ${isActive ? 'app-nav-item-active' : ''}`
                   }
                 >
@@ -210,7 +210,7 @@ export function AppLayout() {
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
-                collapsed ? 'justify-center py-[10px]' : 'gap-3 px-3 py-[10px]'
+                collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
               <span className="app-nav-icon flex-shrink-0">
@@ -218,7 +218,7 @@ export function AppLayout() {
               </span>
               {!collapsed && (
                 <>
-                  <span className="app-nav-label flex-1 text-left">
+                  <span className="app-nav-label flex-1 text-left truncate">
                     {darkMode ? t("theme.mode.dark", "深色模式") : t("theme.mode.light", "浅色模式")}
                   </span>
                   <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ color: 'hsl(var(--muted-foreground) / 0.5)', transform: 'rotate(-90deg)' }}>
@@ -231,14 +231,14 @@ export function AppLayout() {
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
-                collapsed ? 'justify-center py-[10px]' : 'gap-3 px-3 py-[10px]'
+                collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
               <span className="app-nav-icon flex-shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
                 {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
-                <span className="app-nav-label">{t('nav.collapseSidebar', '收起侧栏')}</span>
+                <span className="app-nav-label truncate">{t('nav.collapseSidebar', '收起侧栏')}</span>
               )}
             </button>
           </div>
