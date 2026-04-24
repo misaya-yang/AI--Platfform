@@ -1737,7 +1737,7 @@ async def get_session_metrics(
     limit: int = Query(default=50, ge=1, le=200),
 ):
     """Get context metrics for a session."""
-    from assistant_service.core import get_context_metrics_collector
+    from ai_gateway_core.metrics import get_context_metrics_collector
 
     # Verify session ownership (security: prevent access to other users' metrics)
     session_manager = get_session_manager(request)
@@ -1772,7 +1772,7 @@ async def get_tenant_metrics(
     hours: int = Query(default=24, ge=1, le=168),
 ):
     """Get aggregated metrics for the current tenant."""
-    from assistant_service.core import get_context_metrics_collector
+    from ai_gateway_core.metrics import get_context_metrics_collector
 
     collector = get_context_metrics_collector()
     stats = await collector.get_tenant_stats(user.tenant_id, hours=hours)

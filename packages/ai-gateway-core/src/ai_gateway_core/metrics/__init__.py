@@ -41,9 +41,18 @@ class NoOpRealtimeMetrics:
         return None
 
 
+from .context_metrics import (
+    ContextMetricsCollector,
+    MetricLayer,
+    get_context_metrics_collector,
+)
+
 __all__ = [
+    "ContextMetricsCollector",
+    "MetricLayer",
     "NoOpRealtimeMetrics",
     "NoOpUsageRecorder",
     "RealtimeMetricsLike",
     "UsageRecorderLike",
+    "get_context_metrics_collector",
 ]
