@@ -1069,30 +1069,18 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         features.append(f"providers: {', '.join(configured_providers)}")
     if session_manager:
         features.append("session persistence")
-    if tavily_api_key:
-        features.append("web search")
     if kb_service:
         features.append("KB tools")
-    if code_executor:
-        features.append("code execution")
-    if image_gen_registered:
-        features.append("image generation")
+    features.append("proxy → assistant-service (chat / tools / MCP)")
 
-    registered_tools = len(tool_registry.list_tools())
-    if registered_tools > 0:
-        features.append(f"{registered_tools} tools")
-
-    if features:
-        logger.info(f"Assistant Service 已初始化 ({', '.join(features)})")
+    if configured_providers:
+        logger.info(f"Gateway启动完成: model_registry ready ({', '.join(features)})")
     else:
-        logger.warning("Assistant Service 已初始化，但没有配置任何 LLM 提供商 API Key")
+        logger.warning("Gateway 启动，但没有配置任何 LLM 提供商 API Key")
 
-    # One-time startup diagnostics for Assistant (engine/tools/keys) to aid debugging.
-    try:
-        tool_names = [t.name for t in tool_registry.list_tools()]
-    except Exception:
-        tool_names = []
-
+    # Startup diagnostics — log which provider keys are present so ops can
+    # tell at a glance whether the gateway can proxy-sign KB calls + which
+    # providers model_registry can route to.
     dashscope_key_present = bool(os.environ.get("DASHSCOPE_API_KEY"))
     if not dashscope_key_present:
         knowledge_dashscope = getattr(getattr(settings, "knowledge", None), "dashscope", None)
@@ -1103,11 +1091,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     google_key_present = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
     logger.info(
-        "[Assistant Startup] default_engine=agent_loop tools=%s keys={google:%s,dashscope:%s,tavily:%s}",
-        tool_names,
+        "[Gateway Startup] role=proxy keys={google:%s,dashscope:%s}",
         google_key_present,
         dashscope_key_present,
-        bool(tavily_api_key),
     )
 
 
