@@ -16,7 +16,65 @@
     >
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- First-paint fallback. React wipes this on mount; if React never
+           mounts (JS bundle failed to download, service unreachable), the
+           boot-timeout script below replaces the spinner with an error
+           panel + reload button. Without this, a network blip during
+           bundle load surfaces as a fully blank page. -->
+      <div id="app-boot-fallback" aria-live="polite" style="
+        position:fixed;inset:0;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:16px;
+        font-family:system-ui,-apple-system,'Segoe UI',sans-serif;
+        color:#6b7280;background:var(--boot-bg, #ffffff);">
+        <div style="width:34px;height:34px;border:3px solid #e5e7eb;
+          border-top-color:#7c3aed;border-radius:50%;
+          animation:appBootSpin 0.9s linear infinite;"></div>
+        <div id="app-boot-msg" style="font-size:14px;letter-spacing:0.02em;">
+          Loading…
+        </div>
+        <div id="app-boot-error" style="display:none;max-width:360px;
+          text-align:center;font-size:13px;line-height:1.55;color:#374151;">
+          <div style="font-weight:600;color:#111827;margin-bottom:6px;">
+            Couldn't load the app
+          </div>
+          <div style="margin-bottom:14px;">
+            The frontend bundle didn't finish downloading. This is usually a
+            network blip — check your connection and try again.
+          </div>
+          <button id="app-boot-retry" style="
+            padding:8px 18px;border-radius:8px;border:1px solid #d1d5db;
+            background:#7c3aed;color:#fff;font-size:13px;font-weight:500;
+            cursor:pointer;">Reload</button>
+        </div>
+      </div>
+      <style>
+        @keyframes appBootSpin { to { transform: rotate(360deg); } }
+        html.dark #app-boot-fallback { background:#0b1020;color:#cbd5e1; }
+        html.dark #app-boot-fallback [id="app-boot-error"] > div:first-child { color:#f1f5f9; }
+        html.dark #app-boot-fallback [id="app-boot-error"] > div { color:#cbd5e1; }
+      </style>
+    </div>
+    <script>
+      // Boot-timeout watchdog. React's root.render() wipes #app-boot-fallback
+      // on successful mount. If that didn't happen within 10s, the bundle
+      // almost certainly failed to download — swap the spinner for an
+      // error panel + reload button. Removes the silent white screen
+      // symptom on flaky networks.
+      (function appBootWatchdog() {
+        var TIMEOUT_MS = 10000;
+        setTimeout(function () {
+          var fallback = document.getElementById('app-boot-fallback');
+          if (!fallback) return; // React already mounted; nothing to do.
+          var msg = document.getElementById('app-boot-msg');
+          var err = document.getElementById('app-boot-error');
+          if (msg) msg.style.display = 'none';
+          if (err) err.style.display = 'block';
+          var btn = document.getElementById('app-boot-retry');
+          if (btn) btn.addEventListener('click', function () { location.reload(); });
+        }, TIMEOUT_MS);
+      })();
+    </script>
     <script>
       (function applyInitialThemeAndLocale() {
         var params = new URLSearchParams(window.location.search);

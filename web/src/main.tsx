@@ -21,6 +21,7 @@ import "./styles/tokens.css";
 import "./styles/themes.css";
 import "./i18n"; // 初始化i18n国际化
 import App from "./App";
+import { RootErrorBoundary } from "@/components/RootErrorBoundary";
 import { initInteractionTelemetry } from "@/features/chat/telemetry";
 
 // Custom retry logic for rate limit (429) errors
@@ -84,10 +85,12 @@ initInteractionTelemetry();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <App />
-      </BrowserRouter>
-    </QueryClientProvider>
+    <RootErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <App />
+        </BrowserRouter>
+      </QueryClientProvider>
+    </RootErrorBoundary>
   </StrictMode>
 );
