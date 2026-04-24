@@ -57,11 +57,23 @@ async def get_user_context(request: Request) -> UserContext:
 
     If ``settings.app.allow_anonymous`` is ``True`` and no identity headers
     are present, an anonymous context is returned.  Otherwise a 401 is raised.
+
+    Roles come through ``X-User-Roles`` as a comma-separated list. The
+    gateway's JWT layer produced this list; tool_registry / any KB
+    admin-only endpoints consume it for role-based checks. Without
+    this parse the KB side defaults to ``["user"]`` and silently denies
+    any ``role:admin`` path (cross-service drift from Phase 5a H-2).
     """
     user_id = request.headers.get("X-User-Id", "").strip()
     tenant_id = request.headers.get("X-Tenant-Id", "").strip()
     user_tier = request.headers.get("X-User-Tier", "normal").strip()
     user_type = request.headers.get("X-User-Type", "user").strip()
+    roles_raw = request.headers.get("X-User-Roles", "").strip()
+    roles = (
+        [r.strip() for r in roles_raw.split(",") if r.strip()]
+        if roles_raw
+        else ["user"]
+    )
 
     if user_id and tenant_id:
         return UserContext(
@@ -69,6 +81,7 @@ async def get_user_context(request: Request) -> UserContext:
             tenant_id=tenant_id,
             user_tier=user_tier,
             user_type=user_type,
+            roles=roles,
         )
 
     # Check if anonymous access is allowed

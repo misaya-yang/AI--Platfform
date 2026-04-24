@@ -336,6 +336,18 @@ class ServiceProxy:
 
         headers = self._build_headers(request, user_headers)
 
+        # Body caching — audit H-1. If the inbound request carries a
+        # body (POST/PUT/PATCH/DELETE) and the caller didn't pre-read,
+        # pre-read it here so the retry branch below can replay the
+        # same bytes. Without this cache, a transient
+        # ``RemoteProtocolError`` / ``PoolTimeout`` on the first
+        # attempt consumes ``request.stream()`` and the retry gets an
+        # empty body — silently 400s upstream document uploads on a
+        # flaky KB hop. GET / HEAD / OPTIONS skip this cache so
+        # body-less requests stay stream-through.
+        if body is None and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            body = await request.body()
+
         prefix = error_prefix or self._cfg.name
 
         try:

@@ -363,9 +363,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_anonymous=resolved.app.allow_anonymous,
         )
     elif not resolved.app.allow_anonymous:
-        logger.warning(
-            "gateway_secret_unset_but_anonymous_disabled",
-            hint="Set GATEWAY_ASSISTANT_SHARED_SECRET (prod) or KNOWLEDGE_APP__ALLOW_ANONYMOUS=true (dev).",
+        # Fail hard. ``get_user_context`` trusts X-User-* headers
+        # verbatim when present; no middleware + no anonymous means
+        # a sibling container can impersonate any user. Refuse to
+        # start in that configuration.
+        raise RuntimeError(
+            "GATEWAY_ASSISTANT_SHARED_SECRET is unset AND "
+            "KNOWLEDGE_APP__ALLOW_ANONYMOUS=false. This combination is a "
+            "security hole: get_user_context trusts X-User-* headers with "
+            "no HMAC check, so any sibling container can impersonate any "
+            "user. Either set the secret (production) or enable "
+            "allow_anonymous=true (dev only)."
         )
 
     # --- Health ---

@@ -367,10 +367,19 @@ if _gateway_secret_env:
         settings.app.allow_anonymous,
     )
 elif not settings.app.allow_anonymous:
-    logger.warning(
-        "GATEWAY_ASSISTANT_SHARED_SECRET unset AND allow_anonymous=False — "
-        "every request will be rejected by get_user_context until the secret "
-        "is provided or allow_anonymous is enabled (dev only)."
+    # Fail hard. ``get_user_context`` trusts ``X-User-Id``/``X-Tenant-Id``
+    # headers verbatim when they are present, so "no middleware + no
+    # anonymous" does NOT mean "everything is rejected" — it means
+    # "anyone on the docker bridge network can forge identity headers
+    # and land a full impersonation". The original H-4 audit finding
+    # is exactly this scenario. Refuse to start in that configuration.
+    raise RuntimeError(
+        "GATEWAY_ASSISTANT_SHARED_SECRET is unset AND "
+        "ASSISTANT_APP__ALLOW_ANONYMOUS=false. This combination is a "
+        "security hole: get_user_context trusts X-User-* headers with "
+        "no HMAC check, so any sibling container can impersonate any "
+        "user. Either set the secret (production) or enable "
+        "allow_anonymous=true (dev only)."
     )
 
 
