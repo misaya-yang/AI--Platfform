@@ -138,34 +138,34 @@ async def all_providers_health(
     require_admin(user)
     from ai_gateway_core.enums import ModelProvider
 
-    model_registry = getattr(request.app.state, "model_registry", None)
-    if not model_registry:
+    model_meta = getattr(request.app.state, "model_meta", None)
+    if not model_meta:
         return {}
 
-    # 供应商中文名称
+    # Per-provider display names. Keyed by the ``ModelProvider`` enum
+    # value (which matches ``llm_providers.provider_id`` in the DB).
     provider_names = {
-        ModelProvider.OPENAI: "OpenAI",
-        ModelProvider.ANTHROPIC: "Anthropic",
-        ModelProvider.DEEPSEEK: "DeepSeek",
-        ModelProvider.DASHSCOPE: "阿里云 DashScope",
-        ModelProvider.GOOGLE: "Google Gemini",
+        ModelProvider.OPENAI.value: "OpenAI",
+        ModelProvider.ANTHROPIC.value: "Anthropic",
+        ModelProvider.DEEPSEEK.value: "DeepSeek",
+        ModelProvider.DASHSCOPE.value: "阿里云 DashScope",
+        ModelProvider.GOOGLE.value: "Google Gemini",
+        ModelProvider.GOOGLE_VERTEX.value: "Google Vertex AI",
     }
+
+    tenant_id = user.tenant_id or "default"
+    enabled = set(await model_meta.list_enabled_providers(tenant_id))
+    model_counts = await model_meta.count_enabled_models_by_provider(tenant_id)
 
     providers_status = {}
     for provider in ModelProvider:
-        is_configured = model_registry.is_provider_configured(provider)
-        # 统计该供应商的可用模型数量
-        model_count = (
-            sum(1 for m in model_registry.get_available_models() if m.provider == provider)
-            if is_configured
-            else 0
-        )
-
-        providers_status[provider.value] = {
-            "name": provider_names.get(provider, provider.value),
+        pid = provider.value
+        is_configured = pid in enabled
+        providers_status[pid] = {
+            "name": provider_names.get(pid, pid),
             "status": "configured" if is_configured else "not_configured",
             "configured": is_configured,
-            "model_count": model_count,
+            "model_count": model_counts.get(pid, 0) if is_configured else 0,
             "last_check": datetime.utcnow().isoformat(),
         }
 

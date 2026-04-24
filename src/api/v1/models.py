@@ -1,7 +1,12 @@
 """
-LLM Model Management API.
+LLM Model Management API — admin CRUD.
 
-REST endpoints for managing LLM models.
+Phase 5e: gateway no longer owns an in-process ``ModelRegistry``.
+Admin writes (create/update/delete/toggle) persist to the
+``llm_models`` table via ``ModelService``; assistant-service's own
+ModelRegistry refreshes on demand on the next request (loads
+lazily from the DB), so the old gateway-side
+``load_models_from_database`` cache-refresh calls are no-ops here.
 """
 
 from decimal import Decimal
@@ -9,7 +14,6 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from assistant_service.core.models.model_registry import ModelRegistry
 from ...services.llm.model_service import ModelService
 from ..deps import get_user_context
 from ..schemas.providers import (
@@ -19,17 +23,6 @@ from ..schemas.providers import (
 )
 
 router = APIRouter()
-
-
-def get_model_registry(request: Request) -> ModelRegistry:
-    """Get ModelRegistry from app state."""
-    registry = getattr(request.app.state, "model_registry", None)
-    if registry is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Model registry is not initialized.",
-        )
-    return registry
 
 
 def get_model_service(request: Request) -> ModelService:
@@ -51,7 +44,6 @@ async def list_models(
     user: UserContext = Depends(get_user_context),
 ):
     """List all models for the tenant."""
-    # Determine access level based on user roles
     if "admin" in user.roles:
         access_level = "admin"
     elif "premium" in user.roles or "vip" in user.roles:
@@ -59,7 +51,6 @@ async def list_models(
     else:
         access_level = "public"
 
-    # Only admin can see disabled models
     if include_disabled and "admin" not in user.roles:
         include_disabled = False
 
@@ -76,11 +67,9 @@ async def list_models(
 async def create_model(
     body: ModelCreate,
     model_service: ModelService = Depends(get_model_service),
-    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Create a new model."""
-    # Check admin permission
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
 
@@ -100,12 +89,6 @@ async def create_model(
             is_enabled=body.is_enabled,
             sort_order=body.sort_order,
         )
-
-        # Refresh model registry to reflect changes in assistant
-        await model_registry.load_models_from_database(
-            model_service, tenant_id=user.tenant_id or "default"
-        )
-
         return model
     except Exception as e:
         if "duplicate key" in str(e).lower():
@@ -133,9 +116,8 @@ async def get_model(
 async def update_model(
     model_id: str,
     body: ModelUpdate,
-    provider_id: str | None = None,  # optional query param
+    provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
-    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
     """Update a model.
@@ -144,15 +126,11 @@ async def update_model(
     the same model_id exists under multiple providers (introduced by
     migration 055). Without it we default to pre-migration behaviour —
     first row by sort_order+provider_id wins — which works for the
-    common case of a single provider per model_id. The frontend should
-    pass ``provider_id`` whenever it knows which row the user is
-    editing.
+    common case of a single provider per model_id.
     """
-    # Check admin permission
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
 
-    # Convert price fields to Decimal if provided
     input_price = (
         Decimal(str(body.input_price_per_1k)) if body.input_price_per_1k is not None else None
     )
@@ -160,10 +138,6 @@ async def update_model(
         Decimal(str(body.output_price_per_1k)) if body.output_price_per_1k is not None else None
     )
 
-    # Renames: when the request changes ``model_id`` to something new,
-    # pass it through as ``new_model_id`` so the service UPDATEs the PK.
-    # When the body omits model_id OR sends the same value, treat as no-op
-    # (avoids useless SET on identity columns + pricing sync spam).
     new_mid = body.model_id if body.model_id and body.model_id != model_id else None
 
     model = await model_service.update_model(
@@ -184,12 +158,6 @@ async def update_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-
-    # Refresh model registry to reflect changes in assistant
-    await model_registry.load_models_from_database(
-        model_service, tenant_id=user.tenant_id or "default"
-    )
-
     return model
 
 
@@ -198,12 +166,9 @@ async def delete_model(
     model_id: str,
     provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
-    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
-    """Delete a model. ``provider_id`` is optional query param; pass it
-    when the same model_id exists under multiple providers (post-055)."""
-    # Check admin permission
+    """Delete a model."""
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
 
@@ -215,11 +180,6 @@ async def delete_model(
     if not deleted:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Refresh model registry to reflect changes in assistant
-    await model_registry.load_models_from_database(
-        model_service, tenant_id=user.tenant_id or "default"
-    )
-
     return {"model_id": model_id, "status": "deleted"}
 
 
@@ -229,15 +189,9 @@ async def toggle_model(
     is_enabled: bool = Query(..., description="Enable or disable the model"),
     provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
-    model_registry: ModelRegistry = Depends(get_model_registry),
     user: UserContext = Depends(get_user_context),
 ):
-    """Toggle model enabled state.
-
-    ``provider_id`` query param scopes the toggle to one provider row
-    when the same model_id exists under multiple providers.
-    """
-    # Check admin permission
+    """Toggle model enabled state."""
     if "admin" not in user.roles:
         raise HTTPException(status_code=403, detail="Admin permission required")
 
@@ -249,10 +203,4 @@ async def toggle_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
-
-    # Refresh model registry to reflect changes in assistant
-    await model_registry.load_models_from_database(
-        model_service, tenant_id=user.tenant_id or "default"
-    )
-
     return model

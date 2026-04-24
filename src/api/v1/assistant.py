@@ -20,13 +20,9 @@ Endpoints:
 
 from __future__ import annotations
 
-import asyncio
-import base64 as _b64
 import json
 import logging
-import time
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -35,25 +31,9 @@ from pydantic import BaseModel
 from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.enums import ModelProvider
 from ai_gateway_core.exceptions import PermissionDeniedError
-from ai_gateway_core.image import (
-    append_image_turns,
-    apply_watermark_b64,
-    build_gemini_contents_from_history,
-    parse_image_size,
-    resolve_image_routing,
-    send_image_callback,
-)
 from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
-from ai_gateway_core.style_presets import (
-    StylePreset,
-    compose_styled_prompt,
-    resolve_dashscope_style_tag,
-    resolve_negative_prompt,
-    resolve_style_preset,
-)
-from assistant_service.core import ModelRegistry
-from assistant_service.core.tools.gemini_image_tool import get_gemini_image_generator
-from assistant_service.core.tools.smart_image_generator import get_smart_image_generator
+from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
+from typing import Any
 from ...services.storage import get_artifact_storage
 from ..deps import get_user_context
 from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
@@ -126,116 +106,15 @@ class SessionHistoryResponse(BaseModel):
     total: int
 
 
-def get_model_registry(request: Request) -> ModelRegistry:
-    """Get ModelRegistry from app state."""
-    registry = getattr(request.app.state, "model_registry", None)
-    if registry is None:
+def get_model_meta(request: Request):
+    """Get the DB-backed GatewayModelMeta (built in main.py lifespan)."""
+    meta = getattr(request.app.state, "model_meta", None)
+    if meta is None:
         raise HTTPException(
             status_code=503,
-            detail="Model registry is not initialized.",
+            detail="Model metadata service is not initialized.",
         )
-    return registry
-
-
-_SESSION_METADATA_SOFT_CAP = 1_000_000  # leave ~48KB headroom under the 1MB DB cap
-
-
-async def _upload_to_gemini_files(gemini, result_image: dict) -> str | None:
-    """Upload a freshly generated image to Gemini Files API, return its URI.
-
-    Returning None signals the caller to fall back to inline base64 for this
-    turn (which will almost certainly blow the 1MB session cap and lose the
-    visual anchor — but at least the current response still works). Upload
-    failure is logged but never propagates: image generation already succeeded,
-    and a missing URI only affects the *next* turn's editing ability, not the
-    current user-facing response.
-    """
-    try:
-        import base64 as _b64
-        data_b64 = result_image.get("content_base64")
-        if not data_b64:
-            return None
-        raw = _b64.b64decode(data_b64)
-        return await gemini.upload_image(raw, result_image.get("mime_type", "image/jpeg"))
-    except Exception as exc:
-        logger.warning(
-            "Gemini Files API upload failed; next-turn edit will lack visual anchor: %s",
-            exc,
-        )
-        return None
-
-
-def _slim_image_history(history: list[dict]) -> list[dict]:
-    """Cap image_chat_history size so it fits under the 1MB session metadata limit.
-
-    Multi-turn image history has three heavy per-turn fields, each of which can
-    independently exceed 1MB:
-      - ``image_base64``       — the generated image itself (~1MB for 1024x1024 JPEG)
-      - ``thought_signature``  — Gemini 3.x reasoning-continuity blob (~1MB)
-      - ``mime_type``          — trivial, dropped alongside image_base64
-
-    We apply graduated degradation so the most useful context survives under the
-    tightest budget:
-
-    * **Pass 1** — keep ``image_base64`` + ``thought_signature`` only on the
-      most recent model turn. Older model turns drop both so they can't add
-      multiple MB each.
-    * **Pass 2** — if the kept turn alone still exceeds the soft cap, drop its
-      ``thought_signature`` (Gemini can still edit from the visible image).
-    * **Pass 3** — if still over, drop the ``image_base64`` too. The history
-      survives as text-only scaffolding instead of being silently rejected.
-
-    Losing the whole session lineage on every turn is strictly worse than
-    degrading: the user at least keeps their prior prompts, and a partial
-    context is something, rather than the current "every turn looks like a
-    fresh session" failure mode.
-    """
-    if not history:
-        return history
-
-    import json as _json
-
-    def _strip_image(turn: dict) -> None:
-        turn.pop("image_base64", None)
-        turn.pop("mime_type", None)
-
-    def _strip_signature(turn: dict) -> None:
-        turn.pop("thought_signature", None)
-
-    # Pass 1: keep image+signature only on the last model turn
-    keep_count = 0
-    max_keep = 1
-    result: list[dict] = []
-    for turn in reversed(history):
-        turn = dict(turn)  # shallow copy so mutations don't leak
-        if turn.get("role") == "model":
-            has_heavy_payload = turn.get("image_base64") or turn.get("thought_signature")
-            if has_heavy_payload:
-                if keep_count < max_keep:
-                    keep_count += 1
-                else:
-                    _strip_image(turn)
-                    _strip_signature(turn)
-        result.append(turn)
-    result.reverse()
-
-    # Pass 2: if signature alone pushes us over, drop it (image is more useful)
-    try:
-        if len(_json.dumps(result)) > _SESSION_METADATA_SOFT_CAP:
-            for turn in result:
-                if turn.get("role") == "model":
-                    _strip_signature(turn)
-
-            # Pass 3: image too large? drop it; text-only history still beats
-            # losing the whole lineage.
-            if len(_json.dumps(result)) > _SESSION_METADATA_SOFT_CAP:
-                for turn in result:
-                    if turn.get("role") == "model":
-                        _strip_image(turn)
-    except (TypeError, ValueError):
-        pass
-
-    return result
+    return meta
 
 
 def _user_can_access_model(user: UserContext, access_level: str) -> bool:
@@ -389,18 +268,24 @@ async def get_run_status(
     )
 
 
-def _check_model_permission(
-    user: UserContext, model_id: str, model_registry: ModelRegistry
+async def _check_model_permission(
+    user: UserContext, model_id: str, model_meta: Any
 ) -> None:
-    """Check if user has permission to use the specified model."""
-    model = model_registry.get_model(model_id)
-    if model is None:
+    """Check if the user has permission to invoke ``model_id``.
+
+    DB-backed via ``GatewayModelMeta``. Unknown model → 400; caller's
+    tier/role insufficient → 403. The old ModelRegistry in-memory
+    lookup was sync; swapping to a single DB query per chat request
+    is cheap (well under 1 ms).
+    """
+    access_level = await model_meta.get_access_level(user.tenant_id, model_id)
+    if access_level is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_id}")
 
-    if not _user_can_access_model(user, model.access_level.value):
+    if not _user_can_access_model(user, access_level):
         raise HTTPException(
             status_code=403,
-            detail=f"Access denied: Model '{model_id}' requires {model.access_level.value} access level",
+            detail=f"Access denied: Model '{model_id}' requires {access_level} access level",
         )
 
 
@@ -445,11 +330,12 @@ async def chat(
     from ..deps import enforce_rate_limit
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
-    # Model-permission authz. assistant-service has no access to gateway's
-    # model_registry, so this check MUST run at the edge.
-    model_registry = getattr(request.app.state, "model_registry", None)
-    if model_registry:
-        _check_model_permission(user, body.model_id, model_registry)
+    # Model-permission authz. assistant-service enforces tenant-scoped
+    # model lookups on its side too, but belt-and-braces at the edge
+    # makes the 403 come back fast without a proxy round-trip.
+    model_meta = getattr(request.app.state, "model_meta", None)
+    if model_meta:
+        await _check_model_permission(user, body.model_id, model_meta)
 
     session_id = body.session_id or str(uuid.uuid4())
     if body.session_id:
@@ -493,13 +379,14 @@ async def chat_stream(
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # Authz 1: model must be allowed for this user. The proxy target
-    # (assistant-service) has no access to gateway's model_registry, so
-    # this check MUST run here or users could specify any model_id.
+    # Authz 1: model must be allowed for this user. Done at the edge so
+    # 403 comes back without a proxy round-trip. DB-backed
+    # ``GatewayModelMeta`` query (<1 ms) — the old in-memory
+    # ModelRegistry lookup went away with Phase 5e's split.
     model_id = body_json.get("model_id")
-    model_registry = getattr(request.app.state, "model_registry", None)
-    if model_id and model_registry:
-        _check_model_permission(user, model_id, model_registry)
+    model_meta = getattr(request.app.state, "model_meta", None)
+    if model_id and model_meta:
+        await _check_model_permission(user, model_id, model_meta)
 
     # Authz 2: session ownership. Users resuming a conversation must own
     # that session. assistant-service would also reject mismatches via
@@ -1133,7 +1020,9 @@ async def download_artifact(
 
 
 # =========================================================================
-# Image Generation Endpoint (Smart Routing)
+# Image Generation Endpoints — Phase 5e thin proxy to assistant-service.
+# Real implementation lives in
+#   apps/assistant-service/src/assistant_service/api/routes/images.py
 # =========================================================================
 
 
@@ -1142,471 +1031,17 @@ async def generate_image(
     body: ImageGenerationRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
-    model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
-    """
-    Generate or iteratively edit images.
-
-    Two modes:
-    1. **Single-turn** (no session_id): text → image, no history.
-    2. **Multi-turn** (with session_id): builds full conversation history
-       (including previously generated images) and sends to Gemini.
-       The MODEL decides whether to edit a previous image or create something new.
-
-    Routing: Google models → Gemini first → DashScope fallback.
-    DashScope has no multi-turn support, so sessions with history always route to Gemini.
-    """
+    """Thin proxy — assistant-service owns image generation routing
+    (Gemini / Doubao / DashScope) and multi-turn session history."""
     from ..deps import enforce_rate_limit
     await enforce_rate_limit(request, user, operation="image_generate")
 
-    start_time = time.time()
-
-    try:
-        model_info = model_registry.get_model(body.model_id)
-        selected_provider = model_info.provider.value if model_info else None
-        prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            body.model_id, selected_provider,
-        )
-
-        if body.reference_image and not prefer_gemini:
-            logger.warning(
-                "reference_image ignored: image edit requires Gemini "
-                "(model=%s provider=%s). Falling through to fresh generation.",
-                body.model_id, selected_provider,
-            )
-
-        width, height, aspect_ratio = parse_image_size(body.size)
-
-        async def _build_data_url(img: dict) -> str:
-            """Encode one generated image to a data URL (watermark off-thread)."""
-            cb64 = img.get("content_base64", "")
-            mt = img.get("mime_type", "image/png")
-            if body.add_watermark and cb64:
-                cb64, mt = await asyncio.to_thread(apply_watermark_b64, cb64)
-            return f"data:{mt};base64,{cb64}"
-
-        # ------------------------------------------------------------------
-        # Multi-turn mode: rebuild Gemini contents from session history
-        # ------------------------------------------------------------------
-        session_mgr = getattr(request.app.state, "session_manager", None)
-
-        # App-driven edit mode: caller sent reference_image → stateless single
-        # request, no session required. Preferred for mobile apps that keep the
-        # prior turn's image locally and re-submit it each edit request.
-        if body.reference_image and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                preset = body.style
-                styled_prompt = compose_styled_prompt(body.prompt, preset)
-                logger.info(
-                    "Image edit (reference_image): model=%s, preset=%s, prompt=%s...",
-                    body.model_id, preset.value, body.prompt[:50],
-                )
-                res = await gemini.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    aspect_ratio=aspect_ratio,
-                    reference_image=body.reference_image,
-                )
-                if res.success and res.images:
-                    urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
-                    return ImageGenerationResponse(
-                        success=True,
-                        images=[GeneratedImage(url=u, width=width, height=height) for u in urls],
-                        provider="google",
-                        duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    )
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="google",
-                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    error=res.error or "Image edit failed",
-                )
-
-        if body.session_id and session_mgr and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if not gemini.is_configured:
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="none",
-                    duration_ms=(time.time() - start_time) * 1000,
-                    error="Gemini API key not configured for multi-turn image chat",
-                )
-
-            session = await session_mgr.get(body.session_id)
-            image_history: list[dict] = []
-            locked_preset = StylePreset.DEFAULT
-            if session and session.metadata:
-                image_history = session.metadata.get("image_chat_history", [])
-                locked_preset = resolve_style_preset(
-                    session.metadata.get("style_preset"),
-                )
-
-            # Style lock semantics: requested preset overrides the session lock
-            # only when the caller sends something other than DEFAULT. This lets
-            # follow-up edits inherit the original style automatically while
-            # still allowing explicit style switches.
-            effective_preset = (
-                body.style if body.style is not StylePreset.DEFAULT else locked_preset
-            )
-            styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
-
-            contents = build_gemini_contents_from_history(image_history, styled_prompt)
-
-            logger.info(
-                "Image multi-turn: session=%s, turns=%d, preset=%s, prompt=%s...",
-                body.session_id, len(contents), effective_preset.value, body.prompt[:50],
-            )
-
-            res = await gemini.generate_chat(
-                contents=contents, n=body.n, aspect_ratio=aspect_ratio,
-            )
-
-            # Only persist the turn pair on success — skipping on failure avoids
-            # dangling unanswered user prompts that would poison the next request.
-            if res.success and res.images:
-                # Upload the generated image to Gemini Files API so the next
-                # turn can reference it via fileData URI instead of inline base64.
-                # Keeps session metadata small (~50 bytes/turn vs 1MB+).
-                file_uri = await _upload_to_gemini_files(gemini, res.images[0])
-                # Persist the raw user prompt in history (not the styled one) —
-                # style is tracked separately so future edits can re-style
-                # without the modifier compounding turn after turn.
-                append_image_turns(
-                    image_history, body.prompt, res.images[0], res.text,
-                    file_uri=file_uri,
-                )
-                if session_mgr and session:
-                    meta = dict(session.metadata or {})
-                    meta["image_chat_history"] = image_history
-                    meta["style_preset"] = effective_preset.value
-                    await session_mgr.update_metadata(body.session_id, meta)
-            else:
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="google",
-                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    error=res.error or "Image generation failed",
-                )
-
-            urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
-            images = [GeneratedImage(url=u, width=width, height=height) for u in urls]
-
-            return ImageGenerationResponse(
-                success=True, images=images, provider="google",
-                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-            )
-
-        # ------------------------------------------------------------------
-        # Single-turn mode (no session, non-Gemini, or Gemini single-shot)
-        # ------------------------------------------------------------------
-        # Expand the preset into three artefacts: a styled prompt (used by all
-        # providers so Gemini/Doubao see the modifier), a DashScope native tag,
-        # and a DashScope negative prompt. See style_presets.py for the table.
-        preset = body.style
-        styled_prompt = compose_styled_prompt(body.prompt, preset)
-        dashscope_tag = resolve_dashscope_style_tag(preset)
-        negative_prompt = resolve_negative_prompt(preset)
-
-        router = get_smart_image_generator()
-        logger.info(
-            "Image single-turn: model_id=%s, preset=%s, prompt=%s..., size=%s",
-            body.model_id, preset.value, body.prompt[:50], body.size,
-        )
-
-        res = await router.generate(
-            prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
-            style=dashscope_tag, negative_prompt=negative_prompt,
-            aspect_ratio=aspect_ratio,
-            prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
-            dashscope_model=dashscope_model,
-        )
-
-        if not res.success:
-            err = res.error or "Image generation failed"
-            if res.blocked and res.block_reason:
-                err = f"{err} (blocked: {res.block_reason})"
-            return ImageGenerationResponse(
-                success=False, images=[], provider=res.provider,
-                duration_ms=res.duration_ms or (time.time() - start_time) * 1000, error=err,
-            )
-
-        urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
-        images = [GeneratedImage(url=u, width=width, height=height) for u in urls]
-
-        return ImageGenerationResponse(
-            success=True, images=images, provider=res.provider,
-            duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-        )
-
-    except Exception as e:
-        logger.error(f"Image generation failed: {e}")
-        return ImageGenerationResponse(
-            success=False, images=[], provider="unknown",
-            duration_ms=(time.time() - start_time) * 1000, error=str(e),
-        )
-
-
-# =========================================================================
-# Async Image Generation (background task with polling)
-# =========================================================================
-
-# In-memory task store for async image generation
-# Key: task_id, Value: dict with task state
-_image_tasks: dict[str, dict] = {}
-# Max tasks to keep (LRU eviction of completed tasks older than 1 hour)
-_MAX_TASKS = 500
-
-
-def _cleanup_old_tasks() -> None:
-    """Remove completed/failed tasks older than 1 hour."""
-    if len(_image_tasks) < _MAX_TASKS:
-        return
-    now = datetime.now(timezone.utc)
-    to_remove = []
-    for tid, task in _image_tasks.items():
-        if task["status"] in ("completed", "failed"):
-            created = datetime.fromisoformat(task["created_at"])
-            if (now - created).total_seconds() > 3600:
-                to_remove.append(tid)
-    for tid in to_remove:
-        _image_tasks.pop(tid, None)
-
-
-async def _process_image_result(
-    img: dict,
-    *,
-    task_id: str,
-    prompt: str,
-    width: int,
-    height: int,
-    add_watermark: bool,
-    session_id: str | None,
-    user: UserContext,
-    index: int,
-    artifact_storage,
-) -> dict:
-    """Watermark + save artifact for one generated image. Runs concurrently per image."""
-    content_base64 = img.get("content_base64", "")
-    mime_type = img.get("mime_type", "image/png")
-
-    if add_watermark and content_base64:
-        try:
-            content_base64, mime_type = await asyncio.to_thread(
-                apply_watermark_b64, content_base64,
-            )
-        except Exception as e:
-            logger.warning("Watermark failed for image %d: %s", index, e)
-
-    data_url = f"data:{mime_type};base64,{content_base64}"
-    entry: dict = {"url": data_url, "width": width, "height": height}
-
-    if artifact_storage and session_id and content_base64:
-        try:
-            content = _b64.b64decode(content_base64)
-            ext = mime_type.split("/")[-1] or "png"
-            filename = f"generated_image_{task_id[:8]}_{index + 1}.{ext}"
-            artifact = await artifact_storage.create_artifact(
-                session_id=session_id,
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                type="image",
-                format=ext,
-                title=f"Generated: {prompt[:40]}...",
-                filename=filename,
-                content=content,
-                source="image_generation",
-            )
-            entry["artifact_id"] = artifact.artifact_id
-            entry["download_url"] = await artifact_storage.get_presigned_download_url(artifact)
-        except Exception as e:
-            logger.warning("Failed to save async image artifact: %s", e)
-
-    return entry
-
-
-async def _run_image_generation_task(
-    task_id: str,
-    body: AsyncImageGenerationRequest,
-    model_registry: ModelRegistry,
-    user: UserContext,
-    session_manager=None,
-) -> None:
-    """Background coroutine that runs image generation and saves artifacts."""
-    task = _image_tasks[task_id]
-    task["status"] = "running"
-    task["progress"] = 10
-
-    start_time = time.time()
-
-    try:
-        model_info = model_registry.get_model(body.model_id)
-        selected_provider = model_info.provider.value if model_info else None
-        prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            body.model_id, selected_provider,
-        )
-
-        if body.reference_image and not prefer_gemini:
-            logger.warning(
-                "Async: reference_image ignored: image edit requires Gemini "
-                "(model=%s provider=%s). Falling through to fresh generation.",
-                body.model_id, selected_provider,
-            )
-
-        width, height, aspect_ratio = parse_image_size(body.size)
-
-        task["progress"] = 30
-
-        # ------------------------------------------------------------------
-        # App-driven edit mode: caller sent reference_image → stateless single
-        # request to Gemini with the prior image attached. No session read/write,
-        # no 1MB metadata concerns, works across users trivially. This is the
-        # recommended pattern for mobile apps that manage their own history.
-        # ------------------------------------------------------------------
-        res = None
-        if body.reference_image and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                preset = body.style
-                styled_prompt = compose_styled_prompt(body.prompt, preset)
-                logger.info(
-                    "Async image edit (reference_image): model=%s, preset=%s, prompt=%s...",
-                    body.model_id, preset.value, body.prompt[:50],
-                )
-                res = await gemini.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    aspect_ratio=aspect_ratio,
-                    reference_image=body.reference_image,
-                )
-
-        # ------------------------------------------------------------------
-        # Multi-turn mode: session_id + Gemini → use chat history
-        # ------------------------------------------------------------------
-        if res is None and body.session_id and session_manager and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                session = await session_manager.get(body.session_id)
-                if not session:
-                    session = await session_manager.create(
-                        user_id=user.user_id,
-                        tenant_id=user.tenant_id,
-                        session_id=body.session_id,
-                        metadata={"image_chat_history": []},
-                    )
-                image_history: list[dict] = []
-                locked_preset = StylePreset.DEFAULT
-                if session and session.metadata:
-                    image_history = session.metadata.get("image_chat_history", [])
-                    locked_preset = resolve_style_preset(
-                        session.metadata.get("style_preset"),
-                    )
-
-                # Inherit session's locked style when the caller sent DEFAULT;
-                # an explicit non-DEFAULT preset overrides and updates the lock.
-                effective_preset = (
-                    body.style if body.style is not StylePreset.DEFAULT else locked_preset
-                )
-                styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
-
-                contents = build_gemini_contents_from_history(image_history, styled_prompt)
-
-                logger.info(
-                    "Async image multi-turn: session=%s, turns=%d, preset=%s, prompt=%s...",
-                    body.session_id, len(contents), effective_preset.value, body.prompt[:50],
-                )
-
-                res = await gemini.generate_chat(
-                    contents=contents, n=body.n, aspect_ratio=aspect_ratio,
-                )
-
-                # Skip history update on failure to avoid dangling user turn
-                if res.success and res.images:
-                    file_uri = await _upload_to_gemini_files(gemini, res.images[0])
-                    append_image_turns(
-                        image_history, body.prompt, res.images[0], res.text,
-                        file_uri=file_uri,
-                    )
-                    if session_manager and session:
-                        meta = dict(session.metadata or {})
-                        meta["image_chat_history"] = image_history
-                        meta["style_preset"] = effective_preset.value
-                        await session_manager.update_metadata(body.session_id, meta)
-
-        # ------------------------------------------------------------------
-        # Single-turn fallback (no session, non-Gemini, or Gemini not configured)
-        # ------------------------------------------------------------------
-        if res is None:
-            preset = body.style
-            styled_prompt = compose_styled_prompt(body.prompt, preset)
-            dashscope_tag = resolve_dashscope_style_tag(preset)
-            negative_prompt = resolve_negative_prompt(preset)
-
-            router = get_smart_image_generator()
-            res = await router.generate(
-                prompt=styled_prompt,
-                n=body.n,
-                size=body.size or "1024*1024",
-                style=dashscope_tag,
-                negative_prompt=negative_prompt,
-                aspect_ratio=aspect_ratio,
-                prefer_gemini=prefer_gemini,
-                prefer_doubao=prefer_doubao,
-                dashscope_model=dashscope_model,
-            )
-
-        duration_ms = (time.time() - start_time) * 1000
-        task["duration_ms"] = duration_ms
-        task["provider"] = res.provider
-
-        if not res.success:
-            err = res.error or "Image generation failed"
-            if res.blocked and res.block_reason:
-                err = f"{err} (blocked: {res.block_reason})"
-            task["status"] = "failed"
-            task["error"] = err
-            task["progress"] = 100
-            task["completed_at"] = datetime.now(timezone.utc).isoformat()
-            return
-
-        task["progress"] = 70
-
-        # Process all images concurrently — watermark off the event loop,
-        # artifact uploads in parallel.
-        artifact_storage = get_artifact_storage()
-        images = await asyncio.gather(
-            *[
-                _process_image_result(
-                    img,
-                    task_id=task_id,
-                    prompt=body.prompt,
-                    width=width,
-                    height=height,
-                    add_watermark=body.add_watermark,
-                    session_id=body.session_id,
-                    user=user,
-                    index=i,
-                    artifact_storage=artifact_storage,
-                )
-                for i, img in enumerate(res.images)
-            ]
-        )
-
-        task["images"] = images
-        task["status"] = "completed"
-        task["progress"] = 100
-        task["completed_at"] = datetime.now(timezone.utc).isoformat()
-
-    except Exception as e:
-        logger.error("Async image generation task %s failed: %s", task_id, e)
-        task["status"] = "failed"
-        task["error"] = str(e)
-        task["progress"] = 100
-        task["duration_ms"] = (time.time() - start_time) * 1000
-        task["completed_at"] = datetime.now(timezone.utc).isoformat()
-
-    if body.callback_url:
-        try:
-            await send_image_callback(body.callback_url, task)
-        except Exception as e:
-            logger.warning("Callback to %s failed: %s", body.callback_url, e)
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="generate-image", body=body_bytes,
+    )
 
 
 @router.post("/generate-image-async", response_model=AsyncImageTaskSubmitResponse)
@@ -1614,85 +1049,27 @@ async def submit_image_generation(
     body: AsyncImageGenerationRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
-    model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> AsyncImageTaskSubmitResponse:
-    """
-    Submit an async image generation task.
-
-    Returns a task_id immediately. Poll GET /image-task/{task_id} for status.
-    When completed, images are auto-saved to artifacts (if session_id provided).
-    """
-    _cleanup_old_tasks()
-
-    task_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-
-    _image_tasks[task_id] = {
-        "task_id": task_id,
-        "status": "pending",
-        "progress": 0,
-        "prompt": body.prompt,
-        "model_id": body.model_id,
-        "provider": None,
-        "images": [],
-        "duration_ms": None,
-        "error": None,
-        "created_at": now,
-        "completed_at": None,
-    }
-
-    # Launch background task
-    session_mgr = getattr(request.app.state, "session_manager", None)
-    asyncio.create_task(
-        _run_image_generation_task(task_id, body, model_registry, user, session_manager=session_mgr)
-    )
-
-    return AsyncImageTaskSubmitResponse(
-        task_id=task_id,
-        status="pending",
-        message="Image generation task submitted",
+    """Thin proxy — background task lives in assistant-service's in-memory store."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="generate-image-async", body=body_bytes,
     )
 
 
 @router.get("/image-task/{task_id}", response_model=AsyncImageTaskStatusResponse)
 async def get_image_task_status(
     task_id: str,
+    request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AsyncImageTaskStatusResponse:
-    """
-    Poll the status of an async image generation task.
-
-    Status flow: pending → running → completed / failed
-    When status is 'completed', images array contains the results with artifact info.
-    """
-    task = _image_tasks.get(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-    images = [
-        AsyncImageArtifact(
-            artifact_id=img.get("artifact_id"),
-            download_url=img.get("download_url"),
-            url=img["url"],
-            width=img.get("width"),
-            height=img.get("height"),
-        )
-        for img in task.get("images", [])
-    ]
-
-    return AsyncImageTaskStatusResponse(
-        task_id=task["task_id"],
-        status=task["status"],
-        progress=task.get("progress", 0),
-        prompt=task["prompt"],
-        model_id=task["model_id"],
-        provider=task.get("provider"),
-        images=images,
-        duration_ms=task.get("duration_ms"),
-        error=task.get("error"),
-        created_at=task["created_at"],
-        completed_at=task.get("completed_at"),
+    """Thin proxy — polls the task store in assistant-service."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(
+        request, user, path=f"image-task/{task_id}",
     )
+
 
 
 # =========================================================================

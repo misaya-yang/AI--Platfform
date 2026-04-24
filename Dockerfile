@@ -54,14 +54,17 @@ RUN pip install --no-cache-dir ./packages/ai-gateway-core \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
-# Also install assistant-service package. Gateway v1 routes at src/api/v1/*.py
-# still import from ``assistant_service.core.*`` after the Phase-3 refactor.
-# A true HTTP boundary (gateway → assistant-service over :8093) is Phase 5;
-# until then, the gateway image needs the assistant source bundled in.
-COPY apps/assistant-service/ ./apps/assistant-service/
-RUN pip install --no-cache-dir ./apps/assistant-service \
-    --index-url ${PIP_INDEX_URL} \
-    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
+# Phase 5e: assistant-service is no longer bundled into the gateway
+# image. All ``from assistant_service.core ...`` imports were replaced
+# across Phase 5d/5e (enums + style_presets + image helpers + quiz +
+# skills + memory + connectors + working_memory + task_manager +
+# context_metrics → ai_gateway_core; AssistantService / tool_registry
+# / MCPManager / tenant services deleted from gateway lifespan;
+# ModelRegistry replaced by a narrow ``GatewayModelMeta`` DB facade;
+# /generate-image + /image-task proxy to assistant-service). Gate
+# guarding the boundary:
+#   docker run ai-gateway:latest python -c "import assistant_service"
+#   → ModuleNotFoundError  ✓
 
 RUN pip install --no-cache-dir ".[all]" \
     --index-url ${PIP_INDEX_URL} \

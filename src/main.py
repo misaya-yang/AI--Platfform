@@ -778,10 +778,12 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     from ai_gateway_core.config import resolve_dashscope, resolve_google
     from ai_gateway_core.enums import ModelProvider
-    from assistant_service.core import ModelRegistry
 
-    model_registry = ModelRegistry()
-    configured_providers = []
+    # Phase 5e: gateway no longer builds an in-process ``ModelRegistry``.
+    # Provider-config sync (env → DB seeding) still runs because the admin
+    # UI expects to see the env-derived providers in ``llm_providers``;
+    # that's a DB operation and doesn't need the registry.
+    configured_providers: list[str] = []
 
     # 默认 provider 配置定义 — for providers whose endpoint selection is
     # straightforward (single key, single base_url env). DashScope and
@@ -907,33 +909,15 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             if google_backend == "vertex":
                 base_url = None  # let configure_provider pick VERTEX_BASE_URL
 
-        # 配置 ModelRegistry（内存中）
+        # Phase 5e: gateway just records that the provider env is set
+        # (used below for env → DB seeding). The in-memory ``configure_provider``
+        # dance the old ModelRegistry did is assistant-service's job now.
         if api_key:
             try:
-                configure_kwargs = dict(
-                    api_key=api_key,
-                    base_url=base_url,
-                )
-                if provider_id == "google":
-                    configure_kwargs["backend"] = google_backend
-                model_registry.configure_provider(
-                    ModelProvider(provider_id),
-                    **configure_kwargs,
-                )
+                ModelProvider(provider_id)  # validate it's a known provider
                 configured_providers.append(provider_id)
                 if provider_id == "google" and google_backend == "vertex":
-                    vertex_overrides = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
-                    if vertex_overrides:
-                        logger.info(
-                            f"Google provider on Vertex (default) + per-model overrides: {vertex_overrides}"
-                        )
-                    else:
-                        logger.info("Google provider routed to Vertex (all models)")
-                elif provider_id == "google" and os.environ.get("GOOGLE_VERTEX_MODELS", "").strip():
-                    logger.info(
-                        f"Google provider on AI Studio (default), Vertex overrides: "
-                        f"{os.environ['GOOGLE_VERTEX_MODELS']}"
-                    )
+                    logger.info("Google provider routed to Vertex (env-seeded)")
             except ValueError:
                 logger.warning(f"Unknown provider enum: {provider_id}")
 
@@ -975,21 +959,15 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
                 if not p.get("has_api_key"):
                     continue  # 没有 API key
 
-                # 从数据库加载 API key 并配置 ModelRegistry
-                api_key = await provider_service._get_api_key(tenant_id, provider_id)
-                if api_key:
-                    try:
-                        provider_enum = ModelProvider(provider_id)
-                        model_registry.configure_provider(
-                            provider_enum,
-                            api_key=api_key,
-                            base_url=p.get("base_url"),
-                        )
-                        configured_providers.append(provider_id)
-                        logger.info(f"Loaded provider {provider_id} from database")
-                    except ValueError:
-                        # 自定义 provider，目前不支持
-                        logger.debug(f"Custom provider {provider_id} not in enum, skipping")
+                # Phase 5e: we no longer configure an in-memory registry
+                # here — just track which providers the DB has so
+                # ``/health/providers`` can enumerate them.
+                try:
+                    ModelProvider(provider_id)
+                    configured_providers.append(provider_id)
+                    logger.info(f"Provider {provider_id} loaded from database")
+                except ValueError:
+                    logger.debug(f"Custom provider {provider_id} not in enum, skipping")
         except Exception as e:
             logger.warning(f"Failed to load providers from database: {e}")
 
@@ -1018,9 +996,26 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # enforcement — all run over the wire against assistant-service.
     _ = session_manager, tavily_api_key, knowledge_vlm_service  # kept for sibling code paths
 
-    # Store in app.state. ``None`` placeholders so legacy getattr readers
-    # in /services and /health see a consistent shape.
-    app.state.model_registry = model_registry
+    # Phase 5e: gateway uses a narrow ``GatewayModelMeta`` facade over
+    # ModelService + ProviderService for the 3 routes that still need LLM
+    # metadata (chat-stream permission check, /health/providers, model
+    # CRUD). The full ModelRegistry lives in assistant-service.
+    model_service = getattr(app.state, "model_service", None)
+    provider_service = getattr(app.state, "provider_service", None)
+    if model_service and provider_service:
+        from .services.llm.gateway_model_meta import GatewayModelMeta
+        app.state.model_meta = GatewayModelMeta(model_service, provider_service)
+    else:
+        app.state.model_meta = None
+        logger.warning(
+            "GatewayModelMeta not initialised — /chat/stream permission check "
+            "will be bypassed and /health/providers will return {}"
+        )
+
+    # ``None`` placeholders so legacy getattr readers in /services and
+    # /health see a consistent shape. Real implementations all live in
+    # assistant-service now (Phase 5d + 5e).
+    app.state.model_registry = None
     app.state.assistant_service = None
     app.state.assistant_gateway = None
     app.state.tool_registry = None
@@ -1030,12 +1025,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     app.state.tenant_mcp_config = None
     app.state.tool_audit = None
 
-    # Load models from database (if available)
-    model_service = getattr(app.state, "model_service", None)
+    # Sync model pricing from DB (no in-memory registry refresh required —
+    # assistant-service refreshes its own registry on demand).
     if model_service:
-        loaded = await model_registry.load_models_from_database(model_service, tenant_id="default")
-        if loaded > 0:
-            logger.info(f"Loaded {loaded} models from database into registry")
         try:
             synced = await model_service.sync_pricing_from_llm_models(
                 tenant_id="default",
