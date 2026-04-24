@@ -126,7 +126,10 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
-  const SIDER_WIDTH = 220;
+  // 187 = 220 × 0.85 (narrowed 15% per 2026-04-24 feedback). Keeps
+  // "Knowledge Base" on one line with the 14.5px/400 label and a 12px
+  // icon-gap, verified at 1440×900.
+  const SIDER_WIDTH = 187;
   const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
   const pageTitleKey = getPageTitleKey(location.pathname);

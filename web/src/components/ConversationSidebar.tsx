@@ -339,7 +339,7 @@ function SectionGroup({
   if (sessions.length === 0) return null;
 
   return (
-    <div className="mb-[6px]">
+    <div>
       <button
         type="button"
         className="flex w-full items-center gap-1.5 px-3 py-[3px] text-xs font-medium text-muted-foreground/70 uppercase tracking-wider hover:text-muted-foreground"
@@ -495,12 +495,12 @@ export function ConversationSidebar({
           </div>
         ) : (
           <>
-            {/* Folders (Projects) — "PROJECTS" eyebrow sits flush
-                with the first folder row (mb/pt trimmed so no visible
-                gap between the group label and its children). */}
+            {/* Folders (Projects) — zero margin; the eyebrow + folders
+                + date groups all chain directly, no visible gaps at
+                the section boundaries. */}
             {folderNames.length > 0 && (
-              <div className="mb-1">
-                <div className="px-3 pt-1 pb-[3px] text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-widest">
+              <div>
+                <div className="px-3 pt-1 pb-[2px] text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-widest">
                   {t("assistant.projects", "Projects")}
                 </div>
                 {folderNames.map((folder) => (
