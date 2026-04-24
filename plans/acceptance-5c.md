@@ -95,3 +95,43 @@ Still NOT allowed in any 5c commit / PR / chat:
 Items #4 and #5 are **code-ready**, not **in-prod**. The narrative the
 5c work earns is "run/approval state externalised to DB;
 proxy-ready behind default-OFF flags".
+
+## Prod deploy evidence (2026-04-24)
+
+- Deployed commit: `48f9342` (later than the task's `45f9a94` floor; verified via `git log origin/dev -1 --oneline` in step 5 of `plans/ops-prod-deploy-5a5b5c.md`).
+- Prior commit on prod: `48f9342` — git tree was already at this SHA from an earlier subagent pull, but the running container images (gateway `sha256:234b7062fe21…`, assistant-service `sha256:38e83e203289…`) pre-dated the phase-5a/5b/5c commits and had to be rebuilt to activate them.
+- Public port 8093 curl from laptop (step 10a):
+
+  ```
+  * connect to 52.65.136.42 port 8093 from 10.6.5.17 port 54174 failed: Connection refused
+  * Failed to connect to 52.65.136.42 port 8093 after 3849 ms: Couldn't connect to server
+  curl: (7) Failed to connect to 52.65.136.42 port 8093 after 3849 ms: Couldn't connect to server
+  ```
+
+  Connection refused (not filtered/timeout) ⇒ the listener is loopback-bound per the Phase-5a port boundary.
+
+- Public /config JSON (step 10b, HTTP 200):
+
+  ```json
+  {"default_model_id":"qwen3.6-plus","available_providers":["dashscope","google","google-vertex"],"kb_enabled":true,"web_search_enabled":true,"tools_available":[…]}
+  ```
+
+  `default_model_id` + `available_providers` keys = Phase-5b shape.
+
+- Public /chat/stream SSE (step 10d): HTTP 200, first `text_delta` event (`"Hello there"`) at t≈`1776994426.503`, vs `run_started` at t≈`1776994424.160` ⇒ **first text_delta within ~2.34 s**. `run_finished` reported `usage.total_tokens=2619`.
+
+- Gateway log scan for 5xx / HMAC verify (step 12):
+
+  ```
+  $ docker compose logs gateway --since 120s --tail 300 2>&1 \
+      | grep -iE 'HMAC verify|auth denied|circuit breaker OPEN|500|5xx' | head -30
+  (no output)
+  ```
+
+  Zero lines = pass.
+
+- Container env (step 11, values redacted): `GATEWAY_ASSISTANT_SHARED_SECRET` is present and 64 chars long inside `ai-gateway-backend`; `ASSISTANT_REQUIRE_DB` is absent (correctly left off this round). `GATEWAY_PROXY__ENABLED=true` (master flag on; per-route flags default off, so `/chat/stream` still serves in-gateway this round — as designed for phase-5b scope).
+
+Polaris #6-AS is now **✓ in prod** (HMAC middleware shipped in the running image + port boundary verified from outside the VPC).
+
+Full step-by-step log with timestamps and raw stdout: `plans/ops-prod-deploy-5a5b5c.md`.
