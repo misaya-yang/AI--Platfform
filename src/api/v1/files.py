@@ -336,20 +336,13 @@ async def upload_file(
                 f"key={file_info.storage_key}"
             )
 
-            # Trigger async processing
-            try:
-                task_queue = getattr(request.app.state, "task_queue", None)
-                if task_queue:
-                    await task_queue.enqueue(
-                        "process_file",
-                        {
-                            "file_path": relative_path,
-                            "user_id": user.user_id,
-                            "tenant_id": user.tenant_id,
-                        },
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to trigger async processing: {e}")
+            # Phase 5d: async ``process_file`` pre-processing removed. The
+            # FileProcessor pipeline lives only in assistant-service now, and
+            # AS processes uploads on-demand on first reference in the chat
+            # path (PDF→images, OCR). The extra enqueue-then-preprocess round
+            # trip that existed here only optimised first-chat latency — its
+            # cost (a failing task silently logged) wasn't worth the gain
+            # after the lifespan cleanup.
 
             return FileUploadResponse(
                 file_id=file_info.file_id,
@@ -430,20 +423,8 @@ async def upload_file(
         f"size={size_mb:.2f}MB path={relative_path} (local fallback)"
     )
 
-    # Trigger async processing
-    try:
-        task_queue = getattr(request.app.state, "task_queue", None)
-        if task_queue:
-            await task_queue.enqueue(
-                "process_file",
-                {
-                    "file_path": relative_path,
-                    "user_id": user.user_id,
-                    "tenant_id": user.tenant_id,
-                },
-            )
-    except Exception as e:
-        logger.warning(f"Failed to trigger async processing: {e}")
+    # Phase 5d: pre-processing task removed; AS handles on-demand. See the
+    # storage-backed branch above for the same rationale.
 
     return FileUploadResponse(
         file_id=file_id,

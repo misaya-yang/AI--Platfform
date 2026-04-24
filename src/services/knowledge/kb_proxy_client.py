@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,11 +22,14 @@ logger = logging.getLogger(__name__)
 KB_SERVICE_URL = os.getenv("KB_SERVICE_URL", "http://knowledge-service:8092")
 _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0)
 
-# Lazy singleton — constructed the first time a request is signed so that
-# deployments without the env set still crash loudly on the first call
-# rather than at import time (matches the pattern gateway uses for its
-# assistant-service proxy).
+# Lazy singleton — constructed the first time a request is signed so
+# deployments without the env set fail loud on first call (and let
+# dev envs start without the secret). The ``threading.Lock`` guards
+# against two concurrent first-requests each constructing their own
+# ``GatewaySecret`` instance; not a correctness issue (both instances
+# produce valid signatures) but wasteful and harder to reason about.
 _gateway_secret_signer: GatewaySecret | None = None
+_signer_lock = threading.Lock()
 
 
 def _get_signer() -> GatewaySecret | None:
@@ -39,11 +43,15 @@ def _get_signer() -> GatewaySecret | None:
     global _gateway_secret_signer
     if _gateway_secret_signer is not None:
         return _gateway_secret_signer
-    secret = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET")
-    if not secret:
-        return None
-    _gateway_secret_signer = GatewaySecret(secret=secret)
-    return _gateway_secret_signer
+    with _signer_lock:
+        # Re-check inside the lock — standard double-checked locking.
+        if _gateway_secret_signer is not None:
+            return _gateway_secret_signer
+        secret = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET")
+        if not secret:
+            return None
+        _gateway_secret_signer = GatewaySecret(secret=secret)
+        return _gateway_secret_signer
 
 
 @dataclass

@@ -1,16 +1,13 @@
-"""Equivalence contract for Phase 5b route migrations.
+"""Schema contract for Phase-5b-migrated (proxied) routes.
 
-For each migrated route, the gateway's response with the feature flag
-OFF (in-process) must have the same **shape** as the response with the
-flag ON (proxy to assistant-service). This catches the "AS side is a
-stub" regression the Roadmap §5b calls out.
-
-We can't exercise the full in-process dependency graph (SessionManager,
-MCPManager, full ModelRegistry) inside a fast unit test — so these
-tests assert **schema equivalence**: every key the in-process route
-produces, the AS-proxied route also produces, and vice versa. They
-also lock the AS route's shape to the gateway's pydantic schema so a
-future AS PR can't drop a field silently.
+Originally written as an equivalence test between the gateway's
+in-process and proxy-forwarded responses. Since Phase 5d
+(``0167261``) deleted the in-process branches, the tests now only
+exercise the proxy path and lock the AS route's shape to the
+gateway's pydantic schemas. That still catches the "AS side is a
+stub" regression from Roadmap §5b and guards against a future AS
+PR silently dropping a field — only the "compare against legacy
+behaviour" half of the contract retired with the fallback code.
 """
 from __future__ import annotations
 

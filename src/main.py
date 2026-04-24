@@ -354,18 +354,17 @@ def create_app() -> FastAPI:
             # Use native client for TaskQueue as it requires raw commands like brpop/lpush
             task_queue = TaskQueue(container.redis.get_native_client())
 
-            # 注册任务处理器
-            task_queue.register_handler(
-                "process_file",
-                _make_process_file_handler(app),
-            )
-
+            # Phase 5d: ``process_file`` task handler removed. The pre-processing
+            # pipeline (FileProcessor) now lives only in assistant-service, and
+            # AS's chat path processes uploads on-demand on first reference. Any
+            # ``process_file`` task enqueued by an old client would no-op here;
+            # the frontend in ``src/api/v1/files.py`` no longer enqueues them.
             await task_queue.start_worker()
             app.state.task_queue = task_queue
-            logger.info("Redis 任务队列已启动 (worker active)")
+            logger.info("Redis 任务队列已启动 (worker active, no handlers registered)")
         else:
             app.state.task_queue = None
-            logger.warning("Redis 未启用，异步文件预处理功能不可用")
+            logger.info("Redis 未启用，文件上传仅走同步保存路径")
 
         # 启动计费拦截器（如果启用）
         if settings.proxy.enabled and settings.proxy.billing_enabled:
@@ -619,24 +618,6 @@ def create_app() -> FastAPI:
         )
 
     return app
-
-
-def _make_process_file_handler(app: FastAPI, process_file_task=None):
-    """Create a task handler that resolves assistant_service from app.state at runtime."""
-    if process_file_task is None:
-        from ai_gateway_core.tasks import process_file_task as _process_file_task
-
-        process_file_task = _process_file_task
-
-    async def _process_file_wrapper(payload):
-        assistant_service = getattr(app.state, "assistant_service", None)
-        file_processor = getattr(assistant_service, "file_processor", None)
-        if not file_processor:
-            logger.error("Assistant service not initialized; skipping process_file task")
-            return
-        await process_file_task(payload, file_processor)
-
-    return _process_file_wrapper
 
 
 def _setup_app_state(app: FastAPI, container: Container) -> None:

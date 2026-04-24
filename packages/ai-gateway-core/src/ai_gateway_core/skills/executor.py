@@ -76,3 +76,6 @@ class SkillExecutor:
                 "success": False,
                 "error": f"Unknown entrypoint type: {entrypoint}",
             }
+
+
+__all__ = ["BuiltinHandler", "SkillExecutor", "register_builtin"]

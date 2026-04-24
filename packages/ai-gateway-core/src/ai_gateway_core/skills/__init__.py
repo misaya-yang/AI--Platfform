@@ -14,7 +14,7 @@ Layout:
 """
 
 from .builder import SkillBuilder
-from .executor import SkillExecutor
+from .executor import SkillExecutor, register_builtin
 from .models import SkillManifest, SkillRunRecord, SkillSource, TriggerConfig
 from .parser import parse_skill_md
 from .registry import SkillRegistry
@@ -28,4 +28,5 @@ __all__ = [
     "SkillSource",
     "TriggerConfig",
     "parse_skill_md",
+    "register_builtin",
 ]
