@@ -13,9 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.logging import get_logger
-from assistant_service.core.quiz.quiz_grader import QuizGrader
+from ai_gateway_core.quiz import QuizGrader
+
+from ...core.auth.user_resolver import UserContext
 from ..deps import enforce_rate_limit, get_user_context
 
 logger = get_logger(__name__)

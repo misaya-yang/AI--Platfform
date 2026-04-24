@@ -21,12 +21,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from pydantic import BaseModel, Field
 
+from ai_gateway_core.skills import (
+    SkillBuilder,
+    SkillManifest,
+    SkillRegistry,
+    SkillSource,
+    parse_skill_md,
+)
+
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
-from assistant_service.core.skills.parser import parse_skill_md
-from assistant_service.core.openclaw.skills.models import SkillManifest, SkillSource
-from assistant_service.core.openclaw.skills.registry import SkillRegistry
-from assistant_service.core.openclaw.skills.builder import SkillBuilder
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -48,7 +52,7 @@ def _get_skill_registry(request: Request) -> SkillRegistry:
     if registry is None:
         db = getattr(request.app.state, "database", None)
         registry = SkillRegistry(database=db)
-        from assistant_service.core.skills.builtin.skill_create import SKILL_CREATE_MANIFEST
+        from ai_gateway_core.skills.builtin.skill_create import SKILL_CREATE_MANIFEST
         registry.register(SKILL_CREATE_MANIFEST)
         request.app.state._skill_registry = registry
     return registry
@@ -263,7 +267,7 @@ async def test_skill(
     if not skill:
         raise HTTPException(404, f"Skill '{name}' not found")
 
-    from assistant_service.core.skills.executor import SkillExecutor
+    from ai_gateway_core.skills.executor import SkillExecutor
     executor = SkillExecutor()
     result = await executor.execute(skill, {"input": body.input})
     return result

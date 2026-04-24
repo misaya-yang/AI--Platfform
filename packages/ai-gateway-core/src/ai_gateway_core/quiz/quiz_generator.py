@@ -12,9 +12,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..models.model_registry import ChatMessage, ModelRegistry
+from ai_gateway_core.models import ChatMessage
+
+if TYPE_CHECKING:
+    # ModelRegistry is AS-internal (owns per-provider wire protocols).
+    # Only the type annotation is needed here; at runtime we call
+    # model_registry.chat_completion(...) via duck-typing.
+    from assistant_service.core.models.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 

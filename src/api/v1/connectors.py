@@ -322,7 +322,7 @@ async def disconnect_connector(
     )
     # Stop MCP server if running
     try:
-        from assistant_service.core.mcp.connector_mcp import get_connector_mcp_service
+        from ai_gateway_core.connectors import get_connector_mcp_service
         mcp = get_connector_mcp_service()
         await mcp.stop_connector(user.tenant_id, provider)
     except Exception:
@@ -359,7 +359,7 @@ async def activate_connector_mcp(
     if not row:
         raise HTTPException(400, "No active Confluence connection. Connect first via Settings.")
 
-    from assistant_service.core.mcp.connector_mcp import get_connector_mcp_service
+    from ai_gateway_core.connectors import get_connector_mcp_service
     mcp = get_connector_mcp_service()
 
     try:
@@ -386,7 +386,7 @@ async def connector_mcp_status(
     user: UserContext = Depends(get_user_context),
 ):
     """Check if MCP server is running for a provider."""
-    from assistant_service.core.mcp.connector_mcp import get_connector_mcp_service
+    from ai_gateway_core.connectors import get_connector_mcp_service
     mcp = get_connector_mcp_service()
 
     connected = mcp.is_connected(user.tenant_id, provider)

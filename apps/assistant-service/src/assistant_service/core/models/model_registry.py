@@ -213,40 +213,13 @@ class StreamDelta:
     thinking_content: str | None = None  # Qwen reasoning_content / Gemini thought parts
 
 
-@dataclass
-class ChatMessage:
-    """A chat message."""
-
-    role: str  # system, user, assistant, tool
-    content: str
-    name: str | None = None
-    tool_calls: list[dict[str, Any]] | None = None
-    tool_call_id: str | None = None
-    images: list[str] | None = None  # Base64 or URLs for vision models
-    thought_signature: str | None = None  # Gemini 3 thought signature
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ChatMessage:
-        """Create ChatMessage from dictionary."""
-        return cls(
-            role=data.get("role", "user"),
-            content=data.get("content", ""),
-            name=data.get("name"),
-            tool_calls=data.get("tool_calls"),
-            tool_call_id=data.get("tool_call_id"),
-            images=data.get("images"),
-            thought_signature=data.get("thought_signature"),
-        )
-
-
-def _normalize_message(msg) -> ChatMessage:
-    """Convert message to ChatMessage if it's a dict."""
-    if isinstance(msg, ChatMessage):
-        return msg
-    elif isinstance(msg, dict):
-        return ChatMessage.from_dict(msg)
-    else:
-        raise TypeError(f"Expected ChatMessage or dict, got {type(msg)}")
+# ``ChatMessage`` moved to ``ai_gateway_core.models.chat_message`` in Phase 5d
+# so gateway-side code (quiz, skills, streaming writer) can reference the
+# shape without a compile-time dep on this module. Re-exported here for AS
+# internal sites; delete once every AS ``from ..models.model_registry import
+# ChatMessage`` caller migrates to the shared import.
+from ai_gateway_core.models import ChatMessage
+from ai_gateway_core.models import normalize_chat_message as _normalize_message  # noqa: F401
 
 
 @dataclass

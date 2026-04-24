@@ -23,11 +23,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ai_gateway_core.quiz import (
+    QuizGenerator,
+    QuizGrader,
+    QuizService,
+    QuizShareManager,
+)
+
 from ...core.auth.user_resolver import UserContext
-from assistant_service.core.quiz.quiz_generator import QuizGenerator
-from assistant_service.core.quiz.quiz_grader import QuizGrader
-from assistant_service.core.quiz.quiz_service import QuizService
-from assistant_service.core.quiz.quiz_share_manager import QuizShareManager
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])

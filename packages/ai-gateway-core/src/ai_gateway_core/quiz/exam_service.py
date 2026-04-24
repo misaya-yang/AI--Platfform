@@ -470,7 +470,7 @@ Provide your analysis with these sections:
 Use the exam language (Chinese if title is Chinese, otherwise English).
 """
 
-        from ..models.model_registry import ChatMessage as ModelChatMessage
+        from ai_gateway_core.models import ChatMessage as ModelChatMessage
 
         content, _usage = await model_registry.chat(
             model_id="qwen3.6-plus",

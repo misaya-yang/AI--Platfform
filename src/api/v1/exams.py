@@ -28,9 +28,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from ai_gateway_core.quiz import ExamService
+
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
-from assistant_service.core.quiz.exam_service import ExamService
 
 logger = logging.getLogger(__name__)
 
