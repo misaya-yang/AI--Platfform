@@ -36,17 +36,21 @@ import { languages } from "@/i18n";
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
 
+// Icons and labels are visually paired — keep size/stroke in sync.
+// Thinner 1.5 stroke reads as more editorial than the default 2, and
+// 18px keeps the collapsed rail comfortable without cramping.
 const NAV_ICON_SIZE = 18;
+const NAV_ICON_STROKE = 1.5;
 
 const navItems = [
-  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:dashboard:view" },
-  { key: "/services", labelKey: "nav.services", icon: <Server size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:services:view" },
-  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "knowledge:dataset:view" },
-  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "conversation:playground:access" },
-  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "conversation:playground:access" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={NAV_ICON_SIZE} strokeWidth={2} />, permission: null },
-  { key: "/users", labelKey: "nav.users", icon: <Users size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "user:list" },
-  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={NAV_ICON_SIZE} strokeWidth={2} />, permission: "console:settings:view" },
+  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:dashboard:view" },
+  { key: "/services", labelKey: "nav.services", icon: <Server size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:services:view" },
+  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "knowledge:dataset:view" },
+  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "conversation:playground:access" },
+  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "conversation:playground:access" },
+  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: null },
+  { key: "/users", labelKey: "nav.users", icon: <Users size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "user:list" },
+  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:settings:view" },
 ];
 
 function getPageTitleKey(pathname: string): string {
@@ -142,24 +146,26 @@ export function AppLayout() {
         theme={resolvedTheme}
       >
         <div className="flex flex-col h-full">
-          {/* Brand — 60px tall with bottom hairline per design */}
+          {/* Brand — slightly taller (64px) to breathe at the top rail. */}
           <div
             className={`flex items-center gap-2.5 border-b border-border/60 ${collapsed ? 'justify-center px-0' : 'px-[18px]'}`}
-            style={{ height: 60, flexShrink: 0 }}
+            style={{ height: 64, flexShrink: 0 }}
           >
             <Logo collapsed={collapsed} />
           </div>
 
-          {/* Navigation */}
-          <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide py-2.5">
-            <div className="flex flex-col gap-[2px]">
+          {/* Navigation — extra top/bottom room (py-4) so items aren't
+              squeezed against the brand and footer rails. Gap-[3px]
+              gives items a small breath without floating apart. */}
+          <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide py-4">
+            <div className="flex flex-col gap-[3px]">
               {filteredNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
                   className={({ isActive }) =>
                     `app-nav-link relative group flex items-center rounded-lg transition-colors duration-140 ease-out ${
-                      collapsed ? 'justify-center py-[9px]' : 'gap-3 px-3 py-[9px]'
+                      collapsed ? 'justify-center py-[11px]' : 'gap-3 px-3 py-[11px]'
                     } ${isActive ? 'app-nav-item-active' : ''}`
                   }
                 >
@@ -193,17 +199,19 @@ export function AppLayout() {
             </div>
           </nav>
 
-          {/* Footer — theme + collapse */}
-          <div className="px-2.5 py-2.5 border-t border-border/60 flex flex-col gap-[2px]">
+          {/* Footer — theme + collapse. Same vertical rhythm as the
+              nav items above (py-[11px] + gap-[3px]) so the rail feels
+              continuous rather than split. */}
+          <div className="px-2.5 py-3 border-t border-border/60 flex flex-col gap-[3px]">
             <button
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
-                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+                collapsed ? 'justify-center py-[10px]' : 'gap-3 px-3 py-[10px]'
               }`}
             >
               <span className="app-nav-icon flex-shrink-0">
-                {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={2} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={2} />}
+                {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
                 <>
@@ -220,11 +228,11 @@ export function AppLayout() {
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
-                collapsed ? 'justify-center py-2' : 'gap-3 px-3 py-2'
+                collapsed ? 'justify-center py-[10px]' : 'gap-3 px-3 py-[10px]'
               }`}
             >
               <span className="app-nav-icon flex-shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
-                {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={2} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={2} />}
+                {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
                 <span className="app-nav-label">{t('nav.collapseSidebar', '收起侧栏')}</span>
@@ -282,13 +290,16 @@ export function AppLayout() {
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
-        /* Base nav link — matches design-handoff Sidebar */
+        /* Base nav link — editorial tone: slightly larger but thinner
+           text. 14.5px / weight 400 at -0.005em tracking reads as the
+           kind of sans you see in tool chrome from Linear / Raycast
+           rather than a SaaS admin dashboard. */
         .app-nav-link {
-          color: hsl(215 16% 38%); /* textMid */
+          color: hsl(215 16% 42%);
           cursor: pointer;
-          font-size: 13px;
+          font-size: 14.5px;
         }
-        .dark .app-nav-link { color: hsl(220 8% 65%); }
+        .dark .app-nav-link { color: hsl(220 8% 68%); }
         .app-nav-link:hover { background: hsl(var(--muted) / 0.5); color: hsl(var(--foreground)); }
         .app-nav-link:hover .app-nav-icon { color: hsl(var(--foreground)); }
         .app-nav-icon {
@@ -298,19 +309,21 @@ export function AppLayout() {
         }
         .app-nav-label {
           font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-          font-size: 13px;
-          font-weight: 500;
-          letter-spacing: 0;
-          line-height: 1.2;
+          font-size: 14.5px;
+          font-weight: 400;
+          letter-spacing: -0.005em;
+          line-height: 1.25;
         }
 
-        /* Active — indigo soft bg + indigo icon/text + 600 weight */
+        /* Active — keep the primary tint but drop from 600→520-ish
+           weight so the shift from inactive→active is a tone change,
+           not a weight jump. Prevents the "stand up and shout" look. */
         .app-nav-item-active {
-          background: hsl(var(--primary) / 0.10);
+          background: hsl(var(--primary) / 0.09);
           color: hsl(var(--primary)) !important;
         }
         .app-nav-item-active:hover {
-          background: hsl(var(--primary) / 0.13);
+          background: hsl(var(--primary) / 0.12);
         }
         .app-nav-item-active .app-nav-icon,
         .app-nav-item-active:hover .app-nav-icon {
@@ -318,7 +331,7 @@ export function AppLayout() {
         }
         .app-nav-item-active .app-nav-label {
           color: hsl(var(--primary));
-          font-weight: 600;
+          font-weight: 500;
         }
         .dark .app-nav-item-active { background: hsl(var(--primary) / 0.18); }
         .dark .app-nav-item-active:hover { background: hsl(var(--primary) / 0.24); }

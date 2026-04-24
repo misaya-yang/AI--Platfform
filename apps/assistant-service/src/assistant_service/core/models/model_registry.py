@@ -184,8 +184,15 @@ def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
 # a small inter-chunk delay so the UI sees a token-like cadence without
 # materially changing total stream time.
 #
-# Operator override: ``GEMINI_SMOOTHER_DISABLED=1`` turns this off (the
-# provider then yields each Vertex frame verbatim). Useful for debugging
+# Also applies to the OpenAI-compat path (DashScope, DeepSeek, OpenAI itself)
+# as of 2026-04-24 — DashScope Intl's SSE coalesces multiple tokens per frame
+# on slower networks, and without splitting the UI rendered in 2 large bursts
+# instead of a smooth stream. The same smoother works for both providers.
+#
+# Operator override: ``GEMINI_SMOOTHER_DISABLED=1`` turns this off for all
+# providers (the provider then yields each upstream frame verbatim). The env
+# name is kept historical — it now gates Google AND OpenAI-compat, renaming
+# would require re-plumbing across prod deploys. Useful for debugging
 # "is the smoother introducing artificial latency?" and nothing else — in
 # production the smoother is always on.
 _SMOOTHER_DISABLED = os.environ.get("GEMINI_SMOOTHER_DISABLED", "").lower() in {"1", "true", "yes"}
@@ -1665,13 +1672,33 @@ class ModelRegistry:
                             in_think_block = True
                             content = pre_content
 
-                yield StreamDelta(
-                    content=content,
-                    tool_calls=delta.get("tool_calls"),
-                    finish_reason=finish_reason,
-                    usage=usage_data,
-                    thinking_content=thinking,
+                # SMOOTHER: DashScope Intl (and other OpenAI-compat endpoints on
+                # slower networks) coalesce multiple tokens into a single SSE
+                # frame — observed in prod 2026-04-24 yielding only 2 text
+                # deltas for a "count 1-10" prompt, visible to users as "no
+                # streaming, just one dump." Same remediation as the Google
+                # path (_stream_google below): split a content chunk into
+                # token-sized sub-deltas with a small inter-chunk delay so
+                # the frontend renders a typewriter cadence.
+                #
+                # Only applies when the chunk contains visible content and no
+                # side-channel payload (tool_calls / usage / thinking) —
+                # those ride alone so ordering is preserved. Usage-only /
+                # finish-only events are emitted unchanged.
+                has_meta = bool(
+                    delta.get("tool_calls") or finish_reason or usage_data or thinking
                 )
+                if content and not has_meta:
+                    async for _sub in _smooth_text_delta(content):
+                        yield StreamDelta(content=_sub)
+                else:
+                    yield StreamDelta(
+                        content=content,
+                        tool_calls=delta.get("tool_calls"),
+                        finish_reason=finish_reason,
+                        usage=usage_data,
+                        thinking_content=thinking,
+                    )
 
     async def _stream_anthropic(
         self,

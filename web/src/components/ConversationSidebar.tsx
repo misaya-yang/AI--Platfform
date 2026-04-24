@@ -332,14 +332,17 @@ function SectionGroup({
   fallbackLabel: string;
   collapsible?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Folders (collapsible groups) default to CLOSED so the projects
+  // row stays compact at a glance — users click the folder to open
+  // its sessions. Date groups (non-collapsible) stay open.
+  const [collapsed, setCollapsed] = useState(collapsible === true);
   if (sessions.length === 0) return null;
 
   return (
-    <div className="mb-3">
+    <div className="mb-[6px]">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 px-3 py-1 text-xs font-medium text-muted-foreground/70 uppercase tracking-wider hover:text-muted-foreground"
+        className="flex w-full items-center gap-1.5 px-3 py-[3px] text-xs font-medium text-muted-foreground/70 uppercase tracking-wider hover:text-muted-foreground"
         onClick={() => collapsible && setCollapsed(!collapsed)}
       >
         {icon}
@@ -347,7 +350,10 @@ function SectionGroup({
         {collapsible && <span className="text-[10px]">{collapsed ? "▸" : "▾"}</span>}
       </button>
       {!collapsed && (
-        <div className="space-y-0.5 mt-0.5">
+        // Flush: first session sits directly under the group title (no
+        // visible gap). space-y-[1px] gives the tiniest separator
+        // between sibling sessions without looking like a bullet list.
+        <div className="space-y-[1px] mt-0">
           {sessions.map((s) => (
             <SessionItem
               key={s.session_id}
@@ -489,10 +495,12 @@ export function ConversationSidebar({
           </div>
         ) : (
           <>
-            {/* Folders (Projects) */}
+            {/* Folders (Projects) — "PROJECTS" eyebrow sits flush
+                with the first folder row (mb/pt trimmed so no visible
+                gap between the group label and its children). */}
             {folderNames.length > 0 && (
-              <div className="mb-2">
-                <div className="px-3 py-1 text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-widest">
+              <div className="mb-1">
+                <div className="px-3 pt-1 pb-[3px] text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-widest">
                   {t("assistant.projects", "Projects")}
                 </div>
                 {folderNames.map((folder) => (
