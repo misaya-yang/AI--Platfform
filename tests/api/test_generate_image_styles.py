@@ -685,6 +685,60 @@ class TestMultiTurnSignatureFlow:
         history_artifact_id = persisted_meta["image_chat_history"][1]["artifact_id"]
         assert response_artifact_id == history_artifact_id
 
+    async def test_n_greater_than_1_with_session_id_returns_all_images(self):
+        """Regression guard — earlier code dropped images[1..n] for stateful + n>1."""
+        body = ImageGenerationRequest(
+            prompt="a cat", model_id="gemini-3.1-flash-image-preview",
+            session_id="sess-multi", n=2,
+        )
+        session = _session_stub(metadata={"image_chat_history": []})
+        session_mgr = _session_manager_stub(session)
+        storage = self._artifact_storage_stub()
+
+        # Gemini returns 2 images
+        multi_image_result = GeminiImageResult(
+            success=True,
+            images=[
+                {"filename": "g1.png", "content_base64": "ZmFrZTE=",
+                 "mime_type": "image/png", "size_bytes": 5,
+                 "thought_signature": "sig_a"},
+                {"filename": "g2.png", "content_base64": "ZmFrZTI=",
+                 "mime_type": "image/png", "size_bytes": 5,
+                 "thought_signature": "sig_b"},
+            ],
+            text=None,
+            duration_ms=10.0,
+        )
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate_chat = AsyncMock(return_value=multi_image_result)
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
+        ):
+            resp = await generate_image(
+                body=body, request=_make_request(session_manager=session_mgr),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        # All n images returned
+        assert resp.success is True
+        assert len(resp.images) == 2
+        assert all(im.artifact_id is not None for im in resp.images)
+        assert resp.images[0].artifact_id != resp.images[1].artifact_id
+
+        # History only has ONE model turn (canonical anchor) — not 2 — to keep
+        # session metadata small
+        persisted_meta = session_mgr.update_metadata.call_args.args[1]
+        history = persisted_meta["image_chat_history"]
+        model_turns = [t for t in history if t.get("role") == "model"]
+        assert len(model_turns) == 1
+
 
 @pytest.mark.asyncio
 class TestReferenceImageUrl:

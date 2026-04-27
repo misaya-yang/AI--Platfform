@@ -641,28 +641,41 @@ async def _persist_multi_turn_result(
     artifact_storage,
     width: int,
     height: int,
-) -> tuple[str | None, GeneratedImage]:
-    """Store the newly-generated image as an artifact, append the turn to
-    history, persist the session metadata. Returns ``(artifact_id, image)``
-    for the response."""
+) -> tuple[str | None, list[GeneratedImage]]:
+    """Store ALL newly-generated images as artifacts (concurrently), append a
+    single canonical turn to history, persist the session metadata. Returns
+    ``(canonical_artifact_id, [GeneratedImage, ...])`` — the canonical id is
+    the first image's id, used as the visual anchor for the next-turn replay.
+
+    History only records the canonical (first) image: putting all n>1 images
+    into next turn's context would balloon the prompt and make replay slow
+    while adding little signal beyond the visual anchor.
+    """
     session, image_history, effective_preset = session_state
-    img = res.images[0]
 
-    artifact_id, generated = await _persist_and_get_url(
-        img,
-        artifact_storage=artifact_storage,
-        session_id=body.session_id,
-        user=user,
-        prompt=body.prompt,
-        add_watermark=body.add_watermark,
-        width=width,
-        height=height,
-        index=0,
-    )
+    persisted = await asyncio.gather(*[
+        _persist_and_get_url(
+            img,
+            artifact_storage=artifact_storage,
+            session_id=body.session_id,
+            user=user,
+            prompt=body.prompt,
+            add_watermark=body.add_watermark,
+            width=width,
+            height=height,
+            index=i,
+        )
+        for i, img in enumerate(res.images)
+    ])
+    canonical_artifact_id = persisted[0][0]
+    canonical_img_payload = res.images[0]
+    generated_list = [gi for _, gi in persisted]
 
+    # History gets only the first image — multi-image n>1 still has just one
+    # canonical visual anchor for next-turn replay.
     append_image_turns(
-        image_history, body.prompt, img, res.text,
-        artifact_id=artifact_id,
+        image_history, body.prompt, canonical_img_payload, res.text,
+        artifact_id=canonical_artifact_id,
     )
 
     if session_manager and session:
@@ -678,7 +691,7 @@ async def _persist_multi_turn_result(
                 body.session_id, e,
             )
 
-    return artifact_id, generated
+    return canonical_artifact_id, generated_list
 
 
 # -----------------------------------------------------------------------------
@@ -777,14 +790,14 @@ async def generate_image(
                     session_id=body.session_id,
                 )
 
-            _, generated = await _persist_multi_turn_result(
+            _, generated_list = await _persist_multi_turn_result(
                 body, res=res, session_state=session_state,
                 session_manager=session_mgr, user=user,
                 artifact_storage=artifact_storage,
                 width=width, height=height,
             )
             return ImageGenerationResponse(
-                success=True, images=[generated],
+                success=True, images=generated_list,
                 provider="google",
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
                 session_id=body.session_id,
@@ -874,7 +887,6 @@ async def _run_image_generation_task(
         artifact_storage = _get_artifact_storage()
         has_reference = bool(body.reference_image or body.reference_image_url)
         res = None
-        new_artifact_id: str | None = None
         generated_response_imgs: list[GeneratedImage] = []
 
         if has_reference and prefer_gemini:
@@ -910,13 +922,13 @@ async def _run_image_generation_task(
                 return
 
             if res and res.success and res.images:
-                aid, generated = await _persist_multi_turn_result(
+                _, generated_list = await _persist_multi_turn_result(
                     body, res=res, session_state=session_state,
                     session_manager=session_manager, user=user,
                     artifact_storage=artifact_storage,
                     width=width, height=height,
                 )
-                generated_response_imgs.append(generated)
+                generated_response_imgs.extend(generated_list)
 
         if res is None:
             styled_prompt = compose_styled_prompt(body.prompt, body.style)
