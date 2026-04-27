@@ -241,13 +241,13 @@ async def lifespan(app: FastAPI):
     # bucket so artifacts are visible to both services).
     if get_artifact_storage() is None:
         try:
-            from src.config.settings import get_settings as _get_gw_settings
+            from src.config.settings import Settings as _GwSettings
             from src.services.storage.image_storage import (
                 StorageBackend,
                 StorageConfig,
             )
 
-            gw_settings = _get_gw_settings()
+            gw_settings = _GwSettings()
             gw_storage = getattr(gw_settings, "storage", None)
             backend_str = getattr(gw_storage, "backend", "local") if gw_storage else "local"
             try:
