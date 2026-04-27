@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _b64
+import json
 import logging
 import time
 import uuid
@@ -119,14 +120,31 @@ class AsyncImageTaskStatusResponse(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# In-memory task store for async generation
+# Async task store
 # -----------------------------------------------------------------------------
+#
+# Two backends, picked at request time based on whether Redis is wired up:
+#
+# 1. **Redis** (preferred) — survives container restarts and works across
+#    multiple AS replicas. Tasks expire after 1 hour via Redis ``EX`` so
+#    completed-task cleanup is automatic.
+# 2. **In-process dict** (fallback) — for dev/test where Redis isn't
+#    available. Has a soft 500-entry cap; oldest completed/failed tasks
+#    over an hour old are evicted on each new submit.
+#
+# The fallback path is intentionally not deleted: integration tests run
+# without Redis, and a single-replica dev deployment doesn't need it.
 
 _image_tasks: dict[str, dict] = {}
 _MAX_TASKS = 500
+_TASK_TTL_SECONDS = 3600
+_TASK_KEY_PREFIX = "image_task:"
 
 
 def _cleanup_old_tasks() -> None:
+    """Evict completed/failed in-process tasks older than the TTL.
+
+    No-op for the Redis backend (Redis ``EX`` handles expiry)."""
     if len(_image_tasks) < _MAX_TASKS:
         return
     now = datetime.now(timezone.utc)
@@ -134,10 +152,39 @@ def _cleanup_old_tasks() -> None:
     for tid, task in _image_tasks.items():
         if task["status"] in ("completed", "failed"):
             created = datetime.fromisoformat(task["created_at"])
-            if (now - created).total_seconds() > 3600:
+            if (now - created).total_seconds() > _TASK_TTL_SECONDS:
                 to_remove.append(tid)
     for tid in to_remove:
         _image_tasks.pop(tid, None)
+
+
+async def _store_task(redis, task_id: str, task: dict) -> None:
+    """Persist ``task`` under ``task_id``. Uses Redis when present, else the
+    in-process dict. Always refreshes the TTL on Redis writes — completed
+    tasks then expire 1h after completion regardless of when submitted."""
+    if redis is not None:
+        try:
+            await redis.set(
+                _TASK_KEY_PREFIX + task_id,
+                json.dumps(task, default=str),
+                ex=_TASK_TTL_SECONDS,
+            )
+            return
+        except Exception as exc:
+            logger.warning("Redis task store write failed (%s); falling back to dict", exc)
+    _image_tasks[task_id] = task
+
+
+async def _load_task(redis, task_id: str) -> dict | None:
+    """Look up a task by id. Tries Redis first, falls back to dict."""
+    if redis is not None:
+        try:
+            raw = await redis.get(_TASK_KEY_PREFIX + task_id)
+            if raw:
+                return json.loads(raw)
+        except Exception as exc:
+            logger.warning("Redis task store read failed (%s); falling back to dict", exc)
+    return _image_tasks.get(task_id)
 
 
 async def _upload_to_gemini_files(gemini, result_image: dict) -> str | None:
@@ -362,11 +409,19 @@ async def _process_image_result(
 
 async def _run_image_generation_task(
     task_id: str, body: AsyncImageGenerationRequest,
-    model_registry: ModelRegistry, user: UserContext, session_manager=None,
+    model_registry: ModelRegistry, user: UserContext,
+    session_manager=None, redis=None,
 ) -> None:
-    task = _image_tasks[task_id]
+    task = await _load_task(redis, task_id)
+    if task is None:
+        # Defensive: caller should have stored the task before scheduling us.
+        # If we get here the submit path raced or the storage backend dropped
+        # it; bail rather than crash the worker.
+        logger.error("Async image task %s vanished before worker started", task_id)
+        return
     task["status"] = "running"
     task["progress"] = 10
+    await _store_task(redis, task_id, task)
     start_time = time.time()
 
     try:
@@ -446,6 +501,7 @@ async def _run_image_generation_task(
             task["error"] = err
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
+            await _store_task(redis, task_id, task)
             return
 
         task["progress"] = 70
@@ -473,6 +529,8 @@ async def _run_image_generation_task(
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
 
+    await _store_task(redis, task_id, task)
+
     if body.callback_url:
         try:
             await send_image_callback(body.callback_url, task)
@@ -490,15 +548,20 @@ async def submit_image_generation(
     _cleanup_old_tasks()
     task_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    _image_tasks[task_id] = {
+    task = {
         "task_id": task_id, "status": "pending", "progress": 0,
         "prompt": body.prompt, "model_id": body.model_id, "provider": None,
         "images": [], "duration_ms": None, "error": None,
         "created_at": now, "completed_at": None,
     }
+    redis = getattr(request.app.state, "redis", None)
+    await _store_task(redis, task_id, task)
     session_mgr = get_session_manager(request)
     asyncio.create_task(
-        _run_image_generation_task(task_id, body, model_registry, user, session_manager=session_mgr)
+        _run_image_generation_task(
+            task_id, body, model_registry, user,
+            session_manager=session_mgr, redis=redis,
+        )
     )
     return AsyncImageTaskSubmitResponse(
         task_id=task_id, status="pending",
@@ -509,9 +572,11 @@ async def submit_image_generation(
 @router.get("/image-task/{task_id}", response_model=AsyncImageTaskStatusResponse)
 async def get_image_task_status(
     task_id: str,
+    request: Request,
     user: UserContext = Depends(get_user_context),
 ) -> AsyncImageTaskStatusResponse:
-    task = _image_tasks.get(task_id)
+    redis = getattr(request.app.state, "redis", None)
+    task = await _load_task(redis, task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     images = [

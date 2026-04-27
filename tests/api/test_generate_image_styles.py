@@ -16,17 +16,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.api.schemas.assistant import (
+from assistant_service.api.routes.images import (
     AsyncImageGenerationRequest,
     ImageGenerationRequest,
+    generate_image,
 )
-from src.api.v1.assistant import generate_image
-from src.core.auth.user_resolver import UserContext
+from assistant_service.auth import UserContext
 from assistant_service.core.tools.gemini_image_tool import GeminiImageResult
 from assistant_service.core.tools.smart_image_generator import (
     SmartImageGenerationResult,
 )
-from assistant_service.core.tools.style_presets import StylePreset
+from ai_gateway_core.enums import StylePreset
 
 
 # =============================================================================
@@ -144,7 +144,7 @@ class TestSingleTurnStyleForwarding:
         router_mock.generate = AsyncMock(return_value=_successful_router_result("google"))
 
         with patch(
-            "src.api.v1.assistant.get_smart_image_generator",
+            "assistant_service.api.routes.images.get_smart_image_generator",
             return_value=router_mock,
         ):
             await generate_image(
@@ -171,7 +171,7 @@ class TestSingleTurnStyleForwarding:
         router_mock.generate = AsyncMock(return_value=_successful_router_result("dashscope"))
 
         with patch(
-            "src.api.v1.assistant.get_smart_image_generator",
+            "assistant_service.api.routes.images.get_smart_image_generator",
             return_value=router_mock,
         ):
             await generate_image(
@@ -197,7 +197,7 @@ class TestSingleTurnStyleForwarding:
         router_mock.generate = AsyncMock(return_value=_successful_router_result("dashscope"))
 
         with patch(
-            "src.api.v1.assistant.get_smart_image_generator",
+            "assistant_service.api.routes.images.get_smart_image_generator",
             return_value=router_mock,
         ):
             await generate_image(
@@ -219,7 +219,7 @@ class TestSingleTurnStyleForwarding:
         router_mock.generate = AsyncMock(return_value=_successful_router_result("google"))
 
         with patch(
-            "src.api.v1.assistant.get_smart_image_generator",
+            "assistant_service.api.routes.images.get_smart_image_generator",
             return_value=router_mock,
         ):
             await generate_image(
@@ -272,7 +272,7 @@ class TestMultiTurnStyleLock:
         gemini_mock.generate_chat = AsyncMock(return_value=_successful_gemini_image())
 
         with patch(
-            "src.api.v1.assistant.get_gemini_image_generator",
+            "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
         ):
             await generate_image(
@@ -315,7 +315,7 @@ class TestMultiTurnStyleLock:
         gemini_mock.generate_chat = AsyncMock(return_value=_successful_gemini_image())
 
         with patch(
-            "src.api.v1.assistant.get_gemini_image_generator",
+            "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
         ):
             await generate_image(
@@ -356,7 +356,7 @@ class TestMultiTurnStyleLock:
         gemini_mock.generate_chat = AsyncMock(return_value=_successful_gemini_image())
 
         with patch(
-            "src.api.v1.assistant.get_gemini_image_generator",
+            "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
         ):
             await generate_image(
@@ -407,7 +407,7 @@ class TestMultiTurnStyleLock:
         ))
 
         with patch(
-            "src.api.v1.assistant.get_gemini_image_generator",
+            "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
         ):
             await generate_image(
@@ -438,7 +438,7 @@ class TestMultiTurnStyleLock:
         gemini_mock.generate_chat = AsyncMock(return_value=_successful_gemini_image())
 
         with patch(
-            "src.api.v1.assistant.get_gemini_image_generator",
+            "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
         ):
             await generate_image(
@@ -454,3 +454,105 @@ class TestMultiTurnStyleLock:
         user_turn = next(t for t in history if t.get("role") == "user")
         assert user_turn["text"] == "a mosque"
         assert "oil painting" not in user_turn["text"].lower()
+
+
+@pytest.mark.asyncio
+class TestMultiTurnSignatureFlow:
+    """End-to-end: thoughtSignature must round-trip from Gemini response →
+    session metadata → next turn's contents array.
+
+    Without this Gemini 3.x silently degrades multi-turn edit quality (or 400s
+    outright). See ``ai_gateway_core/image/helpers.py`` for the contract."""
+
+    def _gemini_with_signature(self, sig: str) -> GeminiImageResult:
+        return GeminiImageResult(
+            success=True,
+            images=[{
+                "filename": "g.png",
+                "content_base64": "ZmFrZQ==",
+                "mime_type": "image/png",
+                "size_bytes": 4,
+                "thought_signature": sig,
+            }],
+            text=None,
+            duration_ms=10.0,
+        )
+
+    async def test_signature_persists_to_session_on_first_turn(self):
+        body = ImageGenerationRequest(
+            prompt="a cat", model_id="gemini-3.1-flash-image-preview",
+            session_id="sess-1",
+        )
+        session = _session_stub(metadata={"image_chat_history": []})
+        session_mgr = _session_manager_stub(session)
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate_chat = AsyncMock(
+            return_value=self._gemini_with_signature("sig_first_turn"),
+        )
+        gemini_mock.upload_image = AsyncMock(return_value="files/abc")
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ):
+            await generate_image(
+                body=body, request=_make_request(session_manager=session_mgr),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        persisted_meta = session_mgr.update_metadata.call_args.args[1]
+        history = persisted_meta["image_chat_history"]
+        model_turn = next(t for t in history if t.get("role") == "model")
+        assert model_turn.get("thought_signature") == "sig_first_turn", (
+            "Signature from Gemini response must land on the model turn — "
+            "without it, turn 2 has no anchor for the model's prior reasoning."
+        )
+
+    async def test_signature_replayed_to_gemini_on_second_turn(self):
+        """Turn 2: history already has a signature → it MUST be in the
+        contents array sent to Gemini, attached to the prior image part."""
+        body = ImageGenerationRequest(
+            prompt="make it orange",
+            model_id="gemini-3.1-flash-image-preview",
+            session_id="sess-1",
+        )
+        session = _session_stub(metadata={
+            "image_chat_history": [
+                {"role": "user", "text": "a cat"},
+                {
+                    "role": "model",
+                    "file_uri": "files/abc",
+                    "mime_type": "image/png",
+                    "thought_signature": "sig_from_turn1",
+                },
+            ],
+        })
+        session_mgr = _session_manager_stub(session)
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate_chat = AsyncMock(
+            return_value=self._gemini_with_signature("sig_turn2"),
+        )
+        gemini_mock.upload_image = AsyncMock(return_value="files/def")
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ):
+            await generate_image(
+                body=body, request=_make_request(session_manager=session_mgr),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        contents = gemini_mock.generate_chat.call_args.kwargs["contents"]
+        # Find the prior model image part — must carry the signature
+        model_turns = [c for c in contents if c["role"] == "model"]
+        assert len(model_turns) == 1
+        img_part = next(p for p in model_turns[0]["parts"] if "fileData" in p)
+        assert img_part.get("thoughtSignature") == "sig_from_turn1", (
+            "Replay missing signature → Gemini 3.x will reject or degrade. "
+            f"Got img_part={img_part}"
+        )

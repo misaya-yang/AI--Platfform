@@ -121,8 +121,11 @@ def build_gemini_contents_from_history(
     - ``image_base64`` turns → ``{"inlineData": {"data": ..., "mimeType": ...}}``
       (kept for backward-compatibility with history written before the Files
       API migration)
-    - ``thought_signature`` is passed through verbatim when present, but is not
-      required for image-only turns (Gemini only enforces it for function calls)
+    - ``thought_signature`` is required by Gemini 3.x for conversational image
+      editing — without it the model loses the original image's structural
+      reasoning and either errors (400) or silently degrades quality. Per
+      Google's 2026 guidance the signature must be replayed verbatim on every
+      subsequent turn.
     """
     contents: list[dict[str, Any]] = []
     for turn in image_history:
@@ -185,9 +188,12 @@ def append_image_turns(
         model_turn["image_base64"] = result_image["content_base64"]
     if result_text:
         model_turn["text"] = result_text
-    # thought_signature is intentionally NOT persisted: it's a 1MB+ blob that
-    # Gemini only strictly requires for function-call parts. For plain image
-    # editing turns the docs say "the API does not strictly enforce validation"
-    # and omitting it does not trigger a 400. Storing it would push session
-    # metadata back over the 1MB cap.
+    # Gemini 3.x requires thought_signature on every replayed model turn for
+    # conversational image editing — missing it triggers a 400 or silently
+    # degrades edit coherence. Signatures are opaque/signed blobs typically a
+    # few KB (not 1MB as previously assumed); safe to store inline alongside
+    # the file_uri pointer. See Google's "Thought Signatures" guidance, 2026.
+    sig = result_image.get("thought_signature")
+    if sig:
+        model_turn["thought_signature"] = sig
     image_history.append(model_turn)
