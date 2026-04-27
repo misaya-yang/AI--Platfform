@@ -689,13 +689,20 @@ class TestMultiTurnSignatureFlow:
 @pytest.mark.asyncio
 class TestReferenceImageUrl:
     """Stateless edit via URL — Dev backend passes a URL, AS fetches and
-    forwards bytes to Gemini. Saves ~1.3 MB Dev → AS upload per edit."""
+    forwards bytes to Gemini. Saves ~1.3 MB Dev → AS upload per edit.
+
+    SSRF guards (see ``_safe_fetch_url``):
+    - http(s) only
+    - DNS resolution rejects private/loopback/link-local/reserved/multicast
+    - manual redirect handling (max 3 hops, each re-validated)
+    - streaming with hard 8 MB byte cap
+    """
 
     async def test_reference_image_url_fetched_and_forwarded_to_gemini(self):
         body = ImageGenerationRequest(
             prompt="make it red",
             model_id="gemini-3.1-flash-image-preview",
-            reference_image_url="https://s3.example.com/prior.png",
+            reference_image_url="https://example.com/prior.png",
         )
 
         gemini_mock = MagicMock()
@@ -712,19 +719,30 @@ class TestReferenceImageUrl:
             duration_ms=5.0,
         ))
 
-        # Mock httpx.AsyncClient at the import location used by images.py.
         from unittest.mock import MagicMock as _MM
+
+        async def _one_chunk():
+            yield b"prior_image_bytes"
+
+        stream_response = _MM()
+        stream_response.status_code = 200
+        stream_response.headers = {}
+        stream_response.raise_for_status = _MM()
+        stream_response.aiter_bytes = _MM(return_value=_one_chunk())
+        stream_response.__aenter__ = AsyncMock(return_value=stream_response)
+        stream_response.__aexit__ = AsyncMock(return_value=None)
+
         client_cm = _MM()
-        resp_obj = _MM()
-        resp_obj.content = b"prior_image_bytes"
-        resp_obj.raise_for_status = _MM()
         client_cm.__aenter__ = AsyncMock(return_value=client_cm)
         client_cm.__aexit__ = AsyncMock(return_value=None)
-        client_cm.get = AsyncMock(return_value=resp_obj)
+        client_cm.stream = _MM(return_value=stream_response)
 
         with patch(
             "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._is_safe_destination",
+            return_value=(True, ""),
         ), patch(
             "assistant_service.api.routes.images.httpx.AsyncClient",
             return_value=client_cm,
@@ -764,3 +782,143 @@ class TestReferenceImageUrl:
             )
         assert exc.value.status_code == 400
         assert "http" in str(exc.value.detail).lower()
+
+    @pytest.mark.parametrize("bad_url", [
+        "http://localhost/x.png",
+        "http://127.0.0.1/x.png",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/x.png",
+        "http://192.168.1.1/x.png",
+        "http://172.16.0.1/x.png",
+    ])
+    async def test_reference_image_url_rejects_private_destinations(self, bad_url):
+        """SSRF guard — DNS resolution must reject any private/loopback IP target,
+        even before any HTTP fetch is attempted."""
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_image_url=bad_url,
+        )
+        from fastapi import HTTPException as _HE
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+        assert exc.value.status_code == 400
+        assert (
+            "rejected" in str(exc.value.detail).lower()
+            or "disallowed" in str(exc.value.detail).lower()
+        )
+
+    async def test_reference_image_url_rejects_redirect_to_private(self):
+        """SSRF guard — a public URL that redirects to a private IP must be
+        rejected on the second hop (manual redirect handling re-validates each
+        hop)."""
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_image_url="https://example.com/redirect.png",
+        )
+        from fastapi import HTTPException as _HE
+        from unittest.mock import MagicMock as _MM
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+
+        # First hop: public DNS OK, server returns 302 → http://127.0.0.1/x.png
+        # Second hop: DNS validation rejects 127.0.0.1 → 400
+        redirect_response = _MM()
+        redirect_response.status_code = 302
+        redirect_response.headers = {"location": "http://127.0.0.1/x.png"}
+        redirect_response.aiter_bytes = AsyncMock()
+        redirect_response.__aenter__ = AsyncMock(return_value=redirect_response)
+        redirect_response.__aexit__ = AsyncMock(return_value=None)
+
+        client_cm = _MM()
+        client_cm.__aenter__ = AsyncMock(return_value=client_cm)
+        client_cm.__aexit__ = AsyncMock(return_value=None)
+        client_cm.stream = _MM(return_value=redirect_response)
+
+        # Bypass _is_safe_destination only for the public first hop. The second
+        # hop (against 127.0.0.1) must run for real and be rejected.
+        from assistant_service.api.routes import images as _images
+
+        original_is_safe = _images._is_safe_destination
+
+        def _bypass_first_then_real(host, port):
+            if host == "example.com":
+                return (True, "")
+            return original_is_safe(host, port)
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._is_safe_destination",
+            side_effect=_bypass_first_then_real,
+        ), patch(
+            "assistant_service.api.routes.images.httpx.AsyncClient",
+            return_value=client_cm,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+        assert exc.value.status_code == 400
+
+    async def test_reference_image_url_streaming_aborts_oversize(self):
+        """SSRF guard — body must be aborted as soon as cumulative bytes cross
+        8 MB, not after full download."""
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_image_url="https://example.com/big.png",
+        )
+        from fastapi import HTTPException as _HE
+        from unittest.mock import MagicMock as _MM
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+
+        # Simulate a stream of 1 MB chunks — should abort after the 9th chunk.
+        async def _chunks():
+            for _ in range(20):
+                yield b"X" * (1024 * 1024)
+
+        big_response = _MM()
+        big_response.status_code = 200
+        big_response.headers = {}
+        big_response.raise_for_status = _MM()
+        big_response.aiter_bytes = _MM(return_value=_chunks())
+        big_response.__aenter__ = AsyncMock(return_value=big_response)
+        big_response.__aexit__ = AsyncMock(return_value=None)
+
+        client_cm = _MM()
+        client_cm.__aenter__ = AsyncMock(return_value=client_cm)
+        client_cm.__aexit__ = AsyncMock(return_value=None)
+        client_cm.stream = _MM(return_value=big_response)
+
+        # Patch _is_safe_destination so we don't make real DNS in unit tests.
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._is_safe_destination",
+            return_value=(True, ""),
+        ), patch(
+            "assistant_service.api.routes.images.httpx.AsyncClient",
+            return_value=client_cm,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+        assert exc.value.status_code == 400
+        assert "8" in str(exc.value.detail)

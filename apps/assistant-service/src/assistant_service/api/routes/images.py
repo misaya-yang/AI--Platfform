@@ -33,12 +33,15 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _b64
+import ipaddress
 import json
 import logging
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -397,6 +400,134 @@ async def _persist_and_get_url(
     )
 
 
+# -----------------------------------------------------------------------------
+# SSRF-safe URL fetcher for ``reference_image_url``
+# -----------------------------------------------------------------------------
+#
+# The Dev backend passes a URL of a prior generated image; AS fetches it
+# server-side. Without guards an authenticated attacker could:
+#   * hit AWS metadata (169.254.169.254) → IAM credential theft
+#   * probe internal services / private networks
+#   * bypass via redirect to private IP (302 follows past prefix check)
+#   * amplify with oversized payloads (cap was checked after full download)
+#
+# ``_safe_fetch_url`` defends with: scheme allow-list, manual redirect handling
+# (each hop re-validated), DNS resolution + IP category check
+# (private/loopback/link-local/reserved/multicast/unspecified all rejected),
+# streaming with hard byte cap, 30 s wall clock.
+
+_REFERENCE_URL_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
+_REFERENCE_URL_MAX_REDIRECTS = 3
+_REFERENCE_URL_TIMEOUT_SECONDS = 30.0
+
+
+def _is_safe_destination(host: str, port: int) -> tuple[bool, str]:
+    """Resolve ``host`` and reject if any address is private/loopback/etc.
+
+    Multi-record hosts must have *all* addresses safe — a single private
+    record poisons the whole hostname (DNS rebinding defence).
+
+    Returns ``(ok, reason)``. ``reason`` is empty on success, populated on
+    rejection so the caller can surface a useful 400.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        return False, f"DNS resolution failed: {e}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False, f"unparseable address: {addr}"
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return False, (
+                f"destination {host} resolves to disallowed address {addr}"
+            )
+    return True, ""
+
+
+async def _safe_fetch_url(url: str) -> bytes:
+    """Fetch ``url`` with SSRF + size guards.
+
+    - http(s) only
+    - At most ``_REFERENCE_URL_MAX_REDIRECTS`` manual redirects; each hop's
+      host re-validated against the private-IP set
+    - Streaming with hard byte cap to avoid amplification / slow-loris
+    - ``_REFERENCE_URL_TIMEOUT_SECONDS`` wall clock
+    """
+    current = url
+    async with httpx.AsyncClient(
+        timeout=_REFERENCE_URL_TIMEOUT_SECONDS,
+        follow_redirects=False,
+    ) as client:
+        # We allow up to MAX_REDIRECTS hops, plus one final non-redirect hop
+        # that produces the body. ``range(MAX + 1)`` gives us that budget.
+        for _ in range(_REFERENCE_URL_MAX_REDIRECTS + 1):
+            parsed = urlparse(current)
+            if parsed.scheme not in ("http", "https"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference_image_url must be an http(s) URL",
+                )
+            host = parsed.hostname
+            if not host:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference_image_url missing host",
+                )
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            ok, reason = _is_safe_destination(host, port)
+            if not ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"reference_image_url destination rejected: {reason}",
+                )
+
+            # Stream the response so we can abort on the first byte over cap.
+            async with client.stream("GET", current) as resp:
+                # 3xx with Location → record the next hop and let the for-loop
+                # continue. ``next_url`` is captured outside the ``async with``
+                # so the stream context cleans up before we re-validate DNS.
+                if 300 <= resp.status_code < 400 and "location" in resp.headers:
+                    next_url = resp.headers["location"]
+                    if next_url.startswith("/"):
+                        next_url = f"{parsed.scheme}://{parsed.netloc}{next_url}"
+                else:
+                    resp.raise_for_status()
+                    buf = bytearray()
+                    async for chunk in resp.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > _REFERENCE_URL_MAX_BYTES:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    "reference_image_url payload exceeds "
+                                    f"{_REFERENCE_URL_MAX_BYTES // (1024 * 1024)} MB limit"
+                                ),
+                            )
+                    return bytes(buf)
+            # Stream context closed cleanly; advance to the next hop.
+            current = next_url
+
+    # Fell through the loop without returning — we exhausted the redirect
+    # budget. Raise a descriptive 400.
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "reference_image_url exceeded "
+            f"{_REFERENCE_URL_MAX_REDIRECTS} redirects"
+        ),
+    )
+
+
 async def _resolve_reference_bytes(
     body: ImageGenerationRequest, *, artifact_storage,
 ) -> str | None:
@@ -404,35 +535,18 @@ async def _resolve_reference_bytes(
 
     Order:
     1. ``reference_image`` (base64/data-URL) — pass through
-    2. ``reference_image_url`` — fetch via HTTP, base64-encode
+    2. ``reference_image_url`` — SSRF-safe fetch (see ``_safe_fetch_url``),
+       base64-encoded for Gemini's ``inlineData``
 
-    Returns ``None`` if neither is set. SSRF guard: ``reference_image_url``
-    is restricted to https:// and our own S3 / public domains; localhost
-    and private IPs are rejected upstream by the gateway.
+    Returns ``None`` if neither is set.
     """
     if body.reference_image:
         return body.reference_image
     if not body.reference_image_url:
         return None
-
-    url = body.reference_image_url
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="reference_image_url must be an http(s) URL",
-        )
-
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content = resp.content
-            if len(content) > 8 * 1024 * 1024:  # 8 MB hard cap
-                raise HTTPException(
-                    status_code=400,
-                    detail="reference_image_url payload exceeds 8 MB limit",
-                )
-            return _b64.b64encode(content).decode()
+        content = await _safe_fetch_url(body.reference_image_url)
+        return _b64.b64encode(content).decode()
     except HTTPException:
         raise
     except Exception as exc:
