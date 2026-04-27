@@ -215,6 +215,11 @@ _MAX_TASKS = 500
 _TASK_TTL_SECONDS = 3600
 _TASK_KEY_PREFIX = "image_task:"
 
+# Strong refs to in-flight async-generation workers. ``asyncio.create_task``
+# only weak-references the task; without this set the task can be GC'd
+# mid-execution under load. Each worker self-removes via ``done_callback``.
+_in_flight_workers: set[asyncio.Task[None]] = set()
+
 
 def _cleanup_old_tasks() -> None:
     """Evict completed/failed in-process tasks older than the TTL.
@@ -417,7 +422,7 @@ async def _persist_and_get_url(
 
 
 async def _resolve_reference_bytes(
-    body: ImageGenerationRequest, *, artifact_storage,
+    body: ImageGenerationRequest, *, artifact_storage, user: UserContext | None = None,
 ) -> str | None:
     """Resolve any reference image to a base64 string suitable for Gemini.
 
@@ -438,10 +443,32 @@ async def _resolve_reference_bytes(
                 status_code=503,
                 detail="reference_artifact_id requires ArtifactStorage to be configured",
             )
+        # Ownership check — without this, any caller could pass any artifact_id
+        # they observed from logs / network and read another user's image.
+        # Fetch metadata first (cheap), check tenant+user, then download.
+        try:
+            artifact = await artifact_storage.get_artifact(body.reference_artifact_id)
+        except Exception as exc:
+            logger.warning("reference_artifact_id lookup failed: %s", exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load reference_artifact_id: {exc}",
+            ) from exc
+        # 404 (not 403) for both not-found and wrong-owner — same error code
+        # so an attacker can't use timing/code distinction to enumerate IDs.
+        if (
+            artifact is None
+            or (user is not None and artifact.user_id != user.user_id)
+            or (user is not None and artifact.tenant_id != user.tenant_id)
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"reference_artifact_id {body.reference_artifact_id!r} not found",
+            )
         try:
             content = await artifact_storage.download_artifact(body.reference_artifact_id)
         except Exception as exc:
-            logger.warning("reference_artifact_id lookup failed: %s", exc)
+            logger.warning("reference_artifact_id download failed: %s", exc)
             raise HTTPException(
                 status_code=400,
                 detail=f"Failed to load reference_artifact_id: {exc}",
@@ -665,7 +692,9 @@ async def generate_image(
 
         # ---- Stateless edit (caller passes prior image) ------------------
         if has_reference and prefer_gemini:
-            ref_b64 = await _resolve_reference_bytes(body, artifact_storage=artifact_storage)
+            ref_b64 = await _resolve_reference_bytes(
+                body, artifact_storage=artifact_storage, user=user,
+            )
             gemini = get_gemini_image_generator()
             if not gemini.is_configured:
                 return ImageGenerationResponse(
@@ -853,7 +882,7 @@ async def _run_image_generation_task(
                 await _store_task(redis, task_id, task)
                 return
             ref_b64 = await _resolve_reference_bytes(
-                body, artifact_storage=artifact_storage,
+                body, artifact_storage=artifact_storage, user=user,
             )
             styled_prompt = compose_styled_prompt(body.prompt, body.style)
             res = await gemini.generate(
@@ -942,7 +971,9 @@ async def _run_image_generation_task(
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
 
     except Exception as e:
-        logger.error("Async image generation task %s failed: %s", task_id, e)
+        # logger.exception captures the stack trace; previous logger.error
+        # only logged str(e), making prod debugging impossible.
+        logger.exception("Async image generation task %s failed", task_id)
         task["status"] = "failed"
         task["error"] = str(e)
         task["progress"] = 100
@@ -973,16 +1004,25 @@ async def submit_image_generation(
         "prompt": body.prompt, "model_id": body.model_id, "provider": None,
         "images": [], "duration_ms": None, "error": None,
         "created_at": now, "completed_at": None,
+        # Owner — checked on poll to prevent IDOR. Without this,
+        # any authenticated user could poll any UUID and read another
+        # tenant's prompt + presigned image URLs.
+        "owner_user_id": user.user_id,
+        "owner_tenant_id": user.tenant_id,
     }
     redis = getattr(request.app.state, "redis", None)
     await _store_task(redis, task_id, task)
     session_mgr = get_session_manager(request)
-    asyncio.create_task(
+    worker = asyncio.create_task(
         _run_image_generation_task(
             task_id, body, model_registry, user,
             session_manager=session_mgr, redis=redis,
         )
     )
+    # Strong-ref the task so the event loop's weak-ref doesn't let it
+    # be GC'd mid-execution. Self-removes on completion.
+    _in_flight_workers.add(worker)
+    worker.add_done_callback(_in_flight_workers.discard)
     return AsyncImageTaskSubmitResponse(
         task_id=task_id, status="pending",
         message="Image generation task submitted",
@@ -998,6 +1038,14 @@ async def get_image_task_status(
     redis = getattr(request.app.state, "redis", None)
     task = await _load_task(redis, task_id)
     if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # Ownership check — return 404 (not 403) to avoid leaking task existence
+    # via timing/error-code distinction.
+    owner_user_id = task.get("owner_user_id")
+    owner_tenant_id = task.get("owner_tenant_id")
+    if owner_user_id is not None and owner_user_id != user.user_id:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    if owner_tenant_id is not None and owner_tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     images = [
         AsyncImageArtifact(

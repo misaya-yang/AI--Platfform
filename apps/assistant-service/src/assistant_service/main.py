@@ -27,11 +27,25 @@ logging.basicConfig(
 settings = get_settings()
 
 
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("Assistant Service starting...")
     app.state.settings = settings
+
+    # Mandatory init failures (DB, Redis when REQUIRE_REDIS is set) raise
+    # from lifespan so the container crashes instead of starting in a half-broken
+    # state where /health returns 200 but every chat request 500s. Optional
+    # integrations (Confluence, Tavily, etc.) further down still warn-and-continue.
+    require_db = _env_truthy("ASSISTANT_REQUIRE_DB", default=True)
+    require_redis = _env_truthy("ASSISTANT_REQUIRE_REDIS", default=False)
 
     # ── Database ──
     database = None
@@ -43,7 +57,14 @@ async def lifespan(app: FastAPI):
         app.state.database = database
         logger.info("Database connected")
     except Exception as e:
-        logger.warning(f"Database init failed: {e}")
+        if require_db:
+            logger.error("Database init failed (ASSISTANT_REQUIRE_DB=true): %s", e)
+            raise RuntimeError(
+                f"Database is mandatory but failed to initialize: {e}. "
+                "Either fix DATABASE_URL/connectivity or set ASSISTANT_REQUIRE_DB=false "
+                "(dev only — production must not run without DB)."
+            ) from e
+        logger.warning(f"Database init failed (running without DB): {e}")
 
     # ── Redis ──
     redis_client = None
@@ -56,11 +77,19 @@ async def lifespan(app: FastAPI):
             app.state.redis = redis_client
             logger.info("Redis connected")
         except Exception as e:
-            logger.warning(f"Redis init failed: {e}")
+            if require_redis:
+                logger.error("Redis init failed (ASSISTANT_REQUIRE_REDIS=true): %s", e)
+                raise RuntimeError(
+                    f"Redis is mandatory but failed: {e}. "
+                    "Async image tasks fall back to in-process dict without Redis, "
+                    "which breaks across container restarts and multi-replica deploys."
+                ) from e
+            logger.warning(f"Redis init failed (running without Redis): {e}")
 
     # ── Model Registry ──
     from ai_gateway_core.config import resolve_dashscope, resolve_google
-    from .core.models.model_registry import ModelRegistry, ModelProvider
+
+    from .core.models.model_registry import ModelProvider, ModelRegistry
     model_registry = ModelRegistry()
 
     # Provider config must mirror gateway's (src/main.py). When the gateway
@@ -178,8 +207,10 @@ async def lifespan(app: FastAPI):
 
     # ── Tool Registry ──
     from .core.tools import (
-        TavilySearchTool, get_tool_registry, register_builtin_tools,
-        register_document_generation_tool, register_pptx_generation_tool,
+        TavilySearchTool,
+        register_builtin_tools,
+        register_document_generation_tool,
+        register_pptx_generation_tool,
     )
     from .core.tools.image_generator_tool import register_image_generation_tool
 
@@ -218,7 +249,6 @@ async def lifespan(app: FastAPI):
         logger.info("Primitive tools enabled (fs_read/fs_write/fs_glob/fs_grep)")
 
     # ── AssistantService ──
-    from .core import AssistantService
     # Bucket-B wiring (Phase 4.2): fetch concrete recorders/storage from the
     # gateway's src/ and inject into AssistantService. ``main.py`` is the
     # only allowed composition-root site for these src.* imports; anywhere
@@ -230,6 +260,8 @@ async def lifespan(app: FastAPI):
         get_file_storage,
         init_artifact_storage,
     )
+
+    from .core import AssistantService
 
     realtime_metrics = get_realtime_metrics()
     usage_recorder = get_usage_recorder()
@@ -403,6 +435,7 @@ app.add_middleware(
 _gateway_secret_env = os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
 if _gateway_secret_env:
     from ai_gateway_core.auth.gateway_secret import GatewaySecret
+
     from .auth import GatewaySecretAuthMiddleware
 
     app.add_middleware(
@@ -447,4 +480,5 @@ async def security_headers(request, call_next):
 
 # ── Register API routes ──
 from .api.router import router as api_router
+
 app.include_router(api_router, prefix="/api/v1/assistant")

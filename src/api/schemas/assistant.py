@@ -547,17 +547,33 @@ class ImageGenerationRequest(BaseModel):
         default=None,
         description="Image chat session ID. Enables multi-turn editing with full conversation history.",
     )
+    reference_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable artifact ID from an earlier generation (preferred for stateless "
+            "edits). The server looks up bytes directly via ArtifactStorage — no URL "
+            "fetch, no SSRF surface. Caller's tenant + user_id must match the "
+            "artifact's owner."
+        ),
+    )
     reference_image: str | None = Field(
         default=None,
         max_length=_REFERENCE_IMAGE_MAX_CHARS,
         description=(
-            "Previous image to edit (base64 or data URL). When provided, the backend "
-            "sends it to Gemini along with the prompt so the model edits that image "
-            "instead of generating a new one. Use this for app-managed multi-turn "
-            "editing — the app keeps the prior turn's image and re-submits it each "
-            "request. Gemini-only; ignored for DashScope/Doubao. "
-            "Max 6,000,000 chars (~4.5 MiB decoded); compress JPEG quality 90% "
-            "and ≤ 2 MB before sending."
+            "Previous image to edit (base64 or data URL). Use only when the prior "
+            "image is local-only (e.g. a user upload that never went through us). "
+            "Prefer ``reference_artifact_id`` (server-side lookup) or "
+            "``reference_image_url`` (we fetch via SSRF-safe client). Gemini-only. "
+            "Max 6,000,000 chars (~4.5 MiB decoded)."
+        ),
+    )
+    reference_image_url: str | None = Field(
+        default=None,
+        description=(
+            "URL of a prior image. AS fetches it via SSRF-safe client (DNS pinning + "
+            "private/loopback rejection + 8 MB streaming cap). Only http(s); private/"
+            "loopback/link-local rejected. Prefer ``reference_artifact_id`` when "
+            "possible — that path doesn't fetch a URL at all."
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
@@ -576,9 +592,24 @@ class ImageGenerationRequest(BaseModel):
 class GeneratedImage(BaseModel):
     """A generated image result."""
 
-    url: str = Field(..., description="Image URL (data:image/png;base64,... or http)")
+    url: str = Field(
+        ...,
+        description=(
+            "Presigned S3 URL when artifact storage is configured (preferred). "
+            "Falls back to ``data:image/...;base64,...`` only when storage is "
+            "unavailable (dev/test)."
+        ),
+    )
     width: int | None = Field(default=None, description="Image width")
     height: int | None = Field(default=None, description="Image height")
+    artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable ID for this generated image. Pass back as "
+            "``reference_artifact_id`` to edit it later — fastest + safest path "
+            "(no URL fetch, no base64 re-upload)."
+        ),
+    )
 
 
 class ImageGenerationResponse(BaseModel):
@@ -589,6 +620,10 @@ class ImageGenerationResponse(BaseModel):
     provider: str = Field(..., description="Provider used for generation (dashscope/google)")
     duration_ms: float = Field(..., description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
+    session_id: str | None = Field(
+        default=None,
+        description="Echo of session_id when stateful multi-turn was used.",
+    )
 
 
 # =============================================================================
@@ -611,17 +646,28 @@ class AsyncImageGenerationRequest(BaseModel):
     )
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
-    session_id: str | None = Field(default=None, description="Session ID for artifact storage")
+    session_id: str | None = Field(default=None, description="Session ID for stateful multi-turn editing")
+    reference_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable artifact ID from an earlier generation (preferred for stateless "
+            "edits). Server-side lookup; tenant + user_id checked against artifact owner."
+        ),
+    )
     reference_image: str | None = Field(
         default=None,
         max_length=_REFERENCE_IMAGE_MAX_CHARS,
         description=(
-            "Previous image to edit (base64 or data URL). When provided, the backend "
-            "sends it to Gemini with the prompt so the model edits that image. Use "
-            "this for app-managed multi-turn editing (app keeps the prior turn's "
-            "image and re-submits it each request). Gemini-only. "
-            "Max 6,000,000 chars (~4.5 MiB decoded); compress JPEG quality 90% "
-            "and ≤ 2 MB before sending."
+            "Previous image as base64 / data URL. Prefer ``reference_artifact_id`` or "
+            "``reference_image_url`` — direct base64 transit costs ~1.3 MB / request. "
+            "Gemini-only. Max 6,000,000 chars (~4.5 MiB decoded)."
+        ),
+    )
+    reference_image_url: str | None = Field(
+        default=None,
+        description=(
+            "URL of a prior image. AS fetches via SSRF-safe client. Only http(s); "
+            "private/loopback rejected; 8 MB streaming cap."
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")

@@ -50,6 +50,25 @@ def _fake_response(
     )
 
 
+def _fake_safe_response(
+    *,
+    status: int = 200,
+    body: bytes = b"",
+    headers: dict[str, str] | None = None,
+    url: str = "https://example.com/",
+):
+    """Build a ``SafeFetchResponse`` for tests that no longer mock httpx
+    directly — the SSRF path now goes through ``safe_fetch_with_response``."""
+    from ai_gateway_core.security import SafeFetchResponse
+    return SafeFetchResponse(
+        body=body,
+        final_url=url,
+        status_code=status,
+        headers=headers or {"content-type": "text/html"},
+        encoding=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # SSRF — literal private / forbidden URLs
 # ---------------------------------------------------------------------------
@@ -121,7 +140,7 @@ async def test_web_fetch_happy_path_returns_extracted_markdown() -> None:
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
-        "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response", new=AsyncMock(return_value=_fake_safe_response(status=fake_resp.status_code, body=fake_resp.content, headers=dict(fake_resp.headers), url=str(fake_resp.url)))
     ):
         out = await web_fetch("https://example.com/", extract="markdown")
 
@@ -145,7 +164,7 @@ async def test_web_fetch_text_mode_strips_all_tags() -> None:
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
-        "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response", new=AsyncMock(return_value=_fake_safe_response(status=fake_resp.status_code, body=fake_resp.content, headers=dict(fake_resp.headers), url=str(fake_resp.url)))
     ):
         out = await web_fetch("https://example.com/", extract="text")
 
@@ -162,12 +181,13 @@ async def test_web_fetch_text_mode_strips_all_tags() -> None:
 
 @pytest.mark.asyncio
 async def test_executor_returns_clean_error_on_timeout() -> None:
+    from ai_gateway_core.security import SafeFetchError
     with patch(
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
-        "httpx.AsyncClient.get",
-        new=AsyncMock(side_effect=httpx.TimeoutException("boom")),
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response",
+        new=AsyncMock(side_effect=SafeFetchError("fetch failed: timed out boom")),
     ):
         executor = WebFetchExecutor()
         result = await executor.execute(
@@ -202,7 +222,7 @@ async def test_web_fetch_truncates_to_max_chars() -> None:
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
-        "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response", new=AsyncMock(return_value=_fake_safe_response(status=fake_resp.status_code, body=fake_resp.content, headers=dict(fake_resp.headers), url=str(fake_resp.url)))
     ):
         out = await web_fetch(
             "https://example.com/", max_chars=500, extract="text"
@@ -219,18 +239,12 @@ async def test_web_fetch_truncates_to_max_chars() -> None:
 
 @pytest.mark.asyncio
 async def test_web_fetch_rejects_redirect_to_private_ip() -> None:
-    # First response is a redirect; the Location hostname resolves to 10.x.
-    redirect_resp = _fake_response(
-        status=302,
-        body=b"",
-        headers={"location": "http://internal.corp.example/secret"},
-        url="https://example.com/",
-    )
+    """SSRF guard end-to-end — when ``safe_fetch_with_response`` raises a
+    redirect-to-private rejection, the executor must surface it as a clean
+    error result (no leaked stack)."""
+    from ai_gateway_core.security import SafeFetchError
 
-    resolves = {
-        "example.com": "93.184.216.34",
-        "internal.corp.example": "10.0.0.5",
-    }
+    resolves = {"example.com": "93.184.216.34"}
 
     def _fake_getaddrinfo(host, *_a, **_k):
         ip = resolves.get(host, "8.8.8.8")
@@ -240,8 +254,11 @@ async def test_web_fetch_rejects_redirect_to_private_ip() -> None:
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo,
     ), patch(
-        "httpx.AsyncClient.get",
-        new=AsyncMock(return_value=redirect_resp),
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response",
+        new=AsyncMock(side_effect=SafeFetchError(
+            "destination rejected: internal.corp.example resolves to "
+            "disallowed address 10.0.0.5",
+        )),
     ):
         executor = WebFetchExecutor()
         result = await executor.execute(
@@ -271,7 +288,7 @@ async def test_executor_success_returns_payload_dict() -> None:
         "assistant_service.core.tools.web_fetch.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo_factory("93.184.216.34"),
     ), patch(
-        "httpx.AsyncClient.get", new=AsyncMock(return_value=fake_resp)
+        "assistant_service.core.tools.web_fetch.safe_fetch_with_response", new=AsyncMock(return_value=_fake_safe_response(status=fake_resp.status_code, body=fake_resp.content, headers=dict(fake_resp.headers), url=str(fake_resp.url)))
     ):
         executor = WebFetchExecutor()
         result = await executor.execute(

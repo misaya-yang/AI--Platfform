@@ -1873,8 +1873,10 @@ async def preview_chunks(
     try:
         dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
 
-        # Import chunking module
-        from src.services.knowledge.chunking import (
+        # Import chunking module from KS's own services package — gateway src/
+        # is NOT bundled into the KS image, so the legacy `from src.services...`
+        # path crashed every preview-chunks call with ModuleNotFoundError.
+        from ...services.knowledge.chunking import (
             ChunkingConfig,
             flatten_chunks,
             merge_small_chunks,

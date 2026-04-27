@@ -51,6 +51,7 @@ User passes a URL → server fetches it → bytes/effects flow back to user
 
 from __future__ import annotations
 
+import dataclasses
 import ipaddress
 import logging
 import socket
@@ -218,6 +219,26 @@ class _DNSPinnedTransport(httpx.AsyncHTTPTransport):
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class SafeFetchResponse:
+    """Rich result from ``safe_fetch_with_response``.
+
+    Use this when the caller needs more than just bytes — e.g. ``web_fetch``
+    tool needs the final URL after redirects, the response status code, and
+    the content-type header to decide HTML vs JSON vs text extraction.
+    """
+
+    body: bytes
+    final_url: str
+    status_code: int
+    headers: dict[str, str]
+    encoding: str | None = None
+
+    @property
+    def content_type(self) -> str:
+        return self.headers.get("content-type", "") or ""
+
+
 async def safe_fetch(
     url: str,
     *,
@@ -237,7 +258,30 @@ async def safe_fetch(
       validation is purely IP-based via DNS resolution.
 
     Raises ``SafeFetchError`` on any violation.
+
+    For callers needing the final URL / status / headers (e.g. content-type
+    sniffing), use :func:`safe_fetch_with_response` instead.
     """
+    response = await safe_fetch_with_response(
+        url,
+        max_bytes=max_bytes,
+        max_redirects=max_redirects,
+        timeout=timeout,
+        allowed_hosts=allowed_hosts,
+    )
+    return response.body
+
+
+async def safe_fetch_with_response(
+    url: str,
+    *,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    allowed_hosts: tuple[str, ...] | None = None,
+) -> SafeFetchResponse:
+    """Like ``safe_fetch`` but returns a ``SafeFetchResponse`` with the body,
+    the final URL after manual redirects, status code, and headers."""
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
 
@@ -289,7 +333,13 @@ async def safe_fetch(
                             f"payload exceeds {max_bytes // (1024 * 1024)} MB cap",
                             status_code=400,
                         )
-                return bytes(buf)
+                return SafeFetchResponse(
+                    body=bytes(buf),
+                    final_url=current,
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers),
+                    encoding=resp.encoding,
+                )
         except httpx.HTTPError as exc:
             raise SafeFetchError(f"fetch failed: {exc}") from exc
         finally:

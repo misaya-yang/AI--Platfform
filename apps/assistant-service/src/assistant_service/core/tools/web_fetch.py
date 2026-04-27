@@ -28,15 +28,21 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import re
-import socket
+import socket  # kept for test patching of `socket.getaddrinfo`
 import time
 from html import unescape
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-import httpx
+import httpx  # kept for `httpx.TimeoutException` / `httpx.HTTPError` in executor's except clauses
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import (
+    SafeFetchError,
+    safe_fetch_with_response,
+)
+from ai_gateway_core.security.safe_fetch import _is_unsafe_ip
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -70,37 +76,39 @@ _FORBIDDEN_HOSTS = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-
 
 
 class SSRFError(ValueError):
-    """Raised when a URL fails SSRF validation."""
+    """Back-compat alias raised by web_fetch's URL validation.
+
+    The actual security primitives now live in ``ai_gateway_core.security`` —
+    this class stays so the existing tool tests + agent code can keep
+    catching ``SSRFError``. ``SafeFetchError`` from the shared module is
+    converted to ``SSRFError`` at the boundary so the tool's external
+    contract is preserved.
+    """
 
 
 # ---------------------------------------------------------------------------
-# SSRF validation
+# SSRF validation — thin wrappers over ai_gateway_core.security
 # ---------------------------------------------------------------------------
+#
+# Implementation moved to ``ai_gateway_core.security.safe_fetch``. The
+# stronger primitives there add: DNS pinning during connect (TOCTOU-safe),
+# IPv4-mapped-IPv6 unwrap (``::ffff:10.0.0.1`` style bypass), and
+# urljoin-based redirect resolution. The wrappers here keep the same
+# function names so existing tests + callsites don't have to change.
 
 
 def _is_blocked_ip(ip_str: str) -> bool:
-    """Return True if the IP is in any range we refuse to fetch from."""
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        # Garbage we can't parse — refuse.
-        return True
-    # `ipaddress` flags RFC1918 (10/8, 172.16/12, 192.168/16), loopback (127/8,
-    # ::1), link-local (169.254/16, fe80::/10), multicast, reserved, and
-    # unspecified. That covers the cloud-metadata endpoint (169.254.169.254)
-    # and Docker networks.
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
+    """Return True if the IP is in any range we refuse to fetch from.
+
+    Delegates to the shared ``_is_unsafe_ip`` so the rule set is in one
+    place — IPv4-mapped IPv6 (``::ffff:127.0.0.1``) is correctly unwrapped
+    here too, where the previous local impl missed it.
+    """
+    return _is_unsafe_ip(ip_str)
 
 
 def _resolve_host(host: str) -> list[str]:
-    """Resolve a hostname to all its IP addresses. Isolated for mocking."""
+    """Resolve a hostname to all its IP addresses. Kept for test mocking."""
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as exc:
@@ -111,8 +119,10 @@ def _resolve_host(host: str) -> list[str]:
 def _validate_url(url: str) -> str:
     """Validate scheme + hostname + resolved IPs. Returns the normalized URL.
 
-    Raises SSRFError on any violation — the caller converts this to a clean
-    error result (never a stack trace).
+    Raises ``SSRFError`` on any violation. Internally delegates to
+    ``ai_gateway_core.security.is_safe_destination`` so the rule set is
+    consistent with every other SSRF callsite (image route, KS document
+    ingestion, callbacks).
     """
     if not url or not isinstance(url, str):
         raise SSRFError("url must be a non-empty string")
@@ -129,22 +139,26 @@ def _validate_url(url: str) -> str:
     if host in _FORBIDDEN_HOSTS:
         raise SSRFError(f"hostname {host!r} is blocked")
 
-    # If the host is already an IP literal, check directly; avoids DNS.
+    # IP literal — check directly without DNS.
     try:
-        literal = ipaddress.ip_address(host)
+        ip_obj = ipaddress.ip_address(host)
     except ValueError:
-        literal = None
+        ip_obj = None
 
-    if literal is not None:
-        if _is_blocked_ip(str(literal)):
+    if ip_obj is not None:
+        if _is_unsafe_ip(str(ip_obj)):
             raise SSRFError(f"host IP {host} resolves to a blocked range")
-    else:
-        ips = _resolve_host(host)
-        if not ips:
-            raise SSRFError(f"could not resolve {host!r}")
-        for ip in ips:
-            if _is_blocked_ip(ip):
-                raise SSRFError(f"host {host!r} resolves to blocked IP {ip}")
+        return urlunparse(parsed)
+
+    # Hostname — resolve via module-local _resolve_host (so tests can patch
+    # `web_fetch.socket.getaddrinfo`) and check each address with the shared
+    # _is_unsafe_ip rule (covers IPv4-mapped IPv6 etc).
+    ips = _resolve_host(host)
+    if not ips:
+        raise SSRFError(f"could not resolve {host!r}")
+    for ip in ips:
+        if _is_unsafe_ip(ip):
+            raise SSRFError(f"host {host!r} resolves to blocked IP {ip}")
 
     return urlunparse(parsed)
 
@@ -304,53 +318,29 @@ def _extract(html: str, mode: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_with_manual_redirects(url: str) -> tuple[str, httpx.Response, bytes]:
-    """Issue the request and follow redirects manually so each hop is SSRF-checked.
+async def _fetch_with_manual_redirects(url: str):
+    """Issue the request via the shared SSRF-safe fetcher.
 
-    Returns (final_url, final_response, body_bytes). Raises SSRFError or
-    httpx exceptions on failure.
+    Returns the ``SafeFetchResponse`` directly (body, final_url, status_code,
+    headers, encoding). Tests that previously got back ``(url, httpx_response,
+    bytes)`` should call ``.body``, ``.headers``, ``.status_code`` on the
+    return value instead.
     """
-    current_url = _validate_url(url)
-    timeout = httpx.Timeout(_TOTAL_TIMEOUT_SECS)
-    headers = {"User-Agent": _USER_AGENT, "Accept": "*/*"}
-
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=False,
-        headers=headers,
-    ) as client:
-        for _ in range(_MAX_REDIRECTS + 1):
-            resp = await client.get(current_url)
-
-            # Manual redirect handling — re-validate before following.
-            if resp.is_redirect and resp.headers.get("location"):
-                next_url = str(resp.headers["location"])
-                # httpx gives us the target URL; resolve relative locations.
-                if next_url.startswith("/"):
-                    p = urlparse(current_url)
-                    next_url = f"{p.scheme}://{p.netloc}{next_url}"
-                current_url = _validate_url(next_url)
-                continue
-
-            # Non-redirect — enforce size + return.
-            content_length = resp.headers.get("content-length")
-            if content_length and content_length.isdigit():
-                if int(content_length) > _MAX_RESPONSE_BYTES:
-                    raise ValueError(
-                        f"response too large: Content-Length={content_length} exceeds "
-                        f"{_MAX_RESPONSE_BYTES} bytes"
-                    )
-            # httpx already read the body (we called .get, not .stream);
-            # enforce size post-hoc for servers that omit Content-Length.
-            body = resp.content
-            if len(body) > _MAX_RESPONSE_BYTES:
-                raise ValueError(
-                    f"response too large: {len(body)} bytes exceeds "
-                    f"{_MAX_RESPONSE_BYTES} bytes"
-                )
-            return current_url, resp, body
-
-        raise ValueError(f"too many redirects (>{_MAX_REDIRECTS})")
+    # ``safe_fetch_with_response`` does scheme + DNS-pinned destination check
+    # + streaming size cap + urljoin redirect, identical security policy as
+    # every other SSRF callsite in the system.
+    try:
+        return await safe_fetch_with_response(
+            url,
+            max_bytes=_MAX_RESPONSE_BYTES,
+            max_redirects=_MAX_REDIRECTS,
+            timeout=_TOTAL_TIMEOUT_SECS,
+        )
+    except SafeFetchError as exc:
+        # Tool-internal contract: SSRF / size / scheme failures surface as
+        # SSRFError so the executor catches them and returns a clean
+        # `{"error": ...}` result instead of leaking a 500.
+        raise SSRFError(str(exc)) from exc
 
 
 async def web_fetch(
@@ -373,13 +363,15 @@ async def web_fetch(
     if max_chars <= 0:
         max_chars = _DEFAULT_MAX_CHARS
 
-    final_url, resp, body = await _fetch_with_manual_redirects(url)
-    content_type = resp.headers.get("content-type", "") or ""
+    response = await _fetch_with_manual_redirects(url)
+    body = response.body
+    final_url = response.final_url
+    content_type = response.content_type
 
-    # Decode bytes → str. httpx.Response.text would do this but we already
-    # hold the raw bytes for size enforcement, so decode directly.
+    # Decode bytes → str. The stored encoding (from Content-Type charset)
+    # is the best hint; fall back to utf-8 with replace so we never crash.
     try:
-        text = body.decode(resp.encoding or "utf-8", errors="replace")
+        text = body.decode(response.encoding or "utf-8", errors="replace")
     except (LookupError, TypeError):
         text = body.decode("utf-8", errors="replace")
 
@@ -397,13 +389,13 @@ async def web_fetch(
         "attention required | cloudflare",
     )
     blocked_by_antibot = (
-        (resp.status_code == 403 and any(m in _preview for m in cloudflare_markers))
-        or (resp.status_code == 503 and "cloudflare" in _preview)
+        (response.status_code == 403 and any(m in _preview for m in cloudflare_markers))
+        or (response.status_code == 503 and "cloudflare" in _preview)
     )
     if blocked_by_antibot:
         return {
             "url": final_url,
-            "status": resp.status_code,
+            "status": response.status_code,
             "content": (
                 f"[Blocked by anti-bot protection at {final_url}. "
                 "The site (likely Cloudflare-protected) rejected the fetch. "
@@ -424,7 +416,7 @@ async def web_fetch(
 
     return {
         "url": final_url,
-        "status": resp.status_code,
+        "status": response.status_code,
         "content": extracted,
         "truncated": truncated,
         "content_type": content_type,

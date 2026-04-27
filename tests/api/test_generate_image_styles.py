@@ -829,10 +829,21 @@ class TestReferenceArtifactId:
 
     def _artifact_storage_with(self, artifact_id: str, content: bytes):
         storage = MagicMock()
+        # Owner matches the standard _user() (u1/t1) so ownership check passes
+        artifact_obj = MagicMock()
+        artifact_obj.artifact_id = artifact_id
+        artifact_obj.user_id = "u1"
+        artifact_obj.tenant_id = "t1"
+
+        async def _get(aid):
+            return artifact_obj if aid == artifact_id else None
+
         async def _download(aid):
             if aid == artifact_id:
                 return content
             return None
+
+        storage.get_artifact = AsyncMock(side_effect=_get)
         storage.download_artifact = AsyncMock(side_effect=_download)
         return storage
 
@@ -920,3 +931,169 @@ class TestReferenceWithNonGeminiModel:
         )
         assert resp.success is False
         assert "gemini" in (resp.error or "").lower()
+
+
+@pytest.mark.asyncio
+class TestReferenceArtifactIdIDOR:
+    """Cross-tenant IDOR — user A must not be able to use user B's artifact_id."""
+
+    def _artifact_storage_with_owner(self, artifact_id: str, owner_user: str, owner_tenant: str):
+        from unittest.mock import MagicMock as _MM
+        artifact = _MM()
+        artifact.artifact_id = artifact_id
+        artifact.user_id = owner_user
+        artifact.tenant_id = owner_tenant
+
+        async def _get(aid):
+            return artifact if aid == artifact_id else None
+
+        async def _download(aid):
+            return b"secret_bytes" if aid == artifact_id else None
+
+        storage = _MM()
+        storage.get_artifact = AsyncMock(side_effect=_get)
+        storage.download_artifact = AsyncMock(side_effect=_download)
+        return storage
+
+    async def test_other_tenant_artifact_id_returns_404(self):
+        from fastapi import HTTPException as _HE
+
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_artifact_id="art_belongs_to_other",
+        )
+        # Artifact owner is tenant=other_tenant, user=other_user
+        storage = self._artifact_storage_with_owner(
+            "art_belongs_to_other", "other_user", "other_tenant",
+        )
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+
+        # Caller is the standard u1/t1 user — should get 404, not the bytes
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        # 404 (not 403) — same code as not-found so attackers can't enumerate
+        assert exc.value.status_code == 404
+        # Bytes never downloaded for unauthorized caller
+        storage.download_artifact.assert_not_awaited()
+
+    async def test_other_tenant_same_user_id_still_blocked(self):
+        """Cross-tenant same user_id is suspicious (re-used user id across
+        tenants) — must still 404."""
+        from fastapi import HTTPException as _HE
+
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_artifact_id="art_other_tenant",
+        )
+        # Same user_id="u1" but different tenant_id
+        storage = self._artifact_storage_with_owner(
+            "art_other_tenant", "u1", "different_tenant",
+        )
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+        assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+class TestImageTaskOwnership:
+    """Ownership check on /image-task/{task_id} — codex flagged that any
+    authenticated user could poll any UUID and read another tenant's prompt
+    + presigned URLs."""
+
+    async def test_other_user_polling_task_gets_404(self):
+        from fastapi import HTTPException as _HE
+        from assistant_service.api.routes.images import (
+            _image_tasks,
+            get_image_task_status,
+        )
+
+        # Submit a task as user A (admin/default tenant)
+        _image_tasks["task_a1"] = {
+            "task_id": "task_a1",
+            "status": "completed",
+            "progress": 100,
+            "prompt": "secret prompt",
+            "model_id": "gemini-3-flash-preview",
+            "provider": "google",
+            "images": [{"url": "https://s3...", "width": 512, "height": 512}],
+            "duration_ms": 1000.0,
+            "error": None,
+            "created_at": "2026-04-27T18:00:00+00:00",
+            "completed_at": "2026-04-27T18:00:01+00:00",
+            "owner_user_id": "user_a",
+            "owner_tenant_id": "tenant_a",
+        }
+
+        try:
+            # User B polls the task — must 404
+            from assistant_service.auth import UserContext
+            user_b = UserContext(
+                user_id="user_b", tenant_id="tenant_a", is_authenticated=True,
+            )
+            with pytest.raises(_HE) as exc:
+                await get_image_task_status(
+                    task_id="task_a1",
+                    request=_make_request(session_manager=None),
+                    user=user_b,
+                )
+            assert exc.value.status_code == 404
+        finally:
+            _image_tasks.pop("task_a1", None)
+
+    async def test_owner_polling_task_succeeds(self):
+        from assistant_service.api.routes.images import (
+            _image_tasks,
+            get_image_task_status,
+        )
+
+        _image_tasks["task_owner"] = {
+            "task_id": "task_owner",
+            "status": "completed",
+            "progress": 100,
+            "prompt": "p",
+            "model_id": "gemini-3-flash-preview",
+            "provider": "google",
+            "images": [],
+            "duration_ms": 1.0,
+            "error": None,
+            "created_at": "2026-04-27T18:00:00+00:00",
+            "completed_at": None,
+            "owner_user_id": "u1",
+            "owner_tenant_id": "t1",
+        }
+
+        try:
+            resp = await get_image_task_status(
+                task_id="task_owner",
+                request=_make_request(session_manager=None),
+                user=_user(),
+            )
+            assert resp.task_id == "task_owner"
+            assert resp.status == "completed"
+        finally:
+            _image_tasks.pop("task_owner", None)

@@ -12,8 +12,6 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import httpx
-
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
 from ...core.exceptions import ValidationFailedError
@@ -568,7 +566,7 @@ class DocumentService:
         content_type: str | None = None
 
         text, detected_mime = await asyncio.to_thread(
-            self._ks._extract_text_from_bytes, content_bytes, str(parsed), content_type
+            self._ks._extract_text_from_bytes, content_bytes, raw_url, content_type
         )
 
         doc_id = str(uuid.uuid4())
