@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ai_gateway_core.logging import get_logger
-from ...services.storage.image_storage import ImageStorageService
+from ai_gateway_core.storage.image_storage import ImageStorageService
 from ..deps import get_image_storage_service, get_user_context
 
 logger = get_logger(__name__)

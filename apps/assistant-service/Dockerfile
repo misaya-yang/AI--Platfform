@@ -1,5 +1,20 @@
 # Assistant Service — independent microservice
-# Shares gateway's src/ for core AssistantService logic (compatibility shim)
+#
+# As of Phase 5f Batch B, AS still bundles gateway's src/ because main.py
+# imports a small fixed set of concretes that haven't been moved yet:
+#
+#   - src.persistence.database          (DatabaseStorage class)
+#   - src.services.session.database_session_manager  (DatabaseSessionManager)
+#   - src.services.knowledge.kb_proxy_client         (KBProxyClient)
+#   - src.services.metrics.realtime_metrics          (get_realtime_metrics)
+#   - src.services.metrics.usage_recorder            (get_usage_recorder)
+#
+# Phase 5f Batch C will move these into ai_gateway_core, after which the
+# COPY src/ + pip install ".[all]" lines below can be removed and the
+# image will no longer contain /app/src/.
+#
+# Storage stack (image_storage / artifact_storage / file_storage) was moved
+# to ai_gateway_core in Batch B so it does NOT need src/ anymore.
 
 FROM python:3.12-slim AS builder
 

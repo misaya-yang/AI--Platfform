@@ -6,11 +6,37 @@ calls on storage instances.
 
 NoOp reference impls are provided so an un-injected AssistantService
 degrades to silent no-op behavior instead of NoneType-crashing.
+
+Concrete implementations (moved here from gateway src/services/storage/
+in Phase 5f Batch B) are also re-exported below.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+from .artifact_storage import (
+    ArtifactInfo,
+    ArtifactStorageService,
+    get_artifact_storage,
+    init_artifact_storage,
+)
+from .file_storage import (
+    FileInfo,
+    FileStorageService,
+    get_file_storage,
+    init_file_storage,
+    shutdown_file_storage,
+)
+from .image_storage import (
+    BaseStorageBackend,
+    ImageStorageService,
+    LocalStorageBackend,
+    OSSStorageBackend,
+    S3StorageBackend,
+    StorageBackend,
+    StorageConfig,
+)
 
 
 @runtime_checkable
@@ -88,4 +114,23 @@ __all__ = [
     "FileStorageLike",
     "NoOpArtifactStorage",
     "NoOpFileStorage",
+    # Concrete image-storage stack (moved in Phase 5f Batch B)
+    "BaseStorageBackend",
+    "ImageStorageService",
+    "LocalStorageBackend",
+    "OSSStorageBackend",
+    "S3StorageBackend",
+    "StorageBackend",
+    "StorageConfig",
+    # Artifact storage (moved in Phase 5f Batch B)
+    "ArtifactInfo",
+    "ArtifactStorageService",
+    "get_artifact_storage",
+    "init_artifact_storage",
+    # File storage (moved in Phase 5f Batch B)
+    "FileInfo",
+    "FileStorageService",
+    "get_file_storage",
+    "init_file_storage",
+    "shutdown_file_storage",
 ]

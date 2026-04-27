@@ -292,12 +292,12 @@ async def _load_task(redis, task_id: str) -> dict | None:
 
 
 def _get_artifact_storage():
-    """Artifact storage lives in gateway's src/services/storage; the
-    assistant-service Docker image bundles it. Return None if the module
-    isn't reachable (dev + tests) — callers fall back to data URLs in the
-    response and skip session-history persistence (multi-turn won't work)."""
+    """Artifact storage lives in ai_gateway_core (since Phase 5f Batch B).
+    Return None if the module isn't reachable (dev + tests) — callers fall
+    back to data URLs in the response and skip session-history persistence
+    (multi-turn won't work)."""
     try:
-        from src.services.storage import get_artifact_storage
+        from ai_gateway_core.storage import get_artifact_storage
         return get_artifact_storage()
     except Exception:
         return None

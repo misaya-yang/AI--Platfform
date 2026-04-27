@@ -199,7 +199,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Initialize S3 ImageStorageService for file persistence
             image_storage = None
             try:
-                from .storage.image_storage import (
+                from ai_gateway_core.storage.image_storage import (
                     ImageStorageService, StorageBackend, StorageConfig,
                 )
                 storage_cfg = resolved.storage

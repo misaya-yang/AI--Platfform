@@ -249,13 +249,15 @@ async def lifespan(app: FastAPI):
         logger.info("Primitive tools enabled (fs_read/fs_write/fs_glob/fs_grep)")
 
     # ── AssistantService ──
-    # Bucket-B wiring (Phase 4.2): fetch concrete recorders/storage from the
-    # gateway's src/ and inject into AssistantService. ``main.py`` is the
-    # only allowed composition-root site for these src.* imports; anywhere
-    # else in apps/assistant-service/ uses the Protocols from ai-gateway-core.
+    # Bucket-B wiring (Phase 4.2): fetch concrete recorders from the gateway's
+    # src/ and inject into AssistantService. ``main.py`` is the only allowed
+    # composition-root site for these src.* imports; anywhere else in
+    # apps/assistant-service/ uses the Protocols from ai-gateway-core.
+    # Storage stack itself moved to ai_gateway_core in Phase 5f Batch B, so
+    # storage helpers no longer require a src.* import here.
     from src.services.metrics.realtime_metrics import get_realtime_metrics
     from src.services.metrics.usage_recorder import get_usage_recorder
-    from src.services.storage import (
+    from ai_gateway_core.storage import (
         get_artifact_storage,
         get_file_storage,
         init_artifact_storage,
@@ -266,46 +268,18 @@ async def lifespan(app: FastAPI):
     realtime_metrics = get_realtime_metrics()
     usage_recorder = get_usage_recorder()
 
-    # Artifact storage init — the singleton in ``src.services.storage`` is
-    # per-process. Gateway initializes it during its own startup; AS runs in
-    # a separate container and must initialize its own instance from the
-    # gateway-shaped GATEWAY_STORAGE__* env vars (prod hands AS the same
-    # bucket so artifacts are visible to both services).
+    # Artifact storage init — the ai_gateway_core singleton is per-process.
+    # Gateway initializes it during its own startup; AS runs in a separate
+    # container and must initialize its own instance from the GATEWAY_STORAGE__*
+    # env vars (prod hands AS the same bucket so artifacts are visible to both
+    # services).
     if get_artifact_storage() is None:
         try:
-            from src.config.settings import Settings as _GwSettings
-            from src.services.storage.image_storage import (
-                StorageBackend,
-                StorageConfig,
-            )
+            from ai_gateway_core.storage.image_storage import StorageConfig
 
-            gw_settings = _GwSettings()
-            gw_storage = getattr(gw_settings, "storage", None)
-            backend_str = getattr(gw_storage, "backend", "local") if gw_storage else "local"
-            try:
-                backend = StorageBackend(backend_str)
-            except ValueError:
-                backend = StorageBackend.LOCAL
-
-            s3 = getattr(gw_storage, "s3", None) if gw_storage else None
-            oss = getattr(gw_storage, "oss", None) if gw_storage else None
-            storage_config = StorageConfig(
-                backend=backend,
-                s3_bucket=getattr(s3, "bucket", "") if s3 else "",
-                s3_region=getattr(s3, "region", "us-east-1") if s3 else "us-east-1",
-                s3_access_key=getattr(s3, "access_key", "") if s3 else "",
-                s3_secret_key=getattr(s3, "secret_key", "") if s3 else "",
-                s3_endpoint_url=getattr(s3, "endpoint_url", None) if s3 else None,
-                oss_bucket=getattr(oss, "bucket", "") if oss else "",
-                oss_endpoint=getattr(oss, "endpoint", "") if oss else "",
-                oss_access_key=getattr(oss, "access_key", "") if oss else "",
-                oss_secret_key=getattr(oss, "secret_key", "") if oss else "",
-                local_base_path=getattr(gw_storage, "local_base_path", None) or "./data/artifacts",
-                url_expiry_seconds=getattr(gw_storage, "url_expiry_seconds", None) or 3600,
-                key_prefix=getattr(gw_storage, "key_prefix", None) or "",
-            )
+            storage_config = StorageConfig.from_env()
             init_artifact_storage(storage_config, database)
-            logger.info(f"Artifact storage initialized (backend={backend.value})")
+            logger.info(f"Artifact storage initialized (backend={storage_config.backend.value})")
         except Exception as e:
             logger.warning(f"Artifact storage init failed: {e}")
 

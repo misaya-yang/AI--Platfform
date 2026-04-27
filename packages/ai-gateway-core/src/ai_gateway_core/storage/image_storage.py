@@ -95,6 +95,38 @@ class StorageConfig:
     # Prepended to all storage keys for environment isolation
     key_prefix: str = ""
 
+    @classmethod
+    def from_env(cls) -> "StorageConfig":
+        """Build a StorageConfig from GATEWAY_STORAGE__* env vars.
+
+        AS and other services that need storage but don't want to drag the gateway
+        Settings tree should call this. Reads the same env contract as
+        ``src/main.py``'s storage init block.
+        """
+        import os
+
+        backend_str = os.getenv("GATEWAY_STORAGE__BACKEND", "local").lower()
+        try:
+            backend = StorageBackend(backend_str)
+        except ValueError:
+            backend = StorageBackend.LOCAL
+
+        return cls(
+            backend=backend,
+            s3_bucket=os.getenv("GATEWAY_STORAGE__S3__BUCKET", ""),
+            s3_region=os.getenv("GATEWAY_STORAGE__S3__REGION", "us-east-1"),
+            s3_access_key=os.getenv("GATEWAY_STORAGE__S3__ACCESS_KEY", ""),
+            s3_secret_key=os.getenv("GATEWAY_STORAGE__S3__SECRET_KEY", ""),
+            s3_endpoint_url=os.getenv("GATEWAY_STORAGE__S3__ENDPOINT_URL") or None,
+            oss_bucket=os.getenv("GATEWAY_STORAGE__OSS__BUCKET", ""),
+            oss_endpoint=os.getenv("GATEWAY_STORAGE__OSS__ENDPOINT", ""),
+            oss_access_key=os.getenv("GATEWAY_STORAGE__OSS__ACCESS_KEY", ""),
+            oss_secret_key=os.getenv("GATEWAY_STORAGE__OSS__SECRET_KEY", ""),
+            local_base_path=os.getenv("GATEWAY_STORAGE__LOCAL_BASE_PATH", "./data/artifacts"),
+            url_expiry_seconds=int(os.getenv("GATEWAY_STORAGE__URL_EXPIRY_SECONDS", "3600")),
+            key_prefix=os.getenv("GATEWAY_STORAGE__KEY_PREFIX", ""),
+        )
+
 
 class BaseStorageBackend(ABC):
     """Abstract base class for storage backends"""

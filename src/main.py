@@ -379,7 +379,7 @@ def create_app() -> FastAPI:
         image_storage_service = None
         storage_config = None
         try:
-            from .services.storage.image_storage import (
+            from ai_gateway_core.storage.image_storage import (
                 ImageStorageService,
                 StorageBackend,
                 StorageConfig,
@@ -440,14 +440,14 @@ def create_app() -> FastAPI:
             )
 
             # Initialize artifact storage service (for document/image generation, code execution)
-            from .services.storage import init_artifact_storage
+            from ai_gateway_core.storage import init_artifact_storage
 
             artifact_storage = init_artifact_storage(storage_config, container.database)
             app.state.artifact_storage = artifact_storage
             logger.info(f"Artifact 存储服务已初始化 (backend={storage_backend.value})")
 
             # Initialize file storage service for user uploads
-            from .services.storage import init_file_storage
+            from ai_gateway_core.storage import init_file_storage
 
             file_storage = init_file_storage(storage_config)
             app.state.file_storage = file_storage

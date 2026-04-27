@@ -34,7 +34,7 @@ from ai_gateway_core.exceptions import PermissionDeniedError
 from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
 from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
 from typing import Any
-from ...services.storage import get_artifact_storage
+from ai_gateway_core.storage import get_artifact_storage
 from ..deps import get_user_context
 from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
 from ..schemas.assistant import (
