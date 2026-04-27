@@ -543,43 +543,29 @@ class DocumentService:
         if not raw_url:
             raise ValidationFailedError("url is required")
 
-        parsed = httpx.URL(raw_url)
-        if parsed.scheme not in {"http", "https"}:
-            raise ValidationFailedError("Only http/https URLs are supported")
-
         max_bytes = 10 * 1024 * 1024  # 10MB safety limit
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-            "Accept-Encoding": "gzip, deflate",
-        }
 
+        # SSRF-safe fetch — DNS pinning, private/loopback rejection,
+        # streaming with hard byte cap, urljoin-based redirect.
+        # Same primitive used by AS image route to keep semantics aligned.
+        from ai_gateway_core.security import SafeFetchError, safe_fetch
+
+        try:
+            content_bytes = await safe_fetch(
+                raw_url,
+                max_bytes=max_bytes,
+                max_redirects=5,
+                timeout=20.0,
+            )
+        except SafeFetchError as exc:
+            raise ValidationFailedError(f"Failed to fetch url: {exc}") from exc
+
+        # ``safe_fetch`` doesn't expose response headers; sniff content-type
+        # later from the bytes via the existing extractor pipeline. The
+        # earlier code used Content-Type from the response, but downstream
+        # ``extract_text_from_url_content`` already does its own detection
+        # so the field is informational.
         content_type: str | None = None
-        content_bytes: bytes = b""
-        async with (
-            httpx.AsyncClient(
-                timeout=httpx.Timeout(20.0, read=20.0),
-                follow_redirects=True,
-                headers=headers,
-            ) as client,
-            client.stream("GET", str(parsed)) as resp,
-        ):
-            if resp.status_code >= 400:
-                raise ValidationFailedError(
-                    f"Failed to fetch url: {resp.status_code} {resp.reason_phrase or ''}".strip()
-                )
-            content_type = (resp.headers.get("content-type") or "").split(";", 1)[0].strip() or None
-            chunks: list[bytes] = []
-            size = 0
-            async for part in resp.aiter_bytes():
-                if not part:
-                    continue
-                size += len(part)
-                if size > max_bytes:
-                    raise ValidationFailedError("URL content is too large (limit 10MB)")
-                chunks.append(part)
-            content_bytes = b"".join(chunks)
 
         text, detected_mime = await asyncio.to_thread(
             self._ks._extract_text_from_bytes, content_bytes, str(parsed), content_type

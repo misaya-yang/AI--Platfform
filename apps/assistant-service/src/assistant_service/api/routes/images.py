@@ -33,19 +33,12 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _b64
-import ipaddress
 import json
 import logging
-import socket
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
-
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
 
 from ai_gateway_core.enums import StylePreset
 from ai_gateway_core.image import (
@@ -57,12 +50,15 @@ from ai_gateway_core.image import (
     resolve_image_routing,
     send_image_callback,
 )
+from ai_gateway_core.security import SafeFetchError, safe_fetch
 from ai_gateway_core.style_presets import (
     compose_styled_prompt,
     resolve_dashscope_style_tag,
     resolve_negative_prompt,
     resolve_style_preset,
 )
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
 
 from ...auth import UserContext, get_user_context
 from ...core.models.model_registry import ModelRegistry
@@ -116,21 +112,32 @@ class ImageGenerationRequest(BaseModel):
     size: str | None = "1024*1024"
     style: StylePreset = Field(default=StylePreset.DEFAULT)
     session_id: str | None = None
+    reference_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable artifact ID returned by an earlier generation (preferred "
+            "for stateless edits). The server looks up bytes directly via "
+            "ArtifactStorage — no URL fetch, no SSRF surface. Use this when "
+            "you have the artifact_id we returned previously."
+        ),
+    )
     reference_image: str | None = Field(
         default=None,
         description=(
-            "Reference image as base64 or data URL. Use this for fully "
-            "stateless integrations where the Dev backend already holds "
-            "the prior image. Prefer ``reference_image_url`` to avoid "
-            "uploading ~1 MB on every turn."
+            "Reference image as base64 or data URL. Use only when the prior "
+            "image is local-only (e.g. a user upload that never went through "
+            "us). Prefer ``reference_artifact_id`` (server-side lookup) or "
+            "``reference_image_url`` (we fetch via SSRF-safe client)."
         ),
     )
     reference_image_url: str | None = Field(
         default=None,
         description=(
-            "URL of a prior generated image (typically one we returned in "
-            "an earlier response). AS fetches it server-side and forwards "
-            "to Gemini as inline data. Saves bandwidth on the Dev → AS edge."
+            "URL of a prior image. AS fetches it via SSRF-safe client (DNS "
+            "pinning + private-IP rejection + 8 MB streaming cap). Only "
+            "http(s); private/loopback/link-local rejected. Prefer "
+            "``reference_artifact_id`` when possible — that path doesn't "
+            "fetch a URL at all."
         ),
     )
     add_watermark: bool = True
@@ -229,7 +236,14 @@ def _cleanup_old_tasks() -> None:
 async def _store_task(redis, task_id: str, task: dict) -> None:
     """Persist ``task`` under ``task_id``. Uses Redis when present, else the
     in-process dict. Always refreshes the TTL on Redis writes — completed
-    tasks then expire 1h after completion regardless of when submitted."""
+    tasks then expire 1h after completion regardless of when submitted.
+
+    Recovery: when a Redis write succeeds after a previous fallback, we
+    proactively pop the dict entry. Without this, ``_load_task`` keeps
+    preferring the now-stale dict value forever (it's only ever cleared
+    by the size-cap GC). After recovery, Redis is again the authoritative
+    source.
+    """
     if redis is not None:
         try:
             await redis.set(
@@ -237,6 +251,8 @@ async def _store_task(redis, task_id: str, task: dict) -> None:
                 json.dumps(task, default=str),
                 ex=_TASK_TTL_SECONDS,
             )
+            # Redis is now authoritative — drop any stale fallback entry.
+            _image_tasks.pop(task_id, None)
             return
         except Exception as exc:
             logger.warning("Redis task store write failed (%s); falling back to dict", exc)
@@ -400,155 +416,62 @@ async def _persist_and_get_url(
     )
 
 
-# -----------------------------------------------------------------------------
-# SSRF-safe URL fetcher for ``reference_image_url``
-# -----------------------------------------------------------------------------
-#
-# The Dev backend passes a URL of a prior generated image; AS fetches it
-# server-side. Without guards an authenticated attacker could:
-#   * hit AWS metadata (169.254.169.254) → IAM credential theft
-#   * probe internal services / private networks
-#   * bypass via redirect to private IP (302 follows past prefix check)
-#   * amplify with oversized payloads (cap was checked after full download)
-#
-# ``_safe_fetch_url`` defends with: scheme allow-list, manual redirect handling
-# (each hop re-validated), DNS resolution + IP category check
-# (private/loopback/link-local/reserved/multicast/unspecified all rejected),
-# streaming with hard byte cap, 30 s wall clock.
-
-_REFERENCE_URL_MAX_BYTES = 8 * 1024 * 1024  # 8 MB
-_REFERENCE_URL_MAX_REDIRECTS = 3
-_REFERENCE_URL_TIMEOUT_SECONDS = 30.0
-
-
-def _is_safe_destination(host: str, port: int) -> tuple[bool, str]:
-    """Resolve ``host`` and reject if any address is private/loopback/etc.
-
-    Multi-record hosts must have *all* addresses safe — a single private
-    record poisons the whole hostname (DNS rebinding defence).
-
-    Returns ``(ok, reason)``. ``reason`` is empty on success, populated on
-    rejection so the caller can surface a useful 400.
-    """
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except socket.gaierror as e:
-        return False, f"DNS resolution failed: {e}"
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return False, f"unparseable address: {addr}"
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            return False, (
-                f"destination {host} resolves to disallowed address {addr}"
-            )
-    return True, ""
-
-
-async def _safe_fetch_url(url: str) -> bytes:
-    """Fetch ``url`` with SSRF + size guards.
-
-    - http(s) only
-    - At most ``_REFERENCE_URL_MAX_REDIRECTS`` manual redirects; each hop's
-      host re-validated against the private-IP set
-    - Streaming with hard byte cap to avoid amplification / slow-loris
-    - ``_REFERENCE_URL_TIMEOUT_SECONDS`` wall clock
-    """
-    current = url
-    async with httpx.AsyncClient(
-        timeout=_REFERENCE_URL_TIMEOUT_SECONDS,
-        follow_redirects=False,
-    ) as client:
-        # We allow up to MAX_REDIRECTS hops, plus one final non-redirect hop
-        # that produces the body. ``range(MAX + 1)`` gives us that budget.
-        for _ in range(_REFERENCE_URL_MAX_REDIRECTS + 1):
-            parsed = urlparse(current)
-            if parsed.scheme not in ("http", "https"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="reference_image_url must be an http(s) URL",
-                )
-            host = parsed.hostname
-            if not host:
-                raise HTTPException(
-                    status_code=400,
-                    detail="reference_image_url missing host",
-                )
-            port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            ok, reason = _is_safe_destination(host, port)
-            if not ok:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"reference_image_url destination rejected: {reason}",
-                )
-
-            # Stream the response so we can abort on the first byte over cap.
-            async with client.stream("GET", current) as resp:
-                # 3xx with Location → record the next hop and let the for-loop
-                # continue. ``next_url`` is captured outside the ``async with``
-                # so the stream context cleans up before we re-validate DNS.
-                if 300 <= resp.status_code < 400 and "location" in resp.headers:
-                    next_url = resp.headers["location"]
-                    if next_url.startswith("/"):
-                        next_url = f"{parsed.scheme}://{parsed.netloc}{next_url}"
-                else:
-                    resp.raise_for_status()
-                    buf = bytearray()
-                    async for chunk in resp.aiter_bytes():
-                        buf.extend(chunk)
-                        if len(buf) > _REFERENCE_URL_MAX_BYTES:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=(
-                                    "reference_image_url payload exceeds "
-                                    f"{_REFERENCE_URL_MAX_BYTES // (1024 * 1024)} MB limit"
-                                ),
-                            )
-                    return bytes(buf)
-            # Stream context closed cleanly; advance to the next hop.
-            current = next_url
-
-    # Fell through the loop without returning — we exhausted the redirect
-    # budget. Raise a descriptive 400.
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "reference_image_url exceeded "
-            f"{_REFERENCE_URL_MAX_REDIRECTS} redirects"
-        ),
-    )
-
-
 async def _resolve_reference_bytes(
     body: ImageGenerationRequest, *, artifact_storage,
 ) -> str | None:
     """Resolve any reference image to a base64 string suitable for Gemini.
 
-    Order:
-    1. ``reference_image`` (base64/data-URL) — pass through
-    2. ``reference_image_url`` — SSRF-safe fetch (see ``_safe_fetch_url``),
-       base64-encoded for Gemini's ``inlineData``
+    Order (most-secure first):
+    1. ``reference_artifact_id`` — direct lookup in our ArtifactStorage. No
+       URL fetch, no SSRF surface. **Preferred** for stateless edits.
+    2. ``reference_image`` (base64 / data-URL) — pass through. Use only when
+       caller has bytes locally and isn't going through us.
+    3. ``reference_image_url`` — SSRF-safe fetch via shared ``safe_fetch``
+       (DNS pinning + private/loopback rejection + 8 MB streaming cap +
+       urljoin redirect handling). Base64-encoded for Gemini ``inlineData``.
 
-    Returns ``None`` if neither is set.
+    Returns ``None`` if no reference is provided.
     """
+    if body.reference_artifact_id:
+        if not artifact_storage:
+            raise HTTPException(
+                status_code=503,
+                detail="reference_artifact_id requires ArtifactStorage to be configured",
+            )
+        try:
+            content = await artifact_storage.download_artifact(body.reference_artifact_id)
+        except Exception as exc:
+            logger.warning("reference_artifact_id lookup failed: %s", exc)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Failed to load reference_artifact_id: {exc}",
+            ) from exc
+        if not content:
+            raise HTTPException(
+                status_code=404,
+                detail=f"reference_artifact_id {body.reference_artifact_id!r} not found",
+            )
+        return _b64.b64encode(content).decode()
+
     if body.reference_image:
         return body.reference_image
+
     if not body.reference_image_url:
         return None
+
     try:
-        content = await _safe_fetch_url(body.reference_image_url)
+        content = await safe_fetch(
+            body.reference_image_url,
+            max_bytes=8 * 1024 * 1024,
+            max_redirects=3,
+            timeout=30.0,
+        )
         return _b64.b64encode(content).decode()
-    except HTTPException:
-        raise
+    except SafeFetchError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=f"reference_image_url: {exc}",
+        ) from exc
     except Exception as exc:
         logger.warning("reference_image_url fetch failed: %s", exc)
         raise HTTPException(
@@ -715,12 +638,24 @@ async def generate_image(
             body.model_id, selected_provider,
         )
 
-        has_reference = bool(body.reference_image or body.reference_image_url)
+        has_reference = bool(
+            body.reference_artifact_id
+            or body.reference_image
+            or body.reference_image_url
+        )
         if has_reference and not prefer_gemini:
-            logger.warning(
-                "reference image ignored: edit requires Gemini "
-                "(model=%s provider=%s). Falling through to fresh generation.",
-                body.model_id, selected_provider,
+            # Editing an existing image only works on Gemini. Falling through
+            # to fresh generation would silently ignore the user's reference
+            # and produce a totally unrelated image — almost always wrong.
+            return ImageGenerationResponse(
+                success=False, images=[], provider=str(selected_provider or "unknown"),
+                duration_ms=(time.time() - start_time) * 1000,
+                error=(
+                    f"reference image editing requires a Gemini model "
+                    f"(got model_id={body.model_id!r}, provider={selected_provider!r}). "
+                    "Drop the reference fields for fresh generation, or pick a "
+                    "Gemini model_id (e.g. gemini-3-flash-preview)."
+                ),
             )
 
         width, height, aspect_ratio = parse_image_size(body.size)
@@ -885,7 +820,26 @@ async def _run_image_generation_task(
         task["progress"] = 30
 
         artifact_storage = _get_artifact_storage()
-        has_reference = bool(body.reference_image or body.reference_image_url)
+        has_reference = bool(
+            body.reference_artifact_id
+            or body.reference_image
+            or body.reference_image_url
+        )
+
+        # Reference given but routing isn't Gemini — fail explicitly. Falling
+        # through to fresh generation would silently produce an unrelated
+        # image, which is almost never what the caller wanted.
+        if has_reference and not prefer_gemini:
+            task["status"] = "failed"
+            task["error"] = (
+                f"reference image editing requires a Gemini model "
+                f"(got model_id={body.model_id!r}, provider={selected_provider!r})"
+            )
+            task["progress"] = 100
+            task["completed_at"] = datetime.now(timezone.utc).isoformat()
+            await _store_task(redis, task_id, task)
+            return
+
         res = None
         generated_response_imgs: list[GeneratedImage] = []
 

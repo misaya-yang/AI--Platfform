@@ -192,3 +192,36 @@ async def test_load_prefers_dict_after_redis_write_failure_then_recovery():
     # Step 3: load — Redis returns stale pending, dict has fresh running
     result = await _load_task(redis, "t1")
     assert result["status"] == "running", "must prefer fallback dict over stale Redis"
+
+
+@pytest.mark.asyncio
+async def test_store_clears_dict_after_redis_recovers():
+    """After a Redis-fallback write puts data in dict, the next successful
+    Redis write must clear the dict entry. Otherwise ``_load_task`` keeps
+    returning the stale dict value forever and Redis can never reassert
+    authority. Repro:
+    1. Redis write fails → dict has 'pending'
+    2. Redis write succeeds with 'completed' → dict should be cleared
+    3. _load_task must now return Redis's 'completed', not the dict's
+       residual 'pending'
+    """
+    redis = MagicMock()
+    redis.set = AsyncMock(side_effect=[ConnectionError("boom"), None])
+    redis.get = AsyncMock(
+        return_value=json.dumps({"status": "completed", "task_id": "t1"}),
+    )
+
+    # Step 1: Redis fails → dict captures 'pending'
+    await _store_task(redis, "t1", {"status": "pending", "task_id": "t1"})
+    assert _image_tasks["t1"]["status"] == "pending"
+
+    # Step 2: Redis recovers → write succeeds, dict should be cleared
+    await _store_task(redis, "t1", {"status": "completed", "task_id": "t1"})
+    assert "t1" not in _image_tasks, (
+        "Redis recovery must clear stale dict entry; otherwise _load_task "
+        "would keep returning the old dict value forever."
+    )
+
+    # Step 3: load via Redis returns the fresh 'completed'
+    result = await _load_task(redis, "t1")
+    assert result["status"] == "completed"

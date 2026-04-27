@@ -30,7 +30,14 @@ async def _get_client() -> httpx.AsyncClient:
     if _client is None:
         async with _client_lock:
             if _client is None:
-                _client = httpx.AsyncClient(timeout=_CALLBACK_TIMEOUT)
+                # follow_redirects=False so a hostile callback can't redirect
+                # us into the private network mid-transaction. Validation
+                # only happens on the original URL — without this guard a
+                # 302 → http://169.254.169.254 would still leak.
+                _client = httpx.AsyncClient(
+                    timeout=_CALLBACK_TIMEOUT,
+                    follow_redirects=False,
+                )
     return _client
 
 
@@ -41,7 +48,23 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
     immediately on 4xx (client error — retrying won't help).
 
     Returns True only when the receiver returned ``{"code": 0}`` (Wahda contract).
+
+    SSRF guard: ``callback_url`` is validated up-front via
+    ``validate_callback_url`` (rejects private/loopback/link-local/non-http).
+    The actual POST uses ``follow_redirects=False`` so the server can't
+    redirect us into the private network mid-transaction.
     """
+    # Validate the URL FIRST — fail fast on attacker-controlled callbacks
+    # before any DNS / connect attempt.
+    from ai_gateway_core.security import SafeFetchError, validate_callback_url
+
+    try:
+        validate_callback_url(callback_url)
+    except SafeFetchError as exc:
+        logger.warning(
+            "[ImageCallback] Refusing callback to %s: %s", callback_url, exc,
+        )
+        return False
     images = [
         {
             "artifact_id": img.get("artifact_id"),

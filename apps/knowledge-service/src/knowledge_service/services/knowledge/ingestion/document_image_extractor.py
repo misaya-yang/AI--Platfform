@@ -1060,39 +1060,25 @@ class HTMLExtractor:
                 logger.debug(f"Skipping non-HTTP URL: {url[:100]}")
                 return None
 
-            # Add headers to avoid being blocked as bot
-            headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; AI-Gateway/1.0; +https://github.com/ai-gateway)",
-                "Accept": "image/avif,image/webp,image/png,image/jpeg,*/*",
-            }
+            # SSRF-safe fetch — DNS pinning, private/loopback rejection,
+            # streaming hard cap (aborts mid-download, not after full read),
+            # urljoin-based per-hop redirect re-validation. Same primitive
+            # used by AS image route + KS document URL ingestion.
+            from ai_gateway_core.security import SafeFetchError, safe_fetch
 
-            async with httpx.AsyncClient(
-                timeout=HTTP_DOWNLOAD_TIMEOUT_SECONDS,
-                follow_redirects=True,
-                headers=headers,
-            ) as client:
-                response = await client.get(url)
+            try:
+                content = await safe_fetch(
+                    url,
+                    max_bytes=MAX_IMAGE_SIZE_BYTES,
+                    max_redirects=3,
+                    timeout=HTTP_DOWNLOAD_TIMEOUT_SECONDS,
+                )
+            except SafeFetchError as exc:
+                logger.debug(f"Failed to download image (safe_fetch): {exc} from {url[:100]}")
+                return None
 
-                if response.status_code == 200:
-                    content = response.content
-
-                    # Check content size
-                    if len(content) > MAX_IMAGE_SIZE_BYTES:
-                        logger.info(
-                            f"Downloaded image too large: {len(content)} bytes from {url[:100]}"
-                        )
-                        return None
-
-                    mime_type = response.headers.get("content-type", "").split(";")[0]
-                    if not mime_type.startswith("image/"):
-                        mime_type = detect_mime_type(content)
-
-                    return content, mime_type
-                else:
-                    logger.debug(
-                        f"Failed to download image: HTTP {response.status_code} from {url[:100]}"
-                    )
-                    return None
+            mime_type = detect_mime_type(content)
+            return content, mime_type
 
         except Exception as e:
             logger.warning(f"Failed to download image from {url[:100]}: {e}")

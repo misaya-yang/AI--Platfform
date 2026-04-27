@@ -80,9 +80,13 @@ class TaskManager:
             async with self._client_lock:
                 # 双重检查锁定模式，避免多个协程同时创建 client
                 if self._callback_client is None or self._callback_client.is_closed:
+                    # follow_redirects=False so a hostile callback server
+                    # can't 302 us into the private network after URL
+                    # validation passed. SSRF defense in depth.
                     self._callback_client = httpx.AsyncClient(
                         timeout=httpx.Timeout(self.callback_timeout),
                         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                        follow_redirects=False,
                     )
         return self._callback_client
 
@@ -141,7 +145,25 @@ class TaskManager:
         raise TaskNotFoundError(task_id)
 
     async def _send_callback(self, task: Task) -> None:
-        """发送回调，带重试机制"""
+        """发送回调，带重试机制
+
+        SSRF guard: ``task.callback_url`` is user-controlled. Validate
+        before any network attempt to refuse private/loopback/non-http
+        targets. The HTTP client is configured with ``follow_redirects=False``
+        so a hostile callback server can't redirect us into the private
+        network mid-transaction.
+        """
+        # Validate FIRST — fail fast on attacker-controlled callbacks.
+        from ai_gateway_core.security import SafeFetchError, validate_callback_url
+
+        try:
+            validate_callback_url(task.callback_url)
+        except SafeFetchError as exc:
+            logger.warning(
+                f"Refusing callback for task {task.task_id}: {exc}"
+            )
+            return
+
         client = await self._get_callback_client()
         if client.is_closed:
             logger.warning(f"Cannot send callback for task {task.task_id}: client is closed")
