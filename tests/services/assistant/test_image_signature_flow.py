@@ -73,6 +73,29 @@ def test_no_signature_when_absent_in_result():
     assert "thought_signature" not in history[1]
 
 
+def test_base64_NOT_persisted_when_file_uri_unavailable():
+    """Storage discipline lock — without ``file_uri`` we must NOT fall back to
+    storing ``image_base64`` inline. Two such turns blow the 1 MB session
+    metadata cap and brick the whole session.
+
+    See ``ai_gateway_core.image.helpers.append_image_turns`` docstring."""
+    history: list[dict] = []
+    result_image = {
+        "content_base64": "X" * 1_500_000,  # ~1.5 MB raw
+        "mime_type": "image/png",
+        "thought_signature": "sig_abc",
+    }
+    append_image_turns(history, "draw a fish", result_image, "result text")
+
+    assert len(history) == 2
+    model_turn = history[1]
+    # Anchor missing → text + sig only, no base64.
+    assert "image_base64" not in model_turn
+    assert "file_uri" not in model_turn
+    assert model_turn["text"] == "result text"
+    assert model_turn["thought_signature"] == "sig_abc"
+
+
 # ---------------------------------------------------------------------------
 # 2. Signature replayed in next-turn contents
 # ---------------------------------------------------------------------------

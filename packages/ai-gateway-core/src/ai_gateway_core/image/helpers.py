@@ -165,11 +165,21 @@ def append_image_turns(
 ) -> None:
     """Append one user turn and (on success) one model turn to ``image_history``.
 
-    When ``file_uri`` is provided (preferred path), the model turn stores only
-    the URI — the actual base64 lives on Gemini's Files API side. Without a
-    ``file_uri`` we fall back to persisting the base64 inline, which keeps
-    behaviour consistent with old sessions but will be rejected by the 1 MB
-    session metadata cap and lose the visual anchor on the next turn.
+    Storage discipline (load-bearing — DO NOT add a base64 fallback):
+
+    The model turn stores only a Gemini Files API ``file_uri`` as the visual
+    anchor. We DELIBERATELY skip storing raw ``image_base64`` even if
+    ``file_uri`` is None — a freshly-generated 1024×1024 image is ~1 MB
+    base64-encoded, and the session manager refuses metadata writes over
+    1 MB. Two prod turns of inline-base64 history blew the cap and bricked
+    the session entirely (no history written at all). Better to lose the
+    visual anchor on a single turn than to brick the whole session.
+
+    Without a ``file_uri`` the model turn keeps only its text + signature.
+    Replay (``build_gemini_contents_from_history``) emits a text-only model
+    turn in that case, so multi-turn still works but with degraded visual
+    grounding. Investigate Files API auth (a 403 typically means Vertex
+    Express key being used against AI Studio's upload endpoint).
 
     Mutates the list in place. Call only when Gemini responded successfully;
     skip entirely on failure to avoid a dangling unanswered prompt in the next
@@ -184,8 +194,6 @@ def append_image_turns(
     }
     if file_uri:
         model_turn["file_uri"] = file_uri
-    else:
-        model_turn["image_base64"] = result_image["content_base64"]
     if result_text:
         model_turn["text"] = result_text
     # Gemini 3.x requires thought_signature on every replayed model turn for

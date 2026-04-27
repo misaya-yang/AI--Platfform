@@ -67,6 +67,16 @@ class GeminiImageGenerator:
             self.api_key = resolved_key
             self.base_url = resolved_base_url
             self.backend = resolved_backend
+        # Files API is AI Studio only — Vertex Express keys (``AQ.*``) get a
+        # 403 from ``generativelanguage.googleapis.com/upload``. Resolve a
+        # studio key independently so ``upload_image`` always has a usable
+        # key even when ``self.api_key`` is a Vertex Express token.
+        import os
+        self.studio_key = (
+            os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip()
+            or (self.api_key if self.backend == "ai_studio" else "")
+        )
         self.model = model or self.DEFAULT_MODEL
         self._client: httpx.AsyncClient | None = None
 
@@ -285,8 +295,13 @@ class GeminiImageGenerator:
         Raises on API error so the caller can fall back cleanly (e.g. degrade the
         current turn to text-only instead of storing a dangling reference).
         """
-        if not self.is_configured:
-            raise RuntimeError("Gemini API key is not configured — cannot upload file")
+        if not self.studio_key:
+            raise RuntimeError(
+                "AI Studio API key (GEMINI_API_KEY / GOOGLE_API_KEY) is not "
+                "configured — cannot upload to Files API. Vertex Express keys "
+                "(AQ.*) cannot auth against the Files API; a real Studio key "
+                "is required even when image generation runs on Vertex."
+            )
 
         # Files API is AI-Studio-only. Vertex Express Mode has no
         # equivalent endpoint under aiplatform.googleapis.com, so we
@@ -299,7 +314,7 @@ class GeminiImageGenerator:
         url = f"{upload_host}/upload/v1beta/files"
         response = await client.post(
             url,
-            params={"key": self.api_key},
+            params={"key": self.studio_key},
             headers={
                 "Content-Type": mime_type,
                 "X-Goog-Upload-Protocol": "raw",
