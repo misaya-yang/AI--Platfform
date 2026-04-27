@@ -213,7 +213,7 @@ async def inflate_history_with_bytes(
         *[download(aid) for aid in artifact_ids], return_exceptions=True,
     )
     bytes_by_id: dict[str, bytes] = {}
-    for aid, res in zip(artifact_ids, fetched):
+    for aid, res in zip(artifact_ids, fetched, strict=True):
         if isinstance(res, BaseException):
             continue
         if res:

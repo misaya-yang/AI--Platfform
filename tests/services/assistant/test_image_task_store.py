@@ -171,3 +171,24 @@ async def test_redis_round_trip_preserves_full_task_shape():
     result = await _load_task(redis, "t1")
 
     assert result == task
+
+
+@pytest.mark.asyncio
+async def test_load_prefers_dict_after_redis_write_failure_then_recovery():
+    """Reproduces stale-Redis scenario:
+    1. Successful Redis write -> 'pending'
+    2. Redis write fails -> dict gets 'running'
+    3. Redis read works again -> returns OLD 'pending'
+    4. _load_task must return 'running' (from dict), not 'pending' (from Redis)
+    """
+    redis = MagicMock()
+    redis.set = AsyncMock(side_effect=[None, ConnectionError("boom")])
+    redis.get = AsyncMock(return_value=json.dumps({"status": "pending", "task_id": "t1"}))
+
+    # Step 1: first write succeeds -> Redis has pending
+    await _store_task(redis, "t1", {"status": "pending", "task_id": "t1"})
+    # Step 2: second write fails -> dict has running
+    await _store_task(redis, "t1", {"status": "running", "task_id": "t1"})
+    # Step 3: load — Redis returns stale pending, dict has fresh running
+    result = await _load_task(redis, "t1")
+    assert result["status"] == "running", "must prefer fallback dict over stale Redis"

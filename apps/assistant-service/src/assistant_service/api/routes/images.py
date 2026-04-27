@@ -241,15 +241,25 @@ async def _store_task(redis, task_id: str, task: dict) -> None:
 
 
 async def _load_task(redis, task_id: str) -> dict | None:
-    """Look up a task by id. Tries Redis first, falls back to dict."""
+    """Look up a task by id. Tries Redis first, falls back to dict.
+
+    The fallback dict is preferred over a successful Redis read when both
+    have an entry: the dict is only populated when a prior write failed to
+    Redis, so its presence means it holds the freshest known state and
+    Redis may be stale after recovery."""
+    redis_task: dict | None = None
     if redis is not None:
         try:
             raw = await redis.get(_TASK_KEY_PREFIX + task_id)
             if raw:
-                return json.loads(raw)
+                redis_task = json.loads(raw)
         except Exception as exc:
             logger.warning("Redis task store read failed (%s); falling back to dict", exc)
-    return _image_tasks.get(task_id)
+    # Fallback dict wins when present — it's only populated on Redis write
+    # failure so it's authoritative over a possibly-stale Redis value.
+    if task_id in _image_tasks:
+        return _image_tasks[task_id]
+    return redis_task
 
 
 # -----------------------------------------------------------------------------
@@ -755,15 +765,21 @@ async def _run_image_generation_task(
 
         if has_reference and prefer_gemini:
             gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                ref_b64 = await _resolve_reference_bytes(
-                    body, artifact_storage=artifact_storage,
-                )
-                styled_prompt = compose_styled_prompt(body.prompt, body.style)
-                res = await gemini.generate(
-                    prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
-                    reference_image=ref_b64,
-                )
+            if not gemini.is_configured:
+                task["status"] = "failed"
+                task["error"] = "Gemini API key not configured"
+                task["progress"] = 100
+                task["completed_at"] = datetime.now(timezone.utc).isoformat()
+                await _store_task(redis, task_id, task)
+                return
+            ref_b64 = await _resolve_reference_bytes(
+                body, artifact_storage=artifact_storage,
+            )
+            styled_prompt = compose_styled_prompt(body.prompt, body.style)
+            res = await gemini.generate(
+                prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
+                reference_image=ref_b64,
+            )
 
         if res is None and body.session_id and session_manager and prefer_gemini:
             res, session_state, err = await _run_gemini_multi_turn(
@@ -786,7 +802,6 @@ async def _run_image_generation_task(
                     artifact_storage=artifact_storage,
                     width=width, height=height,
                 )
-                new_artifact_id = aid
                 generated_response_imgs.append(generated)
 
         if res is None:
