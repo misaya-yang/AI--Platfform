@@ -478,41 +478,81 @@ class TestMultiTurnSignatureFlow:
             duration_ms=10.0,
         )
 
-    async def test_signature_persists_to_session_on_first_turn(self):
+    def _artifact_storage_stub(self):
+        """Stub ArtifactStorage. Records artifacts created and serves them
+        back from `download_artifact` so multi-turn replay can resolve
+        ``artifact_id`` → bytes without any real S3."""
+        store: dict[str, bytes] = {}
+        next_id = {"n": 0}
+
+        async def _create(*, content, **kw):
+            next_id["n"] += 1
+            aid = f"art_{next_id['n']:03d}"
+            store[aid] = content
+            artifact = MagicMock()
+            artifact.artifact_id = aid
+            return artifact
+
+        async def _presign(artifact, **kw):
+            return f"https://s3.example.com/{artifact.artifact_id}"
+
+        async def _download(aid):
+            return store.get(aid)
+
+        storage = MagicMock()
+        storage.create_artifact = AsyncMock(side_effect=_create)
+        storage.get_presigned_download_url = AsyncMock(side_effect=_presign)
+        storage.download_artifact = AsyncMock(side_effect=_download)
+        storage._store = store  # for test inspection
+        return storage
+
+    async def test_signature_and_artifact_id_persist_to_session_on_first_turn(self):
         body = ImageGenerationRequest(
             prompt="a cat", model_id="gemini-3.1-flash-image-preview",
             session_id="sess-1",
         )
         session = _session_stub(metadata={"image_chat_history": []})
         session_mgr = _session_manager_stub(session)
+        storage = self._artifact_storage_stub()
 
         gemini_mock = MagicMock()
         gemini_mock.is_configured = True
         gemini_mock.generate_chat = AsyncMock(
             return_value=self._gemini_with_signature("sig_first_turn"),
         )
-        gemini_mock.upload_image = AsyncMock(return_value="files/abc")
 
         with patch(
             "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
         ):
-            await generate_image(
+            resp = await generate_image(
                 body=body, request=_make_request(session_manager=session_mgr),
                 user=_user(), model_registry=_registry_stub("google"),
             )
 
+        # Response carries presigned URL + artifact_id (no base64).
+        assert resp.success is True
+        assert len(resp.images) == 1
+        assert resp.images[0].url.startswith("https://s3.example.com/")
+        assert resp.images[0].artifact_id is not None
+        assert "base64" not in resp.images[0].url
+
+        # Session history carries pointer + signature, no bytes.
         persisted_meta = session_mgr.update_metadata.call_args.args[1]
         history = persisted_meta["image_chat_history"]
         model_turn = next(t for t in history if t.get("role") == "model")
-        assert model_turn.get("thought_signature") == "sig_first_turn", (
-            "Signature from Gemini response must land on the model turn — "
-            "without it, turn 2 has no anchor for the model's prior reasoning."
-        )
+        assert model_turn.get("thought_signature") == "sig_first_turn"
+        assert model_turn.get("artifact_id") is not None
+        assert "image_base64" not in model_turn
+        assert "file_uri" not in model_turn
 
     async def test_signature_replayed_to_gemini_on_second_turn(self):
-        """Turn 2: history already has a signature → it MUST be in the
-        contents array sent to Gemini, attached to the prior image part."""
+        """Turn 2: history has artifact_id pointer → AS inflates from
+        artifact storage → signature MUST be on the inlineData part Gemini
+        sees in contents."""
         body = ImageGenerationRequest(
             prompt="make it orange",
             model_id="gemini-3.1-flash-image-preview",
@@ -523,36 +563,120 @@ class TestMultiTurnSignatureFlow:
                 {"role": "user", "text": "a cat"},
                 {
                     "role": "model",
-                    "file_uri": "files/abc",
+                    "artifact_id": "art_001",
                     "mime_type": "image/png",
                     "thought_signature": "sig_from_turn1",
                 },
             ],
         })
         session_mgr = _session_manager_stub(session)
+        storage = self._artifact_storage_stub()
+        storage._store["art_001"] = b"prior_image_bytes"  # what S3 has
 
         gemini_mock = MagicMock()
         gemini_mock.is_configured = True
         gemini_mock.generate_chat = AsyncMock(
             return_value=self._gemini_with_signature("sig_turn2"),
         )
-        gemini_mock.upload_image = AsyncMock(return_value="files/def")
 
         with patch(
             "assistant_service.api.routes.images.get_gemini_image_generator",
             return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
         ):
             await generate_image(
                 body=body, request=_make_request(session_manager=session_mgr),
                 user=_user(), model_registry=_registry_stub("google"),
             )
 
+        # Gemini's contents must carry signature on the inflated inlineData part.
         contents = gemini_mock.generate_chat.call_args.kwargs["contents"]
-        # Find the prior model image part — must carry the signature
         model_turns = [c for c in contents if c["role"] == "model"]
         assert len(model_turns) == 1
-        img_part = next(p for p in model_turns[0]["parts"] if "fileData" in p)
-        assert img_part.get("thoughtSignature") == "sig_from_turn1", (
-            "Replay missing signature → Gemini 3.x will reject or degrade. "
-            f"Got img_part={img_part}"
+        img_part = next(p for p in model_turns[0]["parts"] if "inlineData" in p)
+        assert img_part.get("thoughtSignature") == "sig_from_turn1"
+        # Bytes inflated from S3 stub.
+        import base64 as _b64
+        assert img_part["inlineData"]["data"] == _b64.b64encode(b"prior_image_bytes").decode()
+
+
+@pytest.mark.asyncio
+class TestReferenceImageUrl:
+    """Stateless edit via URL — Dev backend passes a URL, AS fetches and
+    forwards bytes to Gemini. Saves ~1.3 MB Dev → AS upload per edit."""
+
+    async def test_reference_image_url_fetched_and_forwarded_to_gemini(self):
+        body = ImageGenerationRequest(
+            prompt="make it red",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_image_url="https://s3.example.com/prior.png",
         )
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate = AsyncMock(return_value=GeminiImageResult(
+            success=True,
+            images=[{
+                "filename": "out.png",
+                "content_base64": "ZmFrZQ==",
+                "mime_type": "image/png",
+                "size_bytes": 4,
+            }],
+            text=None,
+            duration_ms=5.0,
+        ))
+
+        # Mock httpx.AsyncClient at the import location used by images.py.
+        from unittest.mock import MagicMock as _MM
+        client_cm = _MM()
+        resp_obj = _MM()
+        resp_obj.content = b"prior_image_bytes"
+        resp_obj.raise_for_status = _MM()
+        client_cm.__aenter__ = AsyncMock(return_value=client_cm)
+        client_cm.__aexit__ = AsyncMock(return_value=None)
+        client_cm.get = AsyncMock(return_value=resp_obj)
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images.httpx.AsyncClient",
+            return_value=client_cm,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=None,  # data URL fallback for response
+        ):
+            resp = await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        assert resp.success is True
+        # Gemini received the bytes we fetched, base64-encoded.
+        kwargs = gemini_mock.generate.call_args.kwargs
+        import base64 as _b64
+        expected_b64 = _b64.b64encode(b"prior_image_bytes").decode()
+        assert kwargs["reference_image"] == expected_b64
+
+    async def test_reference_image_url_rejects_non_http_scheme(self):
+        body = ImageGenerationRequest(
+            prompt="edit",
+            model_id="gemini-3.1-flash-image-preview",
+            reference_image_url="file:///etc/passwd",
+        )
+        from fastapi import HTTPException as _HE
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), pytest.raises(_HE) as exc:
+            await generate_image(
+                body=body, request=_make_request(session_manager=None),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+        assert exc.value.status_code == 400
+        assert "http" in str(exc.value.detail).lower()

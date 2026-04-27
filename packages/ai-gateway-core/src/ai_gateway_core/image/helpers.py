@@ -104,6 +104,27 @@ def resolve_image_routing(
 # ---------------------------------------------------------------------------
 # Gemini multi-turn contents builder
 # ---------------------------------------------------------------------------
+#
+# Storage architecture for multi-turn editing:
+#
+# We DON'T use Gemini's Files API. Two reasons:
+#   1. Vertex Express endpoint cannot read URIs uploaded to AI Studio
+#      (cross-host 403). Pinning everything to AI Studio breaks the free-tier
+#      Vertex routing for chat.
+#   2. Vendor-locks our scale to Google's storage product, with a 48 h URI
+#      expiry that breaks "user comes back tomorrow to keep editing".
+#
+# Instead the assistant-service stores generated images in our own S3/MinIO
+# (via ``ArtifactStorage``). Session metadata holds a tiny pointer per turn:
+# ``artifact_id`` (~36 bytes) + ``thought_signature`` (~few KB). On the next
+# turn the route fetches the bytes from S3, base64-encodes them, and passes
+# them to Gemini as ``inlineData``. Server-to-server only — the public API
+# never returns or accepts base64.
+#
+# Backward compat: histories written by the previous Files-API design carry
+# ``file_uri`` and/or ``image_base64`` fields. Replay still honors them so a
+# user mid-session at deploy time doesn't lose context, but we stop writing
+# them going forward.
 
 
 def build_gemini_contents_from_history(
@@ -112,20 +133,21 @@ def build_gemini_contents_from_history(
 ) -> list[dict[str, Any]]:
     """Build Gemini ``contents`` array from stored image chat history.
 
-    Each history turn can carry the image either as an inline base64 payload or
-    as a Gemini Files API URI. The URI form is preferred because it lets the
-    session row stay tiny (~50 bytes per turn vs 1MB+) while Gemini still sees
-    the real image on each call.
+    The route layer is expected to inflate each model turn's ``artifact_id``
+    into ``image_base64`` + ``mime_type`` BEFORE calling this function — see
+    ``inflate_history_with_bytes``. This stays a pure function so it's trivial
+    to unit-test.
 
-    - ``file_uri`` turns → ``{"fileData": {"fileUri": ..., "mimeType": ...}}``
-    - ``image_base64`` turns → ``{"inlineData": {"data": ..., "mimeType": ...}}``
-      (kept for backward-compatibility with history written before the Files
-      API migration)
-    - ``thought_signature`` is required by Gemini 3.x for conversational image
-      editing — without it the model loses the original image's structural
-      reasoning and either errors (400) or silently degrades quality. Per
-      Google's 2026 guidance the signature must be replayed verbatim on every
-      subsequent turn.
+    Recognized model-turn shapes (in order of preference):
+    - ``image_base64`` (inflated from artifact_id, or legacy fallback) →
+      ``{"inlineData": {"data": ..., "mimeType": ...}}``
+    - ``file_uri`` (legacy from old Files-API design) →
+      ``{"fileData": {"fileUri": ..., "mimeType": ...}}``
+    - neither → text-only model turn (visual anchor lost, replay still safe)
+
+    ``thought_signature`` (when present) is attached to the image part. Gemini
+    3.x requires the signature to be replayed verbatim or it 400s / silently
+    degrades edit coherence. Signatures are opaque blobs of a few KB.
     """
     contents: list[dict[str, Any]] = []
     for turn in image_history:
@@ -134,14 +156,14 @@ def build_gemini_contents_from_history(
         if turn.get("text"):
             parts.append({"text": turn["text"]})
 
-        file_uri = turn.get("file_uri")
         inline_b64 = turn.get("image_base64")
+        file_uri = turn.get("file_uri")
         mime = turn.get("mime_type", "image/jpeg")
         img_part: dict[str, Any] | None = None
-        if file_uri:
-            img_part = {"fileData": {"fileUri": file_uri, "mimeType": mime}}
-        elif inline_b64:
+        if inline_b64:
             img_part = {"inlineData": {"mimeType": mime, "data": inline_b64}}
+        elif file_uri:
+            img_part = {"fileData": {"fileUri": file_uri, "mimeType": mime}}
 
         if img_part is not None:
             if turn.get("thought_signature"):
@@ -155,31 +177,85 @@ def build_gemini_contents_from_history(
     return contents
 
 
+async def inflate_history_with_bytes(
+    image_history: list[dict[str, Any]],
+    download: Any,  # Callable[[str], Awaitable[bytes | None]]
+) -> list[dict[str, Any]]:
+    """Return a copy of ``image_history`` with image bytes attached as
+    ``image_base64`` on every model turn that has an ``artifact_id``.
+
+    ``download(artifact_id) -> bytes | None`` is awaited concurrently for all
+    artifact ids. Turns with ``image_base64`` already set (or legacy
+    ``file_uri``) are passed through untouched. Turns whose download returns
+    ``None`` keep their pointer fields so replay stays compat-safe — they just
+    won't carry a visual anchor that turn.
+
+    This function is the boundary between "tiny history pointers" (what we
+    store) and "fat inline-data history" (what Gemini's API needs to see).
+    """
+    import asyncio
+    import base64 as _b64
+
+    artifact_ids: list[str] = []
+    for turn in image_history:
+        if (
+            turn.get("role") == "model"
+            and turn.get("artifact_id")
+            and not turn.get("image_base64")
+        ):
+            artifact_ids.append(turn["artifact_id"])
+
+    if not artifact_ids:
+        return [dict(t) for t in image_history]
+
+    # Parallel fetch — multi-turn replay shouldn't be N×latency.
+    fetched = await asyncio.gather(
+        *[download(aid) for aid in artifact_ids], return_exceptions=True,
+    )
+    bytes_by_id: dict[str, bytes] = {}
+    for aid, res in zip(artifact_ids, fetched):
+        if isinstance(res, BaseException):
+            continue
+        if res:
+            bytes_by_id[aid] = res
+
+    inflated: list[dict[str, Any]] = []
+    for turn in image_history:
+        t = dict(turn)
+        aid = t.get("artifact_id")
+        if (
+            t.get("role") == "model"
+            and aid
+            and aid in bytes_by_id
+            and not t.get("image_base64")
+        ):
+            t["image_base64"] = _b64.b64encode(bytes_by_id[aid]).decode()
+        inflated.append(t)
+    return inflated
+
+
 def append_image_turns(
     image_history: list[dict[str, Any]],
     user_text: str,
     result_image: dict[str, Any] | None,
     result_text: str | None,
     *,
-    file_uri: str | None = None,
+    artifact_id: str | None = None,
 ) -> None:
     """Append one user turn and (on success) one model turn to ``image_history``.
 
-    Storage discipline (load-bearing — DO NOT add a base64 fallback):
+    Storage discipline:
+    - The model turn stores ONLY a pointer (``artifact_id``) plus tiny metadata
+      (mime type, optional text reply, optional thought signature).
+    - Image bytes stay in our S3/MinIO via ArtifactStorage; ``artifact_id`` is
+      the lookup key.
+    - We never inline base64 here — a single 1024×1024 image is ~1 MB
+      base64-encoded; two such turns blow the 1 MB session metadata cap and
+      brick writes for the whole session.
 
-    The model turn stores only a Gemini Files API ``file_uri`` as the visual
-    anchor. We DELIBERATELY skip storing raw ``image_base64`` even if
-    ``file_uri`` is None — a freshly-generated 1024×1024 image is ~1 MB
-    base64-encoded, and the session manager refuses metadata writes over
-    1 MB. Two prod turns of inline-base64 history blew the cap and bricked
-    the session entirely (no history written at all). Better to lose the
-    visual anchor on a single turn than to brick the whole session.
-
-    Without a ``file_uri`` the model turn keeps only its text + signature.
-    Replay (``build_gemini_contents_from_history``) emits a text-only model
-    turn in that case, so multi-turn still works but with degraded visual
-    grounding. Investigate Files API auth (a 403 typically means Vertex
-    Express key being used against AI Studio's upload endpoint).
+    Without an ``artifact_id`` the model turn degrades gracefully to text-only
+    (no visual anchor for the next turn, but the session keeps writing). This
+    happens only on artifact-storage failures — log and continue.
 
     Mutates the list in place. Call only when Gemini responded successfully;
     skip entirely on failure to avoid a dangling unanswered prompt in the next
@@ -192,15 +268,10 @@ def append_image_turns(
         "role": "model",
         "mime_type": result_image.get("mime_type", "image/jpeg"),
     }
-    if file_uri:
-        model_turn["file_uri"] = file_uri
+    if artifact_id:
+        model_turn["artifact_id"] = artifact_id
     if result_text:
         model_turn["text"] = result_text
-    # Gemini 3.x requires thought_signature on every replayed model turn for
-    # conversational image editing — missing it triggers a 400 or silently
-    # degrades edit coherence. Signatures are opaque/signed blobs typically a
-    # few KB (not 1MB as previously assumed); safe to store inline alongside
-    # the file_uri pointer. See Google's "Thought Signatures" guidance, 2026.
     sig = result_image.get("thought_signature")
     if sig:
         model_turn["thought_signature"] = sig

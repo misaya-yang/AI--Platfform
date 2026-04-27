@@ -4,10 +4,29 @@ Owned by assistant-service; gateway forwards ``/api/v1/assistant/generate-image`
 ``/api/v1/assistant/generate-image-async``, and
 ``/api/v1/assistant/image-task/{task_id}`` here via the shared ServiceProxy.
 
-This file is the authoritative implementation. Historically these routes
-lived in the gateway's ``src/api/v1/assistant.py`` because ModelRegistry
-and the per-provider image generators ran in-process; Phase 5e moved the
-real code here so the gateway Dockerfile can drop ``COPY apps/assistant-service``.
+## Architecture
+
+Public API contract — Dev-backend-facing, URL-only:
+
+- Generated image bytes are stored in our own object storage (S3/MinIO via
+  ``ArtifactStorage``). The response carries a presigned download URL plus
+  ``artifact_id``. The Dev backend forwards the URL to its frontend; the
+  frontend fetches the bytes directly from S3 (CDN-cacheable).
+- For multi-turn editing the request body is just ``session_id + prompt``
+  — no image bytes flow over the Dev → AS edge after turn 1.
+- For stateless edits, the Dev backend can pass ``reference_image_url``
+  (URL of the prior image we returned them) instead of base64. AS fetches
+  the bytes server-side and passes them to Gemini as ``inlineData``.
+
+We DO NOT use Gemini's Files API:
+- ``Vertex Express`` (free tier) cannot reference URIs uploaded to AI Studio
+  → cross-host 403 on second turn.
+- 48 h URI expiry breaks "user comes back tomorrow to keep editing".
+- Vendor-locks our scale to Google's storage product.
+
+The base64 representation of the image bytes only ever lives on the
+``AS ↔ Gemini`` server-to-server hop (Gemini's API requires inline data).
+It never appears in the Dev-facing request or response.
 """
 
 from __future__ import annotations
@@ -21,6 +40,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
@@ -29,6 +49,7 @@ from ai_gateway_core.image import (
     append_image_turns,
     apply_watermark_b64,
     build_gemini_contents_from_history,
+    inflate_history_with_bytes,
     parse_image_size,
     resolve_image_routing,
     send_image_callback,
@@ -52,23 +73,63 @@ router = APIRouter()
 
 
 # -----------------------------------------------------------------------------
-# Schemas — kept compatible with gateway's public contract
+# Schemas
 # -----------------------------------------------------------------------------
 
 class GeneratedImage(BaseModel):
-    url: str
+    """Generated image — points to S3-backed artifact when storage is configured."""
+
+    url: str = Field(
+        ...,
+        description=(
+            "Presigned download URL (S3) when artifact storage is configured. "
+            "Falls back to a ``data:image/...;base64,...`` URL only when "
+            "ArtifactStorage is unavailable (dev/tests)."
+        ),
+    )
     width: int | None = None
     height: int | None = None
+    artifact_id: str | None = Field(
+        default=None,
+        description="Stable ID for this generated image. Use as `reference_image_url` "
+                    "lookup or persist for later retrieval.",
+    )
 
 
 class ImageGenerationRequest(BaseModel):
+    """Image generation request — three editing modes:
+
+    1. **Fresh generation**: just ``prompt`` + ``model_id``.
+    2. **Stateless edit**: ``prompt`` + ``reference_image`` (base64) OR
+       ``reference_image_url`` (URL we returned earlier — preferred, avoids
+       Dev backend re-uploading bytes).
+    3. **Stateful multi-turn**: ``prompt`` + ``session_id`` (server holds
+       the editing history).
+    """
+
     prompt: str = Field(..., min_length=1, max_length=4000)
     model_id: str = "qwen-image-2.0"
     n: int = Field(1, ge=1, le=4)
     size: str | None = "1024*1024"
     style: StylePreset = Field(default=StylePreset.DEFAULT)
     session_id: str | None = None
-    reference_image: str | None = None
+    reference_image: str | None = Field(
+        default=None,
+        description=(
+            "Reference image as base64 or data URL. Use this for fully "
+            "stateless integrations where the Dev backend already holds "
+            "the prior image. Prefer ``reference_image_url`` to avoid "
+            "uploading ~1 MB on every turn."
+        ),
+    )
+    reference_image_url: str | None = Field(
+        default=None,
+        description=(
+            "URL of a prior generated image (typically one we returned in "
+            "an earlier response). AS fetches it server-side and forwards "
+            "to Gemini as inline data. Saves bandwidth on the Dev → AS edge."
+        ),
+    )
     add_watermark: bool = True
 
     @field_validator("style", mode="before")
@@ -85,6 +146,10 @@ class ImageGenerationResponse(BaseModel):
     provider: str | None = None
     duration_ms: float | None = None
     error: str | None = None
+    session_id: str | None = Field(
+        default=None,
+        description="Echo of session_id when stateful multi-turn was used.",
+    )
 
 
 class AsyncImageGenerationRequest(ImageGenerationRequest):
@@ -187,20 +252,250 @@ async def _load_task(redis, task_id: str) -> dict | None:
     return _image_tasks.get(task_id)
 
 
-async def _upload_to_gemini_files(gemini, result_image: dict) -> str | None:
-    """Upload a freshly generated image to Gemini Files API, return its URI."""
+# -----------------------------------------------------------------------------
+# Artifact storage helpers
+# -----------------------------------------------------------------------------
+
+
+def _get_artifact_storage():
+    """Artifact storage lives in gateway's src/services/storage; the
+    assistant-service Docker image bundles it. Return None if the module
+    isn't reachable (dev + tests) — callers fall back to data URLs in the
+    response and skip session-history persistence (multi-turn won't work)."""
     try:
-        data_b64 = result_image.get("content_base64")
-        if not data_b64:
-            return None
-        raw = _b64.b64decode(data_b64)
-        return await gemini.upload_image(raw, result_image.get("mime_type", "image/jpeg"))
-    except Exception as exc:
-        logger.warning(
-            "Gemini Files API upload failed; next-turn edit will lack visual anchor: %s",
-            exc,
-        )
+        from src.services.storage import get_artifact_storage
+        return get_artifact_storage()
+    except Exception:
         return None
+
+
+async def _persist_and_get_url(
+    img: dict,
+    *,
+    artifact_storage,
+    session_id: str | None,
+    user: UserContext,
+    prompt: str,
+    add_watermark: bool,
+    width: int,
+    height: int,
+    index: int,
+) -> tuple[str | None, GeneratedImage]:
+    """Watermark, persist to S3 (if storage configured), return (artifact_id, img).
+
+    The ``url`` on the returned ``GeneratedImage`` is a presigned S3 URL when
+    storage is configured, otherwise a ``data:image/...;base64,...`` fallback
+    so dev/test environments still get a usable response.
+    """
+    cb64 = img.get("content_base64", "")
+    mt = img.get("mime_type", "image/png")
+    if add_watermark and cb64:
+        try:
+            cb64, mt = await asyncio.to_thread(apply_watermark_b64, cb64)
+        except Exception as e:
+            logger.warning("Watermark failed for image %d: %s", index, e)
+
+    artifact_id: str | None = None
+    url: str | None = None
+
+    if artifact_storage and cb64:
+        try:
+            content_bytes = _b64.b64decode(cb64)
+            ext = mt.split("/")[-1] or "png"
+            effective_session = session_id or f"stateless_{uuid.uuid4().hex[:12]}"
+            artifact = await artifact_storage.create_artifact(
+                session_id=effective_session,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                type="image",
+                format=ext,
+                title=f"Generated: {prompt[:60]}",
+                filename=f"generated_{uuid.uuid4().hex[:8]}_{index + 1}.{ext}",
+                content=content_bytes,
+                source="image_generation",
+            )
+            artifact_id = artifact.artifact_id
+            url = await artifact_storage.get_presigned_download_url(artifact)
+        except Exception as e:
+            logger.warning("Failed to save image artifact: %s", e)
+
+    if not url:
+        # Fallback only — Dev integrations should have artifact storage configured.
+        url = f"data:{mt};base64,{cb64}"
+
+    return artifact_id, GeneratedImage(
+        url=url, width=width, height=height, artifact_id=artifact_id,
+    )
+
+
+async def _resolve_reference_bytes(
+    body: ImageGenerationRequest, *, artifact_storage,
+) -> str | None:
+    """Resolve any reference image to a base64 string suitable for Gemini.
+
+    Order:
+    1. ``reference_image`` (base64/data-URL) — pass through
+    2. ``reference_image_url`` — fetch via HTTP, base64-encode
+
+    Returns ``None`` if neither is set. SSRF guard: ``reference_image_url``
+    is restricted to https:// and our own S3 / public domains; localhost
+    and private IPs are rejected upstream by the gateway.
+    """
+    if body.reference_image:
+        return body.reference_image
+    if not body.reference_image_url:
+        return None
+
+    url = body.reference_image_url
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="reference_image_url must be an http(s) URL",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content = resp.content
+            if len(content) > 8 * 1024 * 1024:  # 8 MB hard cap
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference_image_url payload exceeds 8 MB limit",
+                )
+            return _b64.b64encode(content).decode()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("reference_image_url fetch failed: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to fetch reference_image_url: {exc}",
+        ) from exc
+
+
+async def _download_artifact_bytes(artifact_storage, artifact_id: str) -> bytes | None:
+    """Fetch raw bytes for an artifact, swallowing storage errors so
+    ``inflate_history_with_bytes`` can degrade a single missing turn instead
+    of aborting the whole replay."""
+    if not artifact_storage:
+        return None
+    try:
+        return await artifact_storage.download_artifact(artifact_id)
+    except Exception as exc:
+        logger.warning("Artifact download failed for %s: %s", artifact_id, exc)
+        return None
+
+
+# -----------------------------------------------------------------------------
+# Multi-turn editing — Gemini chat with S3-backed history
+# -----------------------------------------------------------------------------
+
+
+async def _run_gemini_multi_turn(
+    body: ImageGenerationRequest,
+    *,
+    aspect_ratio: str,
+    width: int,
+    height: int,
+    session_manager,
+    user: UserContext,
+    artifact_storage,
+):
+    """Run one turn of a stateful multi-turn editing session.
+
+    Returns the raw Gemini result + the resolved style preset; the caller
+    is responsible for persisting the new turn back to the session and for
+    building the public response shape.
+    """
+    if not body.session_id:
+        raise ValueError("session_id required for multi-turn flow")
+
+    gemini = get_gemini_image_generator()
+    if not gemini.is_configured:
+        return None, None, "Gemini API key not configured for multi-turn image chat"
+
+    session = await session_manager.get(body.session_id)
+    if not session:
+        session = await session_manager.create(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            session_id=body.session_id,
+            metadata={"image_chat_history": []},
+        )
+
+    image_history: list[dict] = []
+    locked_preset = StylePreset.DEFAULT
+    if session and session.metadata:
+        image_history = session.metadata.get("image_chat_history", [])
+        locked_preset = resolve_style_preset(session.metadata.get("style_preset"))
+
+    effective_preset = (
+        body.style if body.style is not StylePreset.DEFAULT else locked_preset
+    )
+    styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
+
+    # Inflate history pointers → real bytes for Gemini's inlineData.
+    async def _download(aid: str) -> bytes | None:
+        return await _download_artifact_bytes(artifact_storage, aid)
+
+    resolved_history = await inflate_history_with_bytes(image_history, _download)
+    contents = build_gemini_contents_from_history(resolved_history, styled_prompt)
+
+    res = await gemini.generate_chat(
+        contents=contents, n=body.n, aspect_ratio=aspect_ratio,
+    )
+    return res, (session, image_history, effective_preset), None
+
+
+async def _persist_multi_turn_result(
+    body: ImageGenerationRequest,
+    *,
+    res,
+    session_state: tuple,
+    session_manager,
+    user: UserContext,
+    artifact_storage,
+    width: int,
+    height: int,
+) -> tuple[str | None, GeneratedImage]:
+    """Store the newly-generated image as an artifact, append the turn to
+    history, persist the session metadata. Returns ``(artifact_id, image)``
+    for the response."""
+    session, image_history, effective_preset = session_state
+    img = res.images[0]
+
+    artifact_id, generated = await _persist_and_get_url(
+        img,
+        artifact_storage=artifact_storage,
+        session_id=body.session_id,
+        user=user,
+        prompt=body.prompt,
+        add_watermark=body.add_watermark,
+        width=width,
+        height=height,
+        index=0,
+    )
+
+    append_image_turns(
+        image_history, body.prompt, img, res.text,
+        artifact_id=artifact_id,
+    )
+
+    if session_manager and session:
+        meta = dict(session.metadata or {})
+        meta["image_chat_history"] = image_history
+        meta["style_preset"] = effective_preset.value
+        try:
+            await session_manager.update_metadata(body.session_id, meta)
+        except Exception as e:
+            logger.warning(
+                "Session metadata write failed for %s: %s — continuing with "
+                "in-flight history (next turn will not see this image)",
+                body.session_id, e,
+            )
+
+    return artifact_id, generated
 
 
 # -----------------------------------------------------------------------------
@@ -215,7 +510,7 @@ async def generate_image(
     user: UserContext = Depends(get_user_context),
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
-    """Synchronous image generation — routes through Gemini / Doubao / DashScope."""
+    """Synchronous image generation — Gemini multi-turn / stateless edit / fresh."""
     start_time = time.time()
     try:
         model_info = model_registry.get_model(body.model_id) if model_registry else None
@@ -224,103 +519,98 @@ async def generate_image(
             body.model_id, selected_provider,
         )
 
-        if body.reference_image and not prefer_gemini:
+        has_reference = bool(body.reference_image or body.reference_image_url)
+        if has_reference and not prefer_gemini:
             logger.warning(
-                "reference_image ignored: image edit requires Gemini "
+                "reference image ignored: edit requires Gemini "
                 "(model=%s provider=%s). Falling through to fresh generation.",
                 body.model_id, selected_provider,
             )
 
         width, height, aspect_ratio = parse_image_size(body.size)
 
-        async def _build_data_url(img: dict) -> str:
-            cb64 = img.get("content_base64", "")
-            mt = img.get("mime_type", "image/png")
-            if body.add_watermark and cb64:
-                cb64, mt = await asyncio.to_thread(apply_watermark_b64, cb64)
-            return f"data:{mt};base64,{cb64}"
-
+        artifact_storage = _get_artifact_storage()
         session_mgr = getattr(request.app.state, "session_manager", None)
 
-        # App-driven edit mode: caller sends reference_image, stateless.
-        if body.reference_image and prefer_gemini:
+        # ---- Stateless edit (caller passes prior image) ------------------
+        if has_reference and prefer_gemini:
+            ref_b64 = await _resolve_reference_bytes(body, artifact_storage=artifact_storage)
             gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                preset = body.style
-                styled_prompt = compose_styled_prompt(body.prompt, preset)
-                res = await gemini.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    aspect_ratio=aspect_ratio,
-                    reference_image=body.reference_image,
+            if not gemini.is_configured:
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="none",
+                    duration_ms=(time.time() - start_time) * 1000,
+                    error="Gemini API key not configured",
                 )
-                if res.success and res.images:
-                    urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
-                    return ImageGenerationResponse(
-                        success=True,
-                        images=[GeneratedImage(url=u, width=width, height=height) for u in urls],
-                        provider="google",
-                        duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    )
+
+            styled_prompt = compose_styled_prompt(body.prompt, body.style)
+            res = await gemini.generate(
+                prompt=styled_prompt,
+                n=body.n,
+                aspect_ratio=aspect_ratio,
+                reference_image=ref_b64,
+            )
+            if not res.success or not res.images:
                 return ImageGenerationResponse(
                     success=False, images=[], provider="google",
                     duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
                     error=res.error or "Image edit failed",
                 )
 
-        # Multi-turn Gemini chat — persisted history in session metadata.
-        if body.session_id and session_mgr and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if not gemini.is_configured:
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="none",
-                    duration_ms=(time.time() - start_time) * 1000,
-                    error="Gemini API key not configured for multi-turn image chat",
+            persisted = await asyncio.gather(*[
+                _persist_and_get_url(
+                    img, artifact_storage=artifact_storage,
+                    session_id=body.session_id, user=user, prompt=body.prompt,
+                    add_watermark=body.add_watermark, width=width, height=height,
+                    index=i,
                 )
-            session = await session_mgr.get(body.session_id)
-            image_history: list[dict] = []
-            locked_preset = StylePreset.DEFAULT
-            if session and session.metadata:
-                image_history = session.metadata.get("image_chat_history", [])
-                locked_preset = resolve_style_preset(session.metadata.get("style_preset"))
-
-            effective_preset = body.style if body.style is not StylePreset.DEFAULT else locked_preset
-            styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
-            contents = build_gemini_contents_from_history(image_history, styled_prompt)
-
-            res = await gemini.generate_chat(contents=contents, n=body.n, aspect_ratio=aspect_ratio)
-
-            if res.success and res.images:
-                file_uri = await _upload_to_gemini_files(gemini, res.images[0])
-                append_image_turns(
-                    image_history, body.prompt, res.images[0], res.text,
-                    file_uri=file_uri,
-                )
-                if session_mgr and session:
-                    meta = dict(session.metadata or {})
-                    meta["image_chat_history"] = image_history
-                    meta["style_preset"] = effective_preset.value
-                    await session_mgr.update_metadata(body.session_id, meta)
-            else:
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="google",
-                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    error=res.error or "Image generation failed",
-                )
-
-            urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
+                for i, img in enumerate(res.images)
+            ])
             return ImageGenerationResponse(
                 success=True,
-                images=[GeneratedImage(url=u, width=width, height=height) for u in urls],
+                images=[gi for _, gi in persisted],
                 provider="google",
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
             )
 
-        # Single-turn fallback — smart router picks provider.
-        preset = body.style
-        styled_prompt = compose_styled_prompt(body.prompt, preset)
-        dashscope_tag = resolve_dashscope_style_tag(preset)
-        negative_prompt = resolve_negative_prompt(preset)
+        # ---- Stateful multi-turn (session-backed) -----------------------
+        if body.session_id and session_mgr and prefer_gemini:
+            res, session_state, err = await _run_gemini_multi_turn(
+                body, aspect_ratio=aspect_ratio, width=width, height=height,
+                session_manager=session_mgr, user=user,
+                artifact_storage=artifact_storage,
+            )
+            if err:
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="none",
+                    duration_ms=(time.time() - start_time) * 1000, error=err,
+                    session_id=body.session_id,
+                )
+            if not res.success or not res.images:
+                return ImageGenerationResponse(
+                    success=False, images=[], provider="google",
+                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                    error=res.error or "Image generation failed",
+                    session_id=body.session_id,
+                )
+
+            _, generated = await _persist_multi_turn_result(
+                body, res=res, session_state=session_state,
+                session_manager=session_mgr, user=user,
+                artifact_storage=artifact_storage,
+                width=width, height=height,
+            )
+            return ImageGenerationResponse(
+                success=True, images=[generated],
+                provider="google",
+                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                session_id=body.session_id,
+            )
+
+        # ---- Fresh single-turn — smart router picks provider ------------
+        styled_prompt = compose_styled_prompt(body.prompt, body.style)
+        dashscope_tag = resolve_dashscope_style_tag(body.style)
+        negative_prompt = resolve_negative_prompt(body.style)
         router_svc = get_smart_image_generator()
 
         res = await router_svc.generate(
@@ -337,17 +627,28 @@ async def generate_image(
                 err = f"{err} (blocked: {res.block_reason})"
             return ImageGenerationResponse(
                 success=False, images=[], provider=res.provider,
-                duration_ms=res.duration_ms or (time.time() - start_time) * 1000, error=err,
+                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+                error=err,
             )
 
-        urls = await asyncio.gather(*[_build_data_url(img) for img in res.images])
+        persisted = await asyncio.gather(*[
+            _persist_and_get_url(
+                img, artifact_storage=artifact_storage,
+                session_id=body.session_id, user=user, prompt=body.prompt,
+                add_watermark=body.add_watermark, width=width, height=height,
+                index=i,
+            )
+            for i, img in enumerate(res.images)
+        ])
         return ImageGenerationResponse(
             success=True,
-            images=[GeneratedImage(url=u, width=width, height=height) for u in urls],
+            images=[gi for _, gi in persisted],
             provider=res.provider,
             duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Image generation failed: %s", e)
         return ImageGenerationResponse(
@@ -359,52 +660,6 @@ async def generate_image(
 # -----------------------------------------------------------------------------
 # POST /generate-image-async + GET /image-task/{task_id}
 # -----------------------------------------------------------------------------
-
-
-def _get_artifact_storage():
-    """Artifact storage lives in gateway's src/services/storage; the
-    assistant-service Docker image bundles it. Return None if the module
-    isn't reachable (dev + tests) so the async task still returns
-    base64-encoded images without persisting to S3."""
-    try:
-        from src.services.storage import get_artifact_storage
-        return get_artifact_storage()
-    except Exception:
-        return None
-
-
-async def _process_image_result(
-    img: dict, *, task_id: str, prompt: str, width: int, height: int,
-    add_watermark: bool, session_id: str | None, user: UserContext,
-    index: int, artifact_storage,
-) -> dict:
-    content_base64 = img.get("content_base64", "")
-    mime_type = img.get("mime_type", "image/png")
-
-    if add_watermark and content_base64:
-        try:
-            content_base64, mime_type = await asyncio.to_thread(apply_watermark_b64, content_base64)
-        except Exception as e:
-            logger.warning("Watermark failed for image %d: %s", index, e)
-
-    data_url = f"data:{mime_type};base64,{content_base64}"
-    entry: dict = {"url": data_url, "width": width, "height": height}
-
-    if artifact_storage and session_id and content_base64:
-        try:
-            content = _b64.b64decode(content_base64)
-            ext = mime_type.split("/")[-1] or "png"
-            filename = f"generated_image_{task_id[:8]}_{index + 1}.{ext}"
-            artifact = await artifact_storage.create_artifact(
-                session_id=session_id, tenant_id=user.tenant_id, user_id=user.user_id,
-                type="image", format=ext, title=f"Generated: {prompt[:40]}...",
-                filename=filename, content=content, source="image_generation",
-            )
-            entry["artifact_id"] = artifact.artifact_id
-            entry["download_url"] = await artifact_storage.get_presigned_download_url(artifact)
-        except Exception as e:
-            logger.warning("Failed to save async image artifact: %s", e)
-    return entry
 
 
 async def _run_image_generation_task(
@@ -433,48 +688,47 @@ async def _run_image_generation_task(
         width, height, aspect_ratio = parse_image_size(body.size)
         task["progress"] = 30
 
+        artifact_storage = _get_artifact_storage()
+        has_reference = bool(body.reference_image or body.reference_image_url)
         res = None
-        if body.reference_image and prefer_gemini:
+        new_artifact_id: str | None = None
+        generated_response_imgs: list[GeneratedImage] = []
+
+        if has_reference and prefer_gemini:
             gemini = get_gemini_image_generator()
             if gemini.is_configured:
+                ref_b64 = await _resolve_reference_bytes(
+                    body, artifact_storage=artifact_storage,
+                )
                 styled_prompt = compose_styled_prompt(body.prompt, body.style)
                 res = await gemini.generate(
                     prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
-                    reference_image=body.reference_image,
+                    reference_image=ref_b64,
                 )
 
         if res is None and body.session_id and session_manager and prefer_gemini:
-            gemini = get_gemini_image_generator()
-            if gemini.is_configured:
-                session = await session_manager.get(body.session_id)
-                if not session:
-                    session = await session_manager.create(
-                        user_id=user.user_id, tenant_id=user.tenant_id,
-                        session_id=body.session_id,
-                        metadata={"image_chat_history": []},
-                    )
-                image_history: list[dict] = []
-                locked_preset = StylePreset.DEFAULT
-                if session and session.metadata:
-                    image_history = session.metadata.get("image_chat_history", [])
-                    locked_preset = resolve_style_preset(session.metadata.get("style_preset"))
+            res, session_state, err = await _run_gemini_multi_turn(
+                body, aspect_ratio=aspect_ratio, width=width, height=height,
+                session_manager=session_manager, user=user,
+                artifact_storage=artifact_storage,
+            )
+            if err:
+                task["status"] = "failed"
+                task["error"] = err
+                task["progress"] = 100
+                task["completed_at"] = datetime.now(timezone.utc).isoformat()
+                await _store_task(redis, task_id, task)
+                return
 
-                effective_preset = body.style if body.style is not StylePreset.DEFAULT else locked_preset
-                styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
-                contents = build_gemini_contents_from_history(image_history, styled_prompt)
-                res = await gemini.generate_chat(contents=contents, n=body.n, aspect_ratio=aspect_ratio)
-
-                if res.success and res.images:
-                    file_uri = await _upload_to_gemini_files(gemini, res.images[0])
-                    append_image_turns(
-                        image_history, body.prompt, res.images[0], res.text,
-                        file_uri=file_uri,
-                    )
-                    if session_manager and session:
-                        meta = dict(session.metadata or {})
-                        meta["image_chat_history"] = image_history
-                        meta["style_preset"] = effective_preset.value
-                        await session_manager.update_metadata(body.session_id, meta)
+            if res and res.success and res.images:
+                aid, generated = await _persist_multi_turn_result(
+                    body, res=res, session_state=session_state,
+                    session_manager=session_manager, user=user,
+                    artifact_storage=artifact_storage,
+                    width=width, height=height,
+                )
+                new_artifact_id = aid
+                generated_response_imgs.append(generated)
 
         if res is None:
             styled_prompt = compose_styled_prompt(body.prompt, body.style)
@@ -505,18 +759,30 @@ async def _run_image_generation_task(
             return
 
         task["progress"] = 70
-        artifact_storage = _get_artifact_storage()
-        images = await asyncio.gather(*[
-            _process_image_result(
-                img, task_id=task_id, prompt=body.prompt,
-                width=width, height=height,
-                add_watermark=body.add_watermark,
-                session_id=body.session_id, user=user, index=i,
-                artifact_storage=artifact_storage,
-            )
-            for i, img in enumerate(res.images)
-        ])
-        task["images"] = images
+
+        # If the multi-turn helper already persisted, reuse those entries.
+        if not generated_response_imgs:
+            persisted = await asyncio.gather(*[
+                _persist_and_get_url(
+                    img, artifact_storage=artifact_storage,
+                    session_id=body.session_id, user=user, prompt=body.prompt,
+                    add_watermark=body.add_watermark, width=width, height=height,
+                    index=i,
+                )
+                for i, img in enumerate(res.images)
+            ])
+            generated_response_imgs = [gi for _, gi in persisted]
+
+        task["images"] = [
+            {
+                "url": gi.url,
+                "width": gi.width,
+                "height": gi.height,
+                "artifact_id": gi.artifact_id,
+                "download_url": gi.url if gi.artifact_id else None,
+            }
+            for gi in generated_response_imgs
+        ]
         task["status"] = "completed"
         task["progress"] = 100
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
