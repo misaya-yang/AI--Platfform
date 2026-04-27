@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -414,6 +414,18 @@ class ServiceProxy:
         strip = self._cfg.strip_req
         out = {k: v for k, v in request.headers.items() if k.lower() not in strip}
         out.update(user_headers)
+
+        # Forward the gateway's request_id so upstream microservices can
+        # correlate logs end-to-end. Middleware sets ``request.state.request_id``
+        # by either preserving the inbound X-Request-Id or minting a fresh
+        # UUID. If the client also sent X-Request-Id, the request.headers
+        # copy above already kept it — skip overriding.
+        state_request_id = getattr(
+            getattr(request, "state", None), "request_id", None,
+        )
+        if state_request_id and not any(k.lower() == "x-request-id" for k in out):
+            out["X-Request-Id"] = state_request_id
+
         if self._signer is not None:
             sig = self._signer(request)
             if sig is not None:

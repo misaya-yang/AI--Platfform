@@ -255,13 +255,14 @@ async def lifespan(app: FastAPI):
     # apps/assistant-service/ uses the Protocols from ai-gateway-core.
     # Storage stack itself moved to ai_gateway_core in Phase 5f Batch B, so
     # storage helpers no longer require a src.* import here.
-    from src.services.metrics.realtime_metrics import get_realtime_metrics
-    from src.services.metrics.usage_recorder import get_usage_recorder
     from ai_gateway_core.storage import (
         get_artifact_storage,
         get_file_storage,
         init_artifact_storage,
     )
+
+    from src.services.metrics.realtime_metrics import get_realtime_metrics
+    from src.services.metrics.usage_recorder import get_usage_recorder
 
     from .core import AssistantService
 
@@ -400,6 +401,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# X-Request-Id middleware — bind incoming gateway request_id to request.state
+# + REQUEST_ID_CTX contextvar so log lines can include it. When invoked
+# directly (no gateway in front) mints `svc-<uuid>` so log aggregators can
+# tell direct calls from gateway-fronted ones.
+from ai_gateway_core.proxy import RequestIDMiddleware  # noqa: E402
+
+app.add_middleware(RequestIDMiddleware)
 
 # Phase 5a: reject traffic without a valid ``X-Gateway-Secret``. Closes
 # Audit Finding H-4 (sibling-container SSRF → user impersonation). Skipped

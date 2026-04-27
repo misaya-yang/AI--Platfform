@@ -19,11 +19,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
-
-from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -112,8 +111,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if self._is_excluded(request.url.path):
             return await call_next(request)
 
-        # 生成请求 ID
-        request_id = str(uuid.uuid4())
+        # 生成 / 透传请求 ID — 入口若已经携带 X-Request-Id(上游 caller 传入),
+        # 保留它以便端到端关联;否则生成一个新的 UUID。最大长度 64,只允许
+        # safe ASCII(防止恶意 header 写入)。
+        incoming = (request.headers.get("x-request-id") or "").strip()
+        if incoming and len(incoming) <= 64 and all(
+            c.isalnum() or c in "-_." for c in incoming
+        ):
+            request_id = incoming
+        else:
+            request_id = str(uuid.uuid4())
         request.state.request_id = request_id
 
         # 记录开始时间

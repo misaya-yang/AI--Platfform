@@ -200,7 +200,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             image_storage = None
             try:
                 from ai_gateway_core.storage.image_storage import (
-                    ImageStorageService, StorageBackend, StorageConfig,
+                    ImageStorageService,
+                    StorageBackend,
+                    StorageConfig,
                 )
                 storage_cfg = resolved.storage
                 if storage_cfg.backend == "s3" and storage_cfg.s3.bucket:
@@ -336,6 +338,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # X-Request-Id middleware — bind incoming gateway request_id to
+    # request.state + REQUEST_ID_CTX contextvar so log lines can include it.
+    from ai_gateway_core.proxy import RequestIDMiddleware
+
+    app.add_middleware(RequestIDMiddleware)
 
     # --- Phase K5c: Gateway HMAC verification (closes Polaris #6-KB) ---
     # Reject requests that didn't pass through the gateway signer. Sibling

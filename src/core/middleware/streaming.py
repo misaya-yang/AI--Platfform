@@ -18,11 +18,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ...services.metrics import get_metrics_recorder
-from ai_gateway_core.logging import get_logger
 from .rate_limit_http import RateLimitInfo, SlidingWindowRateLimiter
 
 logger = get_logger(__name__)
@@ -648,8 +648,25 @@ class StreamingLoggingMiddleware(PureASGIMiddleware):
             await self.app(scope, receive, send)
             return
 
-        # 生成请求 ID
-        request_id = str(uuid.uuid4())
+        # 生成 / 透传请求 ID — preserve incoming X-Request-Id for end-to-end
+        # correlation (caller may already have one). Same validation rules as
+        # request_logging.py: ≤64 chars, alphanumeric + safe punct.
+        incoming_request_id = ""
+        for header_name, header_value in scope.get("headers", []):
+            if header_name == b"x-request-id":
+                try:
+                    incoming_request_id = header_value.decode("ascii", errors="ignore").strip()
+                except Exception:
+                    incoming_request_id = ""
+                break
+        if (
+            incoming_request_id
+            and len(incoming_request_id) <= 64
+            and all(c.isalnum() or c in "-_." for c in incoming_request_id)
+        ):
+            request_id = incoming_request_id
+        else:
+            request_id = str(uuid.uuid4())
         if "state" not in scope:
             scope["state"] = {}
         scope["state"]["request_id"] = request_id

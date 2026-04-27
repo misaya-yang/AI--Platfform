@@ -17,12 +17,15 @@ from .base import (
     ServiceProxy,
     ServiceProxyConfig,
 )
+from .request_id_middleware import REQUEST_ID_CTX, RequestIDMiddleware
 
 __all__ = [
     "CircuitBreaker",
     "CircuitBreakerState",
     "InMemoryCounter",
     "ProxyError",
+    "REQUEST_ID_CTX",
+    "RequestIDMiddleware",
     "ServiceProxy",
     "ServiceProxyConfig",
 ]

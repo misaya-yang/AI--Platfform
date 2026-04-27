@@ -12,11 +12,10 @@ from __future__ import annotations
 import os
 from typing import Final
 
-from fastapi import Request
-from starlette.responses import Response
-
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.proxy import ServiceProxy, ServiceProxyConfig
+from fastapi import Request
+from starlette.responses import Response
 
 from ...core.auth.user_resolver import UserContext
 
