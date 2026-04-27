@@ -297,13 +297,6 @@ class LangGraphProxy:
             if request_id := original_headers.get("X-Request-Id"):
                 headers["X-Request-Id"] = request_id
 
-        # 其他 Header 透传保持不变
-        if original_headers:
-            if trace_id := original_headers.get("X-Trace-Id"):
-                headers["X-Trace-Id"] = trace_id
-            if request_id := original_headers.get("X-Request-Id"):
-                headers["X-Request-Id"] = request_id
-
         return headers
 
     async def _make_request(
@@ -1663,14 +1656,30 @@ class LangGraphProxy:
         if current >= max_threads:
             raise QuotaExceededError(f"Thread quota exceeded: {current}/{int(max_threads)}")
 
-    async def _count_user_threads(self, user_id: str) -> int:
-        """统计用户的 Thread 数量"""
+    async def _count_user_threads(self, user_id: str) -> float:
+        """统计用户的 Thread 数量
+
+        When Redis is unavailable (or errors), fail-closed: return ``inf`` so
+        ``_check_thread_quota`` denies all non-admin/non-enterprise tiers,
+        matching prod-with-Redis behavior. Admin and enterprise tiers have a
+        ``float("inf")`` quota and are short-circuited before this is called,
+        so they remain unaffected.
+        """
         if self.redis and self.redis.enabled:
             try:
                 return await self.redis.get_user_thread_count(user_id)
-            except Exception:
-                return 0
-        return 0
+            except Exception as exc:
+                logger.warning(
+                    "Redis thread-count lookup failed for user=%s; defaulting to deny: %s",
+                    user_id, exc,
+                )
+                return float("inf")
+        logger.warning(
+            "Redis unavailable; thread quota check defaulting to deny for user=%s "
+            "(set Redis up or whitelist tier)",
+            user_id,
+        )
+        return float("inf")
 
     async def _increment_thread_count(self, user: UserContext) -> None:
         """增加 Thread 计数"""
