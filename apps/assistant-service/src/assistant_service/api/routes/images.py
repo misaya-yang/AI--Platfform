@@ -281,50 +281,109 @@ async def _persist_and_get_url(
     height: int,
     index: int,
 ) -> tuple[str | None, GeneratedImage]:
-    """Watermark, persist to S3 (if storage configured), return (artifact_id, img).
+    """Persist artifact(s) and return (raw_artifact_id_for_history, public_GeneratedImage).
 
-    The ``url`` on the returned ``GeneratedImage`` is a presigned S3 URL when
-    storage is configured, otherwise a ``data:image/...;base64,...`` fallback
-    so dev/test environments still get a usable response.
+    When ``add_watermark`` is True we store two artifacts: a raw one for
+    multi-turn history replay (so next-turn Gemini sees the unwatermarked
+    image and doesn't accumulate watermarks) and a watermarked one whose
+    URL we return. When ``add_watermark`` is False, the same artifact serves
+    both roles.
+
+    The first element of the returned tuple is the **raw** artifact_id (used
+    by ``_persist_multi_turn_result`` to write into session history). The
+    ``artifact_id`` on the returned ``GeneratedImage`` is the **watermarked**
+    one — that's what the Dev backend / frontend sees in the response and
+    will hand back as ``reference_image_url`` for stateless edits.
     """
-    cb64 = img.get("content_base64", "")
-    mt = img.get("mime_type", "image/png")
-    if add_watermark and cb64:
-        try:
-            cb64, mt = await asyncio.to_thread(apply_watermark_b64, cb64)
-        except Exception as e:
-            logger.warning("Watermark failed for image %d: %s", index, e)
+    raw_b64 = img.get("content_base64", "")
+    raw_mt = img.get("mime_type", "image/png")
 
-    artifact_id: str | None = None
-    url: str | None = None
+    if not artifact_storage or not raw_b64:
+        # Fallback path: data URL response, no artifacts.
+        if add_watermark and raw_b64:
+            try:
+                cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
+            except Exception as e:
+                logger.warning("Watermark failed for image %d: %s", index, e)
+                cb64, mt = raw_b64, raw_mt
+        else:
+            cb64, mt = raw_b64, raw_mt
+        return None, GeneratedImage(
+            url=f"data:{mt};base64,{cb64}",
+            width=width, height=height, artifact_id=None,
+        )
 
-    if artifact_storage and cb64:
-        try:
-            content_bytes = _b64.b64decode(cb64)
-            ext = mt.split("/")[-1] or "png"
-            effective_session = session_id or f"stateless_{uuid.uuid4().hex[:12]}"
-            artifact = await artifact_storage.create_artifact(
-                session_id=effective_session,
-                tenant_id=user.tenant_id,
-                user_id=user.user_id,
-                type="image",
-                format=ext,
-                title=f"Generated: {prompt[:60]}",
-                filename=f"generated_{uuid.uuid4().hex[:8]}_{index + 1}.{ext}",
-                content=content_bytes,
-                source="image_generation",
-            )
-            artifact_id = artifact.artifact_id
-            url = await artifact_storage.get_presigned_download_url(artifact)
-        except Exception as e:
-            logger.warning("Failed to save image artifact: %s", e)
+    # Storage available — persist raw artifact first (always).
+    raw_artifact_id: str | None = None
+    raw_url: str | None = None
+    effective_session = session_id or f"stateless_{uuid.uuid4().hex[:12]}"
+    try:
+        raw_bytes = _b64.b64decode(raw_b64)
+        ext = raw_mt.split("/")[-1] or "png"
+        raw_artifact = await artifact_storage.create_artifact(
+            session_id=effective_session,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            type="image",
+            format=ext,
+            title=f"Generated: {prompt[:60]}",
+            filename=f"generated_{uuid.uuid4().hex[:8]}_{index + 1}.{ext}",
+            content=raw_bytes,
+            source="image_generation",
+        )
+        raw_artifact_id = raw_artifact.artifact_id
+        raw_url = await artifact_storage.get_presigned_download_url(raw_artifact)
+    except Exception as e:
+        logger.warning("Failed to save raw image artifact: %s", e)
+        # Fall back to data URL as response, no artifact.
+        cb64 = raw_b64
+        mt = raw_mt
+        if add_watermark:
+            try:
+                cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
+            except Exception as we:
+                logger.warning("Watermark failed for image %d: %s", index, we)
+        return None, GeneratedImage(
+            url=f"data:{mt};base64,{cb64}",
+            width=width, height=height, artifact_id=None,
+        )
 
-    if not url:
-        # Fallback only — Dev integrations should have artifact storage configured.
-        url = f"data:{mt};base64,{cb64}"
+    if not add_watermark:
+        # Single-artifact happy path.
+        return raw_artifact_id, GeneratedImage(
+            url=raw_url or f"data:{raw_mt};base64,{raw_b64}",
+            width=width, height=height, artifact_id=raw_artifact_id,
+        )
 
-    return artifact_id, GeneratedImage(
-        url=url, width=width, height=height, artifact_id=artifact_id,
+    # add_watermark=True → store a separate watermarked artifact for the public URL.
+    try:
+        wm_b64, wm_mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
+        wm_bytes = _b64.b64decode(wm_b64)
+        wm_ext = wm_mt.split("/")[-1] or "png"
+        wm_artifact = await artifact_storage.create_artifact(
+            session_id=effective_session,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            type="image",
+            format=wm_ext,
+            title=f"Watermarked: {prompt[:60]}",
+            filename=f"watermarked_{uuid.uuid4().hex[:8]}_{index + 1}.{wm_ext}",
+            content=wm_bytes,
+            source="image_generation_watermarked",
+        )
+        public_artifact_id = wm_artifact.artifact_id
+        public_url = await artifact_storage.get_presigned_download_url(wm_artifact)
+    except Exception as e:
+        logger.warning("Watermarked artifact persist failed (%s); returning raw URL", e)
+        # Degrade: return raw URL but still keep raw_artifact_id for history.
+        return raw_artifact_id, GeneratedImage(
+            url=raw_url or f"data:{raw_mt};base64,{raw_b64}",
+            width=width, height=height, artifact_id=raw_artifact_id,
+        )
+
+    return raw_artifact_id, GeneratedImage(
+        url=public_url or raw_url or f"data:{raw_mt};base64,{raw_b64}",
+        width=width, height=height, artifact_id=public_artifact_id,
     )
 
 

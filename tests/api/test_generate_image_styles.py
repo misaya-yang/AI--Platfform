@@ -601,6 +601,90 @@ class TestMultiTurnSignatureFlow:
         import base64 as _b64
         assert img_part["inlineData"]["data"] == _b64.b64encode(b"prior_image_bytes").decode()
 
+    async def test_watermark_uses_separate_artifact_for_history_vs_response(self):
+        """Regression guard: with add_watermark=true, history must store the RAW
+        artifact (so next-turn Gemini sees unwatermarked image), while the
+        response URL points to the WATERMARKED artifact."""
+        body = ImageGenerationRequest(
+            prompt="a cat", model_id="gemini-3.1-flash-image-preview",
+            session_id="sess-wm", add_watermark=True,
+        )
+        session = _session_stub(metadata={"image_chat_history": []})
+        session_mgr = _session_manager_stub(session)
+        storage = self._artifact_storage_stub()
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate_chat = AsyncMock(
+            return_value=self._gemini_with_signature("sig_wm"),
+        )
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
+        ):
+            resp = await generate_image(
+                body=body, request=_make_request(session_manager=session_mgr),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        # Two artifacts created: one raw, one watermarked
+        assert storage.create_artifact.call_count == 2
+        sources = [c.kwargs["source"] for c in storage.create_artifact.call_args_list]
+        assert "image_generation" in sources
+        assert "image_generation_watermarked" in sources
+
+        # Response artifact_id is the watermarked one
+        response_artifact_id = resp.images[0].artifact_id
+        # History artifact_id is the raw one
+        persisted_meta = session_mgr.update_metadata.call_args.args[1]
+        history = persisted_meta["image_chat_history"]
+        model_turn = next(t for t in history if t.get("role") == "model")
+        history_artifact_id = model_turn["artifact_id"]
+        # They must be different artifacts
+        assert response_artifact_id != history_artifact_id, (
+            "Response should point to watermarked artifact; history should "
+            "point to raw artifact, so next-turn replay doesn't accumulate watermarks."
+        )
+
+    async def test_no_watermark_uses_single_artifact(self):
+        """When add_watermark=False (default), only one artifact is created and
+        response URL + history both reference it."""
+        body = ImageGenerationRequest(
+            prompt="a cat", model_id="gemini-3.1-flash-image-preview",
+            session_id="sess-nowm", add_watermark=False,
+        )
+        session = _session_stub(metadata={"image_chat_history": []})
+        session_mgr = _session_manager_stub(session)
+        storage = self._artifact_storage_stub()
+
+        gemini_mock = MagicMock()
+        gemini_mock.is_configured = True
+        gemini_mock.generate_chat = AsyncMock(
+            return_value=self._gemini_with_signature("sig_nowm"),
+        )
+
+        with patch(
+            "assistant_service.api.routes.images.get_gemini_image_generator",
+            return_value=gemini_mock,
+        ), patch(
+            "assistant_service.api.routes.images._get_artifact_storage",
+            return_value=storage,
+        ):
+            resp = await generate_image(
+                body=body, request=_make_request(session_manager=session_mgr),
+                user=_user(), model_registry=_registry_stub("google"),
+            )
+
+        assert storage.create_artifact.call_count == 1
+        response_artifact_id = resp.images[0].artifact_id
+        persisted_meta = session_mgr.update_metadata.call_args.args[1]
+        history_artifact_id = persisted_meta["image_chat_history"][1]["artifact_id"]
+        assert response_artifact_id == history_artifact_id
+
 
 @pytest.mark.asyncio
 class TestReferenceImageUrl:
