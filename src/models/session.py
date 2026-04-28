@@ -1,33 +1,10 @@
+"""Back-compat shim — Session models moved to ai_gateway_core in Phase 5f Batch C.
+
+Canonical location: ``ai_gateway_core.session.models``.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+from ai_gateway_core.session import Session, SessionMessage
 
-
-@dataclass
-class SessionMessage:
-    """会话消息"""
-
-    role: str
-    content: Any
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    metadata: dict[str, Any] | None = None
-
-
-@dataclass
-class Session:
-    """会话数据"""
-
-    session_id: str
-    user_id: str
-    tenant_id: str = ""
-    service_id: str | None = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime | None = None
-    metadata: dict[str, Any] | None = None
-    history: list[SessionMessage] = field(default_factory=list)
-    state: dict[str, Any] | None = field(default_factory=dict)
-    config: dict[str, Any] | None = field(default_factory=dict)
-    status: str = "active"
-    expires_at: datetime | None = None
+__all__ = ["Session", "SessionMessage"]

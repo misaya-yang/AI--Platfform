@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI):
     session_manager = None
     if database:
         try:
-            from src.services.session.database_session_manager import DatabaseSessionManager
+            from ai_gateway_core.session import DatabaseSessionManager
             session_manager = DatabaseSessionManager(database)
         except Exception as e:
             logger.warning(f"Session manager init failed: {e}")
