@@ -80,6 +80,7 @@ async def build_runtime(settings: Settings) -> Runtime:
         await db.migrate(migrations_dir / "005_recommended_questions.sql")
         await db.migrate(migrations_dir / "007_hadith_chapters.sql")
         await db.migrate(migrations_dir / "008_strip_bidi_marks_arabic.sql")
+        await db.migrate(migrations_dir / "009_fix_cross_book_hadith_linkage.sql")
     cache = RedisCache(settings.cache)
     await cache.connect()
 

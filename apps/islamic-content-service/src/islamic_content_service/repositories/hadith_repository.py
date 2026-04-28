@@ -24,7 +24,10 @@ _BIDI_NOISE_CHARS = ("‏", "‎")  # RLM, LRM
 
 
 def _normalize_arabic(text: str | None) -> str | None:
-    """Strip publisher-supplied bidi typesetting hints from Arabic text."""
+    """Strip publisher-supplied bidi typesetting hints. Safe for English too —
+    English never legitimately needs RLM/LRM and at least one English
+    chapter intro from sunnah.com had a stray U+200E. Name kept for
+    backwards compat with existing call sites."""
     if not text:
         return text
     if not any(ch in text for ch in _BIDI_NOISE_CHARS):
@@ -33,6 +36,11 @@ def _normalize_arabic(text: str | None) -> str | None:
     for ch in _BIDI_NOISE_CHARS:
         out = out.replace(ch, "")
     return out
+
+
+# Alias — clearer at the EN call sites so reviewers don't wonder why an
+# Arabic-named helper is being applied to a translation_text.
+_normalize_text = _normalize_arabic
 
 
 def _hadith_sort_key(value: str) -> tuple[int, str]:
@@ -167,7 +175,7 @@ class HadithRepository:
                 chapter_title = item.get("chapter_title")
                 if item.get("translation_text"):
                     localization_rows.append(
-                        (hadith_item_id, "en", chapter_title, item["translation_text"])
+                        (hadith_item_id, "en", chapter_title, _normalize_text(item["translation_text"]))
                     )
                 if item.get("arabic_text"):
                     localization_rows.append(
@@ -308,7 +316,8 @@ class HadithRepository:
             localization_rows = []
             if hadith.get("translation_text"):
                 localization_rows.append(
-                    (hadith_item_id, "en", hadith.get("chapter_title"), hadith["translation_text"])
+                    (hadith_item_id, "en", hadith.get("chapter_title"),
+                     _normalize_text(hadith["translation_text"]))
                 )
             if hadith.get("arabic_text"):
                 localization_rows.append(
@@ -464,11 +473,15 @@ class HadithRepository:
                 "chapter_id": str(row["chapter_order"]),
                 "chapter_number": row["chapter_order"],
                 "chapter_id_raw": row["chapter_id_raw"],
-                "chapter_title": row["title_en"] or row["title_ar"] or "",
-                "title_en": row["title_en"],
-                "title_ar": row["title_ar"],
-                "intro_en": row["intro_en"],
-                "intro_ar": row["intro_ar"],
+                "chapter_title": (
+                    _normalize_text(row["title_en"])
+                    or _normalize_text(row["title_ar"])
+                    or ""
+                ),
+                "title_en": _normalize_text(row["title_en"]),
+                "title_ar": _normalize_text(row["title_ar"]),
+                "intro_en": _normalize_text(row["intro_en"]),
+                "intro_ar": _normalize_text(row["intro_ar"]),
                 "hadith_count": row["hadith_count"] or 0,
             }
             for row in rows
@@ -679,11 +692,15 @@ class HadithRepository:
             ),
             "hadith_number": row["hadith_number"],
             "chapter_title": row["ch_title_en"] or row["ch_title_ar"] or row["book_title"],
-            "translation_text": (text_by_language.get("en") or {}).get("body_text", ""),
             # Defense-in-depth: scrub bidi noise on the way out even though
             # we now normalize on insert. Legacy rows pre-backfill, plus any
             # future re-sync from a not-yet-normalized seam, get cleaned.
-            "arabic_text": _normalize_arabic(
+            # English body had 0 cases in prod survey but a single chapter
+            # intro_en carried U+200E — scrub both languages defensively.
+            "translation_text": _normalize_text(
+                (text_by_language.get("en") or {}).get("body_text", "")
+            ) or "",
+            "arabic_text": _normalize_text(
                 (text_by_language.get("ar") or {}).get("body_text", "")
             ) or "",
             "grades": grades_by_language,
