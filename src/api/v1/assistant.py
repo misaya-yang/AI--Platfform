@@ -1082,11 +1082,10 @@ async def get_artifact_download_url(
     Query params: ``variant`` (display|raw|thumbnail, default display) and
     ``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on
     cross-owner access. See assistant-service for the full contract."""
+    # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
-    qs = request.url.query
-    suffix = f"?{qs}" if qs else ""
     return await proxy_to_assistant_service(
-        request, user, path=f"artifacts/{artifact_id}/download-url{suffix}",
+        request, user, path=f"artifacts/{artifact_id}/download-url",
     )
 
 
@@ -1100,11 +1099,10 @@ async def get_image_session_view(
 
     Query params: ``limit`` (1..200, default 50), ``cursor`` (opaque),
     ``include_urls`` (bool, default false). Owner-scoped."""
+    # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
-    qs = request.url.query
-    suffix = f"?{qs}" if qs else ""
     return await proxy_to_assistant_service(
-        request, user, path=f"image-sessions/{session_id}{suffix}",
+        request, user, path=f"image-sessions/{session_id}",
     )
 
 
