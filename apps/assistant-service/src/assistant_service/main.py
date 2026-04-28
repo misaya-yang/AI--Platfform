@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI):
 
     # ── Redis ──
     redis_client = None
+    redis_storage = None  # RedisStorage wrapper for shared session cache
     redis_url = os.getenv("REDIS_URL", settings.redis.url)
     if redis_url and settings.redis.enabled:
         try:
@@ -92,6 +93,18 @@ async def lifespan(app: FastAPI):
             await redis_client.ping()
             app.state.redis = redis_client
             logger.info("Redis connected")
+
+            # Build a RedisStorage wrapper that DatabaseSessionManager
+            # uses for cache. Shared with the gateway via the same Redis
+            # instance — mandatory for cache-coherence across processes.
+            # Without this, AS writes invalidate only its own in-process
+            # dict, leaving the gateway's Redis cache stale (incident
+            # 2026-04-28: chat sessions appearing empty after AS reload).
+            from ai_gateway_core.persistence import RedisStorage
+            redis_storage = RedisStorage(url=redis_url, enabled=True)
+            await redis_storage.connect()
+            app.state.redis_storage = redis_storage
+            logger.info("RedisStorage wrapper connected (shared session cache)")
         except Exception as e:
             if require_redis:
                 logger.error("Redis init failed (ASSISTANT_REQUIRE_REDIS=true): %s", e)
@@ -217,7 +230,7 @@ async def lifespan(app: FastAPI):
     if database:
         try:
             from ai_gateway_core.session import DatabaseSessionManager
-            session_manager = DatabaseSessionManager(database)
+            session_manager = DatabaseSessionManager(database, redis=redis_storage)
         except Exception as e:
             logger.warning(f"Session manager init failed: {e}")
 

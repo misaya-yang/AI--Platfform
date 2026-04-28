@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 from .database import HAS_ASYNCPG, DatabaseStorage
+from .redis import HAS_REDIS, RedisStorage
 
 
 @runtime_checkable
@@ -26,4 +27,10 @@ class DatabaseStorageLike(Protocol):
     async def execute(self, query: str, *args: Any) -> Any: ...
 
 
-__all__ = ["DatabaseStorage", "DatabaseStorageLike", "HAS_ASYNCPG"]
+__all__ = [
+    "DatabaseStorage",
+    "DatabaseStorageLike",
+    "HAS_ASYNCPG",
+    "HAS_REDIS",
+    "RedisStorage",
+]
