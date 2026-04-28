@@ -46,13 +46,24 @@ from .context_metrics import (
     MetricLayer,
     get_context_metrics_collector,
 )
+from .observability import KNOWN_ERROR_TYPES, should_sample_trace
+from .realtime_metrics import RealtimeMetricsService, RealtimeSnapshot, get_realtime_metrics
+from .usage_recorder import UsageRecord, UsageRecorder, get_usage_recorder
 
 __all__ = [
+    "KNOWN_ERROR_TYPES",
     "ContextMetricsCollector",
     "MetricLayer",
     "NoOpRealtimeMetrics",
     "NoOpUsageRecorder",
     "RealtimeMetricsLike",
+    "RealtimeMetricsService",
+    "RealtimeSnapshot",
+    "UsageRecord",
+    "UsageRecorder",
     "UsageRecorderLike",
     "get_context_metrics_collector",
+    "get_realtime_metrics",
+    "get_usage_recorder",
+    "should_sample_trace",
 ]

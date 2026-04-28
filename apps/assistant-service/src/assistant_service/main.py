@@ -261,8 +261,7 @@ async def lifespan(app: FastAPI):
         init_artifact_storage,
     )
 
-    from src.services.metrics.realtime_metrics import get_realtime_metrics
-    from src.services.metrics.usage_recorder import get_usage_recorder
+    from ai_gateway_core.metrics import get_realtime_metrics, get_usage_recorder
 
     from .core import AssistantService
 
