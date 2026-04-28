@@ -7,6 +7,9 @@ circuit breaker, and session management.
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 # Load environment variables from .env file BEFORE importing other modules
 # This ensures env vars are available for module-level configurations
 from pathlib import Path
@@ -567,6 +570,50 @@ def create_app() -> FastAPI:
 
         app.state.assistant_task_manager = await init_task_manager()
 
+        # ── Phase 6: usage event-bus consumer (opt-in via EVENT_BUS_REDIS_URL) ──
+        # When the recorder is dual-writing events (commit 6f1b974), this
+        # consumer reads them off ``events:usage:recorded:v1`` and logs.
+        # Today the body is log-only — observable proof that the bus path
+        # works in prod. The next iteration replaces the handler with a
+        # real downstream sink (analytics warehouse, secondary aggregator,
+        # quota service) without changing any other plumbing.
+        bus_url = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
+        if bus_url:
+            try:
+                from ai_gateway_core.events import EventConsumer, parse_envelope
+                from ai_gateway_core.events.registry import get_stream
+
+                async def _log_usage_event(envelope) -> None:
+                    p = envelope.payload
+                    logger.info(
+                        "usage_event tenant=%s user=%s model=%s tokens=%d/%d "
+                        "lat=%dms status=%s req=%s event_id=%s",
+                        envelope.tenant_id,
+                        getattr(p, "user_id", ""),
+                        getattr(p, "model", ""),
+                        getattr(p, "input_tokens", 0),
+                        getattr(p, "output_tokens", 0),
+                        getattr(p, "latency_ms", 0),
+                        getattr(p, "status", ""),
+                        envelope.request_id,
+                        envelope.event_id,
+                    )
+
+                _consumer = EventConsumer(
+                    redis_url=bus_url,
+                    stream=get_stream("usage.recorded.v1"),
+                    group="gateway-usage-logger",
+                    consumer_name=f"gateway-{os.getpid()}",
+                    handler=_log_usage_event,
+                )
+                _consumer_task = asyncio.create_task(_consumer.start())
+                app.state.usage_event_consumer = _consumer
+                app.state.usage_event_consumer_task = _consumer_task
+                logger.info("usage event consumer started → %s", bus_url.rsplit("@", 1)[-1])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("usage event consumer skipped: %s: %s", type(exc).__name__, exc)
+                app.state.usage_event_consumer = None
+
         # 打印启动信息
         _print_startup_info(settings)
 
@@ -588,6 +635,23 @@ def create_app() -> FastAPI:
         # Phase K5c: KB worker + Confluence scheduler no longer run in the
         # gateway process — they're owned by knowledge-service. Nothing to
         # stop here; the attributes are never set.
+
+        # Phase 6: stop the usage event consumer (if running). The consumer
+        # is started lazily when EVENT_BUS_REDIS_URL is set; we need to
+        # signal stop + await its background task so the redis client closes
+        # cleanly and we don't leak the asyncio task on container exit.
+        _consumer = getattr(app.state, "usage_event_consumer", None)
+        _consumer_task = getattr(app.state, "usage_event_consumer_task", None)
+        if _consumer is not None:
+            try:
+                await _consumer.stop()
+            except Exception:
+                logger.exception("usage event consumer stop() failed")
+        if _consumer_task is not None and not _consumer_task.done():
+            try:
+                await asyncio.wait_for(_consumer_task, timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                _consumer_task.cancel()
 
         # Stop file cleanup service
         file_cleanup_service = getattr(app.state, "file_cleanup_service", None)
