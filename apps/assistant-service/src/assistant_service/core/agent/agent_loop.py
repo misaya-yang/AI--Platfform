@@ -2438,7 +2438,14 @@ class AgentLoop:
                         elif tool_name == "generate_pptx":
                             # Emit OUTLINE_READY so the UI can preview slides (Manus-style).
                             title = tool_args.get("title", "Presentation")
-                            slides = tool_args.get("slides", []) or []
+                            # Coerce the model's ``slides`` arg into the
+                            # canonical list-of-dicts shape — handles
+                            # JSON-string and list-of-strings shapes the
+                            # model occasionally emits. Replace in
+                            # tool_args too so the actual tool invocation
+                            # downstream sees the normalised value.
+                            slides = _coerce_slides(tool_args.get("slides"))
+                            tool_args["slides"] = slides
                             theme = tool_args.get("theme", "professional")
 
                             outline_slides = []
@@ -3391,6 +3398,63 @@ class AgentLoop:
                     "phase": phase.value,
                 },
             )
+
+
+# =============================================================================
+# Tool-arg coercion helpers
+# =============================================================================
+
+
+def _coerce_slides(raw: Any) -> list[dict[str, Any]]:
+    """Normalise the ``slides`` arg passed by the model to ``generate_pptx``.
+
+    Models (Qwen 3.6 in particular) regularly mis-shape this arg in three
+    ways that all crashed the outline emitter at agent_loop.py:2446:
+
+      * Whole arg as a JSON-encoded string (``slides='[{"title": ...}]'``).
+        Model itself diagnosed this in chain-of-thought during the
+        2026-04-28 incident: "I'm passing slides as a JSON string instead
+        of an array."
+      * Items as plain strings (``slides=["intro", "method", ...]``) —
+        pre-bullet model output before tool-call shape is finalised.
+      * Mixed list (some dicts, some strings).
+
+    Anything else (None, int, etc.) → empty list. The tool itself can
+    still validate; this helper just ensures we never AttributeError
+    inside ``slide.get(...)``.
+    """
+    if isinstance(raw, str):
+        # Try once to parse the whole arg as JSON; fall back to empty
+        # rather than treating the string as a single slide title (the
+        # tool would then produce a 1-slide deck with no content).
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        raw = parsed
+
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw, start=1):
+        if isinstance(item, dict):
+            out.append(item)
+        elif isinstance(item, str):
+            # Lift bare-string items into the minimal dict shape the
+            # downstream renderer expects. Use the string as the slide
+            # title so the user sees their model-generated outline,
+            # not a placeholder.
+            out.append(
+                {
+                    "title": item[:80] or f"Slide {idx}",
+                    "layout": "content",
+                    "bullets": [],
+                }
+            )
+        # else: silently skip — int / None / nested-list have no sane
+        # interpretation and would surprise the tool.
+    return out
 
 
 # =============================================================================
