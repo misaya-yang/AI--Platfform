@@ -1900,23 +1900,19 @@ class AgentLoop:
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_dedup = KBDedupState()
             web_dedup = WebSearchDedupState()
-            # Combined hard cap on web-browsing tool calls (search_web + web_fetch).
-            # Observed failure mode: model picks different-enough query strings
-            # to slip past the dedup fingerprint, then piles on web_fetch to
-            # "verify" — 5-10 web tool calls on a single "yesterday's scores"
-            # question. Dedup catches near-duplicates; this cap catches the
-            # long tail of semantically-equivalent-but-textually-distinct calls.
-            web_browsing_calls = 0
-            WEB_BROWSING_CALL_LIMIT = 3
-            _WEB_BROWSING_TOOLS = frozenset({"search_web", "web_search", "web_fetch"})
-            force_answer_without_tools = False
-            # Distinct from ``force_answer_without_tools``: when the web-browsing
-            # cap is hit, only WEB tools should be removed for the next turn —
-            # the model still needs ``generate_pptx`` / ``generate_document``
-            # / ``generate_image`` etc. to produce the artefact the user
-            # actually asked for. Conflating "no more web" with "no tools at
-            # all" was the 2026-04-28 PPT-truncation root cause.
-            disable_web_tools_next_turn = False
+            # Tools the permission middleware has denied for this turn.
+            # Real security gate (per-tool, not a budget) — excluded from
+            # ``tools_for_call`` next iteration so the model doesn't keep
+            # trying a tool it was told it cannot use.
+            denied_tools: set[str] = set()
+            # Tracks whether the most recent tool execution failed. Drives the
+            # post-loop forced-synthesis guard so a leaked narrative + tool
+            # failure can't masquerade as a complete answer.
+            last_tool_failed = False
+            # Set when the model returns an assistant message with no tool
+            # calls — i.e. it chose to stop. Distinguishes natural exit from
+            # iteration-cap exhaustion (where we want forced synthesis).
+            model_terminated_cleanly = False
 
             while iteration < max_iterations:
                 iteration += 1
@@ -2024,28 +2020,17 @@ class AgentLoop:
                     )
 
                 tools_for_call = tools_for_iteration
-                if force_answer_without_tools:
-                    tools_for_call = None
-                    force_answer_without_tools = False
-                    logger.info(
-                        "[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once)."
-                    )
-                elif disable_web_tools_next_turn:
-                    # Filter web tools out, keep everything else available so
-                    # the model can still call ``generate_pptx`` etc. with the
-                    # evidence it has gathered.
-                    if tools_for_call:
-                        tools_for_call = [
-                            t
-                            for t in tools_for_call
-                            if (t.get("function", {}).get("name") if isinstance(t, dict) else getattr(t, "name", ""))
-                            not in _WEB_BROWSING_TOOLS
-                        ]
-                    disable_web_tools_next_turn = False
-                    logger.info(
-                        "[STREAMING-FIRST] Web tools disabled this turn; %d non-web tools remain.",
-                        len(tools_for_call) if tools_for_call else 0,
-                    )
+                if tools_for_call and denied_tools:
+                    tools_for_call = [
+                        t
+                        for t in tools_for_call
+                        if (
+                            t.get("function", {}).get("name")
+                            if isinstance(t, dict)
+                            else getattr(t, "name", "")
+                        )
+                        not in denied_tools
+                    ]
 
                 tool_calls_accumulated: dict[str, dict[str, Any]] = {}
                 tool_call_order: list[str] = []
@@ -2205,6 +2190,7 @@ class AgentLoop:
 
                 # If no tool calls, we're done
                 if not tool_calls_batch:
+                    model_terminated_cleanly = True
                     break
 
                 # Step 4: Execute tool calls
@@ -2292,7 +2278,6 @@ class AgentLoop:
                             _dedup_reason,
                             kb_query_fp[:160] if kb_query_fp else "<no-fp>",
                         )
-                        force_answer_without_tools = True
                         messages.append(
                             {
                                 "role": "tool",
@@ -2309,7 +2294,6 @@ class AgentLoop:
                             _web_reason,
                             web_query_fp[:160] if web_query_fp else "<no-fp>",
                         )
-                        force_answer_without_tools = True
                         messages.append(
                             {
                                 "role": "tool",
@@ -2319,45 +2303,6 @@ class AgentLoop:
                             }
                         )
                         continue
-                    # Hard cap on combined web-browsing tool calls per turn.
-                    # Triggers when model slips past the dedup fingerprint with
-                    # semantically-duplicate queries (e.g. "NBA scores" vs
-                    # "NBA results") or mixes search_web with web_fetch.
-                    if tool_name in _WEB_BROWSING_TOOLS:
-                        web_browsing_calls += 1
-                        if web_browsing_calls > WEB_BROWSING_CALL_LIMIT:
-                            logger.info(
-                                "[STREAMING-FIRST] Web-browsing cap hit (%d > %d); "
-                                "blocking web tools next turn — non-web tools "
-                                "(generate_pptx/document/image) remain available",
-                                web_browsing_calls,
-                                WEB_BROWSING_CALL_LIMIT,
-                            )
-                            # Only block web tools; the model can still produce
-                            # the artefact via generate_pptx / etc. on the next
-                            # turn. Pre-2026-04-28 this set
-                            # ``force_answer_without_tools`` which stripped ALL
-                            # tools and trapped the loop in narrative mode.
-                            disable_web_tools_next_turn = True
-                            messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": tool_id,
-                                    "name": tool_name,
-                                    "content": (
-                                        f"Web-browsing budget exhausted: "
-                                        f"{WEB_BROWSING_CALL_LIMIT} calls already "
-                                        "made this turn (search_web + web_fetch). "
-                                        "Use the evidence you have. You may still "
-                                        "call non-web tools like generate_pptx, "
-                                        "generate_document, generate_image to "
-                                        "complete the user's request — only avoid "
-                                        "further web searches."
-                                    ),
-                                }
-                            )
-                            continue
-
                     # Permission middleware: gate the tool call before any
                     # lifecycle event is emitted. Deny/confirm short-circuits
                     # with a synthetic tool result so the model can adapt.
@@ -2394,7 +2339,7 @@ class AgentLoop:
                                 ),
                             }
                         )
-                        force_answer_without_tools = True
+                        denied_tools.add(tool_name)
                         continue
 
                     # Manus-style step card (parent) for this tool call
@@ -2755,26 +2700,6 @@ class AgentLoop:
                                     data=display,
                                 )
 
-                        # After successful retrieval (KB/Web) and before any answer text,
-                        # force exactly one follow-up model turn without tools.
-                        # This prevents retrieval loops that massively increase TTFT/tokens.
-                        if (
-                            not first_token_emitted
-                            and tool_success
-                            and tool_name in ("search_knowledge_base", "search_web")
-                        ):
-                            results_count = None
-                            if isinstance(tool_metadata, dict):
-                                results_count = tool_metadata.get("total_results")
-                                if results_count is None and isinstance(
-                                    tool_metadata.get("display"), dict
-                                ):
-                                    results_count = len(
-                                        tool_metadata.get("display", {}).get("results", []) or []
-                                    )
-                            if int(results_count or 0) > 0:
-                                force_answer_without_tools = True
-
                         # Persist output files into ArtifactStorage and emit
                         # ARTIFACT_CREATED events for each newly stored artifact.
                         (
@@ -2908,9 +2833,11 @@ class AgentLoop:
                         step_success = tool_success
                         step_error = tool_error
                         step_result_preview = tool_result_preview or None
+                        last_tool_failed = not tool_success
 
                     except Exception as e:
                         logger.exception("[STREAMING-FIRST] Tool %s failed", tool_name)
+                        last_tool_failed = True
                         tool_result = f"Error executing {tool_name}: {str(e)}"
                         tool_result_for_model = _compact_tool_result_for_model(
                             tool_name=tool_name,
@@ -3140,11 +3067,27 @@ class AgentLoop:
                 for _k, _v in forced_usage.items():
                     ctx.usage[_k] = int(_v)
 
-            if not ctx.generated_content.strip():
+            # Forced-synthesis trigger: fire when the loop ended badly, not
+            # just when content is empty. Captures the leaked-narrative case
+            # ("正在生成 PPT…") where the model lied then ran out of iterations
+            # or its last tool failed — content is non-empty but the user
+            # never got a real answer.
+            max_iter_exhausted = (
+                not model_terminated_cleanly and iteration >= max_iterations
+            )
+            if (
+                not ctx.generated_content.strip()
+                or max_iter_exhausted
+                or last_tool_failed
+            ):
                 logger.warning(
-                    "[STREAMING-FIRST] No final content after %s iterations. "
-                    "Running forced synthesis pass 1 (full history, no tools).",
+                    "[STREAMING-FIRST] Loop ended without clean answer "
+                    "(iter=%s, max_iter_exhausted=%s, last_tool_failed=%s, "
+                    "content_empty=%s). Running forced synthesis pass 1.",
                     iteration,
+                    max_iter_exhausted,
+                    last_tool_failed,
+                    not ctx.generated_content.strip(),
                 )
                 # Attempt 1: same messages, tools disabled, small token budget.
                 async for _ev in _run_forced_synthesis(messages, "full"):
