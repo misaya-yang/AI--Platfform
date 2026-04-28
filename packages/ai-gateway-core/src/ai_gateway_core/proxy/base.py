@@ -445,6 +445,21 @@ class ServiceProxy:
                     limits=self._cfg.limits,
                     transport=httpx.AsyncHTTPTransport(retries=2),
                 )
+                # Attach OTel CLIENT-span instrumentation so outbound
+                # gateway → microservice hops show up in the trace tree.
+                # ``instrument_httpx_client`` is graceful — it catches
+                # ImportError so a stripped-down container without the
+                # OTel httpx instrumentor still proxies fine, just
+                # without per-hop CLIENT spans.
+                try:
+                    from ai_gateway_core.tracing import instrument_httpx_client
+
+                    instrument_httpx_client(self._client)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "ServiceProxy: OTel httpx instrumentation skipped: %s",
+                        exc,
+                    )
             return self._client
 
     async def _reset_client(self) -> None:
@@ -474,6 +489,22 @@ class ServiceProxy:
         )
         if state_request_id and not any(k.lower() == "x-request-id" for k in out):
             out["X-Request-Id"] = state_request_id
+
+        # Forward W3C Trace Context. ``OTelInboundMiddleware`` injected
+        # the active context into ``request.state.traceparent`` /
+        # ``request.state.tracestate`` so we don't rebuild them from
+        # OTel here — that keeps the proxy free of an OTel hard-dep
+        # and avoids a double-extract round trip. The httpx
+        # instrumentor adds them again on the client side, but having
+        # the explicit forward here means that even when the
+        # instrumentor isn't loaded the chain stays intact.
+        request_state = getattr(request, "state", None)
+        traceparent = getattr(request_state, "traceparent", None) if request_state else None
+        if traceparent and not any(k.lower() == "traceparent" for k in out):
+            out["traceparent"] = traceparent
+        tracestate = getattr(request_state, "tracestate", None) if request_state else None
+        if tracestate and not any(k.lower() == "tracestate" for k in out):
+            out["tracestate"] = tracestate
 
         if self._signer is not None:
             sig = self._signer(request)

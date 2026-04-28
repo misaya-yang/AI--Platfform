@@ -90,6 +90,19 @@ class KBProxyClient:
                 timeout=_TIMEOUT,
                 transport=httpx.AsyncHTTPTransport(retries=1),
             )
+            # Attach OTel CLIENT-span instrumentation so KB hops appear
+            # in the same trace tree as the inbound gateway request.
+            # Graceful: ``instrument_httpx_client`` catches ImportError
+            # so a deploy without OTel libs still works.
+            try:
+                from ai_gateway_core.tracing import instrument_httpx_client
+
+                instrument_httpx_client(self._client)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "KBProxyClient: OTel httpx instrumentation skipped: %s",
+                    exc,
+                )
         return self._client
 
     async def close(self) -> None:

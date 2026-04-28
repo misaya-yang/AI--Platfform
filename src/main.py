@@ -229,6 +229,16 @@ def create_app() -> FastAPI:
     from ai_gateway_core.proxy import DrainMiddleware
     app.add_middleware(DrainMiddleware)
 
+    # OpenTelemetry inbound server-span middleware. Sits AFTER CORS (added
+    # below; remember Starlette executes last-added FIRST, so CORS still
+    # wraps OTel). Reads W3C ``traceparent`` from inbound headers, opens
+    # a server span, and exposes the active context on ``request.state``
+    # so the proxy layer forwards it intact to assistant-service / KS.
+    # ``init_tracing`` is called in the startup handler below so the
+    # middleware's tracer reference is valid by request time.
+    from ai_gateway_core.tracing import OTelInboundMiddleware
+    app.add_middleware(OTelInboundMiddleware)
+
     # Security response headers
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -346,6 +356,14 @@ def create_app() -> FastAPI:
     async def startup():
         """应用启动"""
         logger.info("正在启动 AI Gateway...")
+
+        # OpenTelemetry SDK bootstrap — must run BEFORE the DB/Redis init
+        # below so AsyncPGInstrumentor can patch asyncpg before any pool
+        # is created. Idempotent: calling init_tracing twice is a no-op.
+        # OTLP endpoint resolved from OTEL_EXPORTER_OTLP_ENDPOINT env;
+        # unset → no-op exporter (spans recorded in-process, dropped).
+        from ai_gateway_core.tracing import init_tracing
+        init_tracing("gateway")
 
         # Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
         # "please stop" signal flips DRAIN. The matching DrainMiddleware was

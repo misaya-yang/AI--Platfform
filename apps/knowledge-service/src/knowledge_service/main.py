@@ -105,6 +105,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             qdrant_url=resolved.qdrant.url,
         )
 
+        # OpenTelemetry SDK bootstrap — must run BEFORE the DB pool init
+        # below so AsyncPGInstrumentor patches asyncpg before the first
+        # connection is acquired. Idempotent across restarts. Endpoint
+        # resolved from OTEL_EXPORTER_OTLP_ENDPOINT; unset → no-op spans.
+        from ai_gateway_core.tracing import init_tracing
+        init_tracing("knowledge-service")
+
         # Graceful drain — flip ``DRAIN`` on SIGTERM/SIGINT so DrainMiddleware
         # short-circuits new requests with 503 + Retry-After. Below (after
         # ``yield``) we await ``DRAIN.wait_drained`` so in-flight retrieval /
@@ -355,6 +362,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # OTel inbound server-span middleware. Placed AFTER CORS, BEFORE
+    # DrainMiddleware in source order so its execution wraps the inner
+    # stack (Drain → RequestID → routes) but is wrapped by CORS. The
+    # span sees ``request.state.request_id`` because RequestIDMiddleware
+    # sits inside it (added after, executes first).
+    from ai_gateway_core.tracing import OTelInboundMiddleware
+    app.add_middleware(OTelInboundMiddleware)
 
     # Graceful drain — placed alongside ``RequestIDMiddleware`` (immediately
     # below) for symmetry with assistant-service. ``DrainMiddleware`` excludes

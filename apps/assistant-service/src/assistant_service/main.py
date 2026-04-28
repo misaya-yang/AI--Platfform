@@ -41,6 +41,13 @@ async def lifespan(app: FastAPI):
     logger.info("Assistant Service starting...")
     app.state.settings = settings
 
+    # ── OpenTelemetry SDK bootstrap — must run BEFORE database init below
+    # so AsyncPGInstrumentor patches asyncpg before any pool is created.
+    # Idempotent: a duplicate call is a debug-log no-op. Endpoint comes
+    # from OTEL_EXPORTER_OTLP_ENDPOINT env; unset → in-process spans only.
+    from ai_gateway_core.tracing import init_tracing
+    init_tracing("assistant-service")
+
     # ── Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
     # "please stop" signal flips ``DRAIN`` and the shutdown path below can wait
     # for in-flight requests to finish. The middleware that consumes ``DRAIN``
@@ -434,6 +441,13 @@ app.add_middleware(
 # Stacking note: Starlette runs the LAST-added middleware FIRST, so adding
 # DrainMiddleware here (after CORS) makes it outermost — drain gating fires
 # before CORS preflight handling. Move it earlier in source order to invert.
+# OTel inbound middleware sits BETWEEN CORS and Drain in source order so
+# its execution wraps Drain → RequestID (it sees request.state.request_id
+# set by RequestIDMiddleware) but is wrapped by CORS preflight handling.
+from ai_gateway_core.tracing import OTelInboundMiddleware  # noqa: E402
+
+app.add_middleware(OTelInboundMiddleware)
+
 from ai_gateway_core.proxy import DrainMiddleware  # noqa: E402
 
 app.add_middleware(DrainMiddleware)
