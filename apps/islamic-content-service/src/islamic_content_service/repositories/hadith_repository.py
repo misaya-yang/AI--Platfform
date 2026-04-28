@@ -20,7 +20,21 @@ from ..domain.constants import HADITH_SOURCE_API
 #   * legacy rows are scrubbed at response build time (defense in depth)
 #   * ZWJ (U+200D) / ZWNJ (U+200C) are LEFT ALONE — those are legitimate
 #     Arabic joiner controls that change letter shaping (e.g. Persian).
-_BIDI_NOISE_CHARS = ("‏", "‎")  # RLM, LRM
+# Strip:
+#   * U+200F RLM, U+200E LRM (publisher-supplied bidi typesetting hints)
+#   * U+202A..U+202E (legacy directional embeddings: LRE/RLE/PDF/LRO/RLO)
+#   * U+2066..U+2069 (modern directional isolates: LRI/RLI/FSI/PDI)
+#   * U+FFFD REPLACEMENT CHARACTER (upstream encoding-conversion losses
+#     in fawazahmed0 — 59 hadith bodies have these)
+# Preserve ZWJ (U+200D), ZWNJ (U+200C), and BOM (U+FEFF) — those are
+# legitimate Arabic/Persian letter shapers (and BOM at non-start is
+# rare but not corrupting).
+_BIDI_NOISE_CHARS = (
+    "‏", "‎",                                        # RLM, LRM
+    "‪", "‫", "‬", "‭", "‮",          # legacy embeddings
+    "⁦", "⁧", "⁨", "⁩",                    # modern isolates
+    "�",                                                  # replacement char
+)
 
 
 def _normalize_arabic(text: str | None) -> str | None:
