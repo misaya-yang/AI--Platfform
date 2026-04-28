@@ -85,10 +85,10 @@ class HadithQueryService:
                 page=page,
                 limit=limit,
             )
-            if not payload["items"]:
-                raise NotReadyError(
-                    f"No Hadith items found for {collection_name} book {book_number}"
-                )
+            # Empty result: return 200 with empty items + total_items=0
+            # rather than 503 NotReadyError. Lets Java distinguish a
+            # legitimately empty page from a real service issue, and
+            # surfaces typo book_numbers via total_items=0 instead of 5xx.
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_book_items",
@@ -112,10 +112,8 @@ class HadithQueryService:
             if collection is None:
                 raise NotReadyError(f"No Hadith collection found for {collection_name}")
             chapters = await self.repository.get_chapters(collection_name, book_number)
-            if not chapters:
-                raise NotReadyError(
-                    f"No chapters found for {collection_name} book {book_number}"
-                )
+            # Empty result: return 200 with empty chapters list rather
+            # than 503 NotReadyError. Same rationale as get_book_items.
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_chapters",
