@@ -162,48 +162,23 @@ class EmbeddingManager:
                     "Gemini api_key is required in dataset embedding_config"
                 )
         elif provider_key in {"dashscope", "aliyun"}:
+            # Use the canonical per-domain resolver from ai_gateway_core
+            # so ``DASHSCOPE_BASE_URL`` / ``DASHSCOPE_EMBEDDING_BASE_URL``
+            # / per-key fallbacks all behave identically to the gateway
+            # and assistant-service paths. The resolver also normalises
+            # the URL suffix (``/compatible-mode`` → ``/api/v1`` for the
+            # SDK) so a single operator env keeps all three domains
+            # working — incident 2026-04-28.
+            from ai_gateway_core.config import resolve_dashscope
+
+            resolved_key, resolved_url = resolve_dashscope("embedding")
             if not api_key:
-                api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
-            # Inline equivalent of resolve_dashscope("embedding") — see
-            # note on Gemini branch above. ``base_url`` resolution must
-            # NOT be nested under ``if not api_key`` — when settings
-            # already provide the key, the env-supplied SDK base URL is
-            # still required to keep the dashscope SDK off its CN
-            # default (which would route to a CN-side account whose
-            # billing is independent of the Intl key).
-            if not api_key:
-                import os as _os
                 api_key = (
-                    _os.environ.get("DASHSCOPE_EMBEDDING_API_KEY", "").strip()
-                    or _os.environ.get("DASHSCOPE_API_KEY", "").strip()
+                    str(self.settings.knowledge.dashscope.api_key or "").strip()
+                    or resolved_key
                 )
             if not base_url:
-                import os as _os
-                base_url = (
-                    _os.environ.get("DASHSCOPE_EMBEDDING_BASE_URL", "").strip()
-                    or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
-                    or None
-                )
-            # The dashscope SDK's ``base_http_api_url`` already INCLUDES
-            # the ``/api/v1`` segment by default
-            # (``https://dashscope.aliyuncs.com/api/v1``); the SDK appends
-            # ``/services/embeddings/...`` to it. Two common env-supplied
-            # values need normalising before they're handed to the SDK:
-            #
-            #   * ``…/compatible-mode``  → OpenAI-HTTP chat path; not a
-            #     dashscope SDK base. Replace with ``/api/v1``.
-            #   * bare host (``https://dashscope-intl.aliyuncs.com``) →
-            #     missing ``/api/v1``; SDK then 404s on every call.
-            #     Append ``/api/v1``.
-            #
-            # Incident 2026-04-28 — CN account arrearage when SDK fell
-            # back to its CN default; then 404 when the env-supplied base
-            # was the bare host.
-            if base_url:
-                if base_url.endswith("/compatible-mode"):
-                    base_url = base_url[: -len("/compatible-mode")] + "/api/v1"
-                elif not base_url.rstrip("/").endswith("/api/v1"):
-                    base_url = base_url.rstrip("/") + "/api/v1"
+                base_url = resolved_url
             if not api_key:
                 raise ValidationFailedError(
                     "DashScope api_key is required in dataset embedding_config"

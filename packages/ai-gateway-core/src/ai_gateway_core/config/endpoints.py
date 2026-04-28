@@ -48,11 +48,26 @@ from typing import Literal
 
 Domain = Literal["chat", "image", "embedding"]
 
-# DashScope defaults. Chat uses the OpenAI-compat suffix; image/embedding
-# use the native dashscope.aliyuncs.com root because the SDK hardcodes
-# /api/v1 paths.
+# DashScope speaks two different URL conventions:
+#
+#   * ``chat`` uses the OpenAI-compatible HTTP path. The OpenAI-compat
+#     client appends ``/v1/chat/completions`` to whatever base it gets,
+#     so the base must end with ``/compatible-mode``.
+#
+#   * ``image`` and ``embedding`` use the dashscope native SDK, which
+#     appends ``/services/...`` to ``dashscope.base_http_api_url``. The
+#     SDK's default base value is ``https://dashscope.aliyuncs.com/api/v1``
+#     — note the ``/api/v1`` segment is part of the BASE, not appended
+#     by the SDK. So the embedding/image base must end with ``/api/v1``.
+#
+# Operators usually set a single ``DASHSCOPE_BASE_URL`` env (the chat-
+# style ``…/compatible-mode``). The resolver normalises it per domain
+# below so a single env value keeps all three domains working.
 DASHSCOPE_DEFAULT_CHAT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode"
-DASHSCOPE_DEFAULT_LEGACY_BASE_URL = "https://dashscope.aliyuncs.com"
+DASHSCOPE_DEFAULT_NATIVE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
+
+_COMPAT_SUFFIX = "/compatible-mode"
+_NATIVE_SUFFIX = "/api/v1"
 
 GOOGLE_AI_STUDIO_BASE_URL = "https://generativelanguage.googleapis.com"
 GOOGLE_VERTEX_BASE_URL = "https://aiplatform.googleapis.com"
@@ -66,32 +81,60 @@ def _first(*candidates: str) -> str:
     return ""
 
 
+def _normalize_dashscope_base(url: str, domain: Domain) -> str:
+    """Make a DashScope base URL match the convention the consumer wants.
+
+    chat domain → ``…/compatible-mode``  (OpenAI-compat client)
+    image/embed → ``…/api/v1``           (dashscope native SDK)
+
+    Either suffix on input is accepted and converted; bare host (no
+    suffix) gets the right one appended. This is what makes a single
+    operator-set ``DASHSCOPE_BASE_URL`` work everywhere — incident
+    2026-04-28 traced an "Arrearage / 404" cascade to the embedding
+    path silently keeping ``/compatible-mode`` and the SDK 404'ing.
+    """
+    cleaned = url.rstrip("/")
+    # Strip whichever suffix is present so we can re-add the right one.
+    if cleaned.endswith(_COMPAT_SUFFIX):
+        cleaned = cleaned[: -len(_COMPAT_SUFFIX)]
+    elif cleaned.endswith(_NATIVE_SUFFIX):
+        cleaned = cleaned[: -len(_NATIVE_SUFFIX)]
+    if domain == "chat":
+        return cleaned + _COMPAT_SUFFIX
+    return cleaned + _NATIVE_SUFFIX
+
+
 def resolve_dashscope(domain: Domain) -> tuple[str, str]:
     """Resolve DashScope ``(api_key, base_url)`` for the given domain.
 
     Falls back through the per-domain env, then the general env, then
-    the domain-appropriate default base URL. Returns ``("", default_url)``
-    if no key is configured — callers decide whether to treat that as
-    "not configured".
+    the domain-appropriate default base URL. The returned base URL is
+    always normalised to the suffix the domain's client expects:
+
+    * chat  → ``…/compatible-mode``
+    * image → ``…/api/v1``
+    * embed → ``…/api/v1``
+
+    Returns ``("", default_url)`` if no key is configured — callers
+    decide whether to treat that as "not configured".
     """
     up = domain.upper()
     api_key = _first(
         os.environ.get(f"DASHSCOPE_{up}_API_KEY", ""),
         os.environ.get("DASHSCOPE_API_KEY", ""),
     )
-    # Chat uses the OpenAI-compat prefix because the model_registry's
-    # OpenAI-compatible client appends /v1/chat/completions. Image and
-    # embedding speak to the legacy /api/v1/* endpoints, so they want
-    # the bare host.
-    default_url = (
-        DASHSCOPE_DEFAULT_CHAT_BASE_URL
-        if domain == "chat"
-        else DASHSCOPE_DEFAULT_LEGACY_BASE_URL
-    )
-    base_url = _first(
+    raw_url = _first(
         os.environ.get(f"DASHSCOPE_{up}_BASE_URL", ""),
         os.environ.get("DASHSCOPE_BASE_URL", ""),
-    ) or default_url
+    )
+    if raw_url:
+        base_url = _normalize_dashscope_base(raw_url, domain)
+    else:
+        base_url = (
+            DASHSCOPE_DEFAULT_CHAT_BASE_URL
+            if domain == "chat"
+            else DASHSCOPE_DEFAULT_NATIVE_BASE_URL
+        )
     return api_key, base_url
 
 

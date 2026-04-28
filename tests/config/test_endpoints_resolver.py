@@ -88,6 +88,8 @@ def test_dashscope_chat_override_does_not_leak_to_image(monkeypatch):
 def test_dashscope_image_override_is_independent_of_chat(monkeypatch):
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-cn-paid")
     monkeypatch.setenv("DASHSCOPE_IMAGE_API_KEY", "sk-image-free")
+    # Bare host URL: resolver normalises it to ``/api/v1`` for image
+    # because the dashscope SDK expects that suffix.
     monkeypatch.setenv(
         "DASHSCOPE_IMAGE_BASE_URL", "https://dashscope-intl.aliyuncs.com",
     )
@@ -96,8 +98,33 @@ def test_dashscope_image_override_is_independent_of_chat(monkeypatch):
     chat_key, _ = endpoints.resolve_dashscope("chat")
 
     assert image_key == "sk-image-free"
-    assert image_url == "https://dashscope-intl.aliyuncs.com"
+    assert image_url == "https://dashscope-intl.aliyuncs.com/api/v1"
     assert chat_key == "sk-cn-paid"
+
+
+def test_dashscope_chat_base_url_normalised_with_compat_suffix(monkeypatch):
+    """Bare host on chat domain → ``/compatible-mode`` suffix appended."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-x")
+    monkeypatch.setenv(
+        "DASHSCOPE_CHAT_BASE_URL", "https://dashscope-intl.aliyuncs.com",
+    )
+    _, chat_url = endpoints.resolve_dashscope("chat")
+    assert chat_url == "https://dashscope-intl.aliyuncs.com/compatible-mode"
+
+
+def test_dashscope_url_swapped_between_domains(monkeypatch):
+    """A single ``DASHSCOPE_BASE_URL`` env value works for all three
+    domains — resolver swaps the suffix per domain."""
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-x")
+    monkeypatch.setenv(
+        "DASHSCOPE_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode",
+    )
+    _, chat_url = endpoints.resolve_dashscope("chat")
+    _, image_url = endpoints.resolve_dashscope("image")
+    _, embed_url = endpoints.resolve_dashscope("embedding")
+    assert chat_url == "https://dashscope-intl.aliyuncs.com/compatible-mode"
+    assert image_url == "https://dashscope-intl.aliyuncs.com/api/v1"
+    assert embed_url == "https://dashscope-intl.aliyuncs.com/api/v1"
 
 
 def test_dashscope_embedding_override_is_independent(monkeypatch):
@@ -111,14 +138,14 @@ def test_dashscope_embedding_override_is_independent(monkeypatch):
     assert chat_key == "sk-cn-paid"
 
 
-def test_dashscope_image_and_embedding_default_to_legacy_host(monkeypatch):
-    """Image + embedding use dashscope.aliyuncs.com (bare host) because
-    SDK/legacy paths hardcode /api/v1 under it. Chat uses compatible-mode."""
+def test_dashscope_image_and_embedding_default_to_native_host(monkeypatch):
+    """Image + embedding default to ``…/api/v1`` (the dashscope SDK's
+    own base path); chat defaults to ``…/compatible-mode`` (OpenAI-HTTP)."""
     _, image_url = endpoints.resolve_dashscope("image")
     _, embed_url = endpoints.resolve_dashscope("embedding")
     _, chat_url = endpoints.resolve_dashscope("chat")
-    assert image_url == endpoints.DASHSCOPE_DEFAULT_LEGACY_BASE_URL
-    assert embed_url == endpoints.DASHSCOPE_DEFAULT_LEGACY_BASE_URL
+    assert image_url == endpoints.DASHSCOPE_DEFAULT_NATIVE_BASE_URL
+    assert embed_url == endpoints.DASHSCOPE_DEFAULT_NATIVE_BASE_URL
     assert chat_url == endpoints.DASHSCOPE_DEFAULT_CHAT_BASE_URL
 
 
