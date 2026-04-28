@@ -7,6 +7,34 @@ from ..db import Database
 from ..domain.constants import HADITH_SOURCE_API
 
 
+# Arabic body text from BOTH sources (sunnah.com + fawazahmed0 CDN) carries
+# embedded Unicode bidi marks — RLM (U+200F) before ~every period and LRM
+# (U+200E) — that the original publishers used as typesetting hints. They
+# render as benign zero-width characters in proper Arabic-aware UIs but
+# show up as visible ``[U+200F]`` markers in JSON inspectors (Apifox /
+# Postman) and add ~300KB of meaningless bytes to our payloads. Modern
+# Unicode bidi algorithms handle direction without these explicit hints.
+#
+# We strip them at both seams (sync-in + read-out) so:
+#   * future inserts never carry them (sync_service / replace_collection)
+#   * legacy rows are scrubbed at response build time (defense in depth)
+#   * ZWJ (U+200D) / ZWNJ (U+200C) are LEFT ALONE — those are legitimate
+#     Arabic joiner controls that change letter shaping (e.g. Persian).
+_BIDI_NOISE_CHARS = ("‏", "‎")  # RLM, LRM
+
+
+def _normalize_arabic(text: str | None) -> str | None:
+    """Strip publisher-supplied bidi typesetting hints from Arabic text."""
+    if not text:
+        return text
+    if not any(ch in text for ch in _BIDI_NOISE_CHARS):
+        return text
+    out = text
+    for ch in _BIDI_NOISE_CHARS:
+        out = out.replace(ch, "")
+    return out
+
+
 def _hadith_sort_key(value: str) -> tuple[int, str]:
     digits = "".join(ch for ch in value if ch.isdigit())
     if digits:
@@ -143,7 +171,7 @@ class HadithRepository:
                     )
                 if item.get("arabic_text"):
                     localization_rows.append(
-                        (hadith_item_id, "ar", chapter_title, item["arabic_text"])
+                        (hadith_item_id, "ar", chapter_title, _normalize_arabic(item["arabic_text"]))
                     )
                 for language, grades in (item.get("grades") or {}).items():
                     for grade in grades or []:
@@ -284,7 +312,8 @@ class HadithRepository:
                 )
             if hadith.get("arabic_text"):
                 localization_rows.append(
-                    (hadith_item_id, "ar", hadith.get("chapter_title"), hadith["arabic_text"])
+                    (hadith_item_id, "ar", hadith.get("chapter_title"),
+                     _normalize_arabic(hadith["arabic_text"]))
                 )
             if localization_rows:
                 await connection.executemany(
@@ -404,7 +433,7 @@ class HadithRepository:
                     "hadith_number": row["hadith_number"],
                     "title": row["ch_title_en"] or row["book_title"],
                     "preview_text": (row["en_body"] or "")[:280],
-                    "arabic_preview_text": (row["ar_body"] or "")[:280],
+                    "arabic_preview_text": (_normalize_arabic(row["ar_body"]) or "")[:280],
                 }
                 for row in page_items
             ],
@@ -579,7 +608,10 @@ class HadithRepository:
                 ) or row["fallback_chapter_title"],
                 "hadith_number": row["hadith_number"],
                 "language": language,
-                "preview_text": (row["matched_body"] or "")[:400],
+                "preview_text": (
+                    (_normalize_arabic(row["matched_body"]) if language == "ar"
+                     else row["matched_body"]) or ""
+                )[:400],
             }
             for row in rows
         ]
@@ -648,7 +680,12 @@ class HadithRepository:
             "hadith_number": row["hadith_number"],
             "chapter_title": row["ch_title_en"] or row["ch_title_ar"] or row["book_title"],
             "translation_text": (text_by_language.get("en") or {}).get("body_text", ""),
-            "arabic_text": (text_by_language.get("ar") or {}).get("body_text", ""),
+            # Defense-in-depth: scrub bidi noise on the way out even though
+            # we now normalize on insert. Legacy rows pre-backfill, plus any
+            # future re-sync from a not-yet-normalized seam, get cleaned.
+            "arabic_text": _normalize_arabic(
+                (text_by_language.get("ar") or {}).get("body_text", "")
+            ) or "",
             "grades": grades_by_language,
             "source_api": HADITH_SOURCE_API,
         }
