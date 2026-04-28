@@ -31,6 +31,8 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.responses import Response
 
+from .route_pattern import extract_route_pattern
+
 logger = logging.getLogger(__name__)
 
 
@@ -283,9 +285,21 @@ class ServiceProxy:
             Return ``None`` to skip signing for a given request.
         """
         self._cfg = config
-        self._breaker = breaker or CircuitBreaker(
+        # Legacy / fallback "global" breaker. Kept so external callers
+        # that share state via the ``breaker=`` constructor arg continue
+        # to work (e.g. injected for test isolation), and as a safety
+        # net for code paths that haven't been routed through
+        # ``_breaker_for`` yet. Per-route breakers in ``self._breakers``
+        # are the hot-path keying.
+        self._global_breaker = breaker or CircuitBreaker(
             name=config.name, threshold=config.breaker_threshold
         )
+        # Lazily-populated per-route breakers, keyed by canonical
+        # route pattern (output of ``extract_route_pattern``). Created
+        # once per pattern; kept in a plain dict because the GIL is
+        # sufficient for the ``setdefault``-style write we use below.
+        self._breakers: dict[str, CircuitBreaker] = {}
+        self._breakers_lock = threading.Lock()
         self._signer = signer
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
@@ -294,7 +308,36 @@ class ServiceProxy:
 
     @property
     def breaker(self) -> CircuitBreaker:
-        return self._breaker
+        """Backward-compat alias for the legacy single-breaker accessor.
+
+        New code should use :meth:`_breaker_for` (per-route keying).
+        Returns the global breaker — same instance an injected
+        ``breaker=`` constructor argument provides.
+        """
+        return self._global_breaker
+
+    def _breaker_for(self, route_pattern: str) -> CircuitBreaker:
+        """Return (lazily creating) the per-pattern breaker.
+
+        The breaker name is ``"{service_name}:{route_pattern}"`` so logs
+        and metrics distinguish ``Assistant Service:/chat/stream`` from
+        ``Assistant Service:/health``. Threshold inherits the proxy
+        config — same trip behaviour as the legacy global breaker, just
+        scoped per route.
+        """
+        existing = self._breakers.get(route_pattern)
+        if existing is not None:
+            return existing
+        with self._breakers_lock:
+            existing = self._breakers.get(route_pattern)
+            if existing is not None:
+                return existing
+            cb = CircuitBreaker(
+                name=f"{self._cfg.name}:{route_pattern}",
+                threshold=self._cfg.breaker_threshold,
+            )
+            self._breakers[route_pattern] = cb
+            return cb
 
     async def forward(
         self,
@@ -328,7 +371,13 @@ class ServiceProxy:
             Human-readable prefix for HTTPException details. Defaults
             to the service name.
         """
-        self._breaker.gate()
+        # Per-route breaker keying (Phase 5e). A flaky ``/chat/stream``
+        # must not poison ``/health`` on the same upstream. Pattern is
+        # extracted from the upstream path; the breaker is created
+        # lazily on first use.
+        route_pattern = extract_route_pattern(upstream_path)
+        breaker = self._breaker_for(route_pattern)
+        breaker.gate()
 
         url = upstream_path
         if request.url.query:
@@ -351,7 +400,7 @@ class ServiceProxy:
         prefix = error_prefix or self._cfg.name
 
         try:
-            return await self._do(request, url, headers, body)
+            return await self._do(request, url, headers, body, breaker)
         except (
             httpx.ConnectError,
             httpx.RemoteProtocolError,
@@ -364,20 +413,20 @@ class ServiceProxy:
             )
             await self._reset_client()
             try:
-                return await self._do(request, url, headers, body)
+                return await self._do(request, url, headers, body, breaker)
             except Exception as e:
                 # Count exactly once for this external request.
-                self._breaker.on_failure()
+                breaker.on_failure()
                 raise HTTPException(502, f"{prefix} unavailable") from e
         except httpx.TimeoutException as exc:
-            self._breaker.on_failure()
+            breaker.on_failure()
             raise HTTPException(504, f"{prefix} timeout") from exc
         except HTTPException:
             # Propagate upstream-produced HTTPExceptions without treating
             # them as transport failures.
             raise
         except Exception as exc:
-            self._breaker.on_failure()
+            breaker.on_failure()
             raise HTTPException(502, f"{prefix} error") from exc
 
     async def aclose(self) -> None:
@@ -443,6 +492,7 @@ class ServiceProxy:
         url: str,
         headers: dict[str, str],
         body: bytes | None,
+        breaker: CircuitBreaker,
     ) -> Response:
         client = await self._get_client()
         req = client.build_request(
@@ -455,7 +505,7 @@ class ServiceProxy:
 
         # Breaker feedback on the response status. Mid-stream failures
         # are handled separately by ``_stream_wrapped``.
-        self._breaker.on_response(resp.status_code)
+        breaker.on_response(resp.status_code)
 
         rh = self._clean_response_headers(resp.headers)
         mt = resp.headers.get("content-type")
@@ -481,14 +531,14 @@ class ServiceProxy:
             )
 
         return StreamingResponse(
-            content=self._stream_wrapped(resp),
+            content=self._stream_wrapped(resp, breaker),
             status_code=resp.status_code,
             headers=rh,
             media_type=mt,
         )
 
     async def _stream_wrapped(
-        self, resp: httpx.Response
+        self, resp: httpx.Response, breaker: CircuitBreaker
     ) -> AsyncIterator[bytes]:
         """Stream chunks and count mid-stream failures as breaker failures.
 
@@ -503,7 +553,7 @@ class ServiceProxy:
         except Exception:
             # Finding M-2: a "handshake 200 + stream truncated" upstream
             # previously flew under the breaker's radar.
-            self._breaker.on_failure()
+            breaker.on_failure()
             raise
         finally:
             await resp.aclose()
