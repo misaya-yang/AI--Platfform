@@ -6,6 +6,7 @@ pool, Qdrant client, and background worker.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -103,6 +104,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             port=resolved.app.port,
             qdrant_url=resolved.qdrant.url,
         )
+
+        # Graceful drain — flip ``DRAIN`` on SIGTERM/SIGINT so DrainMiddleware
+        # short-circuits new requests with 503 + Retry-After. Below (after
+        # ``yield``) we await ``DRAIN.wait_drained`` so in-flight retrieval /
+        # ingestion requests get to finish before the worker + DB pool close.
+        from ai_gateway_core.proxy.drain import DRAIN, install_signal_handlers
+        install_signal_handlers(asyncio.get_running_loop())
 
         # --- startup ---
         db = DatabasePool()
@@ -296,6 +304,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # --- shutdown ---
         logger.info("knowledge_service_shutting_down")
+        # Wait for in-flight requests (retrieval, QA, document upload) to
+        # finish before stopping the worker / closing pools. ``DrainMiddleware``
+        # has already started rejecting fresh traffic with 503.
+        if not await DRAIN.wait_drained(timeout=30.0):
+            logger.warning(
+                "drain_timeout",
+                inflight=DRAIN.inflight,
+                hint="forcing shutdown with requests still in flight",
+            )
         if knowledge_worker:
             try:
                 await knowledge_worker.stop()
@@ -338,6 +355,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Graceful drain — placed alongside ``RequestIDMiddleware`` (immediately
+    # below) for symmetry with assistant-service. ``DrainMiddleware`` excludes
+    # ``/health*`` + ``/metrics`` so probes still answer during drain (the LB
+    # uses readiness flips to stop routing traffic). Starlette stacks
+    # last-added → outermost; this position keeps drain checks inside the
+    # CORS handler so OPTIONS preflight stays cheap.
+    from ai_gateway_core.proxy import DrainMiddleware
+    app.add_middleware(DrainMiddleware)
 
     # X-Request-Id middleware — bind incoming gateway request_id to
     # request.state + REQUEST_ID_CTX contextvar so log lines can include it.

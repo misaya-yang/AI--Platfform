@@ -17,15 +17,20 @@ from .base import (
     ServiceProxy,
     ServiceProxyConfig,
 )
+from .drain import DRAIN, DrainMiddleware, DrainState, install_signal_handlers
 from .request_id_middleware import REQUEST_ID_CTX, RequestIDMiddleware
 
 __all__ = [
     "CircuitBreaker",
     "CircuitBreakerState",
+    "DRAIN",
+    "DrainMiddleware",
+    "DrainState",
     "InMemoryCounter",
     "ProxyError",
     "REQUEST_ID_CTX",
     "RequestIDMiddleware",
     "ServiceProxy",
     "ServiceProxyConfig",
+    "install_signal_handlers",
 ]

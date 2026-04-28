@@ -9,6 +9,7 @@ Start: uvicorn assistant_service.main:app --host 0.0.0.0 --port 8093
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -39,6 +40,14 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("Assistant Service starting...")
     app.state.settings = settings
+
+    # ── Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
+    # "please stop" signal flips ``DRAIN`` and the shutdown path below can wait
+    # for in-flight requests to finish. The middleware that consumes ``DRAIN``
+    # is registered after the FastAPI() instance is built (see below — placed
+    # BEFORE CORSMiddleware so the 503 short-circuit fires first).
+    from ai_gateway_core.proxy.drain import DRAIN, install_signal_handlers
+    install_signal_handlers(asyncio.get_running_loop())
 
     # Mandatory init failures (DB, Redis when REQUIRE_REDIS is set) raise
     # from lifespan so the container crashes instead of starting in a half-broken
@@ -373,6 +382,16 @@ async def lifespan(app: FastAPI):
     yield  # ── Running ──
 
     # ── Shutdown ──
+    # Wait for in-flight requests to finish before closing pools. New requests
+    # were already rejected with 503 by ``DrainMiddleware`` once SIGTERM
+    # flipped ``DRAIN``. Bound the wait so a hung handler doesn't block
+    # container exit forever.
+    if not await DRAIN.wait_drained(timeout=30.0):
+        logger.warning(
+            "drain timeout — %d request(s) still in flight at shutdown",
+            DRAIN.inflight,
+        )
+
     if database:
         await database.close()
     if redis_client:
@@ -400,6 +419,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Graceful drain — when the orchestrator sends SIGTERM, ``install_signal_handlers``
+# (called inside ``lifespan`` startup) flips a process-singleton flag. After
+# that, this middleware short-circuits non-probe requests with 503 + Retry-After
+# while the lifespan shutdown phase awaits in-flight requests. Probe paths
+# (``/health*``, ``/metrics``) still answer so the LB sees the readiness flip
+# and stops routing fresh traffic.
+#
+# Cross-link: ``RequestIDMiddleware`` immediately below — same install pattern
+# (single ``app.add_middleware`` line, no constructor args needed since the
+# default ``DRAIN`` singleton is what we want here).
+#
+# Stacking note: Starlette runs the LAST-added middleware FIRST, so adding
+# DrainMiddleware here (after CORS) makes it outermost — drain gating fires
+# before CORS preflight handling. Move it earlier in source order to invert.
+from ai_gateway_core.proxy import DrainMiddleware  # noqa: E402
+
+app.add_middleware(DrainMiddleware)
 
 # X-Request-Id middleware — bind incoming gateway request_id to request.state
 # + REQUEST_ID_CTX contextvar so log lines can include it. When invoked

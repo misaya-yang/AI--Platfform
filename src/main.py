@@ -216,6 +216,19 @@ def create_app() -> FastAPI:
         allow_origin_regex=cors.allow_origin_regex if cors else None,
     )
 
+    # Graceful drain — flips a process-singleton flag on SIGTERM/SIGINT
+    # (handlers installed in the startup event below) so new requests are
+    # rejected with 503 + Retry-After while in-flight requests get to finish.
+    # The shutdown event awaits ``DRAIN.wait_drained`` before tearing down
+    # container singletons (DB pool, Redis, billing interceptor). Health-probe
+    # paths bypass DRAIN entirely so the LB still sees readiness during drain.
+    #
+    # Cross-link: same install pattern lives in
+    # ``apps/assistant-service/src/assistant_service/main.py`` and
+    # ``apps/knowledge-service/src/knowledge_service/main.py``.
+    from ai_gateway_core.proxy import DrainMiddleware
+    app.add_middleware(DrainMiddleware)
+
     # Security response headers
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -333,6 +346,15 @@ def create_app() -> FastAPI:
     async def startup():
         """应用启动"""
         logger.info("正在启动 AI Gateway...")
+
+        # Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
+        # "please stop" signal flips DRAIN. The matching DrainMiddleware was
+        # registered above (just after CORSMiddleware); the shutdown handler
+        # below awaits ``DRAIN.wait_drained`` before tearing down DB/Redis pools
+        # so in-flight chat streams + tool calls get to finish.
+        import asyncio as _asyncio_drain
+        from ai_gateway_core.proxy.drain import install_signal_handlers
+        install_signal_handlers(_asyncio_drain.get_running_loop())
 
         # 初始化容器（连接数据库、Redis 等）
         await container.initialize()
@@ -534,6 +556,16 @@ def create_app() -> FastAPI:
     async def shutdown():
         """应用关闭"""
         logger.info("正在关闭 AI Gateway...")
+
+        # Wait for in-flight requests (chat streams, tool calls, KB proxy hops)
+        # to finish before tearing down container singletons. ``DrainMiddleware``
+        # is already 503-ing fresh traffic; this bound stops a hung handler from
+        # blocking container exit indefinitely.
+        from ai_gateway_core.proxy.drain import DRAIN
+        if not await DRAIN.wait_drained(timeout=30.0):
+            logger.warning(
+                f"drain timeout — {DRAIN.inflight} request(s) still in flight"
+            )
 
         # Phase K5c: KB worker + Confluence scheduler no longer run in the
         # gateway process — they're owned by knowledge-service. Nothing to
