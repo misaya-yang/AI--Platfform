@@ -1910,6 +1910,13 @@ class AgentLoop:
             WEB_BROWSING_CALL_LIMIT = 3
             _WEB_BROWSING_TOOLS = frozenset({"search_web", "web_search", "web_fetch"})
             force_answer_without_tools = False
+            # Distinct from ``force_answer_without_tools``: when the web-browsing
+            # cap is hit, only WEB tools should be removed for the next turn —
+            # the model still needs ``generate_pptx`` / ``generate_document``
+            # / ``generate_image`` etc. to produce the artefact the user
+            # actually asked for. Conflating "no more web" with "no tools at
+            # all" was the 2026-04-28 PPT-truncation root cause.
+            disable_web_tools_next_turn = False
 
             while iteration < max_iterations:
                 iteration += 1
@@ -2022,6 +2029,22 @@ class AgentLoop:
                     force_answer_without_tools = False
                     logger.info(
                         "[STREAMING-FIRST] Forcing next turn to answer directly (tools disabled once)."
+                    )
+                elif disable_web_tools_next_turn:
+                    # Filter web tools out, keep everything else available so
+                    # the model can still call ``generate_pptx`` etc. with the
+                    # evidence it has gathered.
+                    if tools_for_call:
+                        tools_for_call = [
+                            t
+                            for t in tools_for_call
+                            if (t.get("function", {}).get("name") if isinstance(t, dict) else getattr(t, "name", ""))
+                            not in _WEB_BROWSING_TOOLS
+                        ]
+                    disable_web_tools_next_turn = False
+                    logger.info(
+                        "[STREAMING-FIRST] Web tools disabled this turn; %d non-web tools remain.",
+                        len(tools_for_call) if tools_for_call else 0,
                     )
 
                 tool_calls_accumulated: dict[str, dict[str, Any]] = {}
@@ -2305,11 +2328,17 @@ class AgentLoop:
                         if web_browsing_calls > WEB_BROWSING_CALL_LIMIT:
                             logger.info(
                                 "[STREAMING-FIRST] Web-browsing cap hit (%d > %d); "
-                                "forcing answer from accumulated evidence",
+                                "blocking web tools next turn — non-web tools "
+                                "(generate_pptx/document/image) remain available",
                                 web_browsing_calls,
                                 WEB_BROWSING_CALL_LIMIT,
                             )
-                            force_answer_without_tools = True
+                            # Only block web tools; the model can still produce
+                            # the artefact via generate_pptx / etc. on the next
+                            # turn. Pre-2026-04-28 this set
+                            # ``force_answer_without_tools`` which stripped ALL
+                            # tools and trapped the loop in narrative mode.
+                            disable_web_tools_next_turn = True
                             messages.append(
                                 {
                                     "role": "tool",
@@ -2319,9 +2348,11 @@ class AgentLoop:
                                         f"Web-browsing budget exhausted: "
                                         f"{WEB_BROWSING_CALL_LIMIT} calls already "
                                         "made this turn (search_web + web_fetch). "
-                                        "Answer the user now from the evidence "
-                                        "you already have. Do not call web tools "
-                                        "again in this turn."
+                                        "Use the evidence you have. You may still "
+                                        "call non-web tools like generate_pptx, "
+                                        "generate_document, generate_image to "
+                                        "complete the user's request — only avoid "
+                                        "further web searches."
                                     ),
                                 }
                             )
