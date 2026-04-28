@@ -443,8 +443,11 @@ class DatasetService:
         return self._redact_dataset_secrets(dataset)
 
     def _build_islamic_dataset_defaults(self) -> dict[str, Any]:
+        # ``islamic_profile`` is unset on deploys that don't run Islamic KB
+        # — frontend hits this path on every non-Islamic KB-detail page load.
+        # Without the None guard a 500 spammed logs (incident 2026-04-28).
         profile = self.settings.knowledge.islamic_profile
-        if not profile.enabled:
+        if profile is None or not profile.enabled:
             return {}
         return {
             "retrieval": {
