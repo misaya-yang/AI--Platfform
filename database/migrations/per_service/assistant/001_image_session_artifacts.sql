@@ -13,7 +13,7 @@
 -- search_path drift.
 -- =============================================================================
 
-\set ON_ERROR_STOP on
+-- (psql metacommand removed — runner is asyncpg, transaction-scoped.)
 
 -- ---------------------------------------------------------------------------
 -- 1. artifacts: variant + parent linkage + image-specific first-class fields
