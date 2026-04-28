@@ -180,8 +180,8 @@ def test_request_id_present_at_warning_and_error(json_capture):
     finally:
         REQUEST_ID_CTX.reset(token)
 
-    lines = [json.loads(l) for l in buf.getvalue().strip().splitlines()]
-    assert all(l["request_id"] == "req-multi-level" for l in lines[-2:])
+    lines = [json.loads(line) for line in buf.getvalue().strip().splitlines()]
+    assert all(rec["request_id"] == "req-multi-level" for rec in lines[-2:])
     assert lines[-2]["level"] == "WARNING"
     assert lines[-1]["level"] == "ERROR"
 

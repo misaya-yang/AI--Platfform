@@ -60,20 +60,15 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.enums import StreamEventType
 from ..rag.context_engine import (
-    ContextAssemblyPlan,
     ContextBudgetManager,
     ContextEngine,
     ContextStructure,
     estimate_history_tokens,
     format_long_term_memory,
 )
-from ..rag.context_metrics import (
-    ContextMetricsBuilder,
-    get_context_metrics_collector,
-)
+from ..rag.context_metrics import ContextMetricsBuilder
 from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
 from ..memory.compressor import (
-    CompressedContext,
     ContextCompressor,
     ModelRegistryLLMService,
 )
@@ -83,7 +78,6 @@ from ..rag.rag_metrics import (
     RAGMetrics,
     RAGMetricsCollector,
     RetrievalMetrics,
-    get_rag_evaluator,
     get_rag_metrics_collector,
 )
 from .stream_helpers import merge_stream_tool_calls
@@ -93,7 +87,7 @@ from .artifact_persister import (
     persist_and_collect_events as _artifact_persist_and_collect_events,
     sanitize_output_files as _artifact_sanitize_output_files,
 )
-from .middleware import AgentMiddleware, MiddlewareChain, ToolVerdict, VerdictKind
+from .middleware import MiddlewareChain, VerdictKind
 from .middlewares.runtime_memory import OpenClawMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
@@ -109,15 +103,14 @@ from .tool_result_formatter import (
     tool_schema_name as _fmt_tool_schema_name,
     truncate_chars as _fmt_truncate_chars,
 )
-from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult, ScenarioType
+from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
-from ..tasks.task_manager import SessionResources, TaskManager, get_task_manager
+from ..tasks.task_manager import TaskManager, get_task_manager
 from ..tasks.task_planner import ExecutionPlan, TaskPlanner
 from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
-from ..tools.constants import ToolName
 from ..tools.tool_selector import select_tools
-from ..tool_orchestrator import ToolExecutionResult, ToolOrchestrator
-from ..working_memory import TaskStatus, WorkingMemory
+from ..tool_orchestrator import ToolExecutionResult
+from ..working_memory import WorkingMemory
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
@@ -2403,7 +2396,12 @@ class AgentLoop:
                                 "short_circuit": True,
                                 "message": "KB already searched in this turn; reuse prior evidence.",
                             }
-                            tool_result_text = kb_reuse_result_for_model
+                            # Pre-existing typo (commit 6def8d7b, 2026-02-27):
+                            # ``kb_reuse_result_for_model`` was never defined.
+                            # Reuse the canonical short-circuit string from
+                            # ``tool_dedup`` so the model sees the same
+                            # "use what you have" steer as the dedup branch.
+                            tool_result_text = KB_REUSE_MESSAGE
                             tool_result = tool_result_text
                             tool_result_for_model = tool_result_text
                         elif self.tool_invoker:
