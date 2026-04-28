@@ -54,8 +54,8 @@ UPDATE quran_ayahs
  WHERE position(chr(65533) IN arabic_text) > 0;
 
 UPDATE quran_ayah_translations
-   SET text = replace(text, chr(65533), '')
- WHERE text IS NOT NULL AND position(chr(65533) IN text) > 0;
+   SET translation_text = replace(translation_text, chr(65533), '')
+ WHERE position(chr(65533) IN translation_text) > 0;
 
 UPDATE dua_items
    SET arabic_text = replace(arabic_text, chr(65533), ''),
@@ -95,7 +95,7 @@ BEGIN
             'UPDATE quran_ayahs SET arabic_text = replace(arabic_text, chr(%s), '''') WHERE position(chr(%s) IN arabic_text) > 0',
             cp, cp);
         EXECUTE format(
-            'UPDATE quran_ayah_translations SET text = replace(text, chr(%s), '''') WHERE text IS NOT NULL AND position(chr(%s) IN text) > 0',
+            'UPDATE quran_ayah_translations SET translation_text = replace(translation_text, chr(%s), '''') WHERE position(chr(%s) IN translation_text) > 0',
             cp, cp);
         EXECUTE format(
             'UPDATE dua_items SET arabic_text = replace(arabic_text, chr(%s), '''') WHERE position(chr(%s) IN arabic_text) > 0',
