@@ -274,6 +274,17 @@ class ImageGenerationResponse(BaseModel):
             "`return_variants`. Includes only resolvable variants."
         ),
     )
+    latest_advanced: bool = Field(
+        default=True,
+        description=(
+            "True when ``image_sessions.latest_artifact_id`` was advanced "
+            "to ``output_artifact_id``. False when the CAS lost a race or "
+            "the caller passed ``allow_branch=true`` — the output exists "
+            "as a branch, not the new latest. Clients that want to keep "
+            "editing should re-fetch the session before submitting next "
+            "turn."
+        ),
+    )
 
 
 class AsyncImageGenerationRequest(ImageGenerationRequest):
@@ -313,6 +324,7 @@ class AsyncImageTaskStatusResponse(BaseModel):
     parent_artifact_id: str | None = None
     output_artifact_id: str | None = None
     client_request_id: str | None = None
+    latest_advanced: bool | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -956,15 +968,17 @@ async def _check_idempotency(
     owner_scope: str,
     body: ImageGenerationRequest,
 ) -> tuple[str | None, bool, str | None]:
-    """Check + claim idempotency for ``client_request_id``.
+    """Look-only idempotency probe (no claim).
 
-    Returns:
-      ``(replay_task_id, conflict, request_hash)`` where:
-        * ``replay_task_id`` set when this is an idempotent replay
-        * ``conflict`` True when the same client_request_id was used with
-          a different request body — caller should 409 with idempotency_conflict
-        * ``request_hash`` is the canonical sha256 of this request (caller may
-          stash it on the task / turn for audit)
+    Used by the sync route at request entry to detect already-recorded
+    keys. Async path uses ``record_idempotent`` directly so the claim
+    races atomically against concurrent submits.
+
+    Returns ``(replay_task_id, conflict, request_hash)`` where:
+      * ``replay_task_id`` set when an existing same-hash row is found
+      * ``conflict`` True when client_request_id exists with a different
+        body hash → 409 idempotency_conflict
+      * ``request_hash`` always returned when client_request_id is set
     """
     if not body.client_request_id or pool is None:
         return None, False, None
@@ -1184,7 +1198,13 @@ async def generate_image(
     turn_id = new_turn_id()
 
     try:
-        # ---- Idempotency ------------------------------------------------
+        # ---- Idempotency -----------------------------------------------
+        # Two-step: lookup → claim. The claim is INSERT-ON-CONFLICT-DO-
+        # NOTHING; if it returns False, two concurrent same-key requests
+        # raced and we lost. The winner already executed (or is mid-flight);
+        # the sync surface has no cached body, so a same-hash replay returns
+        # 409 ``duplicate_request_in_flight`` rather than re-charging.
+        # Async path is the canonical idempotent surface.
         replay_task_id, idem_conflict, request_hash = await _check_idempotency(
             pool, owner_scope=owner_scope, body=body,
         )
@@ -1196,12 +1216,35 @@ async def generate_image(
                     "message": "client_request_id reused with different request body",
                 },
             )
-        # NB: sync replay returns no cached body — we never persist the full
-        # response. We still acknowledge the existing claim and re-run the
-        # generation idempotently is wrong (different output). We treat
-        # any idempotent replay on the sync path as a 409 *only* when the
-        # hash differs; same-hash replay falls through and re-runs (the
-        # async path is the canonical idempotent surface).
+        if replay_task_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "duplicate_request_in_flight",
+                    "message": (
+                        "Sync /generate-image does not cache prior response bodies; "
+                        "use the async endpoint for true idempotent replay."
+                    ),
+                    "client_request_id": body.client_request_id,
+                },
+            )
+        if body.client_request_id and request_hash and pool is not None:
+            claimed = await record_idempotent(
+                pool, owner_scope=owner_scope,
+                client_request_id=body.client_request_id,
+                request_hash=request_hash, task_id=turn_id,
+            )
+            if not claimed:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error_code": "duplicate_request_in_flight",
+                        "message": (
+                            "client_request_id raced with a concurrent submit on the sync surface."
+                        ),
+                        "client_request_id": body.client_request_id,
+                    },
+                )
 
         # ---- Provider routing pre-check --------------------------------
         model_info = model_registry.get_model(body.model_id) if model_registry else None
@@ -1342,7 +1385,7 @@ async def generate_image(
                 artifact_storage=artifact_storage,
                 width=width, height=height,
             )
-            await _post_generation_bookkeeping(
+            latest_advanced = await _post_generation_bookkeeping(
                 pool, artifact_storage=artifact_storage,
                 turn_id=turn_id, session_id=body.session_id,
                 owner_scope=owner_scope, body=body,
@@ -1361,6 +1404,7 @@ async def generate_image(
                 output_artifact_id=raw_anchor,
                 client_request_id=body.client_request_id,
                 idempotent_replay=False,
+                latest_advanced=latest_advanced,
                 variants=await _build_variants_response(
                     artifact_storage,
                     raw_artifact_id=raw_anchor,
@@ -1420,7 +1464,7 @@ async def generate_image(
         generated_list = [gi for _, gi in persisted]
 
         # ---- CAS advance + style lock + turn audit + idempotency claim
-        await _post_generation_bookkeeping(
+        latest_advanced = await _post_generation_bookkeeping(
             pool, artifact_storage=artifact_storage,
             turn_id=turn_id, session_id=body.session_id,
             owner_scope=owner_scope, body=body,
@@ -1439,6 +1483,7 @@ async def generate_image(
             output_artifact_id=raw_anchor,
             client_request_id=body.client_request_id,
             idempotent_replay=False,
+            latest_advanced=latest_advanced,
             variants=await _build_variants_response(
                 artifact_storage, raw_artifact_id=raw_anchor,
                 return_variants=body.return_variants, owner_scope=owner_scope,
@@ -1482,7 +1527,12 @@ async def _post_generation_bookkeeping(
     request_hash: str | None,
     new_locked_style: str | None,
     clear_lock: bool = False,
-) -> None:
+) -> bool:
+    """Returns ``latest_advanced``: True iff session.latest_artifact_id
+    actually advanced to ``raw_anchor`` (or no session was involved). False
+    iff the CAS lost a race to a concurrent racer — caller MUST surface
+    this to the response (``latest_advanced=False``) so the client knows
+    its output is a branch, not the new latest."""
     """Centralized post-success state writes:
 
     * CAS-advance latest_artifact_id (skipped when allow_branch=True or no session)
@@ -1504,20 +1554,25 @@ async def _post_generation_bookkeeping(
                 logger.warning("clear_locked_style failed: %s", exc)
 
     # CAS advance
+    latest_advanced = True  # default for no-session / allow_branch cases
     if session_id and raw_anchor and pool is not None and not body.allow_branch:
         try:
-            advanced = await advance_latest_artifact_cas(
+            latest_advanced = await advance_latest_artifact_cas(
                 pool, session_id=session_id,
                 expected_parent=resolved_parent,
                 new_artifact_id=raw_anchor,
             )
-            if not advanced:
+            if not latest_advanced:
                 logger.info(
-                    "latest_artifact CAS skipped session=%s parent=%s — race or branch",
+                    "latest_artifact CAS lost race session=%s parent=%s — output is a branch",
                     session_id, resolved_parent,
                 )
         except Exception as exc:
             logger.warning("advance_latest_artifact_cas failed: %s", exc)
+            latest_advanced = False
+    elif session_id and body.allow_branch:
+        # Caller explicitly asked for a branch — don't advance, don't claim.
+        latest_advanced = False
 
     # Turn audit
     try:
@@ -1531,20 +1586,13 @@ async def _post_generation_bookkeeping(
     except Exception as exc:
         logger.warning("record_turn failed: %s", exc)
 
-    # Idempotency claim — record AFTER success so a failed request doesn't
-    # block a retry of the same client_request_id.
-    if body.client_request_id and request_hash and pool is not None:
-        try:
-            await record_idempotent(
-                pool, owner_scope=owner_scope,
-                client_request_id=body.client_request_id,
-                request_hash=request_hash,
-                # No task_id for sync flow — idempotent replay on sync only
-                # protects against double-charge / double-CAS on retries.
-                task_id=turn_id,
-            )
-        except Exception as exc:
-            logger.warning("record_idempotent failed: %s", exc)
+    # NOTE: idempotency claim was made BEFORE generation in the route
+    # handlers (sync + async paths). Bookkeeping no longer claims —
+    # otherwise a worker crash mid-generation would race with the route
+    # claim. Single source of truth = pre-work claim.
+
+    return latest_advanced
+
 
 
 # -----------------------------------------------------------------------------
@@ -1803,8 +1851,8 @@ async def _run_image_generation_task(
         task["session_id"] = body.session_id
         task["client_request_id"] = body.client_request_id
 
-        # Post-success bookkeeping (CAS, locked_style, turn audit, idempotency)
-        await _post_generation_bookkeeping(
+        # Post-success bookkeeping (CAS, locked_style, turn audit)
+        latest_advanced = await _post_generation_bookkeeping(
             pool, artifact_storage=artifact_storage,
             turn_id=turn_id, session_id=body.session_id,
             owner_scope=owner_scope, body=body,
@@ -1812,6 +1860,7 @@ async def _run_image_generation_task(
             request_hash=request_hash, new_locked_style=new_locked_style,
             clear_lock=clear_lock,
         )
+        task["latest_advanced"] = latest_advanced
 
     except Exception as e:
         logger.exception("Async image generation task %s failed", task_id)
@@ -1897,11 +1946,47 @@ async def submit_image_generation(
         "parent_artifact_id": None,
         "output_artifact_id": None,
     }
+    # Claim idempotency BEFORE scheduling any work. ``record_idempotent``
+    # is a Postgres ON CONFLICT DO NOTHING insert — when two concurrent
+    # submits race with the same client_request_id+payload, exactly one
+    # wins the insert. The loser must NOT spawn another worker; instead
+    # it looks up the winner's task_id and returns it as a replay.
+    if body.client_request_id and request_hash and pool is not None:
+        claimed = await record_idempotent(
+            pool, owner_scope=owner_scope,
+            client_request_id=body.client_request_id,
+            request_hash=request_hash, task_id=task_id,
+        )
+        if not claimed:
+            existing = await lookup_idempotent(
+                pool, owner_scope=owner_scope,
+                client_request_id=body.client_request_id,
+            )
+            if existing and existing["request_hash"] == request_hash:
+                return AsyncImageTaskSubmitResponse(
+                    task_id=existing["task_id"], status="pending",
+                    message="Idempotent replay — existing task returned",
+                )
+            if existing and existing["request_hash"] != request_hash:
+                # extremely unlikely race: lookup at top said no row, but
+                # by the time we tried to insert, a concurrent submit with
+                # a *different* body got there first. Surface as conflict.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error_code": "idempotency_conflict",
+                        "message": "client_request_id raced with a different request body",
+                    },
+                )
+            # No existing row but our INSERT failed for a different reason
+            # (transient DB) — fall through and run anyway. The audit row
+            # may end up missing, but the user request still completes.
+
     redis = getattr(request.app.state, "redis", None)
     await _store_task(redis, task_id, task)
 
-    # Insert pending turn row + claim idempotency BEFORE scheduling work,
-    # so a poll between submit + worker start sees the queue state.
+    # Insert pending turn row so a poll between submit + worker start sees
+    # the queue state.
     try:
         await insert_turn(
             pool,
@@ -1922,17 +2007,7 @@ async def submit_image_generation(
             request_hash=request_hash,
         )
     except Exception as exc:
-        logger.warning("insert pending turn failed: %s", exc)
-
-    if body.client_request_id and request_hash and pool is not None:
-        try:
-            await record_idempotent(
-                pool, owner_scope=owner_scope,
-                client_request_id=body.client_request_id,
-                request_hash=request_hash, task_id=task_id,
-            )
-        except Exception as exc:
-            logger.warning("record_idempotent failed: %s", exc)
+        logger.warning("insert pending turn failed (artifact=%s): %s", task_id, exc)
 
     session_mgr = get_session_manager(request)
     worker = asyncio.create_task(
@@ -1972,9 +2047,15 @@ async def get_image_task_status(
                     app_tenant_id=user.app_tenant_id,
                     app_user_id=user.app_user_id,
                 )
-                if (
-                    turn.get("owner_scope") not in (None, expected_scope, user.user_id)
-                ):
+                # Allow only when owner_scope matches OR is NULL (legacy
+                # pre-mig rows). Do NOT additionally accept user.user_id —
+                # that would let a delegated app reading on behalf of one
+                # end-user read another's tasks if the JWT subject equals
+                # the latter's task owner_scope. expected_scope already
+                # collapses to user.user_id for legacy callers (no app
+                # headers), so dropping the third branch is safe.
+                turn_owner = turn.get("owner_scope")
+                if turn_owner is not None and turn_owner != expected_scope:
                     raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
                 # Build a synthetic task dict from the turn row
@@ -2060,6 +2141,7 @@ async def get_image_task_status(
         parent_artifact_id=task.get("parent_artifact_id"),
         output_artifact_id=task.get("output_artifact_id"),
         client_request_id=task.get("client_request_id"),
+        latest_advanced=task.get("latest_advanced"),
     )
 
 

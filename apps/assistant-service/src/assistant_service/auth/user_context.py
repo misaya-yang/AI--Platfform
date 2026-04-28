@@ -70,6 +70,16 @@ async def get_user_context(request: Request) -> UserContext:
     app_user_id = request.headers.get("X-App-User-Id", "").strip() or None
     app_tenant_id = request.headers.get("X-App-Tenant-Id", "").strip() or None
 
+    # Reject control characters (esp. ASCII 0x1F unit separator) in app_*
+    # identifiers — owner_scope uses 0x1F as its delimiter and a forged
+    # value would let a caller collide with another scope.
+    for name, value in (("X-App-User-Id", app_user_id), ("X-App-Tenant-Id", app_tenant_id)):
+        if value is not None and any(ord(c) < 0x20 for c in value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name}: control characters not allowed",
+            )
+
     if user_id and tenant_id:
         return UserContext(
             user_id=user_id,

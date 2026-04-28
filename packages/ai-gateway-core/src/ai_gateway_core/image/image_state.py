@@ -50,6 +50,9 @@ def _db_safe(default):
 
 # ----- Owner scope ---------------------------------------------------------
 
+_OWNER_SCOPE_SEP = "\x1f"  # ASCII unit separator — not a legal identifier char
+
+
 def compute_owner_scope(
     user_id: str,
     *,
@@ -59,18 +62,26 @@ def compute_owner_scope(
     """Compute the opaque owner-scope identity key.
 
     Format:
-      * If both ``app_tenant_id`` AND ``app_user_id`` present:
-          ``f"{user_id}|{app_tenant_id}|{app_user_id}"``
-        — JWT subject + delegated end-user pair, isolating per-end-user.
+      * Both ``app_tenant_id`` AND ``app_user_id`` present:
+          ``f"{user_id}\\x1f{app_tenant_id}\\x1f{app_user_id}"``
+        — separator is ASCII unit separator (0x1F), which is not a legal
+        character in tenant / user identifiers in any of our backends. Using
+        a printable separator like ``|`` would let a caller forge collisions
+        by embedding the separator in their identifiers (e.g. send
+        ``app_user_id="alice|admin"`` to align with another caller's scope).
       * Else: fallback to ``user_id`` (legacy single-tenant flow).
 
-    The returned string is a stable, opaque identifier — treat it as a
-    primary key, never parse it. Used to scope artifact / image-session /
-    image-turn / idempotency lookups so a delegated app can't read its
-    other end-users' images.
+    Treat the returned string as opaque — never parse, never display.
     """
     if app_tenant_id and app_user_id:
-        return f"{user_id}|{app_tenant_id}|{app_user_id}"
+        if _OWNER_SCOPE_SEP in app_tenant_id or _OWNER_SCOPE_SEP in app_user_id:
+            # Defense-in-depth: should never happen since our headers are
+            # http-cleaned, but if a control char ever slips through reject
+            # the request rather than poison the scope namespace.
+            raise ValueError(
+                "app_tenant_id / app_user_id must not contain control characters"
+            )
+        return f"{user_id}{_OWNER_SCOPE_SEP}{app_tenant_id}{_OWNER_SCOPE_SEP}{app_user_id}"
     return user_id
 
 

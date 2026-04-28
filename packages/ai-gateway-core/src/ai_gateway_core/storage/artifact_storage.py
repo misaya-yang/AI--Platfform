@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from .image_storage import (
     BaseStorageBackend,
     LocalStorageBackend,
@@ -335,15 +337,25 @@ class ArtifactStorageService:
                     artifact.model_id,
                     artifact.prompt,
                 )
-            except Exception as exc:
-                # Schema may pre-date 001_image_session_artifacts. Retry with
-                # the legacy column list so dev environments without the new
-                # migration still work.
+            except asyncpg.UndefinedColumnError as exc:
+                # Schema pre-dates 001_image_session_artifacts. Only this exact
+                # error class triggers the legacy fallback — any other failure
+                # (constraint, dtype, network) must surface so we don't silently
+                # write a row missing owner_scope (which would let a later
+                # cross-tenant download read it). Owner-scope is embedded in
+                # metadata as defense-in-depth so a future read can still
+                # validate even if the column doesn't exist yet.
                 logger.warning(
-                    "Full artifact insert failed (%s); retrying with legacy columns. "
-                    "Apply migration assistant/001_image_session_artifacts to enable variants.",
-                    exc,
+                    "Full artifact insert hit UndefinedColumnError (%s) — falling back to "
+                    "legacy column list for artifact %s. Apply migration "
+                    "assistant/001_image_session_artifacts.",
+                    exc, artifact.artifact_id,
                 )
+                legacy_metadata = dict(artifact.metadata or {})
+                legacy_metadata["__owner_scope"] = artifact.owner_scope
+                legacy_metadata["__variant"] = artifact.variant
+                legacy_metadata["__parent_artifact_id"] = artifact.parent_artifact_id
+                legacy_metadata["__turn_id"] = artifact.turn_id
                 await conn.execute(
                     """
                     INSERT INTO artifacts (
@@ -367,7 +379,7 @@ class ArtifactStorageService:
                     artifact.size_bytes,
                     artifact.mime_type,
                     artifact.source,
-                    json.dumps(artifact.metadata),
+                    json.dumps(legacy_metadata),
                     artifact.created_at,
                     artifact.updated_at,
                 )
@@ -424,12 +436,27 @@ class ArtifactStorageService:
         """
         if not self.database or not self.database._pool:
             # No DB pool — best-effort fallback for dev/tests: ask
-            # ``get_artifact`` and hand back whatever it returns. Callers
-            # that genuinely need variant routing must run with a DB.
+            # ``get_artifact`` and only return it if it actually IS the
+            # requested variant. NEVER return a different variant — that
+            # would smuggle e.g. watermarked display bytes into a
+            # raw-only path (multi-turn reference editing).
             try:
-                return await self.get_artifact(parent_or_self_artifact_id)
+                got = await self.get_artifact(parent_or_self_artifact_id)
             except Exception:
                 return None
+            if got is None:
+                return None
+            got_variant = getattr(got, "variant", None)
+            # Only refuse on a real, string variant mismatch. Legacy / mock
+            # artifacts without a variant column are assumed to be raw (which
+            # is the only legacy variant we ever stored pre-migration).
+            if isinstance(got_variant, str) and got_variant != variant:
+                logger.debug(
+                    "find_variant fallback: artifact %s has variant %r, requested %r — refusing",
+                    parent_or_self_artifact_id, got_variant, variant,
+                )
+                return None
+            return got
 
         try:
             async with self.database._pool.acquire() as conn:
@@ -472,15 +499,29 @@ class ArtifactStorageService:
                     )
         except Exception as exc:
             # Non-asyncpg pool (test mocks) or transient DB error — fall back
-            # to ``get_artifact``. The caller's owner-scope check still runs.
+            # to ``get_artifact``. Only return when it IS the requested
+            # variant — never smuggle a different variant on a DB blip.
             logger.debug(
                 "find_variant: DB unavailable (%s) — falling back to get_artifact",
                 exc,
             )
             try:
-                return await self.get_artifact(parent_or_self_artifact_id)
+                got = await self.get_artifact(parent_or_self_artifact_id)
             except Exception:
                 return None
+            if got is None:
+                return None
+            got_variant = getattr(got, "variant", None)
+            # Only refuse on a real, string variant mismatch. Legacy / mock
+            # artifacts without a variant column are assumed to be raw (which
+            # is the only legacy variant we ever stored pre-migration).
+            if isinstance(got_variant, str) and got_variant != variant:
+                logger.warning(
+                    "find_variant DB-error fallback: artifact %s variant %r ≠ requested %r — refusing",
+                    parent_or_self_artifact_id, got_variant, variant,
+                )
+                return None
+            return got
 
         if not row:
             return None
