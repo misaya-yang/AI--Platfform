@@ -18,6 +18,8 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from ai_gateway_core.proxy.sse_heartbeat import with_sse_heartbeat
+
 from ...adapters.langgraph_proxy import (
     AssistantAccessDeniedError,
     AssistantNotFoundError,
@@ -680,7 +682,16 @@ async def passthrough(
                 async for chunk in resp.aiter_raw():
                     yield chunk
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        # Wrap the upstream byte stream with periodic ``: heartbeat``
+        # SSE comments so an idle 30-60s stretch (long KB query, slow
+        # generation) doesn't trip nginx / ALB / NAT idle timeouts and
+        # sever the client-facing connection mid-flight. EventSource
+        # silently drops ``:``-prefixed lines per the SSE spec, so the
+        # frontend sees zero behavior change.
+        return StreamingResponse(
+            with_sse_heartbeat(gen()),
+            media_type="text/event-stream",
+        )
 
     resp = await client.request(
         method,
