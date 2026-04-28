@@ -88,6 +88,13 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
         "error": task.get("error"),
         "created_at": task.get("created_at"),
         "completed_at": task.get("completed_at"),
+        # ---- Image-redesign additions (all optional; receivers ignore unknowns) ----
+        "turn_id": task.get("turn_id"),
+        "session_id": task.get("session_id"),
+        "parent_artifact_id": task.get("parent_artifact_id"),
+        "output_artifact_id": task.get("output_artifact_id"),
+        "client_request_id": task.get("client_request_id"),
+        "error_code": task.get("error_code"),
     }
 
     client = await _get_client()

@@ -22,6 +22,14 @@ class UserContext:
     roles: list = field(default_factory=lambda: ["user"])
     ip: str = ""
     is_authenticated: bool = True
+    # ---- App-scoped identity (image-redesign Phase 2) -------------------
+    # When the API caller is itself a multi-tenant app proxying its own
+    # users to us, it forwards X-App-Tenant-Id and X-App-User-Id. These
+    # don't replace user_id/tenant_id — those still identify *the API
+    # client's* JWT subject. owner_scope (computed elsewhere) combines
+    # all three so artifact / image-session lookups isolate per end-user.
+    app_user_id: str | None = None
+    app_tenant_id: str | None = None
 
     @property
     def tier(self) -> str:
@@ -59,6 +67,8 @@ async def get_user_context(request: Request) -> UserContext:
     user_type = request.headers.get("X-User-Type", "user").strip()
     roles_raw = request.headers.get("X-User-Roles", "").strip()
     roles = [r.strip() for r in roles_raw.split(",") if r.strip()] if roles_raw else ["user"]
+    app_user_id = request.headers.get("X-App-User-Id", "").strip() or None
+    app_tenant_id = request.headers.get("X-App-Tenant-Id", "").strip() or None
 
     if user_id and tenant_id:
         return UserContext(
@@ -67,6 +77,8 @@ async def get_user_context(request: Request) -> UserContext:
             user_tier=user_tier,
             user_type=user_type,
             roles=roles,
+            app_user_id=app_user_id,
+            app_tenant_id=app_tenant_id,
         )
 
     # Allow anonymous in dev/internal calls

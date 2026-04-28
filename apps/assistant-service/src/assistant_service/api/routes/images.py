@@ -37,18 +37,32 @@ import json
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ai_gateway_core.enums import StylePreset
 from ai_gateway_core.image import (
+    advance_latest_artifact_cas,
     append_image_turns,
     apply_watermark_b64,
     build_gemini_contents_from_history,
+    compute_owner_scope as _compute_owner_scope,
+    compute_request_hash as _compute_request_hash,
+    get_image_session,
+    get_turn_by_task,
     inflate_history_with_bytes,
+    insert_turn,
+    list_turns,
+    lookup_idempotent,
+    make_thumbnail,
+    new_turn_id,
     parse_image_size,
+    record_idempotent,
     resolve_image_routing,
     send_image_callback,
+    set_locked_style as _set_locked_style,
+    update_turn_status,
+    upsert_image_session,
 )
 from ai_gateway_core.security import SafeFetchError, safe_fetch
 from ai_gateway_core.style_presets import (
@@ -57,7 +71,7 @@ from ai_gateway_core.style_presets import (
     resolve_negative_prompt,
     resolve_style_preset,
 )
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from ...auth import UserContext, get_user_context
@@ -142,6 +156,64 @@ class ImageGenerationRequest(BaseModel):
     )
     add_watermark: bool = True
 
+    # ------------- Image-redesign Phase 2 — multi-turn primitives -------------
+    app_user_id: str | None = Field(
+        default=None,
+        description=(
+            "End-user id when the API caller is a multi-tenant app proxying "
+            "for its own users. Combined with `app_tenant_id` and the JWT "
+            "subject to compute owner_scope; isolates artifacts per end-user."
+        ),
+    )
+    app_tenant_id: str | None = Field(
+        default=None,
+        description=(
+            "Tenant id of the calling app's end-user. See `app_user_id`."
+        ),
+    )
+    parent_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Explicit anchor for next-turn editing. When set, we use this "
+            "artifact's raw bytes as the reference image and lineage parent. "
+            "Overrides session_id-derived latest_artifact lookup. Owner-scoped."
+        ),
+    )
+    expected_parent_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "Optimistic-concurrency check. When set, verifies the session's "
+            "current latest_artifact_id equals this value before generating; "
+            "409 latest_artifact_conflict on mismatch."
+        ),
+    )
+    client_request_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Idempotency key. Same (owner_scope, client_request_id) + same "
+            "request body → returns the original task. Different body → 409 "
+            "idempotency_conflict."
+        ),
+    )
+    return_variants: list[str] | None = Field(
+        default=None,
+        description=(
+            "Optional: extra variants to include in the response's `variants` "
+            "map. Subset of: 'raw' | 'display' | 'thumbnail'. The default "
+            "`images[].url` continues to be the display URL (raw when "
+            "watermark disabled)."
+        ),
+    )
+    allow_branch: bool = Field(
+        default=False,
+        description=(
+            "When True, generating from a non-latest parent does NOT advance "
+            "latest_artifact_id (creates a sibling branch). Default False = "
+            "advance only when parent matches current latest."
+        ),
+    )
+
     @field_validator("style", mode="before")
     @classmethod
     def _coerce_style(cls, value: Any) -> StylePreset:
@@ -156,9 +228,51 @@ class ImageGenerationResponse(BaseModel):
     provider: str | None = None
     duration_ms: float | None = None
     error: str | None = None
+    error_code: str | None = Field(
+        default=None,
+        description=(
+            "Machine-readable error code when success=False. Examples: "
+            "idempotency_conflict, latest_artifact_conflict, reference_not_found, "
+            "provider_blocked, provider_unavailable, validation_error."
+        ),
+    )
     session_id: str | None = Field(
         default=None,
         description="Echo of session_id when stateful multi-turn was used.",
+    )
+    turn_id: str | None = Field(
+        default=None,
+        description="Stable identifier for this turn (image_turns.turn_id).",
+    )
+    parent_artifact_id: str | None = Field(
+        default=None,
+        description="Resolved parent artifact_id we generated against, if any.",
+    )
+    output_artifact_id: str | None = Field(
+        default=None,
+        description=(
+            "The raw output artifact_id — the canonical lineage anchor for "
+            "the next turn. Same value advances `latest_artifact_id` on the "
+            "image_session row when CAS succeeds."
+        ),
+    )
+    client_request_id: str | None = Field(
+        default=None,
+        description="Echo of client_request_id when supplied.",
+    )
+    idempotent_replay: bool = Field(
+        default=False,
+        description=(
+            "True when this response was served from idempotency replay "
+            "(matched (owner_scope, client_request_id) + request_hash)."
+        ),
+    )
+    variants: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Optional variant→URL map populated when caller passes "
+            "`return_variants`. Includes only resolvable variants."
+        ),
     )
 
 
@@ -190,8 +304,15 @@ class AsyncImageTaskStatusResponse(BaseModel):
     images: list[AsyncImageArtifact] = []
     duration_ms: float | None = None
     error: str | None = None
+    error_code: str | None = None
     created_at: str
     completed_at: str | None = None
+    # Image-redesign Phase 2 fields (all optional for back-compat)
+    turn_id: str | None = None
+    session_id: str | None = None
+    parent_artifact_id: str | None = None
+    output_artifact_id: str | None = None
+    client_request_id: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -314,20 +435,37 @@ async def _persist_and_get_url(
     width: int,
     height: int,
     index: int,
+    owner_scope: str | None = None,
+    turn_id: str | None = None,
+    parent_artifact_id: str | None = None,
+    provider: str | None = None,
+    model_id: str | None = None,
+    return_variants: list[str] | None = None,
 ) -> tuple[str | None, GeneratedImage]:
     """Persist artifact(s) and return (raw_artifact_id_for_history, public_GeneratedImage).
 
-    When ``add_watermark`` is True we store two artifacts: a raw one for
-    multi-turn history replay (so next-turn Gemini sees the unwatermarked
-    image and doesn't accumulate watermarks) and a watermarked one whose
-    URL we return. When ``add_watermark`` is False, the same artifact serves
-    both roles.
+    Persists up to three artifacts per generated image:
 
-    The first element of the returned tuple is the **raw** artifact_id (used
-    by ``_persist_multi_turn_result`` to write into session history). The
-    ``artifact_id`` on the returned ``GeneratedImage`` is the **watermarked**
-    one — that's what the Dev backend / frontend sees in the response and
-    will hand back as ``reference_image_url`` for stateless edits.
+    * **raw** (always) — un-watermarked; lineage anchor for next-turn editing
+      and the artifact whose id the response's ``output_artifact_id`` carries.
+    * **display** (when ``add_watermark=True``) — watermarked; the URL we
+      return as ``images[].url``.
+    * **thumbnail** (when ``return_variants`` includes 'thumbnail' OR Pillow
+      downscale succeeds) — small (≤256 px longest edge) — for previews.
+
+    All variant rows reference the raw artifact_id via ``parent_artifact_id``
+    so the ``find_variant`` lookup walks both directions.
+
+    The ``GeneratedImage.url`` we return is:
+      * the watermarked display URL when ``add_watermark`` and persist
+        succeeded;
+      * else the raw URL;
+      * else a data: URL fallback.
+    The ``GeneratedImage.artifact_id`` we return is **the display variant's
+    id** when watermarking succeeded (preserves the historical contract
+    where downstream apps treat it as the public id) — but the *raw*
+    artifact_id (first tuple element) remains the lineage anchor for
+    multi-turn replay and the response's ``output_artifact_id``.
     """
     raw_b64 = img.get("content_base64", "")
     raw_mt = img.get("mime_type", "image/png")
@@ -364,6 +502,15 @@ async def _persist_and_get_url(
             filename=f"generated_{uuid.uuid4().hex[:8]}_{index + 1}.{ext}",
             content=raw_bytes,
             source="image_generation",
+            variant="raw",
+            parent_artifact_id=parent_artifact_id,
+            turn_id=turn_id,
+            owner_scope=owner_scope,
+            width=width,
+            height=height,
+            provider=provider,
+            model_id=model_id,
+            prompt=prompt,
         )
         raw_artifact_id = raw_artifact.artifact_id
         raw_url = await artifact_storage.get_presigned_download_url(raw_artifact)
@@ -381,6 +528,34 @@ async def _persist_and_get_url(
             url=f"data:{mt};base64,{cb64}",
             width=width, height=height, artifact_id=None,
         )
+
+    # Optionally produce a thumbnail variant. Best-effort: any failure logs
+    # and continues with the existing variants.
+    want_thumbnail = bool(return_variants and "thumbnail" in return_variants)
+    if want_thumbnail:
+        try:
+            thumb_bytes = await asyncio.to_thread(make_thumbnail, raw_bytes)
+            if thumb_bytes:
+                await artifact_storage.create_artifact(
+                    session_id=effective_session,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    type="image",
+                    format="png",
+                    title=f"Thumbnail: {prompt[:60]}",
+                    filename=f"thumb_{uuid.uuid4().hex[:8]}_{index + 1}.png",
+                    content=thumb_bytes,
+                    source="image_generation_thumbnail",
+                    variant="thumbnail",
+                    parent_artifact_id=raw_artifact_id,
+                    turn_id=turn_id,
+                    owner_scope=owner_scope,
+                    provider=provider,
+                    model_id=model_id,
+                    prompt=prompt,
+                )
+        except Exception as exc:
+            logger.warning("Thumbnail persist failed: %s", exc)
 
     if not add_watermark:
         # Single-artifact happy path.
@@ -404,6 +579,15 @@ async def _persist_and_get_url(
             filename=f"watermarked_{uuid.uuid4().hex[:8]}_{index + 1}.{wm_ext}",
             content=wm_bytes,
             source="image_generation_watermarked",
+            variant="display",
+            parent_artifact_id=raw_artifact_id,
+            turn_id=turn_id,
+            owner_scope=owner_scope,
+            width=width,
+            height=height,
+            provider=provider,
+            model_id=model_id,
+            prompt=prompt,
         )
         public_artifact_id = wm_artifact.artifact_id
         public_url = await artifact_storage.get_presigned_download_url(wm_artifact)
@@ -421,70 +605,131 @@ async def _persist_and_get_url(
     )
 
 
+async def _load_artifact_bytes_owner_scoped(
+    artifact_storage,
+    artifact_id: str,
+    *,
+    owner_scope: str,
+    user: UserContext | None,
+) -> bytes:
+    """Resolve raw bytes for an artifact_id with owner-scope enforcement.
+
+    Returns the raw variant's bytes (walking variants if necessary). Raises
+    HTTPException 404 on missing / owner mismatch (same code so attackers
+    can't enumerate ids by error-code timing).
+    """
+    if not artifact_storage:
+        raise HTTPException(
+            status_code=503,
+            detail="ArtifactStorage not configured",
+        )
+    # Find the raw variant in this artifact's family. Scope-check both the
+    # original lookup and the raw it points to, since legacy data may have
+    # NULL owner_scope (in which case we fall back to tenant_id+user_id).
+    try:
+        raw = await artifact_storage.find_variant(artifact_id, "raw")
+    except Exception as exc:
+        logger.warning("artifact lookup failed for %s: %s", artifact_id, exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        ) from exc
+    if raw is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        )
+    # Owner check: prefer owner_scope when set, else fall back to legacy
+    # tenant_id+user_id check (so pre-migration artifacts still work).
+    owner_ok = False
+    if raw.owner_scope is not None:
+        owner_ok = raw.owner_scope == owner_scope
+    elif user is not None:
+        owner_ok = raw.user_id == user.user_id and raw.tenant_id == user.tenant_id
+    if not owner_ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        )
+    try:
+        content = await artifact_storage.download_artifact(raw.artifact_id)
+    except Exception as exc:
+        logger.warning("artifact download failed for %s: %s", raw.artifact_id, exc)
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        ) from exc
+    if not content:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        )
+    return content
+
+
 async def _resolve_reference_bytes(
-    body: ImageGenerationRequest, *, artifact_storage, user: UserContext | None = None,
-) -> str | None:
-    """Resolve any reference image to a base64 string suitable for Gemini.
+    body: ImageGenerationRequest,
+    *,
+    artifact_storage,
+    user: UserContext | None = None,
+    owner_scope: str | None = None,
+    db_pool=None,
+) -> tuple[str | None, str | None]:
+    """Resolve any reference image to (base64_bytes, resolved_parent_artifact_id).
 
     Order (most-secure first):
-    1. ``reference_artifact_id`` — direct lookup in our ArtifactStorage. No
+    1. ``parent_artifact_id`` — explicit lineage anchor (image-redesign Phase 2).
+    2. ``reference_artifact_id`` — direct lookup in our ArtifactStorage. No
        URL fetch, no SSRF surface. **Preferred** for stateless edits.
-    2. ``reference_image`` (base64 / data-URL) — pass through. Use only when
-       caller has bytes locally and isn't going through us.
-    3. ``reference_image_url`` — SSRF-safe fetch via shared ``safe_fetch``
-       (DNS pinning + private/loopback rejection + 8 MB streaming cap +
-       urljoin redirect handling). Base64-encoded for Gemini ``inlineData``.
+    3. session-derived latest_artifact (when ``session_id`` set + image_session
+       row exists with a non-null ``latest_artifact_id``).
+    4. ``reference_image`` (base64 / data-URL) — pass through.
+    5. ``reference_image_url`` — SSRF-safe fetch.
 
-    Returns ``None`` if no reference is provided.
+    Returns ``(None, None)`` if no reference is provided.
     """
+    # 1. parent_artifact_id (explicit anchor)
+    if body.parent_artifact_id:
+        content = await _load_artifact_bytes_owner_scoped(
+            artifact_storage,
+            body.parent_artifact_id,
+            owner_scope=owner_scope or (user.user_id if user else ""),
+            user=user,
+        )
+        return _b64.b64encode(content).decode(), body.parent_artifact_id
+
+    # 2. reference_artifact_id (legacy)
     if body.reference_artifact_id:
-        if not artifact_storage:
-            raise HTTPException(
-                status_code=503,
-                detail="reference_artifact_id requires ArtifactStorage to be configured",
-            )
-        # Ownership check — without this, any caller could pass any artifact_id
-        # they observed from logs / network and read another user's image.
-        # Fetch metadata first (cheap), check tenant+user, then download.
-        try:
-            artifact = await artifact_storage.get_artifact(body.reference_artifact_id)
-        except Exception as exc:
-            logger.warning("reference_artifact_id lookup failed: %s", exc)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to load reference_artifact_id: {exc}",
-            ) from exc
-        # 404 (not 403) for both not-found and wrong-owner — same error code
-        # so an attacker can't use timing/code distinction to enumerate IDs.
-        if (
-            artifact is None
-            or (user is not None and artifact.user_id != user.user_id)
-            or (user is not None and artifact.tenant_id != user.tenant_id)
-        ):
-            raise HTTPException(
-                status_code=404,
-                detail=f"reference_artifact_id {body.reference_artifact_id!r} not found",
-            )
-        try:
-            content = await artifact_storage.download_artifact(body.reference_artifact_id)
-        except Exception as exc:
-            logger.warning("reference_artifact_id download failed: %s", exc)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to load reference_artifact_id: {exc}",
-            ) from exc
-        if not content:
-            raise HTTPException(
-                status_code=404,
-                detail=f"reference_artifact_id {body.reference_artifact_id!r} not found",
-            )
-        return _b64.b64encode(content).decode()
+        content = await _load_artifact_bytes_owner_scoped(
+            artifact_storage,
+            body.reference_artifact_id,
+            owner_scope=owner_scope or (user.user_id if user else ""),
+            user=user,
+        )
+        return _b64.b64encode(content).decode(), body.reference_artifact_id
 
+    # 3. session-derived latest
+    if body.session_id and db_pool is not None and owner_scope is not None:
+        try:
+            row = await get_image_session(db_pool, body.session_id)
+        except Exception as exc:
+            logger.warning("image_session lookup failed: %s", exc)
+            row = None
+        if row and row.get("owner_scope") == owner_scope and row.get("latest_artifact_id"):
+            latest_id = row["latest_artifact_id"]
+            content = await _load_artifact_bytes_owner_scoped(
+                artifact_storage, latest_id,
+                owner_scope=owner_scope, user=user,
+            )
+            return _b64.b64encode(content).decode(), latest_id
+
+    # 4. raw base64 / data URL
     if body.reference_image:
-        return body.reference_image
+        return body.reference_image, None
 
+    # 5. reference_image_url
     if not body.reference_image_url:
-        return None
+        return None, None
 
     try:
         content = await safe_fetch(
@@ -493,7 +738,7 @@ async def _resolve_reference_bytes(
             max_redirects=3,
             timeout=30.0,
         )
-        return _b64.b64encode(content).decode()
+        return _b64.b64encode(content).decode(), None
     except SafeFetchError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -645,6 +890,241 @@ async def _persist_multi_turn_result(
 
 
 # -----------------------------------------------------------------------------
+# Image-redesign pipeline helpers — owner_scope, idempotency, CAS lineage
+# -----------------------------------------------------------------------------
+
+
+def _get_db_pool(request: Request):
+    """Reach the assistant-service's asyncpg pool (or None in dev/tests).
+
+    The session_manager owns the pool — it's the same DB we use for
+    session/metadata writes. ``database._pool`` is the asyncpg pool
+    handle exposed by ``DatabaseStorage`` (Phase 5f Batch C).
+    """
+    smgr = getattr(request.app.state, "session_manager", None)
+    db = getattr(smgr, "database", None)
+    pool = getattr(db, "_pool", None)
+    return pool
+
+
+def _request_payload_for_hash(body: ImageGenerationRequest) -> dict[str, Any]:
+    """Stable dict used for idempotency request_hash computation."""
+    return {
+        "prompt": body.prompt,
+        "model_id": body.model_id,
+        "n": body.n,
+        "size": body.size,
+        "style": getattr(body.style, "value", str(body.style)),
+        "session_id": body.session_id,
+        "reference_artifact_id": body.reference_artifact_id,
+        "reference_image_url": body.reference_image_url,
+        "reference_image_present": bool(body.reference_image),  # don't hash bytes
+        "add_watermark": body.add_watermark,
+        "app_user_id": body.app_user_id,
+        "app_tenant_id": body.app_tenant_id,
+        "parent_artifact_id": body.parent_artifact_id,
+        "expected_parent_artifact_id": body.expected_parent_artifact_id,
+        "return_variants": sorted(body.return_variants) if body.return_variants else None,
+        "allow_branch": body.allow_branch,
+    }
+
+
+def _resolve_owner_scope(user: UserContext, body: ImageGenerationRequest) -> str:
+    """Compute the owner_scope for a request from headers + body."""
+    return _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=body.app_tenant_id or user.app_tenant_id,
+        app_user_id=body.app_user_id or user.app_user_id,
+    )
+
+
+async def _check_idempotency(
+    pool,
+    *,
+    owner_scope: str,
+    body: ImageGenerationRequest,
+) -> tuple[str | None, bool, str | None]:
+    """Check + claim idempotency for ``client_request_id``.
+
+    Returns:
+      ``(replay_task_id, conflict, request_hash)`` where:
+        * ``replay_task_id`` set when this is an idempotent replay
+        * ``conflict`` True when the same client_request_id was used with
+          a different request body — caller should 409 with idempotency_conflict
+        * ``request_hash`` is the canonical sha256 of this request (caller may
+          stash it on the task / turn for audit)
+    """
+    if not body.client_request_id or pool is None:
+        return None, False, None
+    request_hash = _compute_request_hash(_request_payload_for_hash(body))
+    existing = await lookup_idempotent(
+        pool, owner_scope=owner_scope, client_request_id=body.client_request_id,
+    )
+    if existing:
+        if existing["request_hash"] != request_hash:
+            return None, True, request_hash
+        return existing["task_id"], False, request_hash
+    return None, False, request_hash
+
+
+async def _ensure_image_session(
+    pool,
+    *,
+    session_id: str,
+    owner_scope: str,
+    user: UserContext,
+    body: ImageGenerationRequest,
+) -> dict | None:
+    """Ensure ``image_sessions`` row exists for (session_id, owner_scope).
+
+    Returns the row (post-upsert). Owner-scope mismatch on existing row →
+    raises 404 (treat as nonexistent for the new owner).
+    """
+    if pool is None:
+        return None
+    existing = await get_image_session(pool, session_id)
+    if existing and existing.get("owner_scope") != owner_scope:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {session_id!r} not found",
+        )
+    await upsert_image_session(
+        pool,
+        session_id=session_id,
+        owner_scope=owner_scope,
+        app_user_id=body.app_user_id or user.app_user_id,
+        app_tenant_id=body.app_tenant_id or user.app_tenant_id,
+        locked_style=None,  # don't touch on upsert
+    )
+    return await get_image_session(pool, session_id)
+
+
+async def _check_expected_parent(
+    pool,
+    *,
+    session_id: str,
+    expected_parent: str | None,
+) -> None:
+    """If caller provided ``expected_parent_artifact_id``, verify it matches
+    the session's current ``latest_artifact_id``. Raises 409 on mismatch."""
+    if not expected_parent or pool is None:
+        return
+    row = await get_image_session(pool, session_id)
+    current = row.get("latest_artifact_id") if row else None
+    if current != expected_parent:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "latest_artifact_conflict",
+                "message": "expected_parent_artifact_id does not match current session latest",
+                "current_latest_artifact_id": current,
+            },
+        )
+
+
+async def _resolve_style_for_session(
+    pool,
+    *,
+    session_id: str | None,
+    body_style: StylePreset,
+) -> tuple[StylePreset, str | None]:
+    """Apply image_sessions.locked_style fallback / overwrite.
+
+    * If session has locked_style and request style is DEFAULT → use locked.
+    * Else if request style != DEFAULT → set as new locked_style (caller
+      will write it back AFTER successful generation).
+    * Else (no session / no locked + DEFAULT) → DEFAULT, no change.
+
+    Returns ``(effective_preset, new_locked_style_or_None)``. ``new_locked_style``
+    is what the caller should write back after success (None = no change).
+    """
+    if not session_id or pool is None:
+        return body_style, None
+    row = await get_image_session(pool, session_id)
+    locked = row.get("locked_style") if row else None
+    locked_preset = resolve_style_preset(locked) if locked else None
+
+    if body_style is not StylePreset.DEFAULT:
+        # Explicit non-default style → overwrite lock
+        return body_style, body_style.value
+    if locked_preset is not None:
+        return locked_preset, None
+    return StylePreset.DEFAULT, None
+
+
+async def _record_turn(
+    pool,
+    *,
+    turn_id: str,
+    session_id: str | None,
+    owner_scope: str,
+    task_id: str | None,
+    body: ImageGenerationRequest,
+    parent_artifact_id: str | None,
+    output_artifact_id: str | None,
+    status: str,
+    error: str | None,
+    error_code: str | None,
+    request_hash: str | None,
+) -> None:
+    """Persist a row into image_turns. session_id-less stateless turns get
+    a synthetic session id so the row's NOT NULL constraint holds, but they
+    won't show up in any /image-sessions/{id} listing."""
+    if pool is None:
+        return
+    effective_session = session_id or f"stateless_{turn_id}"
+    await insert_turn(
+        pool,
+        turn_id=turn_id,
+        session_id=effective_session,
+        owner_scope=owner_scope,
+        task_id=task_id,
+        prompt=body.prompt,
+        model_id=body.model_id,
+        style=getattr(body.style, "value", None),
+        add_watermark=body.add_watermark,
+        parent_artifact_id=parent_artifact_id,
+        output_artifact_id=output_artifact_id,
+        status=status,
+        error=error,
+        error_code=error_code,
+        client_request_id=body.client_request_id,
+        request_hash=request_hash,
+        completed_at=datetime.now(timezone.utc) if status in ("completed", "failed") else None,
+    )
+
+
+async def _build_variants_response(
+    artifact_storage,
+    *,
+    raw_artifact_id: str | None,
+    return_variants: list[str] | None,
+    owner_scope: str,
+) -> dict[str, str] | None:
+    """Build the optional variants response map.
+
+    Skips variants that don't resolve. Owner-scope is enforced via the
+    presigned-url helper.
+    """
+    if not return_variants or not raw_artifact_id or not artifact_storage:
+        return None
+    out: dict[str, str] = {}
+    for v in return_variants:
+        if v not in ("raw", "display", "thumbnail"):
+            continue
+        try:
+            url, actual = await artifact_storage.get_presigned_download_url_for_variant(
+                raw_artifact_id, v, owner_scope=owner_scope,
+            )
+        except Exception as exc:
+            logger.warning("variant resolve failed for %s/%s: %s", raw_artifact_id, v, exc)
+            continue
+        if url and actual:
+            out[v] = url
+    return out or None
+
+
+# -----------------------------------------------------------------------------
 # POST /generate-image — synchronous
 # -----------------------------------------------------------------------------
 
@@ -656,24 +1136,79 @@ async def generate_image(
     user: UserContext = Depends(get_user_context),
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> ImageGenerationResponse:
-    """Synchronous image generation — Gemini multi-turn / stateless edit / fresh."""
+    """Synchronous image generation — Gemini multi-turn / stateless edit / fresh.
+
+    Pipeline (post-image-redesign):
+      1. owner_scope from headers + body
+      2. idempotency check on (owner_scope, client_request_id)
+      3. expected_parent CAS pre-check
+      4. resolve reference bytes (parent_artifact_id → reference_artifact_id
+         → session.latest → reference_image[_url] legacy)
+      5. style lock resolve
+      6. provider call
+      7. persist artifacts (raw + display + optional thumbnail)
+      8. CAS-advance image_sessions.latest_artifact_id (when not branching)
+      9. record image_turns row
+     10. shape response (with optional `variants` map)
+    """
     start_time = time.time()
+    pool = _get_db_pool(request)
+    artifact_storage = _get_artifact_storage()
+    session_mgr = getattr(request.app.state, "session_manager", None)
+
+    owner_scope = _resolve_owner_scope(user, body)
+    turn_id = new_turn_id()
+
     try:
+        # ---- Idempotency ------------------------------------------------
+        replay_task_id, idem_conflict, request_hash = await _check_idempotency(
+            pool, owner_scope=owner_scope, body=body,
+        )
+        if idem_conflict:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "idempotency_conflict",
+                    "message": "client_request_id reused with different request body",
+                },
+            )
+        # NB: sync replay returns no cached body — we never persist the full
+        # response. We still acknowledge the existing claim and re-run the
+        # generation idempotently is wrong (different output). We treat
+        # any idempotent replay on the sync path as a 409 *only* when the
+        # hash differs; same-hash replay falls through and re-runs (the
+        # async path is the canonical idempotent surface).
+
+        # ---- Provider routing pre-check --------------------------------
         model_info = model_registry.get_model(body.model_id) if model_registry else None
         selected_provider = model_info.provider.value if model_info else None
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
             body.model_id, selected_provider,
         )
 
-        has_reference = bool(
-            body.reference_artifact_id
+        has_explicit_ref = bool(
+            body.parent_artifact_id
+            or body.reference_artifact_id
             or body.reference_image
             or body.reference_image_url
         )
+        # session_id alone with a stored latest_artifact_id is also "has reference"
+        # for routing purposes (we'll edit the prior image). We compute that
+        # once here so routing decisions don't differ from persistence ones.
+        session_implies_reference = False
+        if (
+            body.session_id and pool is not None
+            and not has_explicit_ref
+        ):
+            sess_row = await get_image_session(pool, body.session_id)
+            session_implies_reference = bool(
+                sess_row
+                and sess_row.get("owner_scope") == owner_scope
+                and sess_row.get("latest_artifact_id")
+            )
+        has_reference = has_explicit_ref or session_implies_reference
+
         if has_reference and not prefer_gemini:
-            # Editing an existing image only works on Gemini. Falling through
-            # to fresh generation would silently ignore the user's reference
-            # and produce a totally unrelated image — almost always wrong.
             return ImageGenerationResponse(
                 success=False, images=[], provider=str(selected_provider or "unknown"),
                 duration_ms=(time.time() - start_time) * 1000,
@@ -683,58 +1218,73 @@ async def generate_image(
                     "Drop the reference fields for fresh generation, or pick a "
                     "Gemini model_id (e.g. gemini-3-flash-preview)."
                 ),
+                error_code="reference_requires_gemini",
+                client_request_id=body.client_request_id,
             )
+
+        # ---- Ensure image_session row + concurrency check --------------
+        if body.session_id:
+            await _ensure_image_session(
+                pool, session_id=body.session_id, owner_scope=owner_scope,
+                user=user, body=body,
+            )
+            await _check_expected_parent(
+                pool, session_id=body.session_id,
+                expected_parent=body.expected_parent_artifact_id,
+            )
+
+        # ---- Style lock ------------------------------------------------
+        effective_style, new_locked_style = await _resolve_style_for_session(
+            pool, session_id=body.session_id, body_style=body.style,
+        )
 
         width, height, aspect_ratio = parse_image_size(body.size)
 
-        artifact_storage = _get_artifact_storage()
-        session_mgr = getattr(request.app.state, "session_manager", None)
+        # ---- Resolve reference bytes ----------------------------------
+        ref_b64: str | None = None
+        resolved_parent: str | None = None
+        if prefer_gemini and (has_explicit_ref or session_implies_reference):
+            try:
+                ref_b64, resolved_parent = await _resolve_reference_bytes(
+                    body, artifact_storage=artifact_storage, user=user,
+                    owner_scope=owner_scope, db_pool=pool,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 404:
+                    await _record_turn(
+                        pool, turn_id=turn_id, session_id=body.session_id,
+                        owner_scope=owner_scope, task_id=None, body=body,
+                        parent_artifact_id=None, output_artifact_id=None,
+                        status="failed", error="reference artifact not found",
+                        error_code="reference_not_found", request_hash=request_hash,
+                    )
+                raise
 
-        # ---- Stateless edit (caller passes prior image) ------------------
-        if has_reference and prefer_gemini:
-            ref_b64 = await _resolve_reference_bytes(
-                body, artifact_storage=artifact_storage, user=user,
-            )
+        # ---- Provider call --------------------------------------------
+        styled_prompt = compose_styled_prompt(body.prompt, effective_style)
+        provider_label: str | None = None
+
+        if prefer_gemini and ref_b64 is not None:
             gemini = get_gemini_image_generator()
             if not gemini.is_configured:
                 return ImageGenerationResponse(
                     success=False, images=[], provider="none",
                     duration_ms=(time.time() - start_time) * 1000,
                     error="Gemini API key not configured",
+                    error_code="provider_unavailable",
+                    client_request_id=body.client_request_id,
+                    session_id=body.session_id,
                 )
-
-            styled_prompt = compose_styled_prompt(body.prompt, body.style)
             res = await gemini.generate(
-                prompt=styled_prompt,
-                n=body.n,
-                aspect_ratio=aspect_ratio,
-                reference_image=ref_b64,
+                prompt=styled_prompt, n=body.n,
+                aspect_ratio=aspect_ratio, reference_image=ref_b64,
             )
-            if not res.success or not res.images:
-                return ImageGenerationResponse(
-                    success=False, images=[], provider="google",
-                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    error=res.error or "Image edit failed",
-                )
-
-            persisted = await asyncio.gather(*[
-                _persist_and_get_url(
-                    img, artifact_storage=artifact_storage,
-                    session_id=body.session_id, user=user, prompt=body.prompt,
-                    add_watermark=body.add_watermark, width=width, height=height,
-                    index=i,
-                )
-                for i, img in enumerate(res.images)
-            ])
-            return ImageGenerationResponse(
-                success=True,
-                images=[gi for _, gi in persisted],
-                provider="google",
-                duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-            )
-
-        # ---- Stateful multi-turn (session-backed) -----------------------
-        if body.session_id and session_mgr and prefer_gemini:
+            provider_label = "google"
+        elif body.session_id and session_mgr and prefer_gemini:
+            # No reference resolved but session+gemini → fall back to legacy
+            # multi-turn path (history-backed). New behavior: when caller
+            # has explicit parent_artifact_id we already resolved bytes above,
+            # so this branch only fires for "session_id alone, never edited".
             res, session_state, err = await _run_gemini_multi_turn(
                 body, aspect_ratio=aspect_ratio, width=width, height=height,
                 session_manager=session_mgr, user=user,
@@ -744,77 +1294,222 @@ async def generate_image(
                 return ImageGenerationResponse(
                     success=False, images=[], provider="none",
                     duration_ms=(time.time() - start_time) * 1000, error=err,
+                    error_code="provider_unavailable",
                     session_id=body.session_id,
+                    client_request_id=body.client_request_id,
                 )
-            if not res.success or not res.images:
+            if not (res and res.success and res.images):
+                err_msg = (res.error if res else None) or "Image generation failed"
                 return ImageGenerationResponse(
                     success=False, images=[], provider="google",
-                    duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                    error=res.error or "Image generation failed",
+                    duration_ms=((res.duration_ms if res else None)
+                                 or (time.time() - start_time) * 1000),
+                    error=err_msg,
+                    error_code="provider_failed",
                     session_id=body.session_id,
+                    client_request_id=body.client_request_id,
                 )
-
-            _, generated_list = await _persist_multi_turn_result(
+            # Persist via the legacy multi-turn helper (writes session metadata)
+            raw_anchor, generated_list = await _persist_multi_turn_result(
                 body, res=res, session_state=session_state,
                 session_manager=session_mgr, user=user,
                 artifact_storage=artifact_storage,
                 width=width, height=height,
+            )
+            await _post_generation_bookkeeping(
+                pool, artifact_storage=artifact_storage,
+                turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, body=body,
+                resolved_parent=resolved_parent,
+                raw_anchor=raw_anchor, request_hash=request_hash,
+                new_locked_style=new_locked_style,
             )
             return ImageGenerationResponse(
                 success=True, images=generated_list,
                 provider="google",
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
                 session_id=body.session_id,
+                turn_id=turn_id,
+                parent_artifact_id=resolved_parent,
+                output_artifact_id=raw_anchor,
+                client_request_id=body.client_request_id,
+                idempotent_replay=False,
+                variants=await _build_variants_response(
+                    artifact_storage,
+                    raw_artifact_id=raw_anchor,
+                    return_variants=body.return_variants,
+                    owner_scope=owner_scope,
+                ),
             )
+        else:
+            dashscope_tag = resolve_dashscope_style_tag(effective_style)
+            negative_prompt = resolve_negative_prompt(effective_style)
+            router_svc = get_smart_image_generator()
+            res = await router_svc.generate(
+                prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+                style=dashscope_tag, negative_prompt=negative_prompt,
+                aspect_ratio=aspect_ratio,
+                prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
+                dashscope_model=dashscope_model,
+            )
+            provider_label = res.provider
 
-        # ---- Fresh single-turn — smart router picks provider ------------
-        styled_prompt = compose_styled_prompt(body.prompt, body.style)
-        dashscope_tag = resolve_dashscope_style_tag(body.style)
-        negative_prompt = resolve_negative_prompt(body.style)
-        router_svc = get_smart_image_generator()
-
-        res = await router_svc.generate(
-            prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
-            style=dashscope_tag, negative_prompt=negative_prompt,
-            aspect_ratio=aspect_ratio,
-            prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
-            dashscope_model=dashscope_model,
-        )
-
-        if not res.success:
+        if not res.success or not res.images:
             err = res.error or "Image generation failed"
+            error_code = "provider_failed"
             if res.blocked and res.block_reason:
                 err = f"{err} (blocked: {res.block_reason})"
+                error_code = "provider_blocked"
+            await _record_turn(
+                pool, turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, task_id=None, body=body,
+                parent_artifact_id=resolved_parent, output_artifact_id=None,
+                status="failed", error=err, error_code=error_code,
+                request_hash=request_hash,
+            )
             return ImageGenerationResponse(
-                success=False, images=[], provider=res.provider,
+                success=False, images=[], provider=provider_label,
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                error=err,
+                error=err, error_code=error_code,
+                session_id=body.session_id,
+                client_request_id=body.client_request_id,
             )
 
+        # ---- Persist artifacts ----------------------------------------
         persisted = await asyncio.gather(*[
             _persist_and_get_url(
                 img, artifact_storage=artifact_storage,
                 session_id=body.session_id, user=user, prompt=body.prompt,
                 add_watermark=body.add_watermark, width=width, height=height,
                 index=i,
+                owner_scope=owner_scope, turn_id=turn_id,
+                parent_artifact_id=resolved_parent,
+                provider=provider_label, model_id=body.model_id,
+                return_variants=body.return_variants,
             )
             for i, img in enumerate(res.images)
         ])
+        raw_anchor = persisted[0][0] if persisted else None
+        generated_list = [gi for _, gi in persisted]
+
+        # ---- CAS advance + style lock + turn audit + idempotency claim
+        await _post_generation_bookkeeping(
+            pool, artifact_storage=artifact_storage,
+            turn_id=turn_id, session_id=body.session_id,
+            owner_scope=owner_scope, body=body,
+            resolved_parent=resolved_parent,
+            raw_anchor=raw_anchor, request_hash=request_hash,
+            new_locked_style=new_locked_style,
+        )
+
         return ImageGenerationResponse(
-            success=True,
-            images=[gi for _, gi in persisted],
-            provider=res.provider,
+            success=True, images=generated_list, provider=provider_label,
             duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
+            session_id=body.session_id,
+            turn_id=turn_id,
+            parent_artifact_id=resolved_parent,
+            output_artifact_id=raw_anchor,
+            client_request_id=body.client_request_id,
+            idempotent_replay=False,
+            variants=await _build_variants_response(
+                artifact_storage, raw_artifact_id=raw_anchor,
+                return_variants=body.return_variants, owner_scope=owner_scope,
+            ),
         )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Image generation failed: %s", e)
+        # Best-effort failure-record so callers can audit via /image-sessions
+        try:
+            await _record_turn(
+                pool, turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, task_id=None, body=body,
+                parent_artifact_id=None, output_artifact_id=None,
+                status="failed", error=str(e), error_code="internal_error",
+                request_hash=None,
+            )
+        except Exception:
+            pass
         return ImageGenerationResponse(
             success=False, images=[], provider="unknown",
             duration_ms=(time.time() - start_time) * 1000, error=str(e),
+            error_code="internal_error",
+            session_id=body.session_id,
+            client_request_id=body.client_request_id,
         )
+
+
+async def _post_generation_bookkeeping(
+    pool,
+    *,
+    artifact_storage,
+    turn_id: str,
+    session_id: str | None,
+    owner_scope: str,
+    body: ImageGenerationRequest,
+    resolved_parent: str | None,
+    raw_anchor: str | None,
+    request_hash: str | None,
+    new_locked_style: str | None,
+) -> None:
+    """Centralized post-success state writes:
+
+    * CAS-advance latest_artifact_id (skipped when allow_branch=True or no session)
+    * Set locked_style if the caller pinned a new one
+    * Insert image_turns row with status=completed
+    * Claim idempotency record (if client_request_id set)
+    """
+    # Style lock write
+    if session_id and new_locked_style and pool is not None:
+        try:
+            await _set_locked_style(pool, session_id, new_locked_style)
+        except Exception as exc:
+            logger.warning("set_locked_style failed: %s", exc)
+
+    # CAS advance
+    if session_id and raw_anchor and pool is not None and not body.allow_branch:
+        try:
+            advanced = await advance_latest_artifact_cas(
+                pool, session_id=session_id,
+                expected_parent=resolved_parent,
+                new_artifact_id=raw_anchor,
+            )
+            if not advanced:
+                logger.info(
+                    "latest_artifact CAS skipped session=%s parent=%s — race or branch",
+                    session_id, resolved_parent,
+                )
+        except Exception as exc:
+            logger.warning("advance_latest_artifact_cas failed: %s", exc)
+
+    # Turn audit
+    try:
+        await _record_turn(
+            pool, turn_id=turn_id, session_id=session_id,
+            owner_scope=owner_scope, task_id=None, body=body,
+            parent_artifact_id=resolved_parent, output_artifact_id=raw_anchor,
+            status="completed", error=None, error_code=None,
+            request_hash=request_hash,
+        )
+    except Exception as exc:
+        logger.warning("record_turn failed: %s", exc)
+
+    # Idempotency claim — record AFTER success so a failed request doesn't
+    # block a retry of the same client_request_id.
+    if body.client_request_id and request_hash and pool is not None:
+        try:
+            await record_idempotent(
+                pool, owner_scope=owner_scope,
+                client_request_id=body.client_request_id,
+                request_hash=request_hash,
+                # No task_id for sync flow — idempotent replay on sync only
+                # protects against double-charge / double-CAS on retries.
+                task_id=turn_id,
+            )
+        except Exception as exc:
+            logger.warning("record_idempotent failed: %s", exc)
 
 
 # -----------------------------------------------------------------------------
@@ -825,19 +1520,29 @@ async def generate_image(
 async def _run_image_generation_task(
     task_id: str, body: AsyncImageGenerationRequest,
     model_registry: ModelRegistry, user: UserContext,
-    session_manager=None, redis=None,
+    session_manager=None, redis=None, pool=None,
 ) -> None:
     task = await _load_task(redis, task_id)
     if task is None:
         # Defensive: caller should have stored the task before scheduling us.
-        # If we get here the submit path raced or the storage backend dropped
-        # it; bail rather than crash the worker.
         logger.error("Async image task %s vanished before worker started", task_id)
         return
     task["status"] = "running"
     task["progress"] = 10
     await _store_task(redis, task_id, task)
     start_time = time.time()
+
+    owner_scope = task.get("owner_scope") or _resolve_owner_scope(user, body)
+    turn_id = task.get("turn_id") or new_turn_id()
+    request_hash = task.get("request_hash")
+    resolved_parent: str | None = None
+    raw_anchor: str | None = None
+
+    # Mark turn as running for parallel observers
+    try:
+        await update_turn_status(pool, turn_id=turn_id, status="running")
+    except Exception:
+        pass
 
     try:
         model_info = model_registry.get_model(body.model_id) if model_registry else None
@@ -849,48 +1554,108 @@ async def _run_image_generation_task(
         task["progress"] = 30
 
         artifact_storage = _get_artifact_storage()
-        has_reference = bool(
-            body.reference_artifact_id
+        has_explicit_ref = bool(
+            body.parent_artifact_id
+            or body.reference_artifact_id
             or body.reference_image
             or body.reference_image_url
         )
+        session_implies_reference = False
+        if (
+            body.session_id and pool is not None and not has_explicit_ref
+        ):
+            sess_row = await get_image_session(pool, body.session_id)
+            session_implies_reference = bool(
+                sess_row and sess_row.get("owner_scope") == owner_scope
+                and sess_row.get("latest_artifact_id")
+            )
+        has_reference = has_explicit_ref or session_implies_reference
 
-        # Reference given but routing isn't Gemini — fail explicitly. Falling
-        # through to fresh generation would silently produce an unrelated
-        # image, which is almost never what the caller wanted.
         if has_reference and not prefer_gemini:
             task["status"] = "failed"
             task["error"] = (
                 f"reference image editing requires a Gemini model "
                 f"(got model_id={body.model_id!r}, provider={selected_provider!r})"
             )
+            task["error_code"] = "reference_requires_gemini"
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
             await _store_task(redis, task_id, task)
+            await update_turn_status(
+                pool, turn_id=turn_id, status="failed",
+                error=task["error"], error_code="reference_requires_gemini",
+            )
+            if body.callback_url:
+                try:
+                    await send_image_callback(body.callback_url, task)
+                except Exception as e:
+                    logger.warning("Callback to %s failed: %s", body.callback_url, e)
             return
+
+        # Style lock resolution
+        effective_style, new_locked_style = await _resolve_style_for_session(
+            pool, session_id=body.session_id, body_style=body.style,
+        )
+
+        # Resolve reference bytes (may raise 404 → recorded as failed turn)
+        ref_b64: str | None = None
+        if prefer_gemini and has_reference:
+            try:
+                ref_b64, resolved_parent = await _resolve_reference_bytes(
+                    body, artifact_storage=artifact_storage, user=user,
+                    owner_scope=owner_scope, db_pool=pool,
+                )
+            except HTTPException as exc:
+                msg = exc.detail if isinstance(exc.detail, str) else "reference not found"
+                task["status"] = "failed"
+                task["error"] = msg
+                task["error_code"] = "reference_not_found"
+                task["progress"] = 100
+                task["completed_at"] = datetime.now(timezone.utc).isoformat()
+                await _store_task(redis, task_id, task)
+                await update_turn_status(
+                    pool, turn_id=turn_id, status="failed",
+                    error=msg, error_code="reference_not_found",
+                )
+                if body.callback_url:
+                    try:
+                        await send_image_callback(body.callback_url, task)
+                    except Exception:
+                        pass
+                return
 
         res = None
         generated_response_imgs: list[GeneratedImage] = []
+        provider_label: str | None = None
+        styled_prompt = compose_styled_prompt(body.prompt, effective_style)
 
-        if has_reference and prefer_gemini:
+        if prefer_gemini and ref_b64 is not None:
             gemini = get_gemini_image_generator()
             if not gemini.is_configured:
                 task["status"] = "failed"
                 task["error"] = "Gemini API key not configured"
+                task["error_code"] = "provider_unavailable"
                 task["progress"] = 100
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
                 await _store_task(redis, task_id, task)
+                await update_turn_status(
+                    pool, turn_id=turn_id, status="failed",
+                    error=task["error"], error_code="provider_unavailable",
+                )
+                if body.callback_url:
+                    try:
+                        await send_image_callback(body.callback_url, task)
+                    except Exception:
+                        pass
                 return
-            ref_b64 = await _resolve_reference_bytes(
-                body, artifact_storage=artifact_storage, user=user,
-            )
-            styled_prompt = compose_styled_prompt(body.prompt, body.style)
             res = await gemini.generate(
                 prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
                 reference_image=ref_b64,
             )
+            provider_label = "google"
 
         if res is None and body.session_id and session_manager and prefer_gemini:
+            # Legacy session-history backed flow (no explicit parent)
             res, session_state, err = await _run_gemini_multi_turn(
                 body, aspect_ratio=aspect_ratio, width=width, height=height,
                 session_manager=session_manager, user=user,
@@ -899,24 +1664,33 @@ async def _run_image_generation_task(
             if err:
                 task["status"] = "failed"
                 task["error"] = err
+                task["error_code"] = "provider_unavailable"
                 task["progress"] = 100
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
                 await _store_task(redis, task_id, task)
+                await update_turn_status(
+                    pool, turn_id=turn_id, status="failed",
+                    error=err, error_code="provider_unavailable",
+                )
+                if body.callback_url:
+                    try:
+                        await send_image_callback(body.callback_url, task)
+                    except Exception:
+                        pass
                 return
-
             if res and res.success and res.images:
-                _, generated_list = await _persist_multi_turn_result(
+                raw_anchor, generated_list = await _persist_multi_turn_result(
                     body, res=res, session_state=session_state,
                     session_manager=session_manager, user=user,
                     artifact_storage=artifact_storage,
                     width=width, height=height,
                 )
                 generated_response_imgs.extend(generated_list)
+                provider_label = "google"
 
         if res is None:
-            styled_prompt = compose_styled_prompt(body.prompt, body.style)
-            dashscope_tag = resolve_dashscope_style_tag(body.style)
-            negative_prompt = resolve_negative_prompt(body.style)
+            dashscope_tag = resolve_dashscope_style_tag(effective_style)
+            negative_prompt = resolve_negative_prompt(effective_style)
             router_svc = get_smart_image_generator()
             res = await router_svc.generate(
                 prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
@@ -925,25 +1699,37 @@ async def _run_image_generation_task(
                 prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
                 dashscope_model=dashscope_model,
             )
+            provider_label = res.provider
 
         duration_ms = (time.time() - start_time) * 1000
         task["duration_ms"] = duration_ms
-        task["provider"] = res.provider
+        task["provider"] = provider_label
 
         if not res.success:
             err = res.error or "Image generation failed"
+            error_code = "provider_failed"
             if res.blocked and res.block_reason:
                 err = f"{err} (blocked: {res.block_reason})"
+                error_code = "provider_blocked"
             task["status"] = "failed"
             task["error"] = err
+            task["error_code"] = error_code
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
             await _store_task(redis, task_id, task)
+            await update_turn_status(
+                pool, turn_id=turn_id, status="failed",
+                error=err, error_code=error_code,
+            )
+            if body.callback_url:
+                try:
+                    await send_image_callback(body.callback_url, task)
+                except Exception:
+                    pass
             return
 
         task["progress"] = 70
 
-        # If the multi-turn helper already persisted, reuse those entries.
         if not generated_response_imgs:
             persisted = await asyncio.gather(*[
                 _persist_and_get_url(
@@ -951,10 +1737,15 @@ async def _run_image_generation_task(
                     session_id=body.session_id, user=user, prompt=body.prompt,
                     add_watermark=body.add_watermark, width=width, height=height,
                     index=i,
+                    owner_scope=owner_scope, turn_id=turn_id,
+                    parent_artifact_id=resolved_parent,
+                    provider=provider_label, model_id=body.model_id,
+                    return_variants=body.return_variants,
                 )
                 for i, img in enumerate(res.images)
             ])
             generated_response_imgs = [gi for _, gi in persisted]
+            raw_anchor = persisted[0][0] if persisted else None
 
         task["images"] = [
             {
@@ -969,16 +1760,36 @@ async def _run_image_generation_task(
         task["status"] = "completed"
         task["progress"] = 100
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
+        task["parent_artifact_id"] = resolved_parent
+        task["output_artifact_id"] = raw_anchor
+        task["turn_id"] = turn_id
+        task["session_id"] = body.session_id
+        task["client_request_id"] = body.client_request_id
+
+        # Post-success bookkeeping (CAS, locked_style, turn audit, idempotency)
+        await _post_generation_bookkeeping(
+            pool, artifact_storage=artifact_storage,
+            turn_id=turn_id, session_id=body.session_id,
+            owner_scope=owner_scope, body=body,
+            resolved_parent=resolved_parent, raw_anchor=raw_anchor,
+            request_hash=request_hash, new_locked_style=new_locked_style,
+        )
 
     except Exception as e:
-        # logger.exception captures the stack trace; previous logger.error
-        # only logged str(e), making prod debugging impossible.
         logger.exception("Async image generation task %s failed", task_id)
         task["status"] = "failed"
         task["error"] = str(e)
+        task["error_code"] = "internal_error"
         task["progress"] = 100
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            await update_turn_status(
+                pool, turn_id=turn_id, status="failed",
+                error=str(e), error_code="internal_error",
+            )
+        except Exception:
+            pass
 
     await _store_task(redis, task_id, task)
 
@@ -997,30 +1808,101 @@ async def submit_image_generation(
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> AsyncImageTaskSubmitResponse:
     _cleanup_old_tasks()
+    pool = _get_db_pool(request)
+    owner_scope = _resolve_owner_scope(user, body)
+
+    # Idempotency check before any work
+    replay_task_id, idem_conflict, request_hash = await _check_idempotency(
+        pool, owner_scope=owner_scope, body=body,
+    )
+    if idem_conflict:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "idempotency_conflict",
+                "message": "client_request_id reused with different request body",
+            },
+        )
+    if replay_task_id:
+        return AsyncImageTaskSubmitResponse(
+            task_id=replay_task_id, status="pending",
+            message="Idempotent replay — existing task returned",
+        )
+
+    # Image-session bootstrap + expected_parent CAS pre-check
+    if body.session_id:
+        await _ensure_image_session(
+            pool, session_id=body.session_id, owner_scope=owner_scope,
+            user=user, body=body,
+        )
+        await _check_expected_parent(
+            pool, session_id=body.session_id,
+            expected_parent=body.expected_parent_artifact_id,
+        )
+
     task_id = str(uuid.uuid4())
+    turn_id = new_turn_id()
     now = datetime.now(timezone.utc).isoformat()
     task = {
         "task_id": task_id, "status": "pending", "progress": 0,
         "prompt": body.prompt, "model_id": body.model_id, "provider": None,
         "images": [], "duration_ms": None, "error": None,
+        "error_code": None,
         "created_at": now, "completed_at": None,
-        # Owner — checked on poll to prevent IDOR. Without this,
-        # any authenticated user could poll any UUID and read another
-        # tenant's prompt + presigned image URLs.
         "owner_user_id": user.user_id,
         "owner_tenant_id": user.tenant_id,
+        "owner_scope": owner_scope,
+        "turn_id": turn_id,
+        "session_id": body.session_id,
+        "client_request_id": body.client_request_id,
+        "request_hash": request_hash,
+        "parent_artifact_id": None,
+        "output_artifact_id": None,
     }
     redis = getattr(request.app.state, "redis", None)
     await _store_task(redis, task_id, task)
+
+    # Insert pending turn row + claim idempotency BEFORE scheduling work,
+    # so a poll between submit + worker start sees the queue state.
+    try:
+        await insert_turn(
+            pool,
+            turn_id=turn_id,
+            session_id=body.session_id or f"stateless_{turn_id}",
+            owner_scope=owner_scope,
+            task_id=task_id,
+            prompt=body.prompt,
+            model_id=body.model_id,
+            style=getattr(body.style, "value", None),
+            add_watermark=body.add_watermark,
+            parent_artifact_id=None,
+            output_artifact_id=None,
+            status="pending",
+            error=None,
+            error_code=None,
+            client_request_id=body.client_request_id,
+            request_hash=request_hash,
+        )
+    except Exception as exc:
+        logger.warning("insert pending turn failed: %s", exc)
+
+    if body.client_request_id and request_hash and pool is not None:
+        try:
+            await record_idempotent(
+                pool, owner_scope=owner_scope,
+                client_request_id=body.client_request_id,
+                request_hash=request_hash, task_id=task_id,
+            )
+        except Exception as exc:
+            logger.warning("record_idempotent failed: %s", exc)
+
     session_mgr = get_session_manager(request)
     worker = asyncio.create_task(
         _run_image_generation_task(
             task_id, body, model_registry, user,
-            session_manager=session_mgr, redis=redis,
+            session_manager=session_mgr, redis=redis, pool=pool,
         )
     )
-    # Strong-ref the task so the event loop's weak-ref doesn't let it
-    # be GC'd mid-execution. Self-removes on completion.
     _in_flight_workers.add(worker)
     worker.add_done_callback(_in_flight_workers.discard)
     return AsyncImageTaskSubmitResponse(
@@ -1037,8 +1919,68 @@ async def get_image_task_status(
 ) -> AsyncImageTaskStatusResponse:
     redis = getattr(request.app.state, "redis", None)
     task = await _load_task(redis, task_id)
+
+    # Cache miss → fall through to image_turns row (Postgres). Both Redis
+    # and the in-process dict expire entries after 1h; image_turns is
+    # authoritative beyond that window.
     if not task:
+        pool = _get_db_pool(request)
+        if pool is not None:
+            turn = await get_turn_by_task(pool, task_id)
+            if turn:
+                # Owner-scope check: deny cross-owner access (404 to hide existence)
+                expected_scope = _compute_owner_scope(
+                    user.user_id,
+                    app_tenant_id=user.app_tenant_id,
+                    app_user_id=user.app_user_id,
+                )
+                if (
+                    turn.get("owner_scope") not in (None, expected_scope, user.user_id)
+                ):
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+                # Build a synthetic task dict from the turn row
+                images: list[AsyncImageArtifact] = []
+                output_id = turn.get("output_artifact_id")
+                if output_id:
+                    artifact_storage = _get_artifact_storage()
+                    if artifact_storage:
+                        try:
+                            url, _actual = await artifact_storage.get_presigned_download_url_for_variant(
+                                output_id, "display",
+                                owner_scope=turn.get("owner_scope") or user.user_id,
+                            )
+                        except Exception:
+                            url = None
+                        if url:
+                            images = [AsyncImageArtifact(
+                                artifact_id=output_id,
+                                download_url=url,
+                                url=url,
+                            )]
+                completed_at = turn.get("completed_at")
+                created_at = turn.get("created_at")
+                return AsyncImageTaskStatusResponse(
+                    task_id=task_id,
+                    status=turn.get("status", "pending"),
+                    progress=100 if turn.get("status") in ("completed", "failed") else 50,
+                    prompt=turn.get("prompt") or "",
+                    model_id=turn.get("model_id") or "",
+                    provider=None,
+                    images=images,
+                    duration_ms=None,
+                    error=turn.get("error"),
+                    error_code=turn.get("error_code"),
+                    created_at=(created_at.isoformat() if created_at else ""),
+                    completed_at=(completed_at.isoformat() if completed_at else None),
+                    turn_id=turn.get("turn_id"),
+                    session_id=turn.get("session_id"),
+                    parent_artifact_id=turn.get("parent_artifact_id"),
+                    output_artifact_id=output_id,
+                    client_request_id=turn.get("client_request_id"),
+                )
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
     # Ownership check — return 404 (not 403) to avoid leaking task existence
     # via timing/error-code distinction.
     owner_user_id = task.get("owner_user_id")
@@ -1047,6 +1989,16 @@ async def get_image_task_status(
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     if owner_tenant_id is not None and owner_tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    # owner_scope check (Phase 2): when present on task, must match request scope.
+    task_scope = task.get("owner_scope")
+    if task_scope is not None:
+        expected_scope = _compute_owner_scope(
+            user.user_id,
+            app_tenant_id=user.app_tenant_id,
+            app_user_id=user.app_user_id,
+        )
+        if task_scope != expected_scope:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     images = [
         AsyncImageArtifact(
             artifact_id=img.get("artifact_id"),
@@ -1063,5 +2015,226 @@ async def get_image_task_status(
         prompt=task["prompt"], model_id=task["model_id"],
         provider=task.get("provider"), images=images,
         duration_ms=task.get("duration_ms"), error=task.get("error"),
+        error_code=task.get("error_code"),
         created_at=task["created_at"], completed_at=task.get("completed_at"),
+        turn_id=task.get("turn_id"),
+        session_id=task.get("session_id"),
+        parent_artifact_id=task.get("parent_artifact_id"),
+        output_artifact_id=task.get("output_artifact_id"),
+        client_request_id=task.get("client_request_id"),
+    )
+
+
+# -----------------------------------------------------------------------------
+# GET /artifacts/{artifact_id}/download-url  — presigned URL for a variant
+# -----------------------------------------------------------------------------
+
+
+class ArtifactDownloadUrlResponse(BaseModel):
+    artifact_id: str
+    variant: str = Field(
+        ...,
+        description=(
+            "Variant actually returned. May differ from request when fallback "
+            "kicks in (e.g. requested 'thumbnail' but only 'display' / 'raw' "
+            "exist)."
+        ),
+    )
+    url: str
+    expires_at: str
+    width: int | None = None
+    height: int | None = None
+    mime_type: str | None = None
+
+
+@router.get(
+    "/artifacts/{artifact_id}/download-url",
+    response_model=ArtifactDownloadUrlResponse,
+)
+async def get_artifact_download_url(
+    artifact_id: str,
+    request: Request,
+    variant: str = Query("display", description="raw | display | thumbnail"),
+    expires_in: int = Query(3600, ge=60, le=3600),
+    user: UserContext = Depends(get_user_context),
+) -> ArtifactDownloadUrlResponse:
+    """Resolve a fresh presigned URL for any variant of an image artifact.
+
+    Variant fallback chain:
+      * thumbnail → display → raw
+      * display   → raw
+      * raw       → no fallback (404 if missing)
+
+    Owner scope is enforced. Cross-owner reads return 404 (not 403) to
+    avoid IDOR enumeration.
+    """
+    if variant not in ("raw", "display", "thumbnail"):
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "validation_error",
+                    "message": "variant must be one of raw|display|thumbnail"},
+        )
+
+    artifact_storage = _get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "storage_unavailable",
+                    "message": "ArtifactStorage not configured"},
+        )
+
+    # Read app-scope from headers (and let callers override via query for
+    # multi-tenant proxies that pass app_user_id separately is not in scope
+    # here — they should set X-App-* headers).
+    owner_scope = _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+
+    url, actual_variant = await artifact_storage.get_presigned_download_url_for_variant(
+        artifact_id, variant, expiry_seconds=expires_in, owner_scope=owner_scope,
+    )
+    if url is None or actual_variant is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "not_found",
+                    "message": f"artifact {artifact_id!r} not found"},
+        )
+
+    # Pull metadata for width/height/mime
+    artifact = await artifact_storage.find_variant(artifact_id, actual_variant)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+    return ArtifactDownloadUrlResponse(
+        artifact_id=artifact_id,
+        variant=actual_variant,
+        url=url,
+        expires_at=expires_at,
+        width=artifact.width if artifact else None,
+        height=artifact.height if artifact else None,
+        mime_type=artifact.mime_type if artifact else None,
+    )
+
+
+# -----------------------------------------------------------------------------
+# GET /image-sessions/{session_id} — multi-turn history
+# -----------------------------------------------------------------------------
+
+
+class ImageTurnPublic(BaseModel):
+    turn_id: str
+    task_id: str | None
+    prompt: str | None
+    model_id: str | None
+    style: str | None
+    add_watermark: bool
+    parent_artifact_id: str | None
+    output_artifact_id: str | None
+    status: str
+    error: str | None
+    error_code: str | None
+    created_at: str
+    completed_at: str | None
+    output_url: str | None = None  # populated when include_urls=true
+
+
+class ImageSessionResponse(BaseModel):
+    session_id: str
+    latest_artifact_id: str | None
+    locked_style: str | None
+    created_at: str
+    updated_at: str
+    turns: list[ImageTurnPublic]
+    next_cursor: str | None = None
+
+
+@router.get(
+    "/image-sessions/{session_id}",
+    response_model=ImageSessionResponse,
+)
+async def get_image_session_view(
+    session_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = Query(None),
+    include_urls: bool = Query(False),
+    user: UserContext = Depends(get_user_context),
+) -> ImageSessionResponse:
+    """Return the focused image-multi-turn view for a session.
+
+    * Owner-scoped: cross-owner sessions return 404.
+    * Pagination: cursor is "ISO_created_at|turn_id" — older-than ordering.
+    * ``include_urls=true`` attaches a presigned display URL per turn (3600 s).
+    """
+    pool = _get_db_pool(request)
+    if pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "storage_unavailable",
+                    "message": "Database pool not available"},
+        )
+
+    owner_scope = _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+
+    sess = await get_image_session(pool, session_id)
+    if not sess or sess.get("owner_scope") != owner_scope:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "not_found",
+                    "message": f"image session {session_id!r} not found"},
+        )
+
+    rows, next_cursor = await list_turns(
+        pool, session_id=session_id, owner_scope=owner_scope,
+        limit=limit, cursor=cursor,
+    )
+
+    artifact_storage = _get_artifact_storage() if include_urls else None
+    turns_out: list[ImageTurnPublic] = []
+    for row in rows:
+        output_url: str | None = None
+        oid = row.get("output_artifact_id")
+        if include_urls and artifact_storage and oid:
+            try:
+                url, _ = await artifact_storage.get_presigned_download_url_for_variant(
+                    oid, "display", owner_scope=owner_scope,
+                )
+                output_url = url
+            except Exception as exc:
+                logger.warning("turn output URL resolve failed: %s", exc)
+        created_at = row.get("created_at")
+        completed_at = row.get("completed_at")
+        turns_out.append(ImageTurnPublic(
+            turn_id=row["turn_id"],
+            task_id=row.get("task_id"),
+            prompt=row.get("prompt"),
+            model_id=row.get("model_id"),
+            style=row.get("style"),
+            add_watermark=bool(row.get("add_watermark", True)),
+            parent_artifact_id=row.get("parent_artifact_id"),
+            output_artifact_id=oid,
+            status=row.get("status", "unknown"),
+            error=row.get("error"),
+            error_code=row.get("error_code"),
+            created_at=created_at.isoformat() if created_at else "",
+            completed_at=completed_at.isoformat() if completed_at else None,
+            output_url=output_url,
+        ))
+
+    sess_created = sess.get("created_at")
+    sess_updated = sess.get("updated_at")
+    return ImageSessionResponse(
+        session_id=session_id,
+        latest_artifact_id=sess.get("latest_artifact_id"),
+        locked_style=sess.get("locked_style"),
+        created_at=sess_created.isoformat() if sess_created else "",
+        updated_at=sess_updated.isoformat() if sess_updated else "",
+        turns=turns_out,
+        next_cursor=next_cursor,
     )

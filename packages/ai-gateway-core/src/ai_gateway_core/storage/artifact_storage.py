@@ -51,6 +51,17 @@ class ArtifactInfo:
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # ---- First-class image variant fields (added by 001_image_session_artifacts) ----
+    # All optional / nullable so non-image artifacts and pre-migration rows still load.
+    variant: str = "raw"               # 'raw' | 'display' | 'thumbnail'
+    parent_artifact_id: str | None = None  # For 'display'/'thumbnail' rows → raw.artifact_id
+    turn_id: str | None = None
+    owner_scope: str | None = None
+    width: int | None = None
+    height: int | None = None
+    provider: str | None = None
+    model_id: str | None = None
+    prompt: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -71,6 +82,15 @@ class ArtifactInfo:
             "metadata": self.metadata,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "variant": self.variant,
+            "parent_artifact_id": self.parent_artifact_id,
+            "turn_id": self.turn_id,
+            "owner_scope": self.owner_scope,
+            "width": self.width,
+            "height": self.height,
+            "provider": self.provider,
+            "model_id": self.model_id,
+            "prompt": self.prompt,
         }
 
 
@@ -177,6 +197,16 @@ class ArtifactStorageService:
         source: str = "ai",
         message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        *,
+        variant: str = "raw",
+        parent_artifact_id: str | None = None,
+        turn_id: str | None = None,
+        owner_scope: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+        prompt: str | None = None,
     ) -> ArtifactInfo:
         """
         Create a new artifact: upload to storage and save metadata to database.
@@ -234,6 +264,15 @@ class ArtifactStorageService:
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
+            variant=variant,
+            parent_artifact_id=parent_artifact_id,
+            turn_id=turn_id,
+            owner_scope=owner_scope,
+            width=width,
+            height=height,
+            provider=provider,
+            model_id=model_id,
+            prompt=prompt,
         )
 
         if self.database and self.database._pool:
@@ -242,40 +281,111 @@ class ArtifactStorageService:
         return artifact
 
     async def _save_artifact_to_db(self, artifact: ArtifactInfo) -> None:
-        """Save artifact metadata to database."""
+        """Save artifact metadata to database.
+
+        Tries the full insert first (post-001_image_session_artifacts schema).
+        Falls back to the minimal-column insert if the new columns aren't present
+        (e.g. running against a DB where the migration hasn't been applied yet).
+        New fields default to NULL/'raw' there, so legacy rows still satisfy the
+        post-migration NOT NULL constraint on `variant` (it has a server-side
+        DEFAULT 'raw').
+        """
         import json
 
         async with self.database._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO artifacts (
-                    artifact_id, session_id, message_id, tenant_id, user_id,
-                    type, format, title, filename, storage_key, size_bytes,
-                    mime_type, source, metadata, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
-                ON CONFLICT (artifact_id) DO UPDATE SET
-                    updated_at = EXCLUDED.updated_at
-                """,
-                artifact.artifact_id,
-                artifact.session_id,
-                artifact.message_id,
-                artifact.tenant_id,
-                artifact.user_id,
-                artifact.type,
-                artifact.format,
-                artifact.title,
-                artifact.filename,
-                artifact.storage_key,
-                artifact.size_bytes,
-                artifact.mime_type,
-                artifact.source,
-                json.dumps(artifact.metadata),
-                artifact.created_at,
-                artifact.updated_at,
-            )
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id, session_id, message_id, tenant_id, user_id,
+                        type, format, title, filename, storage_key, size_bytes,
+                        mime_type, source, metadata, created_at, updated_at,
+                        variant, parent_artifact_id, turn_id, owner_scope,
+                        width, height, provider, model_id, prompt
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                        $17, $18, $19, $20, $21, $22, $23, $24, $25
+                    )
+                    ON CONFLICT (artifact_id) DO UPDATE SET
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    artifact.artifact_id,
+                    artifact.session_id,
+                    artifact.message_id,
+                    artifact.tenant_id,
+                    artifact.user_id,
+                    artifact.type,
+                    artifact.format,
+                    artifact.title,
+                    artifact.filename,
+                    artifact.storage_key,
+                    artifact.size_bytes,
+                    artifact.mime_type,
+                    artifact.source,
+                    json.dumps(artifact.metadata),
+                    artifact.created_at,
+                    artifact.updated_at,
+                    artifact.variant,
+                    artifact.parent_artifact_id,
+                    artifact.turn_id,
+                    artifact.owner_scope,
+                    artifact.width,
+                    artifact.height,
+                    artifact.provider,
+                    artifact.model_id,
+                    artifact.prompt,
+                )
+            except Exception as exc:
+                # Schema may pre-date 001_image_session_artifacts. Retry with
+                # the legacy column list so dev environments without the new
+                # migration still work.
+                logger.warning(
+                    "Full artifact insert failed (%s); retrying with legacy columns. "
+                    "Apply migration assistant/001_image_session_artifacts to enable variants.",
+                    exc,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id, session_id, message_id, tenant_id, user_id,
+                        type, format, title, filename, storage_key, size_bytes,
+                        mime_type, source, metadata, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    ON CONFLICT (artifact_id) DO UPDATE SET
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    artifact.artifact_id,
+                    artifact.session_id,
+                    artifact.message_id,
+                    artifact.tenant_id,
+                    artifact.user_id,
+                    artifact.type,
+                    artifact.format,
+                    artifact.title,
+                    artifact.filename,
+                    artifact.storage_key,
+                    artifact.size_bytes,
+                    artifact.mime_type,
+                    artifact.source,
+                    json.dumps(artifact.metadata),
+                    artifact.created_at,
+                    artifact.updated_at,
+                )
 
-    async def get_artifact(self, artifact_id: str) -> ArtifactInfo | None:
-        """Get artifact by ID."""
+    async def get_artifact(
+        self,
+        artifact_id: str,
+        *,
+        owner_scope: str | None = None,
+    ) -> ArtifactInfo | None:
+        """Get artifact by ID.
+
+        ``owner_scope``: when supplied, returns ``None`` if the artifact's
+        ``owner_scope`` doesn't match. This is the post-image-redesign auth
+        check for the new variant/download endpoints. Legacy callers pass
+        ``None`` and continue to use the existing tenant_id/user_id check
+        in their own code paths (kept for backward compatibility).
+        """
         if not self.database or not self.database._pool:
             return None
 
@@ -288,7 +398,122 @@ class ArtifactStorageService:
         if not row:
             return None
 
+        artifact = self._row_to_artifact(row)
+        if owner_scope is not None and artifact.owner_scope is not None:
+            if artifact.owner_scope != owner_scope:
+                return None
+        return artifact
+
+    async def find_variant(
+        self,
+        parent_or_self_artifact_id: str,
+        variant: str,
+    ) -> ArtifactInfo | None:
+        """Resolve a sibling variant from any artifact_id in the variant family.
+
+        Strategy: every variant row stores ``parent_artifact_id`` = the raw
+        artifact_id; raw rows have ``parent_artifact_id IS NULL`` themselves.
+        So:
+          * if the input IS the requested variant → return it
+          * if the input is the raw root → look for ``parent_artifact_id=root``
+            with ``variant=<wanted>``
+          * if the input is a non-raw variant → first hop to its raw parent,
+            then either return raw (if wanted='raw') or look up the sibling
+
+        Returns ``None`` when the requested variant doesn't exist.
+        """
+        if not self.database or not self.database._pool:
+            return None
+
+        async with self.database._pool.acquire() as conn:
+            base = await conn.fetchrow(
+                "SELECT * FROM artifacts WHERE artifact_id = $1",
+                parent_or_self_artifact_id,
+            )
+            if not base:
+                return None
+            base_artifact = self._row_to_artifact(base)
+
+            # Same-row hit
+            if base_artifact.variant == variant:
+                return base_artifact
+
+            # Resolve the raw root for this family
+            if base_artifact.variant == "raw":
+                raw_id = base_artifact.artifact_id
+            else:
+                raw_id = base_artifact.parent_artifact_id
+                if not raw_id:
+                    # Orphan variant row — best-effort: return None
+                    return None
+
+            if variant == "raw":
+                row = await conn.fetchrow(
+                    "SELECT * FROM artifacts WHERE artifact_id = $1",
+                    raw_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT * FROM artifacts
+                    WHERE parent_artifact_id = $1 AND variant = $2
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    raw_id,
+                    variant,
+                )
+
+        if not row:
+            return None
         return self._row_to_artifact(row)
+
+    async def get_presigned_download_url_for_variant(
+        self,
+        artifact_id: str,
+        variant: str = "display",
+        expiry_seconds: int = 3600,
+        *,
+        owner_scope: str | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve a presigned download URL for the requested image variant.
+
+        Fallback chain:
+          * 'thumbnail' → 'display' → 'raw'
+          * 'display'   → 'raw'
+          * 'raw'       → no fallback (404 if missing)
+
+        ``owner_scope``: when supplied, the resolved artifact must match it
+        or we return (None, None) — same response shape as "not found", to
+        avoid IDOR enumeration via timing/error-code distinction.
+
+        Returns ``(url, actual_variant)``. ``actual_variant`` reflects the
+        variant we *actually* served after fallback (so the caller can show
+        e.g. "thumbnail unavailable, served display" in their response).
+        """
+        order = (
+            ("thumbnail", "display", "raw")
+            if variant == "thumbnail"
+            else ("display", "raw")
+            if variant == "display"
+            else ("raw",)
+        )
+
+        for try_variant in order:
+            artifact = await self.find_variant(artifact_id, try_variant)
+            if artifact is None:
+                continue
+            if (
+                owner_scope is not None
+                and artifact.owner_scope is not None
+                and artifact.owner_scope != owner_scope
+            ):
+                # Owner check fails; treat as not found
+                continue
+            url = await self.get_presigned_download_url(artifact, expiry_seconds)
+            if url:
+                return url, try_variant
+        return None, None
 
     async def get_session_artifacts(
         self,
@@ -388,30 +613,51 @@ class ArtifactStorageService:
         return await self._backend.download(artifact.storage_key)
 
     def _row_to_artifact(self, row) -> ArtifactInfo:
-        """Convert database row to ArtifactInfo."""
+        """Convert database row to ArtifactInfo.
+
+        Tolerates rows that pre-date the 001_image_session_artifacts migration:
+        new columns are read with ``.get(...)``-style defaults so a legacy DB
+        still produces valid ArtifactInfo objects.
+        """
         import json
 
         metadata = row["metadata"]
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
 
+        # asyncpg.Record supports dict-style indexing but not .get(); convert
+        # to dict so we can default-handle missing columns.
+        try:
+            row_dict = dict(row)
+        except Exception:
+            row_dict = row  # type: ignore[assignment]
+
         return ArtifactInfo(
-            artifact_id=row["artifact_id"],
-            session_id=row["session_id"],
-            tenant_id=row["tenant_id"],
-            user_id=row["user_id"],
-            type=row["type"],
-            format=row["format"],
-            title=row["title"],
-            filename=row["filename"],
-            storage_key=row["storage_key"],
-            size_bytes=row["size_bytes"],
-            mime_type=row["mime_type"],
-            source=row["source"],
-            message_id=row["message_id"],
+            artifact_id=row_dict["artifact_id"],
+            session_id=row_dict["session_id"],
+            tenant_id=row_dict["tenant_id"],
+            user_id=row_dict["user_id"],
+            type=row_dict["type"],
+            format=row_dict["format"],
+            title=row_dict["title"],
+            filename=row_dict["filename"],
+            storage_key=row_dict["storage_key"],
+            size_bytes=row_dict["size_bytes"],
+            mime_type=row_dict["mime_type"],
+            source=row_dict["source"],
+            message_id=row_dict["message_id"],
             metadata=metadata,
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            created_at=row_dict["created_at"],
+            updated_at=row_dict["updated_at"],
+            variant=row_dict.get("variant") or "raw",
+            parent_artifact_id=row_dict.get("parent_artifact_id"),
+            turn_id=row_dict.get("turn_id"),
+            owner_scope=row_dict.get("owner_scope"),
+            width=row_dict.get("width"),
+            height=row_dict.get("height"),
+            provider=row_dict.get("provider"),
+            model_id=row_dict.get("model_id"),
+            prompt=row_dict.get("prompt"),
         )
 
     async def close(self) -> None:
