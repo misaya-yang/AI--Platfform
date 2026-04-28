@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -163,6 +164,18 @@ class UsageRecorder:
         self._flushed_ids: set[str] = set()
         self._flushed_ids_max: int = 5000
 
+        # ── Phase 6 dual-write event bus ────────────────────────────────
+        # Optional: when ``EVENT_BUS_REDIS_URL`` is set, every successful
+        # ``record()`` ALSO publishes a ``UsageRecordedV1`` event to the
+        # Redis Streams bus. This is a *dual-write* — the synchronous DB
+        # path stays the source of truth; the event is fire-and-forget for
+        # downstream consumers (analytics, audit, future quota service).
+        # Default OFF: missing env = no bus = silent skip. Failure to
+        # publish NEVER fails the request — billing must not be coupled
+        # to the bus's availability.
+        self._event_bus: Any = None  # ai_gateway_core.events.EventBus | None
+        self._event_bus_failed: bool = False  # latched after init failure
+
     def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
         self.database = database
@@ -284,6 +297,12 @@ class UsageRecorder:
 
         The record will be buffered and written to the database
         in batches for efficiency.
+
+        Side-effect: when ``EVENT_BUS_REDIS_URL`` is set, the record is
+        ALSO published to the Redis Streams event bus as a
+        ``UsageRecordedV1`` event. The bus publish is fire-and-forget;
+        it never raises, never delays the DB path. See
+        ``_maybe_publish_usage_event``.
         """
         await self._normalize_record_dimensions(record)
         # Calculate cost
@@ -295,6 +314,67 @@ class UsageRecorder:
             # Flush if buffer is full
             if len(self._buffer) >= self.buffer_size:
                 await self._flush_buffer_locked()
+
+        # Dual-write to event bus AFTER the DB buffer append so that even
+        # if the bus is wedged we never lose the billing record.
+        await self._maybe_publish_usage_event(record)
+
+    async def _maybe_publish_usage_event(self, record: UsageRecord) -> None:
+        """Best-effort fire-and-forget publish to the event bus.
+
+        - No-op when ``EVENT_BUS_REDIS_URL`` is unset (default).
+        - No-op when a previous bus init / publish raised — the failure
+          flag latches so we don't spam the logs on every record.
+        - Any exception is caught and logged at WARNING; the request
+          path is unaffected.
+        """
+        if self._event_bus_failed:
+            return
+
+        bus_url = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
+        if not bus_url:
+            return
+
+        try:
+            if self._event_bus is None:
+                from ai_gateway_core.events import EventBus
+
+                self._event_bus = EventBus(redis_url=bus_url)
+
+            from ai_gateway_core.events import EventEnvelope, UsageRecordedV1
+
+            envelope = EventEnvelope[UsageRecordedV1](
+                event_type="usage.recorded.v1",
+                producer="usage-recorder",
+                tenant_id=record.tenant_id or "",
+                request_id=record.request_id or "",
+                payload=UsageRecordedV1(
+                    tenant_id=record.tenant_id,
+                    user_id=record.user_id,
+                    model=record.model,
+                    provider=record.provider or "",
+                    service_id=record.service_id or "",
+                    assistant_id=record.assistant_id or "",
+                    input_tokens=int(record.input_tokens or 0),
+                    output_tokens=int(record.output_tokens or 0),
+                    latency_ms=int(record.latency_ms or 0),
+                    first_token_ms=int(record.first_token_ms or 0),
+                    request_total_duration_ms=int(record.request_total_duration_ms or 0),
+                    error_type=record.error_type,
+                    status=record.status or "success",
+                    request_type=record.request_type or "chat",
+                    timestamp=float(record.timestamp or time.time()),
+                    metadata=dict(record.metadata or {}),
+                ),
+            )
+            await self._event_bus.publish(envelope)
+        except Exception as exc:  # noqa: BLE001 — bus must never fail the request
+            logger.warning(
+                "usage event publish skipped (latched): %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            self._event_bus_failed = True
 
     async def record_usage(
         self,
