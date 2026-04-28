@@ -12,9 +12,7 @@ Provides:
 
 from .builtin_tools import (
     KB_SEARCH_DEFINITION,
-    WEB_SEARCH_DEFINITION,
     KBSearchExecutor,
-    WebSearchExecutor,
     register_builtin_tools,
 )
 from .code_executor_tool import (
@@ -37,7 +35,6 @@ from .quiz_tool import (
     QuizGeneratorExecutor,
     register_quiz_tool,
 )
-from .tavily_search import TavilySearchTool
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -53,8 +50,6 @@ from .tool_registry import (
 )
 
 __all__ = [
-    # Tavily
-    "TavilySearchTool",
     # Tool Registry
     "ToolRegistry",
     "ToolDefinition",
@@ -69,9 +64,7 @@ __all__ = [
     "register_tool",
     # Built-in tools
     "KB_SEARCH_DEFINITION",
-    "WEB_SEARCH_DEFINITION",
     "KBSearchExecutor",
-    "WebSearchExecutor",
     "register_builtin_tools",
     # Code executor tool
     "CODE_EXECUTOR_TOOL",

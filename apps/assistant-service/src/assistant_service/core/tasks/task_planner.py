@@ -671,8 +671,6 @@ class TaskPlanner:
     # Tool to TaskType mapping for automatic type inference
     TOOL_TYPE_MAPPING: dict[str, TaskType] = {
         "kb_search": TaskType.RETRIEVE,
-        "web_search": TaskType.RETRIEVE,
-        "tavily_search": TaskType.RETRIEVE,
         "database_query": TaskType.RETRIEVE,
         "generate_text": TaskType.GENERATE,
         "generate_document": TaskType.GENERATE,

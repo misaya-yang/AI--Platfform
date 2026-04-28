@@ -153,23 +153,6 @@ def compact_tool_result_for_model(
                 lines.append(truncate_chars(text_result, 1200))
             return "\n".join(lines)
 
-    if tool_name == "search_web":
-        display = tool_metadata.get("display") if isinstance(tool_metadata, dict) else None
-        if isinstance(display, dict) and isinstance(display.get("results"), list):
-            lines = [f"Web results for: {display.get('query') or ''}".strip()]
-            for idx, item in enumerate(display.get("results", [])[:6], 1):
-                if not isinstance(item, dict):
-                    continue
-                title = item.get("title") or "untitled"
-                url = item.get("url") or ""
-                content = truncate_chars(str(item.get("content") or ""), 220)
-                lines.append(f"[{idx}] {title}")
-                if url:
-                    lines.append(f"url: {url}")
-                if content:
-                    lines.append(content)
-            return "\n".join(lines)
-
     return truncate_chars(text_result, 3000)
 
 

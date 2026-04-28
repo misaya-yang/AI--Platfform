@@ -39,10 +39,6 @@ _TOOL_KEYWORDS: dict[str, list[str]] = {
     ToolName.SEARCH_KB: [
         "knowledge base", "knowledge", "kb", "internal document", "查找", "知识库", "知识", "文档",
     ],
-    ToolName.SEARCH_WEB: [
-        "web", "internet", "news", "current", "latest", "online", "网上", "新闻", "最新",
-        "search online", "google",
-    ],
     ToolName.EXECUTE_CODE: [
         "code", "python", "run", "execute", "script", "calculate", "compute", "plot",
         "chart", "data", "analyze", "代码", "运行", "计算", "分析", "图表", "脚本",

@@ -206,8 +206,8 @@ def _build_config_handler():
             "default_model_id": "qwen3.6-plus",
             "available_providers": ["dashscope", "google-vertex"],
             "kb_enabled": True,
-            "web_search_enabled": False,
-            "tools_available": ["search_knowledge", "search_web"],
+            "web_search_enabled": True,
+            "tools_available": ["search_knowledge_base", "web_fetch"],
         }
     return _handler
 

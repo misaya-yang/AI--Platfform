@@ -235,19 +235,18 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Session manager init failed: {e}")
 
     # ── Tool Registry ──
+    # `search_web` (Tavily) was deleted in PR-2 — capable models use their own
+    # native search (Qwen `enable_search`, Anthropic `web_search_20250305`),
+    # `web_fetch` is the URL-fetch fallback for everything else.
     from .core.tools import (
-        TavilySearchTool,
         register_builtin_tools,
         register_document_generation_tool,
         register_pptx_generation_tool,
     )
     from .core.tools.image_generator_tool import register_image_generation_tool
 
-    tavily_key = os.environ.get("TAVILY_API_KEY", "")
-    tavily_tool = TavilySearchTool(api_key=tavily_key or None)
-
     register_builtin_tools(
-        kb_service=kb_proxy, tavily_tool=tavily_tool,
+        kb_service=kb_proxy,
         memory_service=memory_service, database=database,
     )
     register_document_generation_tool()
@@ -324,7 +323,6 @@ async def lifespan(app: FastAPI):
         model_registry=model_registry,
         kb_service=None,
         kb_proxy=kb_proxy,
-        tavily_api_key=tavily_key or None,
         session_manager=session_manager,
         redis_client=redis_client,
         memory_service=memory_service,

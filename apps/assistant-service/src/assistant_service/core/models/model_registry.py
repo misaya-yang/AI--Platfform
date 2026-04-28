@@ -109,7 +109,7 @@ NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
 
 # Simple heuristic: does the user's message look like it wants fresh web info?
 # Used to decide whether to enable native search for this turn. Kept tiny and
-# dependency-free; the model can still call search_web as a tool when needed.
+# dependency-free; ``web_fetch`` is the URL-fetch fallback for everything else.
 _SEARCH_HINT_KEYWORDS = (
     # English
     "search", "latest", "news", "today", "current", "recent",

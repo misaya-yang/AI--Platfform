@@ -104,15 +104,15 @@ async def test_assistant_message_persists_thinking_and_tool_calls_roundtrip():
     tool_calls = [
         {
             "id": "call_1",
-            "name": "search_web",
-            "arguments": {"query": "NBA scores yesterday"},
+            "name": "web_fetch",
+            "arguments": {"url": "https://example.com/nba/scores/2026-04-27"},
             "status": "completed",
         }
     ]
     tool_results = [
         {
             "tool_call_id": "call_1",
-            "name": "search_web",
+            "name": "web_fetch",
             "result": "Lakers 118 - Warriors 112 | Celtics 105 - Heat 99 ...",
             "error": None,
             "duration_ms": 842,

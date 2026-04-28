@@ -11,9 +11,10 @@ from enum import Enum
 class ToolName(str, Enum):
     """Canonical tool names. Use these instead of hardcoded strings."""
 
-    # Retrieval
+    # Retrieval — web search is delegated to model-native APIs
+    # (Qwen `enable_search`, Anthropic `web_search_20250305`); the only
+    # in-tree retrieval tool is the KB.
     SEARCH_KB = "search_knowledge_base"
-    SEARCH_WEB = "search_web"
 
     # Generation
     GENERATE_IMAGE = "generate_image"
@@ -30,8 +31,8 @@ class ToolName(str, Enum):
 
 
 # Sets for quick membership checks
-RETRIEVAL_TOOLS = {ToolName.SEARCH_KB, ToolName.SEARCH_WEB}
+RETRIEVAL_TOOLS = {ToolName.SEARCH_KB}
 GENERATION_TOOLS = {ToolName.GENERATE_IMAGE, ToolName.GENERATE_DOCUMENT, ToolName.GENERATE_PPTX, ToolName.GENERATE_QUIZ}
 
 # Tools always available in Q&A mode (no creation intent)
-QA_TOOLS = {ToolName.SEARCH_KB, ToolName.SEARCH_WEB, ToolName.UPDATE_MEMORY}
+QA_TOOLS = {ToolName.SEARCH_KB, ToolName.UPDATE_MEMORY}

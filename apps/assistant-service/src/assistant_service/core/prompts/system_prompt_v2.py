@@ -1178,10 +1178,9 @@ def get_time_context_block() -> str:
         "Do NOT treat it as hypothetical. Do NOT add disclaimers like "
         "\"this appears to be a future date\" or \"I cannot verify events "
         "after my training cutoff\" — just answer the question.\n"
-        "- When calling `search_web` for time-sensitive queries, put the "
-        f"**literal date** in the query (e.g. \"NBA scores {_yesterday_str}\"), "
-        "not vague words like \"yesterday\" or \"今天\". One well-formed search "
-        "is better than three reworded ones."
+        "- For time-sensitive web queries, put the **literal date** in the query "
+        f"(e.g. \"NBA scores {_yesterday_str}\"), not vague words like \"yesterday\" "
+        "or \"今天\". One well-formed search is better than three reworded ones."
     )
 
 
@@ -1279,26 +1278,29 @@ Your chat text reply MUST be:
 - Do NOT repeat the questions, options, or answer key as markdown/text — it will appear twice and spoil the quiz for the user.
 """
 
-    # Generate web search guidance based on user preference
+    # Web search guidance. Search is delegated to the model's native
+    # capability (Qwen ``enable_search``, Anthropic ``web_search_20250305``);
+    # ``web_fetch`` reads a specific URL when one is known. There is no
+    # in-tree ``search_web`` tool any more.
     if web_search_enabled:
-        # User enabled web search = Force web search for all questions
         web_hint = """
 ## Web Search (ENABLED - Always Use)
-The user has enabled web search mode. For ANY question that could benefit from current information,
-you MUST use the `search_web` tool (alias: `web_search`) to provide up-to-date, accurate answers.
-Always search first, then synthesize the results into your response.
+The user has enabled web search mode. For ANY question that could benefit from
+current information, search the web first via your native search capability
+and synthesize the results. If you have a specific URL, use ``web_fetch``.
 """
     else:
-        # User didn't enable web search = AI autonomously decides
         web_hint = """
 ## Web Search (Available on Demand)
-Web search is available. Use it intelligently when:
+Web search via your native capability is available. Use it when:
 - The user explicitly asks for current/recent information
 - The question requires real-time data (news, stock prices, weather, events)
 - Your knowledge may be outdated for this specific topic
 - You're uncertain and fresh data would improve your answer
 
-For general knowledge questions you can answer confidently, respond directly without searching.
+When you have a specific URL (user-pasted, or surfaced by your search), call
+``web_fetch`` to read it. For general knowledge you can answer confidently,
+respond directly without searching.
 """
 
     # P1.3: OS Agent instructions when enabled

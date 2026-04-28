@@ -3,8 +3,11 @@ Built-in Tools for Assistant Service
 
 Phase 2: Provides standard tools for the assistant:
 - Knowledge Base Search
-- Web Search (Tavily)
 - File Analysis (future)
+
+Web search is delegated to model-native capabilities (Qwen `enable_search`,
+Anthropic `web_search_20250305`); ``web_fetch`` is the URL-fetch fallback.
+PR-2 deleted the in-tree Tavily-backed ``search_web`` tool entirely.
 """
 
 from __future__ import annotations
@@ -441,138 +444,12 @@ class KBSearchExecutor(ToolExecutor):
 
 
 # =============================================================================
-# Web Search Tool (Tavily)
-# =============================================================================
-
-WEB_SEARCH_DEFINITION = ToolDefinition(
-    name="search_web",
-    description="Search the web for current events, public knowledge, or external information not in the knowledge base.",
-    parameters=[
-        ToolParameter(
-            name="query",
-            type="string",
-            description="The search query. Be specific and include relevant context.",
-            required=True,
-        ),
-        ToolParameter(
-            name="max_results",
-            type="number",
-            description="Maximum number of results to return (1-10). Default is 5.",
-            required=False,
-            default=5,
-        ),
-        ToolParameter(
-            name="search_depth",
-            type="string",
-            description="Search depth: 'basic' for quick results, 'advanced' for more thorough search.",
-            required=False,
-            default="basic",
-            enum=["basic", "advanced"],
-        ),
-    ],
-    category=ToolCategory.RETRIEVAL,
-    risk_level=ToolRiskLevel.LOW,
-    when_to_use="Use for questions about current events, real-time information, "
-    "external companies, public knowledge, or anything not in internal documents.",
-    when_not_to_use="Do not use for internal company information, private data, "
-    "or questions that should be answered from the knowledge base.",
-    examples=[
-        ToolExample(
-            description="Search for recent news",
-            input={"query": "Latest AI developments 2024", "max_results": 5},
-            expected_output="Returns recent news articles about AI",
-        ),
-        ToolExample(
-            description="Search for company information",
-            input={"query": "Apple Inc quarterly earnings", "search_depth": "advanced"},
-            expected_output="Returns financial information about Apple",
-        ),
-    ],
-    timeout_seconds=30,
-)
-
-
-# Note: web_search alias removed in ADR-003 Phase 1 — consolidated to search_web only.
-
-
-class WebSearchExecutor(ToolExecutor):
-    """Executor for web search tool (Tavily)."""
-
-    def __init__(self, tavily_tool):
-        self.tavily_tool = tavily_tool
-
-    async def execute(self, request: ToolCallRequest) -> ToolCallResult:
-        """Execute web search."""
-        start_time = time.time()
-        query = request.arguments.get("query", "")
-        max_results = request.arguments.get("max_results", 5)
-        search_depth = request.arguments.get("search_depth", "basic")
-
-        if not query:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="Query is required",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        if not self.tavily_tool.is_configured:
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error="Web search is not configured (missing TAVILY_API_KEY)",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        try:
-            results = await self.tavily_tool.search(
-                query=query,
-                max_results=max_results,
-                search_depth=search_depth,
-            )
-
-            # Format for LLM consumption
-            formatted_result = self.tavily_tool.format_for_context(results)
-            display = self.tavily_tool.format_for_display(results)
-
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=True,
-                result=formatted_result,
-                duration_ms=(time.time() - start_time) * 1000,
-                metadata={
-                    "total_results": len(
-                        results.results
-                    ),  # TavilySearchResponse uses attribute access
-                    "query": query,
-                    "answer": results.answer,
-                    "display": display,
-                    "duration_ms": (time.time() - start_time) * 1000,
-                },
-            )
-
-        except Exception as e:
-            logger.exception(f"Web search failed: {e}")
-            return ToolCallResult(
-                call_id=request.call_id,
-                tool_name=request.tool_name,
-                success=False,
-                error=str(e),
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-
-# =============================================================================
 # Tool Registration Helper
 # =============================================================================
 
 
 def register_builtin_tools(
     kb_service: KnowledgeClientLike | None = None,
-    tavily_tool=None,
     memory_service: MemoryService | None = None,
     database: Any | None = None,
 ) -> None:
@@ -585,14 +462,6 @@ def register_builtin_tools(
     else:
         logger.warning("KB service not available, KB search tool not registered")
 
-    # Register web search if configured
-    if tavily_tool and tavily_tool.is_configured:
-        web_exec = WebSearchExecutor(tavily_tool)
-        register_tool(WEB_SEARCH_DEFINITION, web_exec)
-        logger.info("Registered web search tool")
-    else:
-        logger.warning("Tavily not configured, web search tool not registered")
-
     # Register memory tool if service available
     if memory_service:
         from .memory_tool import UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor
@@ -600,9 +469,10 @@ def register_builtin_tools(
         register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
         logger.info("Registered memory tool")
 
-    # web_fetch — read a specific URL. Always-on, no env gate. Paired with
-    # search_web (which finds URLs) so the model can actually open the
-    # links it (or the user) has picked. SSRF-guarded; see web_fetch.py.
+    # web_fetch — URL-fetch fallback for models without native search.
+    # Capable models (Qwen `enable_search`, Anthropic `web_search_20250305`)
+    # do their own search; for everything else the model picks a URL and
+    # web_fetch reads it. SSRF-guarded; see web_fetch.py.
     try:
         from .web_fetch import register_web_fetch_tool
 

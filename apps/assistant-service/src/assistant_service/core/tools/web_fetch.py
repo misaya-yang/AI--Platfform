@@ -2,9 +2,12 @@
 web_fetch — fetch a specific URL and return its content.
 
 SOTA agent surfaces (Claude Code, OpenHands, Cursor) ship a URL-fetch tool
-alongside web search: search_web picks candidate URLs, web_fetch reads one
-the model already has (a link the user pasted, a doc URL returned by
-search). Without web_fetch the model is blind to user-provided links.
+alongside web search. After PR-2 deleted the in-tree Tavily-backed
+``search_web`` tool, this is the assistant's only direct URL-retrieval
+surface. Capable models (Qwen `enable_search`, Anthropic `web_search_20250305`)
+do their own search via native APIs; ``web_fetch`` reads URLs the model
+discovers (or that the user pastes). Without web_fetch the model is blind
+to user-provided links.
 
 Safety contract:
 
@@ -401,7 +404,8 @@ async def web_fetch(
                 "The site (likely Cloudflare-protected) rejected the fetch. "
                 "Do not retry this URL or near-duplicate URLs from the same host. "
                 "Try a different source (alternative sports-score site, Wikipedia, "
-                "official league page), or answer from search_web summaries.]"
+                "official league page), or answer from your model's native search "
+                "results if available.]"
             ),
             "truncated": False,
             "content_type": content_type,
@@ -431,8 +435,8 @@ WEB_FETCH_DEFINITION = ToolDefinition(
     name="web_fetch",
     description=(
         "Fetch a specific URL and return its main textual content. Use this "
-        "to read a link the user pasted or a URL returned from search_web. "
-        "Not for arbitrary keyword search — use search_web for that."
+        "to read a link the user pasted or a URL surfaced by the model's "
+        "native web search. Not a keyword-search tool — pick a specific URL."
     ),
     parameters=[
         ToolParameter(
@@ -464,11 +468,12 @@ WEB_FETCH_DEFINITION = ToolDefinition(
     risk_level=ToolRiskLevel.LOW,
     when_to_use=(
         "Use when you have a specific URL to read — a link the user shared, "
-        "a citation URL from search_web, or a doc link you want to inspect."
+        "a citation URL from your model's native search, or a doc link you "
+        "want to inspect."
     ),
     when_not_to_use=(
-        "Do not use for keyword searches (use search_web). Do not use for "
-        "internal/private hostnames — they will be rejected for safety."
+        "Do not use for arbitrary keyword search. Do not use for internal/"
+        "private hostnames — they will be rejected for safety."
     ),
     examples=[
         ToolExample(

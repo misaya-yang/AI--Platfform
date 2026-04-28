@@ -52,9 +52,11 @@ def test_time_block_discourages_future_date_disclaimers() -> None:
 
 def test_time_block_includes_web_search_guidance_with_dated_example() -> None:
     """The block should teach the model to put literal dates into
-    search_web queries, not vague words like 'yesterday'."""
+    time-sensitive web queries, not vague words like 'yesterday'."""
     block = get_time_context_block()
-    assert "search_web" in block
+    # Some kind of search guidance is present. PR-2 dropped the
+    # tool-name-specific phrasing, so we now match on the generic noun.
+    assert "search" in block.lower() or "query" in block.lower()
     # Must show a literal YYYY-MM-DD somewhere as an example.
     assert re.search(r"\d{4}-\d{2}-\d{2}", block) is not None
 

@@ -225,7 +225,7 @@ class ToolOrchestrator:
         # first result is stored.
         self._inflight: dict[str, asyncio.Future[ToolExecutionResult]] = {}
         self._cacheable_tools = frozenset({
-            "search_knowledge_base", "search_web", "search_documents",
+            "search_knowledge_base", "search_documents",
             "list_datasets", "get_dataset_info",
         })
 

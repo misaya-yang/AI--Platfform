@@ -343,7 +343,7 @@ class RegistryToolInvoker(ToolInvoker):
         self._cache_max_size = 200
         # Only idempotent tools are cacheable
         self._cacheable_prefixes = (
-            "search_knowledge_base", "search_web",
+            "search_knowledge_base",
             "mcp_halalmoney__get_", "mcp_halalmoney__check_",
             "mcp_wahda__search_",
         )

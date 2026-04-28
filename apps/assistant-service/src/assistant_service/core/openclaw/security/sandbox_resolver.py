@@ -29,8 +29,6 @@ class SandboxResolver:
     }
 
     MEDIUM_RISK_TOOLS = {
-        "search_web",
-        "web_search",
         "generate_image",
     }
 

@@ -92,7 +92,6 @@ def assistant_service(mock_model_registry, mock_context_manager):
                     service = AssistantService(
                         model_registry=mock_model_registry,
                         kb_service=None,
-                        tavily_api_key=None,
                         session_manager=None,
                         enable_rag_evaluation=False,
                     )

@@ -293,7 +293,13 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_first_kb_web_panel_events() -> None:
+async def test_streaming_first_kb_panel_events() -> None:
+    """KB tool call must emit ``context_retrieved`` for the panel UI.
+
+    Web panel events were removed in PR-2 along with the in-tree Tavily
+    ``search_web`` tool — capable models do their own search and there
+    is no display payload to forward.
+    """
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     tool_calls = [
@@ -303,10 +309,6 @@ async def test_streaming_first_kb_web_panel_events() -> None:
                 "name": "search_knowledge_base",
                 "arguments": '{"query":"x","dataset_ids":["d1"]}',
             },
-        },
-        {
-            "id": "web_1",
-            "function": {"name": "search_web", "arguments": '{"query":"y","max_results":1}'},
         },
     ]
     model = FakeModelRegistry(
@@ -323,11 +325,6 @@ async def test_streaming_first_kb_web_panel_events() -> None:
         "query": "x",
         "took_ms": 12.0,
     }
-    web_display = {
-        "query": "y",
-        "results": [{"title": "t", "url": "u", "content": "c", "score": 0.1}],
-        "response_time_ms": 5.0,
-    }
 
     tool_invoker = FakeToolInvoker(
         results_by_name={
@@ -335,11 +332,6 @@ async def test_streaming_first_kb_web_panel_events() -> None:
                 "success": True,
                 "result": "kb",
                 "metadata": {"total_results": 1, "contexts": [kb_ctx]},
-            },
-            "search_web": {
-                "success": True,
-                "result": "web",
-                "metadata": {"total_results": 1, "display": web_display},
             },
         }
     )
@@ -362,7 +354,6 @@ async def test_streaming_first_kb_web_panel_events() -> None:
         got.append(ev.event_type)
 
     assert "context_retrieved" in got
-    assert "web_search_results" in got
 
 
 @pytest.mark.asyncio
@@ -590,7 +581,8 @@ async def test_streaming_first_dedups_batch_level_duplicate_tool_calls() -> None
 async def test_streaming_first_batch_dedup_preserves_distinct_tool_calls() -> None:
     """Guardrail: the batch-level dedup must NOT collapse genuinely
     different tool calls. Same tool name with different args is legitimate
-    (e.g. two search_web queries, or two generate_image prompts)."""
+    (e.g. two generate_image prompts, or two search_knowledge_base queries
+    with distinct dataset_ids)."""
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
     tool_calls = [

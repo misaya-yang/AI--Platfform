@@ -90,7 +90,6 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
         ]
 
     kb_proxy = getattr(request.app.state, "kb_proxy", None)
-    tavily_api_key = os.getenv("TAVILY_API_KEY")
 
     tools_available: list[str] = []
     from ...core.tools import get_tool_registry
@@ -101,11 +100,15 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     except Exception:
         pass
 
+    # web_search_enabled stays True post-PR-2: capable models do their own
+    # search via native APIs (Qwen `enable_search`, Anthropic
+    # `web_search_20250305`) and ``web_fetch`` is always available as the
+    # URL-fetch fallback. Frontend can keep its toggle as a model-pref hint.
     return {
         "default_model_id": "qwen3.6-plus",
         "available_providers": available_providers,
         "kb_enabled": kb_proxy is not None,
-        "web_search_enabled": bool(tavily_api_key),
+        "web_search_enabled": True,
         "tools_available": tools_available,
     }
 

@@ -119,7 +119,8 @@ return raw MATLAB/R code unexecuted.
 ## NEVER fabricate data
 If the user asks for a chart based on real-world data (scores, stock
 prices, weather, league standings), you **must** obtain the actual data
-before plotting — via `search_web` / `web_fetch` / user-uploaded files.
+before plotting — via your model's native web search, `web_fetch` (with
+a known URL), or user-uploaded files.
 Do NOT invent "representative" numbers to satisfy the totals. If real
 data is unavailable after a reasonable search, say so explicitly rather
 than silently substituting placeholder data.

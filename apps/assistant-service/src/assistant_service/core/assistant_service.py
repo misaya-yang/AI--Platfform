@@ -105,7 +105,6 @@ from .content.structured_output import (
 from .tasks.task_planner import TaskPlanner, create_task_planner
 from .tool_invoker import ToolInvocationContext
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator, create_tool_orchestrator
-from .tools import TavilySearchTool
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .working_memory import WorkingMemory
 
@@ -603,7 +602,6 @@ Please use this web search context to inform your response when relevant."""
         self,
         model_registry: ModelRegistry,
         kb_service: "KnowledgeClientLike | None" = None,
-        tavily_api_key: str | None = None,
         session_manager: SessionManagerLike | None = None,
         context_config: ContextConfig | None = None,
         enable_rag_evaluation: bool = True,
@@ -637,7 +635,6 @@ Please use this web search context to inform your response when relevant."""
         self.tenant_tool_policy = tenant_tool_policy
         self.tenant_mcp_config = tenant_mcp_config
         self.tool_audit = tool_audit
-        self.tavily_tool = TavilySearchTool(api_key=tavily_api_key)
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
         self.context_config = context_config or ContextConfig()
@@ -1261,32 +1258,11 @@ Please use this web search context to inform your response when relevant."""
             f"[LATENCY] Step 1 (memory + KB parallel): {(time.time() - step_start) * 1000:.1f}ms"
         )
 
-        # Step 2: Web search if enabled
-        step_start = time.time()
+        # Step 2: web search was deleted in PR-2 — capable models do their own
+        # search via native APIs (Qwen `enable_search`, Anthropic
+        # `web_search_20250305`); ``web_fetch`` handles URL retrieval.
         web_search_context: str | None = None
-        web_search_results_data: dict | None = None  # Store for persistence
-        if config.web_search_enabled and self.tavily_tool.is_configured:
-            yield AssistantStreamEvent(
-                event_type="status",
-                data={"status": "searching_web", "message": "Searching the web..."},
-            )
-            try:
-                search_response = await self.tavily_tool.search(
-                    query=message,
-                    max_results=config.web_search_max_results,
-                )
-                web_search_context = self.tavily_tool.format_for_context(search_response)
-                web_search_results_data = self.tavily_tool.format_for_display(search_response)
-                yield AssistantStreamEvent(
-                    event_type="web_search_results", data=web_search_results_data
-                )
-            except Exception as e:
-                logger.warning(f"Web search failed: {e}")
-                yield AssistantStreamEvent(
-                    event_type="error",
-                    data={"message": f"Web search failed: {str(e)}", "recoverable": True},
-                )
-        logger.info(f"[LATENCY] Step 2 (web search): {(time.time() - step_start) * 1000:.1f}ms")
+        web_search_results_data: dict | None = None
 
         # Step 2.5: Process uploaded files if any
         step_start = time.time()
@@ -1500,47 +1476,26 @@ Please use this web search context to inform your response when relevant."""
         if not self.code_executor:
             tools = [t for t in tools if t.get("function", {}).get("name") != "execute_code"]
 
-        # Native web search: when the chosen model has a built-in search mode
-        # (Qwen `enable_search`, Gemini `google_search`, Anthropic web_search),
-        # drop Tavily-backed `search_web` from the schema and forward the
-        # provider-specific config to chat_stream. Mirrors the AgentLoop
-        # filter at agent_loop.py:1926 — the legacy (use_agent_loop=False)
-        # path must behave the same, otherwise Qwen 3.6 Plus keeps calling
-        # `search_web` here even though it has native grounding.
+        # Native web search: enable for capable models (Qwen `enable_search`,
+        # Anthropic `web_search_20250305`). Suppress for Google provider —
+        # `googleSearch` grounding is mutually exclusive with
+        # `functionDeclarations` and the assistant always runs with function
+        # tools in scope. PR-2 deleted the Tavily-backed ``search_web`` tool,
+        # so this block no longer rewrites the toolset; it only resolves the
+        # native_search_cfg passed downstream.
         _legacy_model_info = self.model_registry.get_model(config.model_id)
         _legacy_native_search_cfg: dict[str, Any] | None = None
         if _legacy_model_info and getattr(
             _legacy_model_info, "supports_native_search", False
         ):
-            # Gemini's `googleSearch` grounding is mutually exclusive with
-            # `functionDeclarations` — mixing them 400s. The assistant always
-            # runs with function tools in scope, so suppress native-search
-            # for Google provider unconditionally; keep Tavily `search_web`.
             _legacy_provider = getattr(_legacy_model_info, "provider", None)
             _legacy_is_google = (
                 getattr(_legacy_provider, "value", _legacy_provider) == "google"
             )
-            if _legacy_is_google:
-                logger.info(
-                    "[NATIVE-SEARCH] (legacy path) Skipping google_search for "
-                    "%s — cannot combine with functionDeclarations. Keeping "
-                    "Tavily search_web as fallback.",
-                    config.model_id,
-                )
-            else:
+            if not _legacy_is_google:
                 _legacy_native_search_cfg = getattr(
                     _legacy_model_info, "native_search_config", None
                 )
-                before_n = len(tools)
-                tools = [
-                    t for t in tools if t.get("function", {}).get("name") != "search_web"
-                ]
-                if len(tools) != before_n:
-                    logger.info(
-                        "[NATIVE-SEARCH] (legacy path) Using %s built-in search; "
-                        "dropped search_web tool.",
-                        config.model_id,
-                    )
 
         logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
 
@@ -4186,14 +4141,6 @@ Please use this web search context to inform your response when relevant."""
         # Add KB retrieval tool if KB service is available
         if self.kb_service and config.kb_dataset_ids and "kb_search" not in available_tools:
             available_tools.append("kb_search")
-
-        # Add web search tool if enabled
-        if (
-            config.web_search_enabled
-            and self.tavily_tool.is_configured
-            and "web_search" not in available_tools
-        ):
-            available_tools.append("web_search")
 
         logger.info(f"[TASK PLANNING] Available tools: {available_tools}")
 

@@ -72,7 +72,6 @@ class LLMSettings(BaseSettings):
     deepseek_api_key: str = ""
     dashscope_api_key: str = ""
     gemini_api_key: str = ""
-    tavily_api_key: str = ""
 
     model_config = {"env_prefix": ""}
 
@@ -85,7 +84,6 @@ class LLMSettings(BaseSettings):
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
             dashscope_api_key=os.getenv("DASHSCOPE_API_KEY", ""),
             gemini_api_key=os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")),
-            tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
         )
 
 

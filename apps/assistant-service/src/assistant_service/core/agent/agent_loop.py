@@ -100,10 +100,6 @@ from .middlewares.response_cap import ResponseCapMiddleware
 from .tool_dedup import (
     KB_REUSE_MESSAGE,
     KBDedupState,
-    WEB_SEARCH_REUSE_MESSAGE,
-    WebSearchDedupState,
-    is_web_search_tool as _is_web_search_tool,
-    web_query_fingerprint as _web_query_fingerprint,
 )
 from .tool_result_formatter import (
     compact_context_payload as _fmt_compact_context_payload,
@@ -1371,9 +1367,6 @@ class AgentLoop:
                 if name == "search_knowledge_base":
                     q = str(args.get("query") or "")[:120]
                     return {"title": "检索知识库", "description": q, "icon": "kb"}
-                if name == "search_web":
-                    q = str(args.get("query") or "")[:120]
-                    return {"title": "网页搜索", "description": q, "icon": "web"}
                 if name == "execute_python_code":
                     return {"title": "执行代码", "description": "Python", "icon": "code"}
                 if name == "generate_image":
@@ -1893,7 +1886,6 @@ class AgentLoop:
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_dedup = KBDedupState()
-            web_dedup = WebSearchDedupState()
             # Tools the permission middleware has denied for this turn.
             # Real security gate (per-tool, not a budget) — excluded from
             # ``tools_for_call`` next iteration so the model doesn't keep
@@ -1939,79 +1931,26 @@ class AgentLoop:
                             "toolset after first KB completion."
                         )
 
-                # Native web search: when the chosen model has a built-in
-                # search mode (Qwen `enable_search`, Gemini `google_search`,
-                # Anthropic `web_search_20250305`), always prefer it over the
-                # Tavily-backed `search_web` tool. Drop `search_web` from the
-                # schema list unconditionally for capable models — the previous
-                # keyword heuristic (`should_use_native_search(ctx.message)`)
-                # missed real need-to-fetch cases like "画一个骑士队战绩趋势
-                # 图" where the user doesn't type "search" but the task still
-                # requires fresh data, and the model fell back to Tavily.
-                # Providers without native search keep Tavily as before.
+                # Native web search: enable for capable models (Qwen
+                # `enable_search`, Anthropic `web_search_20250305`). Gemini's
+                # `googleSearch` built-in is mutually exclusive with
+                # functionDeclarations and we always have function tools in
+                # scope, so suppress native-search for Google provider — those
+                # users fall back to ``web_fetch`` when they have a known URL.
+                # PR-2 deleted the Tavily-backed ``search_web`` tool, so this
+                # block no longer rewrites the toolset; it only resolves the
+                # native_search_cfg passed to chat_stream below.
                 _model_info = self.model_registry.get_model(ctx.config.model_id)
                 native_search_cfg: dict[str, Any] | None = None
-                # Use getattr for forward-compat with fake/test ModelInfo
-                # objects that predate the native_search fields.
                 if _model_info and getattr(_model_info, "supports_native_search", False):
-                    # Gemini's `googleSearch` built-in tool is MUTUALLY
-                    # EXCLUSIVE with `functionDeclarations` — the API rejects
-                    # any request that mixes them with a 400. Since this
-                    # assistant always runs with function tools in scope
-                    # (quiz / KB / code-executor), auto-enabling google_search
-                    # for Gemini kills every turn. Suppress native-search for
-                    # Google provider unconditionally and fall back to Tavily
-                    # `search_web`.
                     _provider_val = getattr(_model_info, "provider", None)
                     _is_google = (
                         getattr(_provider_val, "value", _provider_val) == "google"
                     )
-                    if _is_google:
-                        logger.info(
-                            "[NATIVE-SEARCH] Skipping google_search for %s — "
-                            "Gemini cannot combine it with functionDeclarations. "
-                            "Keeping Tavily search_web as fallback.",
-                            ctx.config.model_id,
-                        )
-                    else:
+                    if not _is_google:
                         native_search_cfg = getattr(
                             _model_info, "native_search_config", None
                         )
-                        if tools_for_iteration:
-                            before_len = len(tools_for_iteration)
-                            tools_for_iteration = [
-                                schema
-                                for schema in tools_for_iteration
-                                if _tool_schema_name(schema) != "search_web"
-                            ]
-                            if len(tools_for_iteration) != before_len:
-                                logger.info(
-                                    f"[NATIVE-SEARCH] Using {ctx.config.model_id} built-in "
-                                    f"search; dropped search_web tool."
-                                )
-                elif iteration == 1 and tools_for_iteration and any(
-                    _tool_schema_name(s) == "search_web" for s in tools_for_iteration
-                ):
-                    # Diagnostic: Tavily `search_web` is still in scope even
-                    # though native-search _might_ have been expected. Log
-                    # once per turn so operators can root-cause user reports
-                    # of "search_web fired instead of native search" —
-                    # common causes: model_id typo, DB catalog missing the
-                    # capability flag, provider enum drift.
-                    _ns_flag = (
-                        getattr(_model_info, "supports_native_search", False)
-                        if _model_info
-                        else None
-                    )
-                    logger.info(
-                        "[NATIVE-SEARCH] Tavily search_web retained for "
-                        "model_id=%r (get_model=%s, supports_native_search=%s). "
-                        "This is expected for providers without native search "
-                        "(DeepSeek, OpenAI chat-completions path).",
-                        ctx.config.model_id,
-                        "found" if _model_info else "None",
-                        _ns_flag,
-                    )
 
                 tools_for_call = tools_for_iteration
                 if tools_for_call and denied_tools:
@@ -2260,11 +2199,6 @@ class AgentLoop:
                         if tool_name == "search_knowledge_base"
                         else ""
                     )
-                    web_query_fp = (
-                        _web_query_fingerprint(tool_args)
-                        if _is_web_search_tool(tool_name)
-                        else ""
-                    )
                     _dedup_skip, _dedup_reason = kb_dedup.should_skip(tool_name, kb_query_fp)
                     if _dedup_skip:
                         logger.info(
@@ -2278,22 +2212,6 @@ class AgentLoop:
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
                                 "content": KB_REUSE_MESSAGE,
-                            }
-                        )
-                        continue
-                    _web_skip, _web_reason = web_dedup.should_skip(tool_name, web_query_fp)
-                    if _web_skip:
-                        logger.info(
-                            "[STREAMING-FIRST] Skipping web-search call (%s): %s",
-                            _web_reason,
-                            web_query_fp[:160] if web_query_fp else "<no-fp>",
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_id,
-                                "name": tool_name,
-                                "content": WEB_SEARCH_REUSE_MESSAGE,
                             }
                         )
                         continue
@@ -2682,20 +2600,6 @@ class AgentLoop:
                                     data=quiz_data,
                                 )
 
-                        elif tool_name == "search_web":
-                            display = (
-                                tool_metadata.get("display")
-                                if isinstance(tool_metadata, dict)
-                                else None
-                            )
-                            if isinstance(display, dict):
-                                web_search_results_for_persistence = display
-                                yield AgentLoopEvent(
-                                    phase=phase,
-                                    event_type=StreamEventType.WEB_SEARCH_RESULTS.value,
-                                    data=display,
-                                )
-
                         # Persist output files into ArtifactStorage and emit
                         # ARTIFACT_CREATED events for each newly stored artifact.
                         (
@@ -2896,8 +2800,6 @@ class AgentLoop:
 
                     if tool_name == "search_knowledge_base":
                         kb_dedup.mark_completed(kb_query_fp)
-                    elif _is_web_search_tool(tool_name):
-                        web_dedup.mark_completed(web_query_fp)
 
                     # Add tool result to messages with lifecycle management.
                     # Per-tool cap: retrieval tools legitimately return long
@@ -2913,7 +2815,6 @@ class AgentLoop:
                     ) or ""
                     _RETRIEVAL_TOOLS = {
                         "search_knowledge_base",
-                        "search_web",
                         "confluence_read",
                         "fs_read",
                         "fs_glob",

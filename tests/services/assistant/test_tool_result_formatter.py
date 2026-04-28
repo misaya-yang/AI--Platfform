@@ -75,11 +75,11 @@ def test_signal_low_on_weak_match() -> None:
 
 
 def test_signal_absent_for_non_kb_tools() -> None:
-    """web_search and other tools should NOT get the signal — it's KB-specific."""
+    """Non-KB retrieval tools should NOT get the KB-specific quality signal."""
     result = compact_tool_result_for_model(
-        tool_name="search_web",
+        tool_name="web_fetch",
         tool_result_text="web text",
-        tool_metadata={"display": {"query": "q", "results": [{"title": "t", "url": "u", "content": "c"}]}},
+        tool_metadata={"url": "https://example.com", "status": 200},
     )
     assert "RETRIEVAL_QUALITY" not in result
 

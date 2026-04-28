@@ -164,7 +164,7 @@ def test_append_tool_results_block_truncates_verbose_tools():
     huge = "x" * 10_000
     enriched = _append_tool_results_block(
         "original text",
-        [{"name": "search_web", "result": huge}],
+        [{"name": "web_fetch", "result": huge}],
         per_tool_char_cap=500,
         total_char_cap=2000,
     )
