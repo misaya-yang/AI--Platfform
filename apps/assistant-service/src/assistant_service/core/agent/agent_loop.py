@@ -1932,25 +1932,18 @@ class AgentLoop:
                         )
 
                 # Native web search: enable for capable models (Qwen
-                # `enable_search`, Anthropic `web_search_20250305`). Gemini's
-                # `googleSearch` built-in is mutually exclusive with
-                # functionDeclarations and we always have function tools in
-                # scope, so suppress native-search for Google provider — those
-                # users fall back to ``web_fetch`` when they have a known URL.
+                # `enable_search`, Anthropic `web_search_20250305`, Gemini 3.x
+                # `google_search`). Gemini 3 supports combining built-in
+                # grounding with functionDeclarations, so no provider skip.
                 # PR-2 deleted the Tavily-backed ``search_web`` tool, so this
                 # block no longer rewrites the toolset; it only resolves the
                 # native_search_cfg passed to chat_stream below.
                 _model_info = self.model_registry.get_model(ctx.config.model_id)
                 native_search_cfg: dict[str, Any] | None = None
                 if _model_info and getattr(_model_info, "supports_native_search", False):
-                    _provider_val = getattr(_model_info, "provider", None)
-                    _is_google = (
-                        getattr(_provider_val, "value", _provider_val) == "google"
+                    native_search_cfg = getattr(
+                        _model_info, "native_search_config", None
                     )
-                    if not _is_google:
-                        native_search_cfg = getattr(
-                            _model_info, "native_search_config", None
-                        )
 
                 tools_for_call = tools_for_iteration
                 if tools_for_call and denied_tools:

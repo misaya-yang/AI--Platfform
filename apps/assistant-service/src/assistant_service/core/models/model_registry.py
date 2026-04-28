@@ -1364,35 +1364,18 @@ class ModelRegistry:
                 google_tools.append({"functionDeclarations": function_declarations})
                 body["tools"] = google_tools
 
-        # Native search — Gemini 2.x+ exposes `google_search` as a tool; 1.5
-        # uses the older `google_search_retrieval`. The capability map tells
-        # us which form to emit. Append as a separate tool entry (Gemini
-        # accepts multiple tool entries in one request).
-        #
-        # HARD CONSTRAINT: Gemini's built-in grounding tools CANNOT coexist
-        # with user `functionDeclarations` in a single request — the API
-        # returns 400. Callers upstream already suppress native_search_config
-        # for Google when function tools are in scope, but guard here too:
-        # if functionDeclarations are present, silently drop the grounding
-        # tool rather than produce an un-sendable request.
+        # Native search — Gemini 3.x supports combining built-in grounding
+        # (`google_search`) with `functionDeclarations` in a single request,
+        # so always append. Older Gemini 1.5 / 2.0 used to 400 on this combo;
+        # we no longer ship those models. The capability map tells us which
+        # form to emit (`google_search` vs the legacy `google_search_retrieval`).
         if native_search_config and native_search_config.get("tool_type") in (
             "google_search", "google_search_retrieval"
         ):
-            has_function_decls = any(
-                bool(t.get("functionDeclarations"))
-                for t in (body.get("tools") or [])
-            )
-            if has_function_decls:
-                logger.info(
-                    "[GEMINI] Dropping native %s tool — cannot coexist with "
-                    "functionDeclarations in one request.",
-                    native_search_config["tool_type"],
-                )
-            else:
-                search_tool_key = native_search_config["tool_type"]
-                existing = list(body.get("tools") or [])
-                existing.append({search_tool_key: {}})
-                body["tools"] = existing
+            search_tool_key = native_search_config["tool_type"]
+            existing = list(body.get("tools") or [])
+            existing.append({search_tool_key: {}})
+            body["tools"] = existing
 
         # Apply tool_config if provided
         if tool_config:

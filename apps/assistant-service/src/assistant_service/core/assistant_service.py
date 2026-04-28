@@ -1477,10 +1477,9 @@ Please use this web search context to inform your response when relevant."""
             tools = [t for t in tools if t.get("function", {}).get("name") != "execute_code"]
 
         # Native web search: enable for capable models (Qwen `enable_search`,
-        # Anthropic `web_search_20250305`). Suppress for Google provider —
-        # `googleSearch` grounding is mutually exclusive with
-        # `functionDeclarations` and the assistant always runs with function
-        # tools in scope. PR-2 deleted the Tavily-backed ``search_web`` tool,
+        # Anthropic `web_search_20250305`, Gemini 3.x `google_search`). Gemini 3
+        # supports combining built-in grounding with `functionDeclarations`, so
+        # no provider skip. PR-2 deleted the Tavily-backed ``search_web`` tool,
         # so this block no longer rewrites the toolset; it only resolves the
         # native_search_cfg passed downstream.
         _legacy_model_info = self.model_registry.get_model(config.model_id)
@@ -1488,14 +1487,9 @@ Please use this web search context to inform your response when relevant."""
         if _legacy_model_info and getattr(
             _legacy_model_info, "supports_native_search", False
         ):
-            _legacy_provider = getattr(_legacy_model_info, "provider", None)
-            _legacy_is_google = (
-                getattr(_legacy_provider, "value", _legacy_provider) == "google"
+            _legacy_native_search_cfg = getattr(
+                _legacy_model_info, "native_search_config", None
             )
-            if not _legacy_is_google:
-                _legacy_native_search_cfg = getattr(
-                    _legacy_model_info, "native_search_config", None
-                )
 
         logger.info(f"Tools enabled for chat: {[t['function']['name'] for t in tools]}")
 
