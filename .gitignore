@@ -78,6 +78,8 @@ plugins/frontend-design/
 docs/
 !apps/islamic-content-service/docs/
 !apps/islamic-content-service/docs/**
+!apps/assistant-service/docs/
+!apps/assistant-service/docs/**
 
 # ======================== Data & Models ========================
 # Downloaded ML models (OCR, embeddings, etc.)
