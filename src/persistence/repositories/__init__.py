@@ -1,29 +1,39 @@
-"""
-数据仓库层
+"""Back-compat shim — repositories moved to ai_gateway_core in Phase 5f Batch C.
 
-提供各实体的数据访问抽象，支持内存和数据库两种存储后端
+The repository implementations now live at
+``packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/``.
+This re-export keeps any external import of ``src.persistence.repositories``
+working while the canonical home is in ai_gateway_core.
 """
 
-from .base import BaseRepository
-from .api_key_repository import APIKeyRepository, DatabaseAPIKeyRepository
-from .knowledge_repository import DatabaseKnowledgeRepository, KnowledgeRepository
-from .service_repository import DatabaseServiceRepository, ServiceRepository
-from .session_repository import DatabaseSessionRepository, SessionRepository
-from .task_repository import DatabaseTaskRepository, TaskRepository
-from .user_repository import DatabaseUserRepository, UserRepository
+from ai_gateway_core.persistence.repositories import (
+    APIKeyRepository,
+    BaseRepository,
+    DatabaseAPIKeyRepository,
+    DatabaseKnowledgeRepository,
+    DatabaseServiceRepository,
+    DatabaseSessionRepository,
+    DatabaseTaskRepository,
+    DatabaseUserRepository,
+    KnowledgeRepository,
+    ServiceRepository,
+    SessionRepository,
+    TaskRepository,
+    UserRepository,
+)
 
 __all__ = [
-    "BaseRepository",
-    "ServiceRepository",
-    "DatabaseServiceRepository",
-    "SessionRepository",
-    "DatabaseSessionRepository",
-    "TaskRepository",
-    "DatabaseTaskRepository",
-    "UserRepository",
-    "DatabaseUserRepository",
     "APIKeyRepository",
+    "BaseRepository",
     "DatabaseAPIKeyRepository",
-    "KnowledgeRepository",
     "DatabaseKnowledgeRepository",
+    "DatabaseServiceRepository",
+    "DatabaseSessionRepository",
+    "DatabaseTaskRepository",
+    "DatabaseUserRepository",
+    "KnowledgeRepository",
+    "ServiceRepository",
+    "SessionRepository",
+    "TaskRepository",
+    "UserRepository",
 ]

@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     database = None
     db_dsn = os.getenv("DATABASE_URL", settings.database.dsn)
     try:
-        from src.persistence.database import DatabaseStorage
+        from ai_gateway_core.persistence import DatabaseStorage
         database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
         await database.connect()
         app.state.database = database

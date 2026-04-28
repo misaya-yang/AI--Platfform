@@ -1,14 +1,20 @@
-"""Database-storage contract.
+"""Database-storage contract + shared concrete implementation.
 
-Both services need a handle to persistent storage but the concrete class
-(asyncpg-backed ``DatabaseStorage``) stays per-service. This Protocol
-captures only the methods callers actually use, so the implementations
-can evolve independently.
+Both services need a handle to persistent storage. The concrete asyncpg-
+backed ``DatabaseStorage`` was historically per-service (``src/persistence/
+database.py`` in gateway, copied into the AS container via ``COPY src/``).
+Phase 5f Batch C moved the concrete here so the AS image no longer needs
+the gateway's ``src/`` on PYTHONPATH for DB access.
+
+- ``DatabaseStorageLike`` — minimal Protocol for type hints in callers.
+- ``DatabaseStorage`` — full asyncpg-backed concrete (~7K LOC).
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
+
+from .database import HAS_ASYNCPG, DatabaseStorage
 
 
 @runtime_checkable
@@ -20,4 +26,4 @@ class DatabaseStorageLike(Protocol):
     async def execute(self, query: str, *args: Any) -> Any: ...
 
 
-__all__ = ["DatabaseStorageLike"]
+__all__ = ["DatabaseStorage", "DatabaseStorageLike", "HAS_ASYNCPG"]
