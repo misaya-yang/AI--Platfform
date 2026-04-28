@@ -10,13 +10,24 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Hejaz Engineering" }]
-# ``proxy`` submodule needs httpx + FastAPI; auth/gateway_secret is
-# pure-stdlib. Callers typically already have these installed
-# transitively, so no version pin — matches the host-service minimum.
+# Runtime deps the package itself imports. After Phase 5f Batch C the
+# package owns concretes (DatabaseStorage, S3 storage, skill parser,
+# usage recorder) that previously lived in the gateway and pulled their
+# deps through the gateway's pyproject. Now ai-gateway-core must declare
+# them directly so a fresh `pip install ./packages/ai-gateway-core` in
+# the assistant-service container is self-sufficient. Trap #3 in
+# reference_server_deployment.md describes this class of regression.
 dependencies = [
     "httpx",
     "fastapi",
     "starlette",
+    "PyYAML>=6.0",          # ai_gateway_core.skills.parser
+    "asyncpg>=0.29",        # ai_gateway_core.persistence.database
+    "aioboto3>=12",         # ai_gateway_core.storage.image/artifact/file (S3)
+    "aiofiles>=23",         # ai_gateway_core.storage.file_storage
+    "numpy>=1.26",          # ai_gateway_core.metrics.usage_recorder (sketch)
+    "oss2>=2.18",           # ai_gateway_core.storage (alibaba OSS backend)
+    "Pillow>=10",           # ai_gateway_core.storage.image_storage
 ]
 
 [tool.hatch.build.targets.wheel]
