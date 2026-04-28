@@ -71,11 +71,6 @@ from ..rag.context_metrics import (
     ContextMetricsBuilder,
     get_context_metrics_collector,
 )
-from .error_recovery import (
-    ErrorRecoveryManager,
-    ErrorType,
-    RecoveryResult,
-)
 from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
 from ..memory.compressor import (
     CompressedContext,
@@ -91,7 +86,6 @@ from ..rag.rag_metrics import (
     get_rag_evaluator,
     get_rag_metrics_collector,
 )
-from .react_executor import ReActEvent, ReActExecutor
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_manager import SubAgentManager
 from .subagent_types import SubAgentConfig, SubAgentType
@@ -2335,7 +2329,9 @@ class AgentLoop:
                                 "name": tool_name,
                                 "content": (
                                     f"[tool call {_verdict.kind.value}] "
-                                    f"{_verdict.reason or 'blocked by policy'}"
+                                    f"{_verdict.reason or 'blocked by policy'} "
+                                    f"(This tool will not be available again "
+                                    f"this turn — please choose a different approach.)"
                                 ),
                             }
                         )
