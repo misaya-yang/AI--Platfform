@@ -184,14 +184,26 @@ class EmbeddingManager:
                     or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
                     or None
                 )
-            # The dashscope SDK appends ``/api/v1/services/embeddings/...``
-            # to whatever base it gets. If the env points at the OpenAI-
-            # compatible HTTP path (``…/compatible-mode``), strip that
-            # suffix so the SDK's path-builder produces a real native API
-            # URL. Empty result → SDK uses its CN default (incident
-            # 2026-04-28 — CN account arrearage even when Intl works).
-            if base_url and base_url.endswith("/compatible-mode"):
-                base_url = base_url[: -len("/compatible-mode")]
+            # The dashscope SDK's ``base_http_api_url`` already INCLUDES
+            # the ``/api/v1`` segment by default
+            # (``https://dashscope.aliyuncs.com/api/v1``); the SDK appends
+            # ``/services/embeddings/...`` to it. Two common env-supplied
+            # values need normalising before they're handed to the SDK:
+            #
+            #   * ``…/compatible-mode``  → OpenAI-HTTP chat path; not a
+            #     dashscope SDK base. Replace with ``/api/v1``.
+            #   * bare host (``https://dashscope-intl.aliyuncs.com``) →
+            #     missing ``/api/v1``; SDK then 404s on every call.
+            #     Append ``/api/v1``.
+            #
+            # Incident 2026-04-28 — CN account arrearage when SDK fell
+            # back to its CN default; then 404 when the env-supplied base
+            # was the bare host.
+            if base_url:
+                if base_url.endswith("/compatible-mode"):
+                    base_url = base_url[: -len("/compatible-mode")] + "/api/v1"
+                elif not base_url.rstrip("/").endswith("/api/v1"):
+                    base_url = base_url.rstrip("/") + "/api/v1"
             if not api_key:
                 raise ValidationFailedError(
                     "DashScope api_key is required in dataset embedding_config"
