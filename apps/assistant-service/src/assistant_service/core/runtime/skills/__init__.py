@@ -1,4 +1,4 @@
-"""Skill system primitives for OpenClaw-compatible runtime."""
+"""Skill system primitives for the Assistant runtime."""
 
 from .builder import SkillBuilder
 from .models import SkillManifest, SkillRunRecord

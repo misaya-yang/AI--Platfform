@@ -22,7 +22,7 @@ from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ..agent_loop import AgentLoopContext, AgentLoopEvent
-    from ...openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
+    from ...runtime.compat.runtime_adapter import OpenClawRuntimeAdapter
 
 logger = get_logger(__name__)
 

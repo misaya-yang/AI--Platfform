@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ..openclaw.skills.models import SkillManifest
-from ..openclaw.skills.registry import SkillRegistry
+from ..runtime.skills.models import SkillManifest
+from ..runtime.skills.registry import SkillRegistry
 from ..tools.tool_registry import (
     ToolCategory,
     ToolDefinition,

@@ -12,9 +12,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
-from ..openclaw.security.sandbox_resolver import SandboxResolver
-from ..openclaw.tools.lane_scheduler import LaneScheduler
-from ..openclaw.tools.policy_lattice import ToolPolicyLattice
+from ..runtime.security.sandbox_resolver import SandboxResolver
+from ..runtime.tools.lane_scheduler import LaneScheduler
+from ..runtime.tools.policy_lattice import ToolPolicyLattice
 from ..tool_invoker import ToolInvocationContext, ToolInvoker
 from ..tools.tool_registry import ToolCallResult
 from .policy_engine import AssistantPolicyEngine

@@ -1,4 +1,4 @@
-"""Context assembly and cost accounting for OpenClaw-compatible runtime."""
+"""Context assembly and cost accounting for the Assistant runtime."""
 
 from .assembler import ContextAssemblerV2
 from .cost_breakdown import ContextCostBreakdown

@@ -1,4 +1,4 @@
-"""Memory components for OpenClaw-compatible assistant runtime."""
+"""Memory components for the Assistant runtime."""
 
 from .chunker import ChunkConfig, MemoryChunk, chunk_markdown
 from .indexer import MemoryIndexer

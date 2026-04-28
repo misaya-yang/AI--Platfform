@@ -1,4 +1,4 @@
-"""Compatibility adapter layer for OpenClaw-compatible runtime."""
+"""Compatibility adapter layer for the Assistant runtime."""
 
 from .runtime_adapter import OpenClawRuntimeAdapter
 

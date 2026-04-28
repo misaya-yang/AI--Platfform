@@ -1,4 +1,4 @@
-"""Tool policy and scheduling primitives for OpenClaw-compatible runtime."""
+"""Tool policy and scheduling primitives for the Assistant runtime."""
 
 from .lane_scheduler import LaneScheduler
 from .policy_lattice import ToolPolicyLattice

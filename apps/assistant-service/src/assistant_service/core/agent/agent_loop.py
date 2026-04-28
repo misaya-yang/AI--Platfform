@@ -77,7 +77,7 @@ from ..memory.compressor import (
     ContextCompressor,
     ModelRegistryLLMService,
 )
-from ..openclaw.compat.runtime_adapter import OpenClawRuntimeAdapter
+from ..runtime.compat.runtime_adapter import OpenClawRuntimeAdapter
 from ..rag.query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from ..rag.rag_metrics import (
     RAGMetrics,
@@ -94,7 +94,7 @@ from .artifact_persister import (
     sanitize_output_files as _artifact_sanitize_output_files,
 )
 from .middleware import AgentMiddleware, MiddlewareChain, ToolVerdict, VerdictKind
-from .middlewares.openclaw_memory import OpenClawMemoryMiddleware
+from .middlewares.runtime_memory import OpenClawMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
 from .tool_dedup import (
