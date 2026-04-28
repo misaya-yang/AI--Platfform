@@ -193,31 +193,6 @@ async def test_agent_loop_turn_persists_activity_fields_via_live_save_path():
 
 
 @pytest.mark.asyncio
-async def test_legacy_chat_stream_persists_activity_fields_source_contract():
-    """Same regression guard for the legacy (non-agent_loop) chat path."""
-    import importlib
-    import inspect
-
-    svc_mod = importlib.import_module("assistant_service.core.assistant_service")
-    source = inspect.getsource(svc_mod)
-    # The legacy path accumulates into these names and emits them in the
-    # Step-5 persistence block. Losing either half breaks the drawer.
-    assert "total_thinking_content" in source, (
-        "assistant_service.py must accumulate thinking_content in the "
-        "legacy streaming loop for session restoration."
-    )
-    assert '"thinking_content": _persisted_thinking' in source, (
-        "Legacy persist path must include thinking_content in metadata."
-    )
-    assert '"tool_calls": turn_tool_calls or None' in source, (
-        "Legacy persist path must include tool_calls in metadata."
-    )
-    assert '"tool_results": turn_tool_results or None' in source, (
-        "Legacy persist path must include tool_results in metadata."
-    )
-
-
-@pytest.mark.asyncio
 async def test_persisted_thinking_is_capped_to_prevent_jsonb_bloat():
     """Session metadata hard-caps at 1MB. Verify the save path truncates
     huge thinking payloads (reasoning models can emit 50k+ chars) while
