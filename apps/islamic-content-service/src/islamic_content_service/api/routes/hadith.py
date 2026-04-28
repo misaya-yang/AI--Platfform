@@ -67,7 +67,12 @@ async def get_collection_detail(
 
 
 @router.get(
-    "/collections/{collection_name}/hadiths/{hadith_number}/context",
+    # ``:path`` converter so hadith_numbers like "1697/1698b" (5 muslim
+    # rows use the slashed-variant notation) survive URL routing.
+    # Without this, FastAPI/Starlette interprets the slash as a path
+    # separator and the route 404s. The "/context" suffix is still
+    # required so we don't accidentally swallow it into the param.
+    "/collections/{collection_name}/hadiths/{hadith_number:path}/context",
     response_model=HadithContextResponse,
     summary="Get previous/next hadith numbers for reading navigation",
 )
@@ -163,7 +168,9 @@ async def get_chapters(
 
 
 @router.get(
-    "/collections/{collection_name}/hadiths/{hadith_number}",
+    # ``:path`` converter — see context-route comment above. The 5 muslim
+    # hadiths with slashed-variant numbers (e.g. "1697/1698b") need this.
+    "/collections/{collection_name}/hadiths/{hadith_number:path}",
     response_model=HadithDetailResponse,
     summary="Get Hadith detail",
 )
