@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI):
     kb_proxy = None
     kb_url = os.getenv("KB_SERVICE_URL", settings.kb.url)
     try:
-        from src.services.knowledge.kb_proxy_client import KBProxyClient
+        from ai_gateway_core.knowledge import KBProxyClient
         kb_proxy = KBProxyClient(base_url=kb_url)
         logger.info(f"KB proxy → {kb_url}")
     except Exception as e:

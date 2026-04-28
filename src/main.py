@@ -516,7 +516,7 @@ def create_app() -> FastAPI:
                 logger.info("使用量记录器已启动")
 
         # Initialize KB proxy client BEFORE assistant service (microservice mode)
-        from .services.knowledge.kb_proxy_client import KBProxyClient
+        from ai_gateway_core.knowledge import KBProxyClient
         app.state.kb_proxy = KBProxyClient()
 
         # 初始化 Assistant Service (GPT-like 体验)
