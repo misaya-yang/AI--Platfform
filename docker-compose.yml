@@ -86,6 +86,61 @@ services:
     restart: unless-stopped
 
   # ===========================================================================
+  # Migration Job (Phase 6) — opt-in
+  # ===========================================================================
+  # Phase-6 per-service schema split + future per-service migrations.
+  # NOT in the default startup sequence: gateway's auto_init still handles
+  # fresh installs the legacy way, and the schema split is a one-time
+  # operator action against an existing prod DB. Run with:
+  #
+  #     docker compose run --rm migrate
+  #
+  # The job is idempotent (each SQL file recorded in
+  # public.schema_migrations_meta) so repeated runs are safe no-ops.
+  # When all data has been migrated and code uses fully-qualified table
+  # names, gateway's GATEWAY_DATABASE__AUTO_INIT can be set to false and
+  # this job becomes the only schema authority.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/migrate/Dockerfile
+    image: ai-gateway-migrate:${TAG:-latest}
+    container_name: ai-gateway-migrate
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai-gateway-net
+    restart: "no"
+    profiles:
+      - migrate  # opt-in via `docker compose run --rm migrate`
+
+  # ===========================================================================
+  # Tracing Backend (Phase 6, local dev only)
+  # ===========================================================================
+  # Grafana Tempo single-binary mode. Apps export OTLP → tempo:4317; query
+  # via http://localhost:3200. NOT included in prod compose unless the
+  # operator opts in — prod sends to whatever OTLP endpoint
+  # OTEL_EXPORTER_OTLP_ENDPOINT names.
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: ai-gateway-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"   # Tempo HTTP query
+      - "127.0.0.1:4317:4317"   # OTLP gRPC ingest
+    networks:
+      - ai-gateway-net
+    restart: unless-stopped
+    profiles:
+      - tracing  # opt-in: `docker compose --profile tracing up -d tempo`
+
+  # ===========================================================================
   # Application Services
   # ===========================================================================
 
@@ -433,3 +488,5 @@ volumes:
     name: ai-gateway-kb-data
   docgen-artifacts:
     name: ai-gateway-docgen-artifacts
+  tempo-data:
+    name: ai-gateway-tempo-data
