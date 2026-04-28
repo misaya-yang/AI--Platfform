@@ -1952,6 +1952,9 @@ async def submit_image_generation(
     # wins the insert. The loser must NOT spawn another worker; instead
     # it looks up the winner's task_id and returns it as a replay.
     if body.client_request_id and request_hash and pool is not None:
+        # ``record_idempotent`` raises on real Postgres errors (no longer
+        # wrapped in _db_safe) — those propagate to the outer try/except
+        # → 500 → caller retries → still safe.
         claimed = await record_idempotent(
             pool, owner_scope=owner_scope,
             client_request_id=body.client_request_id,
@@ -1968,9 +1971,6 @@ async def submit_image_generation(
                     message="Idempotent replay — existing task returned",
                 )
             if existing and existing["request_hash"] != request_hash:
-                # extremely unlikely race: lookup at top said no row, but
-                # by the time we tried to insert, a concurrent submit with
-                # a *different* body got there first. Surface as conflict.
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -1978,9 +1978,20 @@ async def submit_image_generation(
                         "message": "client_request_id raced with a different request body",
                     },
                 )
-            # No existing row but our INSERT failed for a different reason
-            # (transient DB) — fall through and run anyway. The audit row
-            # may end up missing, but the user request still completes.
+            # claimed=False AND no row found = impossible-by-construction
+            # if both calls hit the same DB. If we ever land here it means
+            # something outside our model violated invariants — refuse to
+            # run rather than risk double-spend.
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "internal_error",
+                    "message": (
+                        "idempotency state is inconsistent (insert failed but "
+                        "no existing row found) — please retry"
+                    ),
+                },
+            )
 
     redis = getattr(request.app.state, "redis", None)
     await _store_task(redis, task_id, task)

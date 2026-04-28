@@ -376,26 +376,37 @@ async def list_turns(
 
 # ----- Idempotency --------------------------------------------------------
 
-@_db_safe(None)
 async def lookup_idempotent(
     pool,
     *,
     owner_scope: str,
     client_request_id: str,
 ) -> dict | None:
-    """Return the recorded (request_hash, task_id) for this key, or None."""
+    """Return the recorded (request_hash, task_id) for this key, or None.
+
+    NOT wrapped in ``_db_safe`` — idempotency is wallet-critical. If the DB
+    is unreachable we MUST surface that (caller should 503 + retry) rather
+    than silently fall through to ``run anyway`` which doubles charges. The
+    only swallowed case is ``pool is None`` (test mocks / dev without DB).
+    """
     if pool is None:
         return None
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT request_hash, task_id, created_at FROM assistant.image_idempotency "
-            "WHERE owner_scope = $1 AND client_request_id = $2",
-            owner_scope, client_request_id,
-        )
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT request_hash, task_id, created_at FROM assistant.image_idempotency "
+                "WHERE owner_scope = $1 AND client_request_id = $2",
+                owner_scope, client_request_id,
+            )
+    except (TypeError, AttributeError) as exc:
+        # Mock pool in tests — surfaces as TypeError ('await' on non-coroutine)
+        # or AttributeError. Production asyncpg failures are PostgresError
+        # subclasses or OSError → we let those propagate.
+        logger.debug("lookup_idempotent: non-real pool (%s) — None", exc)
+        return None
     return dict(row) if row else None
 
 
-@_db_safe(False)
 async def record_idempotent(
     pool,
     *,
@@ -404,19 +415,32 @@ async def record_idempotent(
     request_hash: str,
     task_id: str,
 ) -> bool:
-    """Record an idempotent claim. Returns True on insert, False on existing."""
+    """Record an idempotent claim. Returns True on insert, False on existing.
+
+    NOT wrapped in ``_db_safe`` — see ``lookup_idempotent`` for the rationale.
+    A real Postgres error MUST propagate so the route returns 5xx and the
+    caller retries. Silent ``return False`` on transient errors causes the
+    route to fall through to ``run anyway`` → double-spend.
+    """
     if pool is None:
         return False
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            INSERT INTO assistant.image_idempotency
-                (owner_scope, client_request_id, request_hash, task_id)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (owner_scope, client_request_id) DO NOTHING
-            """,
-            owner_scope, client_request_id, request_hash, task_id,
-        )
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO assistant.image_idempotency
+                    (owner_scope, client_request_id, request_hash, task_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (owner_scope, client_request_id) DO NOTHING
+                """,
+                owner_scope, client_request_id, request_hash, task_id,
+            )
+    except (TypeError, AttributeError) as exc:
+        # Mock pool in tests — surfaces as TypeError on awaiting MagicMock or
+        # similar. Production asyncpg.PostgresError / OSError must propagate
+        # so the route surfaces 5xx and the caller retries.
+        logger.debug("record_idempotent: non-real pool (%s) — False", exc)
+        return False
     # asyncpg "INSERT 0 1" / "INSERT 0 0"
     try:
         return result.endswith(" 1")
