@@ -27,7 +27,17 @@ GRANT USAGE, CREATE ON SCHEMA gateway, assistant, knowledge TO PUBLIC;
 -- Default search_path keeps unqualified queries resolving during the
 -- transition. Order is gateway, assistant, knowledge, public — public last
 -- so anything still in public stays reachable.
-ALTER DATABASE current_database() SET search_path = gateway, assistant, knowledge, public;
+-- ALTER DATABASE expects a literal identifier — wrap in DO block so the
+-- runner resolves the current DB name at execution time. (psql does this
+-- via :DBNAME substitution; asyncpg sends the raw SQL.)
+DO $do$
+BEGIN
+    EXECUTE format(
+        'ALTER DATABASE %I SET search_path = gateway, assistant, knowledge, public',
+        current_database()
+    );
+END
+$do$;
 
 -- Per-session search_path for any role that opens a connection right now —
 -- DB-level ALTER only takes effect on new sessions.
