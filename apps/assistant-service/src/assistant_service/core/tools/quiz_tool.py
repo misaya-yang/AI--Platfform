@@ -31,6 +31,58 @@ from .tool_registry import (
 
 logger = logging.getLogger(__name__)
 
+
+def _coerce_questions(raw: Any) -> list[dict[str, Any]]:
+    """Normalise the ``questions`` arg passed by the model to ``generate_quiz``.
+
+    Mirror of ``_coerce_slides`` in ``agent_loop.py``. Models (Qwen 3.6 in
+    particular) sometimes mis-shape this arg the same three ways that
+    crashed the PPTX outline emitter on 2026-04-28:
+
+      * Whole arg as a JSON-encoded string
+        (``questions='[{"question_text": ...}]'``).
+      * Items as plain strings (``questions=["What is X?", ...]``) —
+        pre-bullet model output before the structured tool-call shape
+        is finalised.
+      * Mixed list (some dicts, some strings).
+
+    Anything else (None, int, dict-at-top, etc.) → empty list. The
+    executor itself still rejects empty lists with "No questions
+    provided", so the user-visible failure mode is unchanged; this
+    helper just ensures we never AttributeError inside ``q.get(...)``.
+    """
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        raw = parsed
+
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw, start=1):
+        if isinstance(item, dict):
+            out.append(item)
+        elif isinstance(item, str):
+            # Lift bare-string items into the minimal dict shape the
+            # downstream validator expects. Use the string as the
+            # question text (truncated to 80 chars to mirror the slide
+            # title limit) so the user sees something coherent if the
+            # quiz somehow squeaks through; the validator will reject
+            # it for missing options on objective types but that's a
+            # cleaner error than ``'str' object has no attribute 'get'``.
+            out.append(
+                {
+                    "question_text": item[:80] or f"Question {idx}",
+                    "question_type": "mc_single",
+                }
+            )
+        # else: silently skip — int / None / nested-list have no sane
+        # interpretation and would surprise the executor.
+    return out
+
 QUIZ_GENERATION_DEFINITION = ToolDefinition(
     name="generate_quiz",
     description=(
@@ -200,9 +252,12 @@ class QuizGeneratorExecutor(ToolExecutor):
         title = args.get("title", "Quiz")
         description = args.get("description", "")
         difficulty = args.get("difficulty", "medium")
-        questions = args.get("questions")
+        # Defend against payload mis-shaping (JSON-encoded string, list
+        # of bare strings, mixed list). Mirror of ``_coerce_slides`` —
+        # see helper docstring for the prod incident corpus.
+        questions = _coerce_questions(args.get("questions"))
 
-        if not questions or not isinstance(questions, list):
+        if not questions:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
