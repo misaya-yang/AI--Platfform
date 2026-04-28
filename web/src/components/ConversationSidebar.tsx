@@ -262,28 +262,37 @@ function SessionItem({
           <button
             type="button"
             className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 pr-16 text-left transition-colors duration-150",
+              // GPT-style: generous corner radius (8px), modest padding,
+              // a tighter color scale between rest / hover / active.
+              "flex w-full items-center rounded-lg px-3 py-2 pr-14 text-left transition-colors duration-150",
               isActive
+                // Active: soft surface + primary text, no border. The state
+                // reads as "selected" without shouting.
                 ? "bg-[hsl(var(--assistant-surface-soft))] text-[hsl(var(--assistant-text-primary))]"
-                : "text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))]/60 hover:text-[hsl(var(--assistant-text-primary))]"
+                // Rest: secondary text on transparent. Hover lightens
+                // surface and promotes text to primary in one step — no
+                // intermediate "warming up" color shift.
+                : "text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))]/70 hover:text-[hsl(var(--assistant-text-primary))]"
             )}
             onClick={onSelect}
             onDoubleClick={startEdit}
           >
-            <MessageSquare className="h-4 w-4 shrink-0" />
-            <span className="flex-1 truncate text-sm">{title}</span>
+            <span className="flex-1 truncate text-[13.5px] leading-5">{title}</span>
           </button>
 
-          {/* Action buttons (visible on hover) */}
-          <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-background/80 rounded-md px-0.5">
-            <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded p-1.5 hover:bg-muted" title={t("assistant.rename", "Rename")}>
-              <Pencil className="h-3.5 w-3.5 text-muted-foreground" />
+          {/* Action buttons — visible on row hover. No background plate
+              (GPT shows raw icons that get a subtle bg per icon on its
+              own hover). The plate makes the row look busier than it
+              is. */}
+          <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))]" title={t("assistant.rename", "Rename")}>
+              <Pencil className="h-3.5 w-3.5" />
             </button>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button type="button" className="rounded p-1.5 hover:bg-muted" title={t("assistant.more", "More")}>
-                  <span className="text-muted-foreground text-xs font-bold">...</span>
+                <button type="button" className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))]" title={t("assistant.more", "More")}>
+                  <span className="text-xs font-bold leading-none">···</span>
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
@@ -305,7 +314,7 @@ function SessionItem({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded p-1.5 hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -339,10 +348,14 @@ function SectionGroup({
   if (sessions.length === 0) return null;
 
   return (
-    <div>
+    // GPT cadence: generous breathing room ABOVE each section heading
+    // (mt-4) creates a clear visual break between date groups; tight
+    // gap below (the heading sits ~6px from the first item) keeps the
+    // group reading as one chunk.
+    <div className="mt-4 first:mt-2">
       <button
         type="button"
-        className="flex w-full items-center gap-1.5 px-3 py-[3px] text-xs font-medium text-muted-foreground/70 uppercase tracking-wider hover:text-muted-foreground"
+        className="flex w-full items-center gap-1.5 px-3 pb-1.5 text-[11px] font-medium text-[hsl(var(--assistant-text-tertiary))] hover:text-[hsl(var(--assistant-text-secondary))]"
         onClick={() => collapsible && setCollapsed(!collapsed)}
       >
         {icon}
@@ -350,10 +363,9 @@ function SectionGroup({
         {collapsible && <span className="text-[10px]">{collapsed ? "▸" : "▾"}</span>}
       </button>
       {!collapsed && (
-        // Flush: first session sits directly under the group title (no
-        // visible gap). space-y-[1px] gives the tiniest separator
-        // between sibling sessions without looking like a bullet list.
-        <div className="space-y-[1px] mt-0">
+        // Items butt up against each other with no visible gap — GPT's
+        // sidebar reads as a single tight cluster per date group.
+        <div>
           {sessions.map((s) => (
             <SessionItem
               key={s.session_id}
@@ -453,13 +465,13 @@ export function ConversationSidebar({
       {/* New Chat — restrained: ghost-style row with icon + label.
           Not a heavy filled pill; at rest reads as a nav item, hover
           reveals a soft surface fill. */}
-      <div className="px-2 pt-3 pb-2">
+      <div className="px-2 pt-3 pb-1">
         <button
           type="button"
           onClick={onNewChat}
-          className="w-full flex items-center gap-2 rounded-md px-2.5 py-2 text-[13px] font-medium text-[hsl(var(--assistant-text-primary))] hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors duration-150"
+          className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] font-medium text-[hsl(var(--assistant-text-primary))] hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors duration-150"
         >
-          <Plus className="h-4 w-4 text-[hsl(var(--assistant-text-secondary))]" />
+          <Plus className="h-[18px] w-[18px] text-[hsl(var(--assistant-text-secondary))]" />
           <span>{t("assistant.newChat")}</span>
         </button>
       </div>
@@ -499,8 +511,8 @@ export function ConversationSidebar({
                 + date groups all chain directly, no visible gaps at
                 the section boundaries. */}
             {folderNames.length > 0 && (
-              <div>
-                <div className="px-3 pt-1 pb-[2px] text-[10px] font-semibold text-muted-foreground/50 uppercase tracking-widest">
+              <div className="mt-2">
+                <div className="px-3 pb-1 text-[11px] font-medium text-[hsl(var(--assistant-text-tertiary))]">
                   {t("assistant.projects", "Projects")}
                 </div>
                 {folderNames.map((folder) => (
@@ -530,9 +542,9 @@ export function ConversationSidebar({
         <button
           type="button"
           onClick={() => setShowCustomize(true)}
-          className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-[12.5px] text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
+          className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors duration-150"
         >
-          <Settings className="h-3.5 w-3.5" />
+          <Settings className="h-[15px] w-[15px]" />
           {t("assistant.customize", "Skills & MCP")}
         </button>
       </div>
