@@ -21,7 +21,8 @@
 -- We do NOT touch it.
 -- =============================================================================
 
-\set ON_ERROR_STOP on
+-- (psql metacommand removed — asyncpg runs the file directly. The runner
+-- already wraps each file in a transaction so any error rolls back.)
 
 DO $migrate$
 DECLARE
