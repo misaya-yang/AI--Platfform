@@ -28,6 +28,14 @@ dependencies = [
     "numpy>=1.26",          # ai_gateway_core.metrics.usage_recorder (sketch)
     "oss2>=2.18",           # ai_gateway_core.storage (alibaba OSS backend)
     "Pillow>=10",           # ai_gateway_core.storage.image_storage
+    "redis>=5.0",           # ai_gateway_core.events (Redis Streams + asyncio client)
+]
+
+[project.optional-dependencies]
+# Dev / test extras — fakeredis backs the ai_gateway_core.events test suite
+# (in-memory Redis Streams emulation, no broker required).
+dev = [
+    "fakeredis>=2.20",
 ]
 
 [tool.hatch.build.targets.wheel]
