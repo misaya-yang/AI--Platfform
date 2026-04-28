@@ -105,6 +105,12 @@ _KNOWN_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
 ]
 
 
+# Memoization cache. Bounded by the number of distinct concrete paths
+# the proxy ever sees (UUID/int collapse keeps that count low — a few
+# hundred at most over a process lifetime). No eviction needed.
+_PATTERN_CACHE: dict[str, str] = {}
+
+
 def extract_route_pattern(path: str) -> str:
     """Map a concrete request path to its route template.
 
@@ -121,6 +127,11 @@ def extract_route_pattern(path: str) -> str:
     if not path:
         return path
 
+    cached = _PATTERN_CACHE.get(path)
+    if cached is not None:
+        return cached
+    raw = path
+
     # Strip query string — breaker scope is the route, not the args.
     qs_idx = path.find("?")
     if qs_idx != -1:
@@ -134,12 +145,14 @@ def extract_route_pattern(path: str) -> str:
     # First pass: known templates win and return their canonical form.
     for regex, template in _KNOWN_PATTERNS:
         if regex.match(path):
+            _PATTERN_CACHE[raw] = template
             return template
 
     # Fallback: collapse UUIDs first (they may contain digits), then
     # bare integer segments. ``re.sub`` handles multiple occurrences.
     collapsed = _UUID_RE.sub("/{uuid}", path)
     collapsed = _INT_RE.sub("/{id}", collapsed)
+    _PATTERN_CACHE[raw] = collapsed
     return collapsed
 
 

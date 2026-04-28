@@ -46,11 +46,14 @@ def _no_env(monkeypatch):
 
 
 async def test_no_op_when_env_unset(base_record):
-    """Default path: env not set → bus stays None, no publish attempted."""
+    """Default path: env not set → bus stays None, latch True from start."""
     rec = UsageRecorder(database=None, buffer_size=10_000)
+    # Constructor reads env once; absent env latches the publish flag
+    # to True so the hot path can short-circuit on a single attr read.
+    assert rec._event_bus_url == ""
+    assert rec._event_bus_failed is True
     await rec._maybe_publish_usage_event(base_record)
     assert rec._event_bus is None
-    assert rec._event_bus_failed is False
 
 
 async def test_publishes_envelope_when_env_set(base_record, monkeypatch):

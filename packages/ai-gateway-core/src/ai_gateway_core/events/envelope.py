@@ -92,7 +92,14 @@ class UsageRecordedV1(BaseModel):
     ``UsageRecorder``, but trimmed to the fields actually needed by
     downstream consumers (billing aggregates, observability sinks). New
     consumers should add fields here, not in the envelope.
+
+    ``EVENT_TYPE`` is the canonical string for routing this payload type
+    through the bus — producers and consumers reference it via the class
+    attribute so a renamed event surfaces as a type error, not a runtime
+    misroute.
     """
+
+    EVENT_TYPE: ClassVar[str] = "usage.recorded.v1"
 
     model_config = ConfigDict(extra="ignore")
 
@@ -122,7 +129,7 @@ class UsageRecordedV1(BaseModel):
 # routing table (stream key) and this is the *schema* table (model class);
 # they evolve independently.
 _PAYLOAD_MODELS: dict[str, type[BaseModel]] = {
-    "usage.recorded.v1": UsageRecordedV1,
+    UsageRecordedV1.EVENT_TYPE: UsageRecordedV1,
 }
 
 

@@ -580,7 +580,11 @@ def create_app() -> FastAPI:
         bus_url = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
         if bus_url:
             try:
-                from ai_gateway_core.events import EventConsumer, parse_envelope
+                from ai_gateway_core.events import (
+                    EventConsumer,
+                    UsageRecordedV1,
+                    parse_envelope,
+                )
                 from ai_gateway_core.events.registry import get_stream
 
                 async def _log_usage_event(envelope) -> None:
@@ -601,7 +605,7 @@ def create_app() -> FastAPI:
 
                 _consumer = EventConsumer(
                     redis_url=bus_url,
-                    stream=get_stream("usage.recorded.v1"),
+                    stream=get_stream(UsageRecordedV1.EVENT_TYPE),
                     group="gateway-usage-logger",
                     consumer_name=f"gateway-{os.getpid()}",
                     handler=_log_usage_event,

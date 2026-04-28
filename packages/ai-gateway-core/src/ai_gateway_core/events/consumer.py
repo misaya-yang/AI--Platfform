@@ -175,13 +175,7 @@ class EventConsumer:
                     # observed promptly.
                     await asyncio.sleep(_IDLE_SLEEP_SEC)
                     continue
-                for _stream_name, messages in entries:
-                    if self._stop_event.is_set():
-                        break
-                    for message_id, fields in messages:
-                        if self._stop_event.is_set():
-                            break
-                        await self._handle_one(client, idem, message_id, fields)
+                await self._dispatch_entries(client, idem, entries)
         finally:
             if self._owns_client:
                 await self._close_client()
@@ -194,6 +188,25 @@ class EventConsumer:
                 await self._inflight
 
     # ----- internals -------------------------------------------------------
+
+    async def _dispatch_entries(
+        self,
+        client: aioredis.Redis,
+        idem: IdempotencyStore,
+        entries: list[Any],
+    ) -> None:
+        """Iterate one XREADGROUP result, dispatching each message.
+
+        Bails on the next message boundary when ``_stop_event`` flips
+        — never abandons an in-flight handler mid-execution.
+        """
+        for _stream_name, messages in entries:
+            if self._stop_event.is_set():
+                return
+            for message_id, fields in messages:
+                if self._stop_event.is_set():
+                    return
+                await self._handle_one(client, idem, message_id, fields)
 
     async def _read_once(
         self, client: aioredis.Redis

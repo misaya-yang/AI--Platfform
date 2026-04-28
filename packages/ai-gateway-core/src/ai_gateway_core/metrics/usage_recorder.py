@@ -165,16 +165,14 @@ class UsageRecorder:
         self._flushed_ids_max: int = 5000
 
         # ── Phase 6 dual-write event bus ────────────────────────────────
-        # Optional: when ``EVENT_BUS_REDIS_URL`` is set, every successful
-        # ``record()`` ALSO publishes a ``UsageRecordedV1`` event to the
-        # Redis Streams bus. This is a *dual-write* — the synchronous DB
-        # path stays the source of truth; the event is fire-and-forget for
-        # downstream consumers (analytics, audit, future quota service).
-        # Default OFF: missing env = no bus = silent skip. Failure to
-        # publish NEVER fails the request — billing must not be coupled
-        # to the bus's availability.
+        # When ``EVENT_BUS_REDIS_URL`` is set, every ``record()`` ALSO
+        # publishes a ``UsageRecordedV1`` event to the Redis Streams bus.
+        # DB path stays the source of truth; bus publish is fire-and-forget.
+        # Env is captured once at construction so the per-request hot path
+        # never re-reads ``os.environ``.
+        self._event_bus_url: str = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
         self._event_bus: Any = None  # ai_gateway_core.events.EventBus | None
-        self._event_bus_failed: bool = False  # latched after init failure
+        self._event_bus_failed: bool = not self._event_bus_url  # short-circuit when env unset
 
     def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
@@ -328,23 +326,22 @@ class UsageRecorder:
         - Any exception is caught and logged at WARNING; the request
           path is unaffected.
         """
+        # Fast-path: this combines "env unset" and "previous failure" into
+        # one boolean read. Set in __init__ to True when no env, set on
+        # first failure thereafter — request hot path is one attr read.
         if self._event_bus_failed:
-            return
-
-        bus_url = os.environ.get("EVENT_BUS_REDIS_URL", "").strip()
-        if not bus_url:
             return
 
         try:
             if self._event_bus is None:
                 from ai_gateway_core.events import EventBus
 
-                self._event_bus = EventBus(redis_url=bus_url)
+                self._event_bus = EventBus(redis_url=self._event_bus_url)
 
             from ai_gateway_core.events import EventEnvelope, UsageRecordedV1
 
             envelope = EventEnvelope[UsageRecordedV1](
-                event_type="usage.recorded.v1",
+                event_type=UsageRecordedV1.EVENT_TYPE,
                 producer="usage-recorder",
                 tenant_id=record.tenant_id or "",
                 request_id=record.request_id or "",

@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 import uuid
 from typing import Any
 
+from ai_gateway_core.proxy.sse_heartbeat import (
+    DEFAULT_HEARTBEAT_INTERVAL_S,
+    with_sse_heartbeat,
+)
+
+# Tests override this attribute to shorten the heartbeat interval —
+# don't inline the constant.
+_SSE_HEARTBEAT_INTERVAL_S = DEFAULT_HEARTBEAT_INTERVAL_S
+
 logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-
-# SSE comment heartbeat interval. Long tool calls (image gen, web search) can
-# stay quiet for 30-60s; without periodic data, intermediaries (nginx default
-# proxy_read_timeout=60s, ALB idle timeout, mobile NATs) sever the connection
-# mid-flight and the model's final response never reaches the client. EventSource
-# silently drops lines starting with `:` per the SSE spec, so this is invisible
-# to the FE while keeping the TCP/HTTP path warm.
-_SSE_HEARTBEAT_INTERVAL_S = 15.0
 
 from ...auth import UserContext, get_user_context
 from ..deps import get_assistant_service, get_model_registry
@@ -148,65 +148,46 @@ async def chat_stream(
     session_id = body.session_id or str(uuid.uuid4())
     history = body.history
 
-    async def event_generator():
-        # Producer feeds the agent loop's events into a queue. Consumer (this
-        # generator) pulls from the queue with a timeout — when no event lands
-        # within _SSE_HEARTBEAT_INTERVAL_S, we emit an SSE comment line to
-        # keep proxies and clients from dropping the connection during long
-        # silent tool calls (e.g. Gemini image gen taking 60s+).
-        queue: asyncio.Queue[Any] = asyncio.Queue()
-        SENTINEL_DONE = object()
+    async def _agent_lines():
+        """Format the agent loop's events as SSE ``data:`` lines.
 
-        async def producer():
-            try:
-                async for event in assistant.chat_stream(
-                    user=user, session_id=session_id, message=body.message,
-                    config=config, history=history,
-                ):
-                    await queue.put(event)
-            except BaseException as exc:  # noqa: BLE001 — propagate to consumer
-                await queue.put(exc)
-            else:
-                await queue.put(SENTINEL_DONE)
-
-        producer_task = asyncio.create_task(producer())
+        Catches generator-side exceptions, logs them with full context,
+        and yields a generic error event so the FE can render a sensible
+        message without leaking internal details.
+        """
         try:
-            while True:
-                try:
-                    item = await asyncio.wait_for(
-                        queue.get(), timeout=_SSE_HEARTBEAT_INTERVAL_S
-                    )
-                except asyncio.TimeoutError:
-                    # SSE comment line — invisible to EventSource consumers.
-                    yield ": heartbeat\n\n"
-                    continue
-
-                if item is SENTINEL_DONE:
-                    return
-                if isinstance(item, BaseException):
-                    logger.exception(
-                        "chat_stream_failed",
-                        extra={"session_id": session_id, "user_id": user.user_id},
-                        exc_info=item,
-                    )
-                    yield (
-                        f"data: {json.dumps({'event_type': 'error', 'data': {'message': 'Chat stream failed. Please try again.'}, 'timestamp': time.time()})}\n\n"
-                    )
-                    return
-
-                event_data = {
-                    "event_type": item.event_type,
-                    "data": item.data,
-                    "timestamp": item.timestamp,
+            async for event in assistant.chat_stream(
+                user=user, session_id=session_id, message=body.message,
+                config=config, history=history,
+            ):
+                payload = {
+                    "event_type": event.event_type,
+                    "data": event.data,
+                    "timestamp": event.timestamp,
                 }
-                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-        finally:
-            if not producer_task.done():
-                producer_task.cancel()
-                try:
-                    await producer_task
-                except (asyncio.CancelledError, BaseException):  # noqa: BLE001
-                    pass
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception(
+                "chat_stream_failed",
+                extra={"session_id": session_id, "user_id": user.user_id},
+            )
+            error_payload = {
+                "event_type": "error",
+                "data": {"message": "Chat stream failed. Please try again."},
+                "timestamp": time.time(),
+            }
+            yield f"data: {json.dumps(error_payload)}\n\n"
+
+    # ``with_sse_heartbeat`` injects ``: heartbeat`` SSE comments every
+    # 15s of producer silence so long tool calls (Gemini image gen 60s+,
+    # KB queries 30s+) don't trip nginx / ALB / NAT idle timeouts. The
+    # helper is the canonical implementation; this route used to inline
+    # the same pattern (deduped 2026-04-28).
+    event_generator = lambda: with_sse_heartbeat(
+        _agent_lines(),
+        interval_seconds=_SSE_HEARTBEAT_INTERVAL_S,
+        as_str=True,
+    )
 
     return StreamingResponse(
         event_generator(),
