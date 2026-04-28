@@ -165,19 +165,33 @@ class EmbeddingManager:
             if not api_key:
                 api_key = str(self.settings.knowledge.dashscope.api_key or "").strip()
             # Inline equivalent of resolve_dashscope("embedding") — see
-            # note on Gemini branch above.
+            # note on Gemini branch above. ``base_url`` resolution must
+            # NOT be nested under ``if not api_key`` — when settings
+            # already provide the key, the env-supplied SDK base URL is
+            # still required to keep the dashscope SDK off its CN
+            # default (which would route to a CN-side account whose
+            # billing is independent of the Intl key).
             if not api_key:
                 import os as _os
                 api_key = (
                     _os.environ.get("DASHSCOPE_EMBEDDING_API_KEY", "").strip()
                     or _os.environ.get("DASHSCOPE_API_KEY", "").strip()
                 )
-                if not base_url:
-                    base_url = (
-                        _os.environ.get("DASHSCOPE_EMBEDDING_BASE_URL", "").strip()
-                        or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
-                        or None
-                    )
+            if not base_url:
+                import os as _os
+                base_url = (
+                    _os.environ.get("DASHSCOPE_EMBEDDING_BASE_URL", "").strip()
+                    or _os.environ.get("DASHSCOPE_BASE_URL", "").strip()
+                    or None
+                )
+            # The dashscope SDK appends ``/api/v1/services/embeddings/...``
+            # to whatever base it gets. If the env points at the OpenAI-
+            # compatible HTTP path (``…/compatible-mode``), strip that
+            # suffix so the SDK's path-builder produces a real native API
+            # URL. Empty result → SDK uses its CN default (incident
+            # 2026-04-28 — CN account arrearage even when Intl works).
+            if base_url and base_url.endswith("/compatible-mode"):
+                base_url = base_url[: -len("/compatible-mode")]
             if not api_key:
                 raise ValidationFailedError(
                     "DashScope api_key is required in dataset embedding_config"
