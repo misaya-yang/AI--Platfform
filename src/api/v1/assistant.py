@@ -1071,6 +1071,43 @@ async def get_image_task_status(
     )
 
 
+@router.get("/artifacts/{artifact_id}/download-url")
+async def get_artifact_download_url(
+    artifact_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Thin proxy — re-sign a presigned URL for an artifact variant.
+
+    Query params: ``variant`` (display|raw|thumbnail, default display) and
+    ``expires_in`` (60..3600, default 3600). Owner-scoped — 404 on
+    cross-owner access. See assistant-service for the full contract."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    qs = request.url.query
+    suffix = f"?{qs}" if qs else ""
+    return await proxy_to_assistant_service(
+        request, user, path=f"artifacts/{artifact_id}/download-url{suffix}",
+    )
+
+
+@router.get("/image-sessions/{session_id}")
+async def get_image_session_view(
+    session_id: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+):
+    """Thin proxy — paginated turn history for an image session.
+
+    Query params: ``limit`` (1..200, default 50), ``cursor`` (opaque),
+    ``include_urls`` (bool, default false). Owner-scoped."""
+    from ._assistant_proxy import proxy_to_assistant_service
+    qs = request.url.query
+    suffix = f"?{qs}" if qs else ""
+    return await proxy_to_assistant_service(
+        request, user, path=f"image-sessions/{session_id}{suffix}",
+    )
+
+
 
 # =========================================================================
 # Context Metrics Endpoints (Observability)

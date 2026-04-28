@@ -102,6 +102,14 @@ async def proxy_to_assistant_service(
     name = getattr(user, "name", None) or getattr(user, "display_name", None)
     if name:
         user_headers["X-User-Name"] = name
+    # Forward image-redesign owner-scope headers so AS can isolate per
+    # end-user when the API caller is itself a multi-tenant app.
+    app_user_id = request.headers.get("X-App-User-Id")
+    if app_user_id:
+        user_headers["X-App-User-Id"] = app_user_id
+    app_tenant_id = request.headers.get("X-App-Tenant-Id")
+    if app_tenant_id:
+        user_headers["X-App-Tenant-Id"] = app_tenant_id
 
     return await _proxy.forward(
         request,
