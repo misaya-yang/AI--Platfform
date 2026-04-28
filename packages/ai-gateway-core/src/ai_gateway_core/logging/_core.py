@@ -6,6 +6,25 @@
 - 上下文信息自动注入（trace_id, user_id 等）
 - 按模块配置日志级别
 - 敏感信息脱敏
+
+PR-3 (2026-04-28) — request_id / OTel bridge
+============================================
+
+Two contextvars sit on every HTTP request but historically never made it
+into log records:
+
+* ``REQUEST_ID_CTX`` — populated by ``RequestIDMiddleware`` (proxy package)
+* OTel ``trace_id`` / ``span_id`` — populated by the OTel SDK once an
+  HTTP/DB span is active
+
+``ContextFilter`` (defined below) reads both on every ``LogRecord`` and
+stamps the values as record attributes so any formatter — JSON or simple
+— can pick them up. The 2,443 existing ``logger.info(...)`` call sites
+keep working unchanged.
+
+Imports of ``REQUEST_ID_CTX`` are deferred to filter-call time to avoid a
+circular import with the proxy package, and the OTel import is wrapped
+in try/except — the SDK is optional in some deploys.
 """
 
 from __future__ import annotations
@@ -23,6 +42,11 @@ from typing import Any
 
 # 上下文变量，用于在请求生命周期内传递日志上下文
 _log_context: ContextVar[LogContext | None] = ContextVar("log_context", default=None)
+
+# Service identity stamped onto every record by ContextFilter. Set once
+# from ``configure_structured_logging(service=...)``. Defaults to
+# ``$SERVICE_NAME`` env or "ai-gateway".
+_SERVICE_NAME: str = os.environ.get("SERVICE_NAME", "ai-gateway")
 
 
 @dataclass
@@ -134,6 +158,68 @@ def _mask_sensitive(value: Any, field_name: str = "") -> Any:
     return value
 
 
+class ContextFilter(logging.Filter):
+    """Stamp request_id / trace_id / span_id / service onto every record.
+
+    Wired into the root logger by ``configure_structured_logging`` so the
+    ~2,443 existing ``logger.info(...)`` call sites pick up bridge data
+    with zero edits.
+
+    Sources (in priority order):
+
+    1. ``REQUEST_ID_CTX`` contextvar from
+       ``ai_gateway_core.proxy.request_id_middleware`` — late-imported
+       inside ``filter()`` to avoid a circular import (proxy ↔ logging).
+    2. OTel ``get_current_span()`` — wrapped in try/except because the
+       SDK is optional in some deployment topologies.
+    3. ``_SERVICE_NAME`` module-global — set once by
+       ``configure_structured_logging(service=...)`` or falling back to
+       the ``SERVICE_NAME`` env var (default ``"ai-gateway"``).
+
+    The filter never blocks a record (``filter()`` always returns True)
+    — its sole purpose is attribute injection.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        # 1) request_id from REQUEST_ID_CTX (late import — proxy package
+        # already imports ai_gateway_core.logging in places, so a
+        # module-top import here would be a cycle).
+        try:
+            from ..proxy.request_id_middleware import REQUEST_ID_CTX
+            req_id = REQUEST_ID_CTX.get(None) if REQUEST_ID_CTX is not None else None
+        except Exception:
+            req_id = None
+        if req_id:
+            record.request_id = req_id
+
+        # 2) OTel trace context (optional install).
+        try:
+            from opentelemetry import trace as _otel_trace  # type: ignore[import-not-found]
+
+            span = _otel_trace.get_current_span()
+            sc = span.get_span_context() if span is not None else None
+            if sc is not None and sc.is_valid:
+                record.trace_id = format(sc.trace_id, "032x")
+                record.span_id = format(sc.span_id, "016x")
+        except Exception:
+            # Never break logging because OTel hiccupped. Other observability
+            # stacks (vanilla ``logging.basicConfig``) must keep functioning.
+            pass
+
+        # 3) Service identity. Always set so log aggregators can group
+        # cleanly even when a record originates outside an HTTP request.
+        if not getattr(record, "service", None):
+            record.service = _SERVICE_NAME
+
+        return True
+
+
+# Field names ContextFilter projects onto records — kept in one place so
+# StructuredFormatter can promote them to top-level JSON keys instead of
+# burying them under ``extra``.
+_BRIDGED_FIELDS: tuple[str, ...] = ("request_id", "trace_id", "span_id", "service")
+
+
 class StructuredFormatter(logging.Formatter):
     """
     结构化日志格式化器
@@ -177,6 +263,15 @@ class StructuredFormatter(logging.Formatter):
 
         log_data["message"] = record.getMessage()
 
+        # Promote bridged fields to top-level keys (request_id / trace_id /
+        # span_id / service). Kept BEFORE the get_log_context() merge so a
+        # legacy LogContext can still override them by carrying matching
+        # keys.
+        for fname in _BRIDGED_FIELDS:
+            v = getattr(record, fname, None)
+            if v:
+                log_data[fname] = v
+
         # 添加上下文信息
         context = get_log_context()
         if context:
@@ -207,6 +302,10 @@ class StructuredFormatter(logging.Formatter):
                 "thread",
                 "threadName",
                 "message",
+                "taskName",  # asyncio 3.12+ noise — never useful in logs
+                # Bridged fields are already top-level above; don't duplicate
+                # them under ``extra``.
+                *_BRIDGED_FIELDS,
             }:
                 extra_fields[key] = value
 
@@ -334,6 +433,7 @@ def configure_structured_logging(
     log_dir: str | None = None,
     log_file_max_bytes: int = 10 * 1024 * 1024,  # 10MB
     log_file_backup_count: int = 5,
+    service: str | None = None,
 ) -> None:
     """
     配置结构化日志
@@ -347,14 +447,35 @@ def configure_structured_logging(
         log_dir: 日志目录（默认为项目根目录下的 logs/）
         log_file_max_bytes: 单个日志文件最大大小
         log_file_backup_count: 保留的日志文件数量
+        service: 服务名（写入每条日志的 ``service`` 字段；不传时使用
+            ``$SERVICE_NAME`` 环境变量，最终回退到 ``"ai-gateway"``）
     """
+    # Stamp service identity for ContextFilter (module-global so the
+    # filter can read it without holding a reference to this scope).
+    if service:
+        global _SERVICE_NAME
+        _SERVICE_NAME = service
+
     # 设置自定义 Logger 类
     logging.setLoggerClass(ContextLogger)
 
     # 配置根 Logger
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
+    # Drop any pre-existing filters so re-calling configure_* in tests
+    # doesn't accumulate ContextFilter instances on the root logger.
+    for f in list(root_logger.filters):
+        root_logger.removeFilter(f)
     root_logger.setLevel(getattr(logging, level.upper()))
+
+    # Bridge filter — stamped onto every HANDLER (NOT the root logger).
+    # Python's stdlib logging only runs logger-level filters on records
+    # emitted directly through that logger; records propagated up from
+    # child loggers bypass parent filters. Handler-level filters DO run
+    # for every record that reaches the handler, regardless of which
+    # logger originated it. Single shared instance is fine — the filter
+    # is stateless modulo the module-level ``_SERVICE_NAME``.
+    bridge_filter = ContextFilter()
 
     # 创建控制台处理器
     console_handler = logging.StreamHandler(sys.stdout)
@@ -363,6 +484,7 @@ def configure_structured_logging(
     else:
         console_formatter = SimpleFormatter(use_colors=sys.stdout.isatty())
     console_handler.setFormatter(console_formatter)
+    console_handler.addFilter(bridge_filter)
     root_logger.addHandler(console_handler)
 
     # 创建文件处理器
@@ -392,6 +514,7 @@ def configure_structured_logging(
         file_formatter = SimpleFormatter(use_colors=False)
         file_handler.setFormatter(file_formatter)
         file_handler.setLevel(logging.DEBUG)  # 文件记录所有级别
+        file_handler.addFilter(bridge_filter)
         root_logger.addHandler(file_handler)
 
         # 错误日志文件（仅 ERROR 及以上）
@@ -404,6 +527,7 @@ def configure_structured_logging(
         )
         error_handler.setFormatter(file_formatter)
         error_handler.setLevel(logging.ERROR)
+        error_handler.addFilter(bridge_filter)
         root_logger.addHandler(error_handler)
 
         # 打印日志文件位置

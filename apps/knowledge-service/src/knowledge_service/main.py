@@ -7,6 +7,7 @@ pool, Qdrant client, and background worker.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,6 +18,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
+from ai_gateway_core.logging import configure_structured_logging
+
 from .api.router import api_router
 from .config import Settings
 from .db.connection import DatabasePool
@@ -24,25 +27,52 @@ from .db.connection import DatabasePool
 # ---------------------------------------------------------------------------
 # Structured logging
 # ---------------------------------------------------------------------------
+# PR-3: All four services now share the ai_gateway_core.logging machinery
+# so every record (incl. structlog calls below) flows through ContextFilter
+# and carries request_id / trace_id / service. structlog stays as a
+# dependency for callers that already use its kw-args API; we just stop
+# using it for service-level config and route its emissions through stdlib
+# via PrintLoggerFactory's default behavior (each structlog log call ends
+# up calling print() — which we redirect via stdlib by reconfiguring it
+# to use the standard logger factory).
 
 def configure_logging(level: str = "INFO") -> None:
-    """Configure structlog with JSON rendering for production."""
+    """Configure JSON/simple logging via the shared core machinery.
+
+    Format toggle order: LOG_FORMAT env > ENVIRONMENT=production → json,
+    else simple. structlog is reconfigured to dispatch through stdlib so
+    its kw-args still surface but ContextFilter can stamp request_id.
+    """
+    log_format = os.environ.get("LOG_FORMAT")
+    if not log_format:
+        log_format = (
+            "json"
+            if os.environ.get("ENVIRONMENT", "").lower() == "production"
+            else "simple"
+        )
+
+    configure_structured_logging(
+        level=level,
+        format_type=log_format,
+        service="knowledge-service",
+        log_to_file=False,
+    )
+
+    # Wire structlog through stdlib so ``structlog.get_logger().info(...)``
+    # ends up as a stdlib LogRecord ContextFilter can stamp. JSONRenderer
+    # would otherwise serialize at the structlog layer and bypass our
+    # filter / formatter.
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
+            structlog.stdlib.add_log_level,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer()
-            if level.upper() == "DEBUG"
-            else structlog.processors.JSONRenderer(),
+            structlog.stdlib.render_to_log_kwargs,
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(structlog, "get_level_from_name", lambda l: getattr(__import__("logging"), l.upper(), 20))(level)
-        ),
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
 

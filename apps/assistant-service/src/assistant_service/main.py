@@ -17,13 +17,28 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from ai_gateway_core.logging import configure_structured_logging
+
 from .config import get_settings
 
-logger = logging.getLogger("assistant-service")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+# PR-3: structured logging via the shared bridge so every record carries
+# request_id (from REQUEST_ID_CTX), trace_id/span_id (when an OTel span is
+# active), and the ``service`` tag. Prod (ENVIRONMENT=production) →
+# single-line JSON; dev → human-readable "simple". LOG_FORMAT env wins.
+_log_format = os.environ.get("LOG_FORMAT")
+if not _log_format:
+    _log_format = (
+        "json"
+        if os.environ.get("ENVIRONMENT", "").lower() == "production"
+        else "simple"
+    )
+configure_structured_logging(
+    level="INFO",
+    format_type=_log_format,
+    service="assistant-service",
+    log_to_file=False,
 )
+logger = logging.getLogger("assistant-service")
 
 settings = get_settings()
 

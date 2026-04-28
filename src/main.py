@@ -85,9 +85,20 @@ def create_app() -> FastAPI:
     settings = Settings()
 
     # 配置结构化日志
+    # PR-3: env-driven format. Prod (ENVIRONMENT=production) → JSON so
+    # request_id / trace_id stamping flows to log aggregators; dev →
+    # human-readable "simple". Override either with LOG_FORMAT.
+    _log_format = os.environ.get("LOG_FORMAT")
+    if not _log_format:
+        _log_format = (
+            "json"
+            if os.environ.get("ENVIRONMENT", "").lower() == "production"
+            else "simple"
+        )
     configure_structured_logging(
         level="INFO",
-        format_type="simple",  # 开发环境使用简单格式，生产可改为 "json"
+        format_type=_log_format,
+        service="ai-gateway",
     )
 
     # 创建依赖注入容器

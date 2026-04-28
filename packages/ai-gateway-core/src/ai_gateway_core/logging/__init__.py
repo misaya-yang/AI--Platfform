@@ -1,6 +1,7 @@
 """Structured JSON logging with contextvar-based request context."""
 
 from ._core import (
+    ContextFilter,
     ContextLogger,
     LogContext,
     SimpleFormatter,
@@ -13,6 +14,7 @@ from ._core import (
 )
 
 __all__ = [
+    "ContextFilter",
     "ContextLogger",
     "LogContext",
     "SimpleFormatter",
