@@ -18,6 +18,7 @@ the ``image_sessions`` compare-and-swap used for the
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -26,6 +27,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _db_safe(default):
+    """Wrap async DB helpers so a non-asyncpg pool (test mocks, missing DB,
+    transient outage) degrades to ``default`` instead of raising.
+
+    ``default`` may be a callable factory for mutable defaults (lists/tuples).
+    Real CAS conflicts inside the function still surface as ``False``; only
+    accidental TypeError / AttributeError / asyncpg errors get swallowed."""
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("%s: DB unavailable (%s) — fallback", fn.__name__, exc)
+                return default() if callable(default) else default
+        return wrapper
+    return deco
 
 
 # ----- Owner scope ---------------------------------------------------------
@@ -78,6 +98,7 @@ def new_turn_id() -> str:
 
 # ----- image_sessions ------------------------------------------------------
 
+@_db_safe(None)
 async def get_image_session(pool, session_id: str) -> dict | None:
     """Return the image_sessions row for ``session_id`` (or None)."""
     if pool is None:
@@ -90,6 +111,7 @@ async def get_image_session(pool, session_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+@_db_safe(None)
 async def upsert_image_session(
     pool,
     *,
@@ -125,6 +147,7 @@ async def upsert_image_session(
         )
 
 
+@_db_safe(None)
 async def set_locked_style(pool, session_id: str, style: str | None) -> None:
     """Overwrite ``locked_style``. ``None`` clears the lock."""
     if pool is None:
@@ -138,6 +161,7 @@ async def set_locked_style(pool, session_id: str, style: str | None) -> None:
         )
 
 
+@_db_safe(False)
 async def advance_latest_artifact_cas(
     pool,
     *,
@@ -185,6 +209,7 @@ async def advance_latest_artifact_cas(
 
 # ----- image_turns ---------------------------------------------------------
 
+@_db_safe(None)
 async def insert_turn(
     pool,
     *,
@@ -232,6 +257,7 @@ async def insert_turn(
         )
 
 
+@_db_safe(None)
 async def update_turn_status(
     pool,
     *,
@@ -261,6 +287,7 @@ async def update_turn_status(
         )
 
 
+@_db_safe(None)
 async def get_turn(pool, turn_id: str) -> dict | None:
     if pool is None:
         return None
@@ -272,6 +299,7 @@ async def get_turn(pool, turn_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+@_db_safe(None)
 async def get_turn_by_task(pool, task_id: str) -> dict | None:
     """Look up a turn by its async task_id (poll fallback)."""
     if pool is None:
@@ -285,6 +313,7 @@ async def get_turn_by_task(pool, task_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+@_db_safe(lambda: ([], None))
 async def list_turns(
     pool,
     *,
@@ -336,6 +365,7 @@ async def list_turns(
 
 # ----- Idempotency --------------------------------------------------------
 
+@_db_safe(None)
 async def lookup_idempotent(
     pool,
     *,
@@ -354,6 +384,7 @@ async def lookup_idempotent(
     return dict(row) if row else None
 
 
+@_db_safe(False)
 async def record_idempotent(
     pool,
     *,

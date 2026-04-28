@@ -800,12 +800,10 @@ async def test_06_style_lock_lifecycle():
         )
         assert h.state.sessions[sid]["locked_style"] == "anime"
 
-        # Turn 4 — explicit "default" — note: pydantic coerces "default" to DEFAULT,
-        # which the route treats as "inherit". To clear the lock the contract
-        # is: caller passes default → no overwrite. To reset to default the
-        # caller would pass... well, anime → lock=anime, then "default" stays anime.
-        # The implementation has no explicit "clear lock" code path: default
-        # never overwrites. We just verify default inherits, leaving anime locked.
+        # Turn 4 — explicit "default" → caller is *resetting* the lock back
+        # to default. Detected via Pydantic's `model_fields_set` (the caller
+        # named the field), so the route distinguishes this from "didn't
+        # touch style" → inherit.
         await generate_image(
             body=ImageGenerationRequest(
                 prompt="t4", model_id=GEMINI_MODEL,
@@ -813,8 +811,8 @@ async def test_06_style_lock_lifecycle():
             ),
             request=_make_request(), user=user, model_registry=_registry_stub("google"),
         )
-        # `default` style → inherits lock. Lock stays anime.
-        assert h.state.sessions[sid]["locked_style"] == "anime"
+        # explicit `default` clears the lock.
+        assert h.state.sessions[sid]["locked_style"] is None
 
 
 # ---- 7-9. download-url variant resolution --------------------------------
