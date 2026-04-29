@@ -163,6 +163,49 @@ class TestSingleTurnStyleForwarding:
         assert kwargs["style"] == "<watercolor>"
         assert "digital render" in kwargs["negative_prompt"]
 
+    async def test_provider_over_return_is_capped_to_requested_n(self):
+        body = ImageGenerationRequest(
+            prompt="a red square",
+            model_id="gemini-2.5-flash-image",
+            style="default",
+            n=1,
+        )
+        router_mock = MagicMock()
+        router_mock.generate = AsyncMock(return_value=SmartImageGenerationResult(
+            success=True,
+            provider="google",
+            images=[
+                {
+                    "filename": "img_1.png",
+                    "content_base64": "ZmFrZTE=",
+                    "mime_type": "image/png",
+                    "size_bytes": 5,
+                },
+                {
+                    "filename": "img_2.png",
+                    "content_base64": "ZmFrZTI=",
+                    "mime_type": "image/png",
+                    "size_bytes": 5,
+                },
+            ],
+            duration_ms=42.0,
+        ))
+
+        with patch(
+            "assistant_service.api.routes.images.get_smart_image_generator",
+            return_value=router_mock,
+        ):
+            resp = await generate_image(
+                body=body,
+                request=_make_request(session_manager=None),
+                user=_user(),
+                model_registry=_registry_stub("google"),
+            )
+
+        assert resp.success is True
+        assert len(resp.images) == 1
+        assert router_mock.generate.call_args.kwargs["n"] == 1
+
     async def test_dashscope_receives_native_tag_for_tagged_preset(self):
         body = ImageGenerationRequest(
             prompt="a cat", model_id="wanx-v1", style="anime",

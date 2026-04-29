@@ -647,6 +647,54 @@ async def test_01_pure_text_to_image_async_happy_path():
     assert status.session_id is None  # text-to-image without session
 
 
+@pytest.mark.asyncio
+async def test_01b_async_caps_provider_over_return_to_requested_n():
+    body = AsyncImageGenerationRequest(
+        prompt="a red square",
+        model_id=GEMINI_MODEL,
+        n=1,
+        add_watermark=False,
+    )
+    user = _user()
+    multi_result = SmartImageGenerationResult(
+        success=True,
+        provider="google",
+        images=[
+            {
+                "filename": "s1.png",
+                "content_base64": PNG_B64,
+                "mime_type": "image/png",
+                "size_bytes": len(PNG_1X1),
+            },
+            {
+                "filename": "s2.png",
+                "content_base64": PNG_B64,
+                "mime_type": "image/png",
+                "size_bytes": len(PNG_1X1),
+            },
+        ],
+        duration_ms=12.0,
+    )
+
+    with _Harness(smart_result=multi_result) as h:
+        request = _make_request()
+        with patch.object(images_module, "get_session_manager", return_value=None):
+            submit = await submit_image_generation(
+                body=body, request=request, user=user,
+                model_registry=_registry_stub("google"),
+            )
+        await asyncio.sleep(0)
+        await asyncio.gather(*list(images_module._in_flight_workers), return_exceptions=True)
+
+        status = await get_image_task_status(
+            task_id=submit.task_id, request=request, user=user,
+        )
+
+    assert status.status == "completed"
+    assert len(status.images) == 1
+    assert len(h.storage._artifacts) == 1
+
+
 # ---- 2. Session first turn — image_sessions row gets created --------------
 
 @pytest.mark.asyncio

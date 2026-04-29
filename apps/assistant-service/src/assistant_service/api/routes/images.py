@@ -163,6 +163,21 @@ async def _bounded(
         sem.release()
 
 
+def _cap_result_images(result: Any, requested_n: int | None) -> None:
+    """Keep provider over-return from changing the public n/artifact contract."""
+    images = getattr(result, "images", None)
+    if not isinstance(images, list):
+        return
+    limit = max(1, int(requested_n or 1))
+    if len(images) > limit:
+        logger.warning(
+            "Image provider returned %d images for n=%d; capping response",
+            len(images),
+            limit,
+        )
+        result.images = images[:limit]
+
+
 # -----------------------------------------------------------------------------
 # Schemas
 # -----------------------------------------------------------------------------
@@ -1335,6 +1350,7 @@ async def _persist_multi_turn_result(
     for new state.
     """
     session, image_history, effective_preset = session_state
+    _cap_result_images(res, body.n)
 
     persisted = await asyncio.gather(*[
         _persist_and_get_url_bounded(
@@ -2258,6 +2274,7 @@ async def generate_image(
                 )
             provider_label = res.provider
 
+        _cap_result_images(res, body.n)
         if not res.success or not res.images:
             err = res.error or "Image generation failed"
             error_code = "provider_failed"
@@ -2631,6 +2648,7 @@ async def _run_image_generation_task(
                 )
             provider_label = res.provider
 
+        _cap_result_images(res, body.n)
         duration_ms = (time.time() - start_time) * 1000
         task["duration_ms"] = duration_ms
         task["provider"] = provider_label
