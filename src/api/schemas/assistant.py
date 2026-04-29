@@ -9,9 +9,8 @@ Phase 1: Unified session + message + streaming protocol.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
-
 from ai_gateway_core.style_presets import StylePreset, resolve_style_preset
+from pydantic import BaseModel, Field, field_validator
 
 # =============================================================================
 # Tool Call Structures (for Agentic workflows)
@@ -556,6 +555,10 @@ class ImageGenerationRequest(BaseModel):
             "artifact's owner."
         ),
     )
+    reference_blob_id: str | None = Field(
+        default=None,
+        description="Object-store blob id from /image-blobs/* for user-provided reference images.",
+    )
     reference_image: str | None = Field(
         default=None,
         max_length=_REFERENCE_IMAGE_MAX_CHARS,
@@ -577,6 +580,13 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+    app_user_id: str | None = None
+    app_tenant_id: str | None = None
+    parent_artifact_id: str | None = None
+    expected_parent_artifact_id: str | None = None
+    client_request_id: str | None = Field(default=None, max_length=128)
+    return_variants: list[str] | None = None
+    allow_branch: bool = False
 
     @field_validator("style", mode="before")
     @classmethod
@@ -617,13 +627,23 @@ class ImageGenerationResponse(BaseModel):
 
     success: bool = Field(..., description="Whether generation succeeded")
     images: list[GeneratedImage] = Field(default_factory=list, description="Generated images")
-    provider: str = Field(..., description="Provider used for generation (dashscope/google)")
-    duration_ms: float = Field(..., description="Generation time in milliseconds")
+    task_id: str | None = None
+    status: str | None = None
+    provider: str | None = Field(default=None, description="Provider used for generation (dashscope/google)")
+    duration_ms: float | None = Field(default=None, description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
+    error_code: str | None = None
     session_id: str | None = Field(
         default=None,
         description="Echo of session_id when stateful multi-turn was used.",
     )
+    turn_id: str | None = None
+    parent_artifact_id: str | None = None
+    output_artifact_id: str | None = None
+    client_request_id: str | None = None
+    idempotent_replay: bool = False
+    variants: dict[str, str] | None = None
+    latest_advanced: bool = True
 
 
 # =============================================================================
@@ -654,6 +674,10 @@ class AsyncImageGenerationRequest(BaseModel):
             "edits). Server-side lookup; tenant + user_id checked against artifact owner."
         ),
     )
+    reference_blob_id: str | None = Field(
+        default=None,
+        description="Object-store blob id from /image-blobs/* for user-provided reference images.",
+    )
     reference_image: str | None = Field(
         default=None,
         max_length=_REFERENCE_IMAGE_MAX_CHARS,
@@ -671,6 +695,13 @@ class AsyncImageGenerationRequest(BaseModel):
         ),
     )
     add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+    app_user_id: str | None = None
+    app_tenant_id: str | None = None
+    parent_artifact_id: str | None = None
+    expected_parent_artifact_id: str | None = None
+    client_request_id: str | None = Field(default=None, max_length=128)
+    return_variants: list[str] | None = None
+    allow_branch: bool = False
     callback_url: str | None = Field(default=None, description="URL to POST results when generation completes")
 
     @field_validator("style", mode="before")
@@ -709,5 +740,50 @@ class AsyncImageTaskStatusResponse(BaseModel):
     images: list[AsyncImageArtifact] = Field(default_factory=list, description="Generated images (when completed)")
     duration_ms: float | None = Field(default=None, description="Total duration when completed")
     error: str | None = Field(default=None, description="Error message if failed")
+    error_code: str | None = None
     created_at: str = Field(..., description="Task creation time ISO8601")
     completed_at: str | None = Field(default=None, description="Completion time ISO8601")
+    turn_id: str | None = None
+    session_id: str | None = None
+    parent_artifact_id: str | None = None
+    output_artifact_id: str | None = None
+    client_request_id: str | None = None
+    latest_advanced: bool | None = None
+
+
+class ImageBlobUploadUrlRequest(BaseModel):
+    filename: str = Field(default="reference.png", max_length=255)
+    mime_type: str = Field(default="image/png")
+    byte_size: int | None = Field(default=None, ge=1)
+    content_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ImageBlobUploadUrlResponse(BaseModel):
+    blob_id: str
+    upload_url: str
+    method: str = "PUT"
+    headers: dict[str, str] = Field(default_factory=dict)
+    fields: dict[str, str] | None = None
+    storage_key: str
+    expires_at: str
+
+
+class ImageBlobCompleteRequest(BaseModel):
+    blob_id: str
+    content_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    byte_size: int | None = Field(default=None, ge=1)
+    mime_type: str | None = None
+
+
+class ImageBlobResponse(BaseModel):
+    blob_id: str
+    status: str
+    content_sha256: str | None = None
+    byte_size: int | None = None
+    mime_type: str
+    storage_key: str
+
+
+class ImageBlobFetchUrlRequest(BaseModel):
+    url: str
+    mime_type: str | None = None

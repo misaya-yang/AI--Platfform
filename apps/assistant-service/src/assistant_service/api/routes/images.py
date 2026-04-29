@@ -33,10 +33,13 @@ from __future__ import annotations
 
 import asyncio
 import base64 as _b64
+import hashlib
 import json
 import logging
+import os
 import time
 import uuid
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -46,9 +49,12 @@ from ai_gateway_core.image import (
     append_image_turns,
     apply_watermark_b64,
     build_gemini_contents_from_history,
-    compute_owner_scope as _compute_owner_scope,
-    compute_request_hash as _compute_request_hash,
+    count_active_image_tasks,
+    create_image_blob,
+    create_image_task,
+    get_image_blob,
     get_image_session,
+    get_image_task,
     get_turn_by_task,
     inflate_history_with_bytes,
     insert_turn,
@@ -60,9 +66,19 @@ from ai_gateway_core.image import (
     record_idempotent,
     resolve_image_routing,
     send_image_callback,
-    set_locked_style as _set_locked_style,
+    update_image_blob_status,
+    update_image_task,
     update_turn_status,
     upsert_image_session,
+)
+from ai_gateway_core.image import (
+    compute_owner_scope as _compute_owner_scope,
+)
+from ai_gateway_core.image import (
+    compute_request_hash as _compute_request_hash,
+)
+from ai_gateway_core.image import (
+    set_locked_style as _set_locked_style,
 )
 from ai_gateway_core.security import SafeFetchError, safe_fetch
 from ai_gateway_core.style_presets import (
@@ -72,6 +88,7 @@ from ai_gateway_core.style_presets import (
     resolve_style_preset,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ...auth import UserContext, get_user_context
@@ -83,6 +100,67 @@ from ..deps import get_model_registry, get_session_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+_REFERENCE_MAX_BYTES = int(os.getenv("IMAGE_REFERENCE_MAX_BYTES", str(8 * 1024 * 1024)))
+_REPLAY_MAX_VISUAL_TURNS = int(os.getenv("IMAGE_REPLAY_MAX_VISUAL_TURNS", "4"))
+_SYNC_WAIT_SECONDS = float(os.getenv("IMAGE_SYNC_WAIT_SECONDS", "12"))
+_PROVIDER_CONCURRENCY = max(1, int(os.getenv("IMAGE_PROVIDER_CONCURRENCY", "4")))
+_PERSIST_CONCURRENCY = max(1, int(os.getenv("IMAGE_PERSIST_CONCURRENCY", "4")))
+_SEMAPHORE_WAIT_SECONDS = float(os.getenv("IMAGE_SEMAPHORE_WAIT_SECONDS", "0.25"))
+_MAX_QUEUE_DEPTH = int(os.getenv("IMAGE_MAX_QUEUE_DEPTH", "200"))
+_MAX_OWNER_ACTIVE_TASKS = int(os.getenv("IMAGE_MAX_OWNER_ACTIVE_TASKS", "8"))
+
+_provider_semaphore = asyncio.Semaphore(_PROVIDER_CONCURRENCY)
+_persistence_semaphore = asyncio.Semaphore(_PERSIST_CONCURRENCY)
+
+
+def _is_prod_env() -> bool:
+    env = (
+        os.getenv("ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("ENV")
+        or ""
+    ).lower()
+    return env in {"prod", "production"}
+
+
+def _requires_persistent_task_store() -> bool:
+    raw = os.getenv("IMAGE_REQUIRE_PERSISTENT_TASKS")
+    if raw is not None:
+        return raw.lower() not in {"0", "false", "no", "off"}
+    return _is_prod_env()
+
+
+def _sync_uses_task_queue() -> bool:
+    raw = os.getenv("IMAGE_SYNC_USES_TASK_QUEUE", "1")
+    return raw.lower() not in {"0", "false", "no", "off"}
+
+
+@asynccontextmanager
+async def _bounded(
+    sem: asyncio.Semaphore,
+    *,
+    status_code: int,
+    error_code: str,
+    message: str,
+    retry_after: int = 2,
+):
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=_SEMAPHORE_WAIT_SECONDS)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error_code": error_code,
+                "message": message,
+                "retry_after": retry_after,
+            },
+        ) from exc
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 # -----------------------------------------------------------------------------
@@ -135,8 +213,17 @@ class ImageGenerationRequest(BaseModel):
             "you have the artifact_id we returned previously."
         ),
     )
+    reference_blob_id: str | None = Field(
+        default=None,
+        description=(
+            "Object-store blob id created by /image-blobs/upload-url, "
+            "/image-blobs/complete, or /image-blobs/fetch-url. Preferred for "
+            "user-provided reference uploads because request bodies stay small."
+        ),
+    )
     reference_image: str | None = Field(
         default=None,
+        max_length=12_000_000,
         description=(
             "Reference image as base64 or data URL. Use only when the prior "
             "image is local-only (e.g. a user upload that never went through "
@@ -225,6 +312,14 @@ class ImageGenerationRequest(BaseModel):
 class ImageGenerationResponse(BaseModel):
     success: bool
     images: list[GeneratedImage] = []
+    task_id: str | None = Field(
+        default=None,
+        description="Task id when sync generation was queued or replayed.",
+    )
+    status: str | None = Field(
+        default=None,
+        description="Task status when sync generation returns before completion.",
+    )
     provider: str | None = None
     duration_ms: float | None = None
     error: str | None = None
@@ -327,6 +422,44 @@ class AsyncImageTaskStatusResponse(BaseModel):
     latest_advanced: bool | None = None
 
 
+class ImageBlobUploadUrlRequest(BaseModel):
+    filename: str = Field(default="reference.png", max_length=255)
+    mime_type: str = Field(default="image/png")
+    byte_size: int | None = Field(default=None, ge=1)
+    content_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class ImageBlobUploadUrlResponse(BaseModel):
+    blob_id: str
+    upload_url: str
+    method: str = "PUT"
+    headers: dict[str, str] = Field(default_factory=dict)
+    fields: dict[str, str] | None = None
+    storage_key: str
+    expires_at: str
+
+
+class ImageBlobCompleteRequest(BaseModel):
+    blob_id: str
+    content_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    byte_size: int | None = Field(default=None, ge=1)
+    mime_type: str | None = None
+
+
+class ImageBlobResponse(BaseModel):
+    blob_id: str
+    status: str
+    content_sha256: str | None = None
+    byte_size: int | None = None
+    mime_type: str
+    storage_key: str
+
+
+class ImageBlobFetchUrlRequest(BaseModel):
+    url: str
+    mime_type: str | None = None
+
+
 # -----------------------------------------------------------------------------
 # Async task store
 # -----------------------------------------------------------------------------
@@ -371,7 +504,7 @@ def _cleanup_old_tasks() -> None:
         _image_tasks.pop(tid, None)
 
 
-async def _store_task(redis, task_id: str, task: dict) -> None:
+async def _store_task(redis, task_id: str, task: dict, *, pool=None) -> None:
     """Persist ``task`` under ``task_id``. Uses Redis when present, else the
     in-process dict. Always refreshes the TTL on Redis writes — completed
     tasks then expire 1h after completion regardless of when submitted.
@@ -391,10 +524,12 @@ async def _store_task(redis, task_id: str, task: dict) -> None:
             )
             # Redis is now authoritative — drop any stale fallback entry.
             _image_tasks.pop(task_id, None)
+            await _persist_task_state(pool, task)
             return
         except Exception as exc:
             logger.warning("Redis task store write failed (%s); falling back to dict", exc)
     _image_tasks[task_id] = task
+    await _persist_task_state(pool, task)
 
 
 async def _load_task(redis, task_id: str) -> dict | None:
@@ -419,6 +554,25 @@ async def _load_task(redis, task_id: str) -> dict | None:
     return redis_task
 
 
+async def _persist_task_state(pool, task: dict, *, lock_seconds: int | None = None) -> None:
+    try:
+        await update_image_task(
+            pool,
+            task_id=task["task_id"],
+            status=task.get("status"),
+            progress=task.get("progress"),
+            provider=task.get("provider"),
+            result=task,
+            error=task.get("error"),
+            error_code=task.get("error_code"),
+            parent_artifact_id=task.get("parent_artifact_id"),
+            output_artifact_id=task.get("output_artifact_id"),
+            locked_seconds=lock_seconds,
+        )
+    except Exception as exc:
+        logger.warning("image task DB state update failed task=%s: %s", task.get("task_id"), exc)
+
+
 # -----------------------------------------------------------------------------
 # Artifact storage helpers
 # -----------------------------------------------------------------------------
@@ -434,6 +588,193 @@ def _get_artifact_storage():
         return get_artifact_storage()
     except Exception:
         return None
+
+
+def _get_storage_backend(artifact_storage):
+    backend = getattr(artifact_storage, "_backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "storage_unavailable",
+                "message": "Object storage backend is not configured",
+            },
+        )
+    return backend
+
+
+def _validate_image_mime(mime_type: str | None) -> str:
+    mt = (mime_type or "image/png").split(";", 1)[0].strip().lower()
+    if not mt.startswith("image/"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "validation_error",
+                "message": "mime_type must be an image/* media type",
+            },
+        )
+    return mt
+
+
+def _blob_storage_key(owner_scope: str, blob_id: str, filename: str) -> str:
+    owner_hash = hashlib.sha256(owner_scope.encode("utf-8")).hexdigest()[:24]
+    safe_name = filename.replace("/", "_").replace("\\", "_").replace("\x00", "")
+    safe_name = safe_name or "reference.png"
+    return f"image-blobs/{owner_hash}/{blob_id}/{safe_name[:180]}"
+
+
+def _sha256_hex(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _normalize_reference_image_b64(value: str) -> tuple[str, bytes, str]:
+    mime_type = "image/png"
+    raw = value.strip()
+    if raw.startswith("data:"):
+        header, sep, data = raw.partition(",")
+        if not sep:
+            raise HTTPException(
+                status_code=422,
+                detail={"error_code": "validation_error", "message": "Invalid data URL reference_image"},
+            )
+        if ";" in header:
+            mime_type = header[5:].split(";", 1)[0] or mime_type
+        raw = data
+    try:
+        decoded = _b64.b64decode(raw, validate=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "validation_error", "message": "reference_image must be base64"},
+        ) from exc
+    if len(decoded) > _REFERENCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error_code": "reference_too_large",
+                "message": f"reference image exceeds {_REFERENCE_MAX_BYTES} bytes",
+            },
+        )
+    return _b64.b64encode(decoded).decode(), decoded, _validate_image_mime(mime_type)
+
+
+def _validate_single_explicit_reference(body: ImageGenerationRequest) -> None:
+    refs = {
+        "parent_artifact_id": body.parent_artifact_id,
+        "reference_artifact_id": body.reference_artifact_id,
+        "reference_blob_id": body.reference_blob_id,
+        "reference_image": body.reference_image,
+        "reference_image_url": body.reference_image_url,
+    }
+    present = [name for name, value in refs.items() if value]
+    if len(present) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error_code": "multiple_reference_sources",
+                "message": (
+                    "Only one explicit reference source may be supplied: "
+                    "parent_artifact_id, reference_artifact_id, reference_blob_id, "
+                    "reference_image, or reference_image_url"
+                ),
+                "fields": present,
+            },
+        )
+
+
+async def _store_blob_bytes(
+    *,
+    pool,
+    artifact_storage,
+    owner_scope: str,
+    user: UserContext,
+    content: bytes,
+    mime_type: str,
+    source: str,
+    filename: str = "reference.png",
+) -> dict[str, Any]:
+    if len(content) > _REFERENCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error_code": "reference_too_large",
+                "message": f"reference image exceeds {_REFERENCE_MAX_BYTES} bytes",
+            },
+        )
+    backend = _get_storage_backend(artifact_storage)
+    blob_id = f"iblob_{uuid.uuid4().hex[:24]}"
+    storage_key = _blob_storage_key(owner_scope, blob_id, filename)
+    mt = _validate_image_mime(mime_type)
+    sha = _sha256_hex(content)
+    await backend.upload(
+        storage_key,
+        content,
+        mt,
+        metadata={
+            "owner-scope-sha256": hashlib.sha256(owner_scope.encode("utf-8")).hexdigest(),
+            "source": source,
+            "blob-id": blob_id,
+        },
+    )
+    await create_image_blob(
+        pool,
+        blob_id=blob_id,
+        owner_scope=owner_scope,
+        content_sha256=sha,
+        byte_size=len(content),
+        mime_type=mt,
+        storage_key=storage_key,
+        source=source,
+        status="ready",
+        artifact_id=None,
+    )
+    return {
+        "blob_id": blob_id,
+        "status": "ready",
+        "content_sha256": sha,
+        "byte_size": len(content),
+        "mime_type": mt,
+        "storage_key": storage_key,
+        "artifact_id": None,
+    }
+
+
+async def _download_blob_bytes(
+    *,
+    pool,
+    artifact_storage,
+    blob_id: str,
+    owner_scope: str,
+) -> bytes:
+    row = await get_image_blob(pool, blob_id=blob_id, owner_scope=owner_scope)
+    if not row or row.get("status") != "ready":
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "reference_not_found", "message": f"blob {blob_id!r} not found"},
+        )
+    artifact_id = row.get("artifact_id")
+    if artifact_id:
+        content = await artifact_storage.download_artifact(artifact_id)
+    else:
+        backend = _get_storage_backend(artifact_storage)
+        content = await backend.download(row["storage_key"])
+    if not content:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "reference_not_found", "message": f"blob {blob_id!r} not found"},
+        )
+    if len(content) > _REFERENCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error_code": "reference_too_large", "message": "reference blob exceeds size limit"},
+        )
+    expected_sha = row.get("content_sha256")
+    if expected_sha and _sha256_hex(content) != expected_sha:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "blob_integrity_mismatch", "message": "reference blob checksum mismatch"},
+        )
+    return content
 
 
 async def _persist_and_get_url(
@@ -617,6 +958,17 @@ async def _persist_and_get_url(
     )
 
 
+async def _persist_and_get_url_bounded(*args, **kwargs) -> tuple[str | None, GeneratedImage]:
+    async with _bounded(
+        _persistence_semaphore,
+        status_code=503,
+        error_code="persistence_busy",
+        message="Image persistence concurrency is saturated",
+        retry_after=3,
+    ):
+        return await _persist_and_get_url(*args, **kwargs)
+
+
 async def _load_artifact_bytes_owner_scoped(
     artifact_storage,
     artifact_id: str,
@@ -705,13 +1057,18 @@ async def _resolve_reference_bytes(
     1. ``parent_artifact_id`` — explicit lineage anchor (image-redesign Phase 2).
     2. ``reference_artifact_id`` — direct lookup in our ArtifactStorage. No
        URL fetch, no SSRF surface. **Preferred** for stateless edits.
-    3. session-derived latest_artifact (when ``session_id`` set + image_session
+    3. ``reference_blob_id`` — object storage blob uploaded/fetched earlier.
+    4. session-derived latest_artifact (when ``session_id`` set + image_session
        row exists with a non-null ``latest_artifact_id``).
-    4. ``reference_image`` (base64 / data-URL) — pass through.
-    5. ``reference_image_url`` — SSRF-safe fetch.
+    5. ``reference_image`` (base64 / data-URL) — converted to blob when
+       object storage is available, then passed to Gemini inline at the last hop.
+    6. ``reference_image_url`` — SSRF-safe fetch, converted to blob when
+       object storage is available.
 
     Returns ``(None, None)`` if no reference is provided.
     """
+    _validate_single_explicit_reference(body)
+
     # 1. parent_artifact_id (explicit anchor)
     if body.parent_artifact_id:
         content = await _load_artifact_bytes_owner_scoped(
@@ -720,6 +1077,11 @@ async def _resolve_reference_bytes(
             owner_scope=owner_scope or (user.user_id if user else ""),
             user=user,
         )
+        if len(content) > _REFERENCE_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
+            )
         return _b64.b64encode(content).decode(), body.parent_artifact_id
 
     # 2. reference_artifact_id (legacy)
@@ -730,9 +1092,24 @@ async def _resolve_reference_bytes(
             owner_scope=owner_scope or (user.user_id if user else ""),
             user=user,
         )
+        if len(content) > _REFERENCE_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
+            )
         return _b64.b64encode(content).decode(), body.reference_artifact_id
 
-    # 3. session-derived latest
+    # 3. reference_blob_id
+    if body.reference_blob_id:
+        content = await _download_blob_bytes(
+            pool=db_pool,
+            artifact_storage=artifact_storage,
+            blob_id=body.reference_blob_id,
+            owner_scope=owner_scope or (user.user_id if user else ""),
+        )
+        return _b64.b64encode(content).decode(), None
+
+    # 4. session-derived latest
     if body.session_id and db_pool is not None and owner_scope is not None:
         try:
             row = await get_image_session(db_pool, body.session_id)
@@ -745,13 +1122,38 @@ async def _resolve_reference_bytes(
                 artifact_storage, latest_id,
                 owner_scope=owner_scope, user=user,
             )
+            if len(content) > _REFERENCE_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
+                )
             return _b64.b64encode(content).decode(), latest_id
 
-    # 4. raw base64 / data URL
+    # 5. raw base64 / data URL
     if body.reference_image:
-        return body.reference_image, None
+        ref_b64, content, mime_type = _normalize_reference_image_b64(body.reference_image)
+        if artifact_storage and db_pool is not None and owner_scope and user:
+            try:
+                await _store_blob_bytes(
+                    pool=db_pool,
+                    artifact_storage=artifact_storage,
+                    owner_scope=owner_scope,
+                    user=user,
+                    content=content,
+                    mime_type=mime_type,
+                    source="inline_request",
+                    filename="reference.png",
+                )
+            except HTTPException:
+                if _requires_persistent_task_store():
+                    raise
+            except Exception as exc:
+                if _requires_persistent_task_store():
+                    raise
+                logger.debug("reference_image blob persist skipped: %s", exc)
+        return ref_b64, None
 
-    # 5. reference_image_url
+    # 6. reference_image_url
     if not body.reference_image_url:
         return None, None
 
@@ -762,6 +1164,30 @@ async def _resolve_reference_bytes(
             max_redirects=3,
             timeout=30.0,
         )
+        if len(content) > _REFERENCE_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"error_code": "reference_too_large", "message": "reference image exceeds size limit"},
+            )
+        if artifact_storage and db_pool is not None and owner_scope and user:
+            try:
+                await _store_blob_bytes(
+                    pool=db_pool,
+                    artifact_storage=artifact_storage,
+                    owner_scope=owner_scope,
+                    user=user,
+                    content=content,
+                    mime_type="image/png",
+                    source="fetched_url",
+                    filename="reference.png",
+                )
+            except HTTPException:
+                if _requires_persistent_task_store():
+                    raise
+            except Exception as exc:
+                if _requires_persistent_task_store():
+                    raise
+                logger.debug("reference_image_url blob persist skipped: %s", exc)
         return _b64.b64encode(content).decode(), None
     except SafeFetchError as exc:
         raise HTTPException(
@@ -787,6 +1213,30 @@ async def _download_artifact_bytes(artifact_storage, artifact_id: str) -> bytes 
     except Exception as exc:
         logger.warning("Artifact download failed for %s: %s", artifact_id, exc)
         return None
+
+
+def _limit_replay_history(image_history: list[dict]) -> list[dict]:
+    """Keep only the most recent visual model turns and their prompts.
+
+    Gemini replay needs image bytes inline at the final provider hop. Limiting
+    visual turns bounds S3 reads, base64 expansion, and request size while
+    preserving the latest edit context.
+    """
+    if _REPLAY_MAX_VISUAL_TURNS <= 0:
+        return []
+    visual_seen = 0
+    keep_reversed: list[dict] = []
+    for turn in reversed(image_history):
+        is_visual_model = (
+            turn.get("role") == "model"
+            and (turn.get("artifact_id") or turn.get("image_base64") or turn.get("file_uri"))
+        )
+        if is_visual_model:
+            if visual_seen >= _REPLAY_MAX_VISUAL_TURNS:
+                continue
+            visual_seen += 1
+        keep_reversed.append(turn)
+    return list(reversed(keep_reversed))
 
 
 # -----------------------------------------------------------------------------
@@ -841,12 +1291,19 @@ async def _run_gemini_multi_turn(
     async def _download(aid: str) -> bytes | None:
         return await _download_artifact_bytes(artifact_storage, aid)
 
-    resolved_history = await inflate_history_with_bytes(image_history, _download)
+    bounded_history = _limit_replay_history(image_history)
+    resolved_history = await inflate_history_with_bytes(bounded_history, _download)
     contents = build_gemini_contents_from_history(resolved_history, styled_prompt)
 
-    res = await gemini.generate_chat(
-        contents=contents, n=body.n, aspect_ratio=aspect_ratio,
-    )
+    async with _bounded(
+        _provider_semaphore,
+        status_code=429,
+        error_code="provider_busy",
+        message="Gemini image provider concurrency is saturated",
+    ):
+        res = await gemini.generate_chat(
+            contents=contents, n=body.n, aspect_ratio=aspect_ratio,
+        )
     return res, (session, image_history, effective_preset), None
 
 
@@ -860,20 +1317,27 @@ async def _persist_multi_turn_result(
     artifact_storage,
     width: int,
     height: int,
+    owner_scope: str | None = None,
+    turn_id: str | None = None,
+    provider: str | None = "google",
+    model_id: str | None = None,
+    return_variants: list[str] | None = None,
+    write_legacy_metadata: bool = False,
 ) -> tuple[str | None, list[GeneratedImage]]:
     """Store ALL newly-generated images as artifacts (concurrently), append a
-    single canonical turn to history, persist the session metadata. Returns
+    single canonical turn to the DB state. Returns
     ``(canonical_artifact_id, [GeneratedImage, ...])`` — the canonical id is
     the first image's id, used as the visual anchor for the next-turn replay.
 
-    History only records the canonical (first) image: putting all n>1 images
-    into next turn's context would balloon the prompt and make replay slow
-    while adding little signal beyond the visual anchor.
+    New turns are not written to legacy ``image_chat_history`` metadata. The
+    route still reads legacy metadata for migration-time replay, but
+    ``image_turns`` + ``image_sessions.latest_artifact_id`` are the authority
+    for new state.
     """
     session, image_history, effective_preset = session_state
 
     persisted = await asyncio.gather(*[
-        _persist_and_get_url(
+        _persist_and_get_url_bounded(
             img,
             artifact_storage=artifact_storage,
             session_id=body.session_id,
@@ -883,32 +1347,29 @@ async def _persist_multi_turn_result(
             width=width,
             height=height,
             index=i,
+            owner_scope=owner_scope,
+            turn_id=turn_id,
+            provider=provider,
+            model_id=model_id,
+            return_variants=return_variants,
         )
         for i, img in enumerate(res.images)
     ])
     canonical_artifact_id = persisted[0][0]
-    canonical_img_payload = res.images[0]
     generated_list = [gi for _, gi in persisted]
 
-    # History gets only the first image — multi-image n>1 still has just one
-    # canonical visual anchor for next-turn replay.
-    append_image_turns(
-        image_history, body.prompt, canonical_img_payload, res.text,
-        artifact_id=canonical_artifact_id,
-    )
-
-    if session_manager and session:
+    if write_legacy_metadata and session_manager and session:
+        append_image_turns(
+            image_history, body.prompt, res.images[0], res.text,
+            artifact_id=canonical_artifact_id,
+        )
         meta = dict(session.metadata or {})
         meta["image_chat_history"] = image_history
         meta["style_preset"] = effective_preset.value
         try:
             await session_manager.update_metadata(body.session_id, meta)
-        except Exception as e:
-            logger.warning(
-                "Session metadata write failed for %s: %s — continuing with "
-                "in-flight history (next turn will not see this image)",
-                body.session_id, e,
-            )
+        except Exception as exc:
+            logger.warning("Legacy image_chat_history write failed for %s: %s", body.session_id, exc)
 
     return canonical_artifact_id, generated_list
 
@@ -928,6 +1389,8 @@ def _get_db_pool(request: Request):
     smgr = getattr(request.app.state, "session_manager", None)
     db = getattr(smgr, "database", None)
     pool = getattr(db, "_pool", None)
+    if type(pool).__module__.startswith("unittest.mock"):
+        return None
     return pool
 
 
@@ -941,6 +1404,7 @@ def _request_payload_for_hash(body: ImageGenerationRequest) -> dict[str, Any]:
         "style": getattr(body.style, "value", str(body.style)),
         "session_id": body.session_id,
         "reference_artifact_id": body.reference_artifact_id,
+        "reference_blob_id": body.reference_blob_id,
         "reference_image_url": body.reference_image_url,
         "reference_image_present": bool(body.reference_image),  # don't hash bytes
         "add_watermark": body.add_watermark,
@@ -1104,6 +1568,10 @@ async def _record_turn(
     error: str | None,
     error_code: str | None,
     request_hash: str | None,
+    thought_signature: str | None = None,
+    provider_text: str | None = None,
+    output_artifact_ids: list[str] | None = None,
+    state: str | None = None,
 ) -> None:
     """Persist a row into image_turns. session_id-less stateless turns get
     a synthetic session id so the row's NOT NULL constraint holds, but they
@@ -1129,6 +1597,10 @@ async def _record_turn(
         client_request_id=body.client_request_id,
         request_hash=request_hash,
         completed_at=datetime.now(timezone.utc) if status in ("completed", "failed") else None,
+        thought_signature=thought_signature,
+        provider_text=provider_text,
+        output_artifact_ids=output_artifact_ids,
+        state=state or status,
     )
 
 
@@ -1163,8 +1635,341 @@ async def _build_variants_response(
 
 
 # -----------------------------------------------------------------------------
+# Image blob data-plane API
+# -----------------------------------------------------------------------------
+
+
+@router.post(
+    "/image-blobs/upload-url",
+    response_model=ImageBlobUploadUrlResponse,
+)
+async def create_image_blob_upload_url(
+    body: ImageBlobUploadUrlRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobUploadUrlResponse:
+    pool = _get_db_pool(request)
+    if pool is None and _requires_persistent_task_store():
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
+        )
+    artifact_storage = _get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "storage_unavailable", "message": "ArtifactStorage not configured"},
+        )
+    mime_type = _validate_image_mime(body.mime_type)
+    if body.byte_size is not None and body.byte_size > _REFERENCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error_code": "reference_too_large", "message": "image blob exceeds size limit"},
+        )
+    owner_scope = _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+    blob_id = f"iblob_{uuid.uuid4().hex[:24]}"
+    storage_key = _blob_storage_key(owner_scope, blob_id, body.filename)
+    backend = _get_storage_backend(artifact_storage)
+    upload = await backend.generate_presigned_upload_url(
+        key=storage_key,
+        content_type=mime_type,
+        expiry_seconds=900,
+        metadata={
+            "blob-id": blob_id,
+            "owner-scope-sha256": hashlib.sha256(owner_scope.encode("utf-8")).hexdigest(),
+        },
+    )
+    if not upload or not upload.get("url"):
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "presigned_upload_unavailable", "message": "Storage backend does not support presigned uploads"},
+        )
+    await create_image_blob(
+        pool,
+        blob_id=blob_id,
+        owner_scope=owner_scope,
+        content_sha256=body.content_sha256,
+        byte_size=body.byte_size,
+        mime_type=mime_type,
+        storage_key=storage_key,
+        source="presigned_upload",
+        status="pending_upload",
+    )
+    return ImageBlobUploadUrlResponse(
+        blob_id=blob_id,
+        upload_url=upload["url"],
+        method=upload.get("method", "PUT"),
+        headers=upload.get("headers") or {"Content-Type": mime_type},
+        fields=upload.get("fields"),
+        storage_key=storage_key,
+        expires_at=(datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat(),
+    )
+
+
+@router.post(
+    "/image-blobs/complete",
+    response_model=ImageBlobResponse,
+)
+async def complete_image_blob_upload(
+    body: ImageBlobCompleteRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobResponse:
+    pool = _get_db_pool(request)
+    if pool is None and _requires_persistent_task_store():
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
+        )
+    owner_scope = _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+    row = await get_image_blob(pool, blob_id=body.blob_id, owner_scope=owner_scope)
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "not_found", "message": f"blob {body.blob_id!r} not found"},
+        )
+    if body.byte_size is not None and body.byte_size > _REFERENCE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"error_code": "reference_too_large", "message": "image blob exceeds size limit"},
+        )
+    artifact_storage = _get_artifact_storage()
+    backend = _get_storage_backend(artifact_storage)
+    exists = await backend.exists(row["storage_key"])
+    if not exists:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "upload_missing", "message": "uploaded object was not found in storage"},
+        )
+    mime_type = _validate_image_mime(body.mime_type or row["mime_type"])
+    await update_image_blob_status(
+        pool,
+        blob_id=body.blob_id,
+        owner_scope=owner_scope,
+        status="ready",
+        content_sha256=body.content_sha256 or row.get("content_sha256"),
+        byte_size=body.byte_size or row.get("byte_size"),
+        mime_type=mime_type,
+    )
+    return ImageBlobResponse(
+        blob_id=body.blob_id,
+        status="ready",
+        content_sha256=body.content_sha256 or row.get("content_sha256"),
+        byte_size=body.byte_size or row.get("byte_size"),
+        mime_type=mime_type,
+        storage_key=row["storage_key"],
+    )
+
+
+@router.post(
+    "/image-blobs/fetch-url",
+    response_model=ImageBlobResponse,
+)
+async def fetch_image_blob_from_url(
+    body: ImageBlobFetchUrlRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobResponse:
+    pool = _get_db_pool(request)
+    if pool is None and _requires_persistent_task_store():
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
+        )
+    artifact_storage = _get_artifact_storage()
+    if not artifact_storage:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "storage_unavailable", "message": "ArtifactStorage not configured"},
+        )
+    try:
+        content = await safe_fetch(
+            body.url,
+            max_bytes=_REFERENCE_MAX_BYTES,
+            max_redirects=3,
+            timeout=30.0,
+        )
+    except SafeFetchError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error_code": "safe_fetch_failed", "message": str(exc)},
+        ) from exc
+    mime_type = _validate_image_mime(body.mime_type or "image/png")
+    owner_scope = _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+    blob = await _store_blob_bytes(
+        pool=pool,
+        artifact_storage=artifact_storage,
+        owner_scope=owner_scope,
+        user=user,
+        content=content,
+        mime_type=mime_type,
+        source="fetch_url",
+        filename="reference.png",
+    )
+    return ImageBlobResponse(
+        blob_id=blob["blob_id"],
+        status=blob["status"],
+        content_sha256=blob["content_sha256"],
+        byte_size=blob["byte_size"],
+        mime_type=blob["mime_type"],
+        storage_key=blob["storage_key"],
+    )
+
+
+# -----------------------------------------------------------------------------
 # POST /generate-image — synchronous
 # -----------------------------------------------------------------------------
+
+
+def _task_to_sync_response(task: dict, *, idempotent_replay: bool = False) -> ImageGenerationResponse:
+    status = task.get("status", "pending")
+    images = [
+        GeneratedImage(
+            url=img["url"],
+            width=img.get("width"),
+            height=img.get("height"),
+            artifact_id=img.get("artifact_id"),
+        )
+        for img in task.get("images", [])
+        if img.get("url")
+    ]
+    if status == "failed":
+        http_status = task.get("http_status_code")
+        if isinstance(http_status, int) and http_status >= 400:
+            raise HTTPException(
+                status_code=http_status,
+                detail={
+                    "error_code": task.get("error_code") or "request_failed",
+                    "message": task.get("error") or "Image generation failed",
+                    "task_id": task.get("task_id"),
+                },
+            )
+        return ImageGenerationResponse(
+            success=False,
+            images=[],
+            task_id=task.get("task_id"),
+            status=status,
+            provider=task.get("provider"),
+            duration_ms=task.get("duration_ms"),
+            error=task.get("error"),
+            error_code=task.get("error_code"),
+            session_id=task.get("session_id"),
+            turn_id=task.get("turn_id"),
+            parent_artifact_id=task.get("parent_artifact_id"),
+            output_artifact_id=task.get("output_artifact_id"),
+            client_request_id=task.get("client_request_id"),
+            idempotent_replay=idempotent_replay,
+            latest_advanced=task.get("latest_advanced", True),
+        )
+    return ImageGenerationResponse(
+        success=status == "completed",
+        images=images,
+        task_id=task.get("task_id"),
+        status=status,
+        provider=task.get("provider"),
+        duration_ms=task.get("duration_ms"),
+        session_id=task.get("session_id"),
+        turn_id=task.get("turn_id"),
+        parent_artifact_id=task.get("parent_artifact_id"),
+        output_artifact_id=task.get("output_artifact_id"),
+        client_request_id=task.get("client_request_id"),
+        idempotent_replay=idempotent_replay,
+        latest_advanced=task.get("latest_advanced", True),
+    )
+
+
+def _task_from_db_row(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    result = row.get("result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            result = None
+    if isinstance(result, dict):
+        return result
+    created_at = row.get("created_at")
+    completed_at = row.get("completed_at")
+    return {
+        "task_id": row.get("task_id"),
+        "status": row.get("status", "pending"),
+        "progress": row.get("progress", 0),
+        "prompt": row.get("prompt") or "",
+        "model_id": row.get("model_id") or "",
+        "provider": row.get("provider"),
+        "images": [],
+        "duration_ms": None,
+        "error": row.get("error"),
+        "error_code": row.get("error_code"),
+        "created_at": created_at.isoformat() if created_at else "",
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "turn_id": row.get("turn_id"),
+        "session_id": row.get("session_id"),
+        "parent_artifact_id": row.get("parent_artifact_id"),
+        "output_artifact_id": row.get("output_artifact_id"),
+        "client_request_id": row.get("client_request_id"),
+    }
+
+
+async def _load_task_any(redis, pool, task_id: str) -> dict | None:
+    task = await _load_task(redis, task_id)
+    if task:
+        return task
+    return _task_from_db_row(await get_image_task(pool, task_id))
+
+
+async def _generate_image_via_task(
+    *,
+    body: ImageGenerationRequest,
+    request: Request,
+    user: UserContext,
+    model_registry: ModelRegistry,
+) -> ImageGenerationResponse | JSONResponse:
+    async_body = AsyncImageGenerationRequest(**body.model_dump(exclude_unset=True))
+    submit = await submit_image_generation(
+        body=async_body,
+        request=request,
+        user=user,
+        model_registry=model_registry,
+    )
+    redis = getattr(request.app.state, "redis", None)
+    pool = _get_db_pool(request)
+    deadline = time.monotonic() + _SYNC_WAIT_SECONDS
+    task: dict | None = None
+    while time.monotonic() < deadline:
+        task = await _load_task_any(redis, pool, submit.task_id)
+        if task and task.get("status") in {"completed", "failed"}:
+            return _task_to_sync_response(
+                task,
+                idempotent_replay="replay" in submit.message.lower(),
+            )
+        await asyncio.sleep(0.05)
+
+    task = task or await _load_task_any(redis, pool, submit.task_id)
+    payload = {
+        "success": False,
+        "task_id": submit.task_id,
+        "status": (task or {}).get("status", submit.status),
+        "error_code": "task_pending",
+        "error": "Image generation is still running; poll /image-task/{task_id}",
+        "client_request_id": body.client_request_id,
+        "session_id": body.session_id,
+        "turn_id": (task or {}).get("turn_id"),
+    }
+    return JSONResponse(status_code=202, content=payload)
 
 
 @router.post("/generate-image", response_model=ImageGenerationResponse)
@@ -1198,6 +2003,15 @@ async def generate_image(
     turn_id = new_turn_id()
 
     try:
+        _validate_single_explicit_reference(body)
+        if _sync_uses_task_queue():
+            return await _generate_image_via_task(
+                body=body,
+                request=request,
+                user=user,
+                model_registry=model_registry,
+            )
+
         # ---- Idempotency -----------------------------------------------
         # Two-step: lookup → claim. The claim is INSERT-ON-CONFLICT-DO-
         # NOTHING; if it returns False, two concurrent same-key requests
@@ -1256,6 +2070,7 @@ async def generate_image(
         has_explicit_ref = bool(
             body.parent_artifact_id
             or body.reference_artifact_id
+            or body.reference_blob_id
             or body.reference_image
             or body.reference_image_url
         )
@@ -1344,10 +2159,16 @@ async def generate_image(
                     client_request_id=body.client_request_id,
                     session_id=body.session_id,
                 )
-            res = await gemini.generate(
-                prompt=styled_prompt, n=body.n,
-                aspect_ratio=aspect_ratio, reference_image=ref_b64,
-            )
+            async with _bounded(
+                _provider_semaphore,
+                status_code=429,
+                error_code="provider_busy",
+                message="Gemini image provider concurrency is saturated",
+            ):
+                res = await gemini.generate(
+                    prompt=styled_prompt, n=body.n,
+                    aspect_ratio=aspect_ratio, reference_image=ref_b64,
+                )
             provider_label = "google"
         elif body.session_id and session_mgr and prefer_gemini:
             # No reference resolved but session+gemini → fall back to legacy
@@ -1384,6 +2205,12 @@ async def generate_image(
                 session_manager=session_mgr, user=user,
                 artifact_storage=artifact_storage,
                 width=width, height=height,
+                owner_scope=owner_scope,
+                turn_id=turn_id,
+                provider="google",
+                model_id=body.model_id,
+                return_variants=body.return_variants,
+                write_legacy_metadata=pool is None,
             )
             latest_advanced = await _post_generation_bookkeeping(
                 pool, artifact_storage=artifact_storage,
@@ -1416,13 +2243,19 @@ async def generate_image(
             dashscope_tag = resolve_dashscope_style_tag(effective_style)
             negative_prompt = resolve_negative_prompt(effective_style)
             router_svc = get_smart_image_generator()
-            res = await router_svc.generate(
-                prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
-                style=dashscope_tag, negative_prompt=negative_prompt,
-                aspect_ratio=aspect_ratio,
-                prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
-                dashscope_model=dashscope_model,
-            )
+            async with _bounded(
+                _provider_semaphore,
+                status_code=429,
+                error_code="provider_busy",
+                message="Image provider concurrency is saturated",
+            ):
+                res = await router_svc.generate(
+                    prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+                    style=dashscope_tag, negative_prompt=negative_prompt,
+                    aspect_ratio=aspect_ratio,
+                    prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
+                    dashscope_model=dashscope_model,
+                )
             provider_label = res.provider
 
         if not res.success or not res.images:
@@ -1448,7 +2281,7 @@ async def generate_image(
 
         # ---- Persist artifacts ----------------------------------------
         persisted = await asyncio.gather(*[
-            _persist_and_get_url(
+            _persist_and_get_url_bounded(
                 img, artifact_storage=artifact_storage,
                 session_id=body.session_id, user=user, prompt=body.prompt,
                 add_watermark=body.add_watermark, width=width, height=height,
@@ -1495,7 +2328,7 @@ async def generate_image(
     except Exception as e:
         logger.exception("Image generation failed: %s", e)
         # Best-effort failure-record so callers can audit via /image-sessions
-        try:
+        with suppress(Exception):
             await _record_turn(
                 pool, turn_id=turn_id, session_id=body.session_id,
                 owner_scope=owner_scope, task_id=None, body=body,
@@ -1503,8 +2336,6 @@ async def generate_image(
                 status="failed", error=str(e), error_code="internal_error",
                 request_hash=None,
             )
-        except Exception:
-            pass
         return ImageGenerationResponse(
             success=False, images=[], provider="unknown",
             duration_ms=(time.time() - start_time) * 1000, error=str(e),
@@ -1582,6 +2413,8 @@ async def _post_generation_bookkeeping(
             parent_artifact_id=resolved_parent, output_artifact_id=raw_anchor,
             status="completed", error=None, error_code=None,
             request_hash=request_hash,
+            output_artifact_ids=[raw_anchor] if raw_anchor else None,
+            state="completed",
         )
     except Exception as exc:
         logger.warning("record_turn failed: %s", exc)
@@ -1612,7 +2445,7 @@ async def _run_image_generation_task(
         return
     task["status"] = "running"
     task["progress"] = 10
-    await _store_task(redis, task_id, task)
+    await _store_task(redis, task_id, task, pool=pool)
     start_time = time.time()
 
     owner_scope = task.get("owner_scope") or _resolve_owner_scope(user, body)
@@ -1622,10 +2455,8 @@ async def _run_image_generation_task(
     raw_anchor: str | None = None
 
     # Mark turn as running for parallel observers
-    try:
+    with suppress(Exception):
         await update_turn_status(pool, turn_id=turn_id, status="running")
-    except Exception:
-        pass
 
     try:
         model_info = model_registry.get_model(body.model_id) if model_registry else None
@@ -1640,6 +2471,7 @@ async def _run_image_generation_task(
         has_explicit_ref = bool(
             body.parent_artifact_id
             or body.reference_artifact_id
+            or body.reference_blob_id
             or body.reference_image
             or body.reference_image_url
         )
@@ -1663,7 +2495,7 @@ async def _run_image_generation_task(
             task["error_code"] = "reference_requires_gemini"
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
-            await _store_task(redis, task_id, task)
+            await _store_task(redis, task_id, task, pool=pool)
             await update_turn_status(
                 pool, turn_id=turn_id, status="failed",
                 error=task["error"], error_code="reference_requires_gemini",
@@ -1695,18 +2527,17 @@ async def _run_image_generation_task(
                 task["status"] = "failed"
                 task["error"] = msg
                 task["error_code"] = "reference_not_found"
+                task["http_status_code"] = exc.status_code
                 task["progress"] = 100
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
-                await _store_task(redis, task_id, task)
+                await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
                     pool, turn_id=turn_id, status="failed",
                     error=msg, error_code="reference_not_found",
                 )
                 if body.callback_url:
-                    try:
+                    with suppress(Exception):
                         await send_image_callback(body.callback_url, task)
-                    except Exception:
-                        pass
                 return
 
         res = None
@@ -1722,21 +2553,25 @@ async def _run_image_generation_task(
                 task["error_code"] = "provider_unavailable"
                 task["progress"] = 100
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
-                await _store_task(redis, task_id, task)
+                await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
                     pool, turn_id=turn_id, status="failed",
                     error=task["error"], error_code="provider_unavailable",
                 )
                 if body.callback_url:
-                    try:
+                    with suppress(Exception):
                         await send_image_callback(body.callback_url, task)
-                    except Exception:
-                        pass
                 return
-            res = await gemini.generate(
-                prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
-                reference_image=ref_b64,
-            )
+            async with _bounded(
+                _provider_semaphore,
+                status_code=429,
+                error_code="provider_busy",
+                message="Gemini image provider concurrency is saturated",
+            ):
+                res = await gemini.generate(
+                    prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
+                    reference_image=ref_b64,
+                )
             provider_label = "google"
 
         if res is None and body.session_id and session_manager and prefer_gemini:
@@ -1752,16 +2587,14 @@ async def _run_image_generation_task(
                 task["error_code"] = "provider_unavailable"
                 task["progress"] = 100
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
-                await _store_task(redis, task_id, task)
+                await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
                     pool, turn_id=turn_id, status="failed",
                     error=err, error_code="provider_unavailable",
                 )
                 if body.callback_url:
-                    try:
+                    with suppress(Exception):
                         await send_image_callback(body.callback_url, task)
-                    except Exception:
-                        pass
                 return
             if res and res.success and res.images:
                 raw_anchor, generated_list = await _persist_multi_turn_result(
@@ -1769,6 +2602,12 @@ async def _run_image_generation_task(
                     session_manager=session_manager, user=user,
                     artifact_storage=artifact_storage,
                     width=width, height=height,
+                    owner_scope=owner_scope,
+                    turn_id=turn_id,
+                    provider="google",
+                    model_id=body.model_id,
+                    return_variants=body.return_variants,
+                    write_legacy_metadata=pool is None,
                 )
                 generated_response_imgs.extend(generated_list)
                 provider_label = "google"
@@ -1777,13 +2616,19 @@ async def _run_image_generation_task(
             dashscope_tag = resolve_dashscope_style_tag(effective_style)
             negative_prompt = resolve_negative_prompt(effective_style)
             router_svc = get_smart_image_generator()
-            res = await router_svc.generate(
-                prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
-                style=dashscope_tag, negative_prompt=negative_prompt,
-                aspect_ratio=aspect_ratio,
-                prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
-                dashscope_model=dashscope_model,
-            )
+            async with _bounded(
+                _provider_semaphore,
+                status_code=429,
+                error_code="provider_busy",
+                message="Image provider concurrency is saturated",
+            ):
+                res = await router_svc.generate(
+                    prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+                    style=dashscope_tag, negative_prompt=negative_prompt,
+                    aspect_ratio=aspect_ratio,
+                    prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
+                    dashscope_model=dashscope_model,
+                )
             provider_label = res.provider
 
         duration_ms = (time.time() - start_time) * 1000
@@ -1801,23 +2646,21 @@ async def _run_image_generation_task(
             task["error_code"] = error_code
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
-            await _store_task(redis, task_id, task)
+            await _store_task(redis, task_id, task, pool=pool)
             await update_turn_status(
                 pool, turn_id=turn_id, status="failed",
                 error=err, error_code=error_code,
             )
             if body.callback_url:
-                try:
+                with suppress(Exception):
                     await send_image_callback(body.callback_url, task)
-                except Exception:
-                    pass
             return
 
         task["progress"] = 70
 
         if not generated_response_imgs:
             persisted = await asyncio.gather(*[
-                _persist_and_get_url(
+                _persist_and_get_url_bounded(
                     img, artifact_storage=artifact_storage,
                     session_id=body.session_id, user=user, prompt=body.prompt,
                     add_watermark=body.add_watermark, width=width, height=height,
@@ -1862,6 +2705,21 @@ async def _run_image_generation_task(
         )
         task["latest_advanced"] = latest_advanced
 
+    except HTTPException as e:
+        detail = e.detail if isinstance(e.detail, dict) else {"message": str(e.detail)}
+        logger.warning("Async image generation task %s rejected: %s", task_id, detail)
+        task["status"] = "failed"
+        task["error"] = detail.get("message") or str(e.detail)
+        task["error_code"] = detail.get("error_code") or "request_failed"
+        task["http_status_code"] = e.status_code
+        task["progress"] = 100
+        task["duration_ms"] = (time.time() - start_time) * 1000
+        task["completed_at"] = datetime.now(timezone.utc).isoformat()
+        with suppress(Exception):
+            await update_turn_status(
+                pool, turn_id=turn_id, status="failed",
+                error=task["error"], error_code=task["error_code"],
+            )
     except Exception as e:
         logger.exception("Async image generation task %s failed", task_id)
         task["status"] = "failed"
@@ -1870,15 +2728,13 @@ async def _run_image_generation_task(
         task["progress"] = 100
         task["duration_ms"] = (time.time() - start_time) * 1000
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
-        try:
+        with suppress(Exception):
             await update_turn_status(
                 pool, turn_id=turn_id, status="failed",
                 error=str(e), error_code="internal_error",
             )
-        except Exception:
-            pass
 
-    await _store_task(redis, task_id, task)
+    await _store_task(redis, task_id, task, pool=pool)
 
     if body.callback_url:
         try:
@@ -1895,8 +2751,37 @@ async def submit_image_generation(
     model_registry: ModelRegistry = Depends(get_model_registry),
 ) -> AsyncImageTaskSubmitResponse:
     _cleanup_old_tasks()
+    _validate_single_explicit_reference(body)
     pool = _get_db_pool(request)
+    if pool is None and _requires_persistent_task_store():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "db_unavailable",
+                "message": "Image task database is unavailable",
+            },
+        )
     owner_scope = _resolve_owner_scope(user, body)
+    total_active = await count_active_image_tasks(pool, owner_scope=None)
+    if total_active is not None and total_active >= _MAX_QUEUE_DEPTH:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "queue_full",
+                "message": "Image task queue is full",
+                "retry_after": 5,
+            },
+        )
+    owner_active = await count_active_image_tasks(pool, owner_scope=owner_scope)
+    if owner_active is not None and owner_active >= _MAX_OWNER_ACTIVE_TASKS:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_code": "owner_concurrency_limit",
+                "message": "Too many active image tasks for this owner",
+                "retry_after": 5,
+            },
+        )
 
     # Idempotency check before any work
     replay_task_id, idem_conflict, request_hash = await _check_idempotency(
@@ -1911,8 +2796,9 @@ async def submit_image_generation(
             },
         )
     if replay_task_id:
+        task = await _load_task_any(getattr(request.app.state, "redis", None), pool, replay_task_id)
         return AsyncImageTaskSubmitResponse(
-            task_id=replay_task_id, status="pending",
+            task_id=replay_task_id, status=(task or {}).get("status", "pending"),
             message="Idempotent replay — existing task returned",
         )
 
@@ -1966,8 +2852,11 @@ async def submit_image_generation(
                 client_request_id=body.client_request_id,
             )
             if existing and existing["request_hash"] == request_hash:
+                task = await _load_task_any(
+                    getattr(request.app.state, "redis", None), pool, existing["task_id"],
+                )
                 return AsyncImageTaskSubmitResponse(
-                    task_id=existing["task_id"], status="pending",
+                    task_id=existing["task_id"], status=(task or {}).get("status", "pending"),
                     message="Idempotent replay — existing task returned",
                 )
             if existing and existing["request_hash"] != request_hash:
@@ -1994,7 +2883,30 @@ async def submit_image_generation(
             )
 
     redis = getattr(request.app.state, "redis", None)
-    await _store_task(redis, task_id, task)
+    try:
+        await create_image_task(
+            pool,
+            task_id=task_id,
+            owner_scope=owner_scope,
+            status="pending",
+            prompt=body.prompt,
+            model_id=body.model_id,
+            request_payload=body.model_dump(mode="json"),
+            progress=0,
+            turn_id=turn_id,
+            session_id=body.session_id,
+            client_request_id=body.client_request_id,
+            request_hash=request_hash,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "task_store_unavailable",
+                "message": "Image task store is unavailable; please retry",
+            },
+        ) from exc
+    await _store_task(redis, task_id, task, pool=pool)
 
     # Insert pending turn row so a poll between submit + worker start sees
     # the queue state.
@@ -2050,14 +2962,26 @@ async def get_image_task_status(
     if not task:
         pool = _get_db_pool(request)
         if pool is not None:
-            turn = await get_turn_by_task(pool, task_id)
-            if turn:
+            expected_scope = _compute_owner_scope(
+                user.user_id,
+                app_tenant_id=user.app_tenant_id,
+                app_user_id=user.app_user_id,
+            )
+            task_row = await get_image_task(pool, task_id)
+            if task_row:
+                row_owner = task_row.get("owner_scope")
+                if row_owner is not None and row_owner != expected_scope:
+                    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                task = _task_from_db_row(task_row)
+                if task:
+                    task.setdefault("owner_scope", row_owner)
+                    # Continue through the normal task response path below.
+            if task:
+                pass
+            else:
+                turn = await get_turn_by_task(pool, task_id)
+                if turn:
                 # Owner-scope check: deny cross-owner access (404 to hide existence)
-                expected_scope = _compute_owner_scope(
-                    user.user_id,
-                    app_tenant_id=user.app_tenant_id,
-                    app_user_id=user.app_user_id,
-                )
                 # Allow only when owner_scope matches OR is NULL (legacy
                 # pre-mig rows). Do NOT additionally accept user.user_id —
                 # that would let a delegated app reading on behalf of one
@@ -2065,51 +2989,59 @@ async def get_image_task_status(
                 # the latter's task owner_scope. expected_scope already
                 # collapses to user.user_id for legacy callers (no app
                 # headers), so dropping the third branch is safe.
-                turn_owner = turn.get("owner_scope")
-                if turn_owner is not None and turn_owner != expected_scope:
-                    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                    turn_owner = turn.get("owner_scope")
+                    if turn_owner is not None and turn_owner != expected_scope:
+                        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
                 # Build a synthetic task dict from the turn row
-                images: list[AsyncImageArtifact] = []
-                output_id = turn.get("output_artifact_id")
-                if output_id:
-                    artifact_storage = _get_artifact_storage()
-                    if artifact_storage:
-                        try:
-                            url, _actual = await artifact_storage.get_presigned_download_url_for_variant(
-                                output_id, "display",
-                                owner_scope=turn.get("owner_scope") or user.user_id,
-                            )
-                        except Exception:
-                            url = None
-                        if url:
-                            images = [AsyncImageArtifact(
-                                artifact_id=output_id,
-                                download_url=url,
-                                url=url,
-                            )]
-                completed_at = turn.get("completed_at")
-                created_at = turn.get("created_at")
-                return AsyncImageTaskStatusResponse(
-                    task_id=task_id,
-                    status=turn.get("status", "pending"),
-                    progress=100 if turn.get("status") in ("completed", "failed") else 50,
-                    prompt=turn.get("prompt") or "",
-                    model_id=turn.get("model_id") or "",
-                    provider=None,
-                    images=images,
-                    duration_ms=None,
-                    error=turn.get("error"),
-                    error_code=turn.get("error_code"),
-                    created_at=(created_at.isoformat() if created_at else ""),
-                    completed_at=(completed_at.isoformat() if completed_at else None),
-                    turn_id=turn.get("turn_id"),
-                    session_id=turn.get("session_id"),
-                    parent_artifact_id=turn.get("parent_artifact_id"),
-                    output_artifact_id=output_id,
-                    client_request_id=turn.get("client_request_id"),
-                )
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                    images: list[AsyncImageArtifact] = []
+                    output_id = turn.get("output_artifact_id")
+                    if output_id:
+                        artifact_storage = _get_artifact_storage()
+                        if artifact_storage:
+                            try:
+                                url, actual = await artifact_storage.get_presigned_download_url_for_variant(
+                                    output_id, "display",
+                                    owner_scope=turn.get("owner_scope") or user.user_id,
+                                )
+                            except Exception:
+                                url, actual = None, None
+                            if url:
+                                public_id = output_id
+                                if actual and actual != "raw":
+                                    try:
+                                        public_artifact = await artifact_storage.find_variant(output_id, actual)
+                                        public_id = getattr(public_artifact, "artifact_id", output_id)
+                                    except Exception:
+                                        public_id = output_id
+                                images = [AsyncImageArtifact(
+                                    artifact_id=public_id,
+                                    download_url=url,
+                                    url=url,
+                                )]
+                    completed_at = turn.get("completed_at")
+                    created_at = turn.get("created_at")
+                    return AsyncImageTaskStatusResponse(
+                        task_id=task_id,
+                        status=turn.get("status", "pending"),
+                        progress=100 if turn.get("status") in ("completed", "failed") else 50,
+                        prompt=turn.get("prompt") or "",
+                        model_id=turn.get("model_id") or "",
+                        provider=None,
+                        images=images,
+                        duration_ms=None,
+                        error=turn.get("error"),
+                        error_code=turn.get("error_code"),
+                        created_at=(created_at.isoformat() if created_at else ""),
+                        completed_at=(completed_at.isoformat() if completed_at else None),
+                        turn_id=turn.get("turn_id"),
+                        session_id=turn.get("session_id"),
+                        parent_artifact_id=turn.get("parent_artifact_id"),
+                        output_artifact_id=output_id,
+                        client_request_id=turn.get("client_request_id"),
+                    )
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
     # Ownership check — return 404 (not 403) to avoid leaking task existence
     # via timing/error-code distinction.

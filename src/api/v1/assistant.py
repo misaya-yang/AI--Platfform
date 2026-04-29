@@ -23,34 +23,32 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from typing import Any
 
+from ai_gateway_core.storage import get_artifact_storage
+from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.enums import ModelProvider
-from ai_gateway_core.exceptions import PermissionDeniedError
-from ai_gateway_core.knowledge.utils import is_multimodal_embedding_model
-from ai_gateway_core.style_presets import StylePreset  # noqa: F401 — pydantic schema uses it
-from typing import Any
-from ai_gateway_core.storage import get_artifact_storage
 from ..deps import get_user_context
 from ..schemas.artifacts import ArtifactCreateRequest, ArtifactInfo, ArtifactListResponse
 from ..schemas.assistant import (
     AssistantChatRequest,
     AssistantChatResponse,
     AssistantConfigResponse,
-    DatasetInfoResponse,
-    DatasetsListResponse,
-    AsyncImageArtifact,
     AsyncImageGenerationRequest,
     AsyncImageTaskStatusResponse,
     AsyncImageTaskSubmitResponse,
-    GeneratedImage,
+    DatasetsListResponse,
+    ImageBlobCompleteRequest,
+    ImageBlobFetchUrlRequest,
+    ImageBlobResponse,
+    ImageBlobUploadUrlRequest,
+    ImageBlobUploadUrlResponse,
     ImageGenerationRequest,
     ImageGenerationResponse,
-    ModelInfoResponse,
     ModelsListResponse,
 )
 
@@ -1051,6 +1049,9 @@ async def submit_image_generation(
     user: UserContext = Depends(get_user_context),
 ) -> AsyncImageTaskSubmitResponse:
     """Thin proxy — background task lives in assistant-service's in-memory store."""
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="image_generate")
+
     from ._assistant_proxy import proxy_to_assistant_service
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
@@ -1068,6 +1069,54 @@ async def get_image_task_status(
     from ._assistant_proxy import proxy_to_assistant_service
     return await proxy_to_assistant_service(
         request, user, path=f"image-task/{task_id}",
+    )
+
+
+@router.post("/image-blobs/upload-url", response_model=ImageBlobUploadUrlResponse)
+async def create_image_blob_upload_url(
+    body: ImageBlobUploadUrlRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobUploadUrlResponse:
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="image_generate")
+
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="image-blobs/upload-url", body=body_bytes,
+    )
+
+
+@router.post("/image-blobs/complete", response_model=ImageBlobResponse)
+async def complete_image_blob_upload(
+    body: ImageBlobCompleteRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobResponse:
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="image_generate")
+
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="image-blobs/complete", body=body_bytes,
+    )
+
+
+@router.post("/image-blobs/fetch-url", response_model=ImageBlobResponse)
+async def fetch_image_blob_from_url(
+    body: ImageBlobFetchUrlRequest,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+) -> ImageBlobResponse:
+    from ..deps import enforce_rate_limit
+    await enforce_rate_limit(request, user, operation="image_generate")
+
+    from ._assistant_proxy import proxy_to_assistant_service
+    body_bytes = await request.body()
+    return await proxy_to_assistant_service(
+        request, user, path="image-blobs/fetch-url", body=body_bytes,
     )
 
 

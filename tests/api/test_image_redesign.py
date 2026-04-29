@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import uuid
 from copy import deepcopy
@@ -58,6 +59,8 @@ from assistant_service.api.routes.images import (
     _image_tasks,
     AsyncImageGenerationRequest,
     ImageGenerationRequest,
+    ImageBlobFetchUrlRequest,
+    fetch_image_blob_from_url,
     generate_image,
     get_artifact_download_url,
     get_image_session_view,
@@ -262,6 +265,24 @@ class _FakeArtifactStorage:
         return a
 
 
+class _FakeBlobBackend:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+
+    async def upload(self, key: str, content: bytes, content_type: str, metadata=None):
+        self.objects[key] = (content, content_type)
+        return f"s3://bucket/{key}"
+
+    async def download(self, key: str) -> bytes:
+        return self.objects[key][0]
+
+    async def exists(self, key: str) -> bool:
+        return key in self.objects
+
+    async def generate_presigned_upload_url(self, key: str, content_type: str, expiry_seconds=900, metadata=None):
+        return {"url": f"https://s3.example.com/upload/{key}", "method": "PUT"}
+
+
 # ---------------------------------------------------------------------------
 # In-memory image_state store + stub functions
 # ---------------------------------------------------------------------------
@@ -362,6 +383,10 @@ class _FakeImageStateStore:
         client_request_id: str | None,
         request_hash: str | None,
         completed_at=None,
+        thought_signature: str | None = None,
+        provider_text: str | None = None,
+        output_artifact_ids: list[str] | None = None,
+        state: str | None = None,
     ):
         existing = self.turns.get(turn_id)
         now = datetime.now(timezone.utc)
@@ -382,6 +407,10 @@ class _FakeImageStateStore:
                 "error_code": error_code,
                 "client_request_id": client_request_id,
                 "request_hash": request_hash,
+                "thought_signature": thought_signature,
+                "provider_text": provider_text,
+                "output_artifact_ids": output_artifact_ids,
+                "state": state or status,
                 "created_at": now,
                 "completed_at": completed_at,
             }
@@ -393,6 +422,13 @@ class _FakeImageStateStore:
                 existing["output_artifact_id"] = output_artifact_id
             if completed_at is not None:
                 existing["completed_at"] = completed_at
+            if thought_signature is not None:
+                existing["thought_signature"] = thought_signature
+            if provider_text is not None:
+                existing["provider_text"] = provider_text
+            if output_artifact_ids is not None:
+                existing["output_artifact_ids"] = output_artifact_ids
+            existing["state"] = state or status
 
     async def update_turn_status(
         self,
@@ -1292,6 +1328,136 @@ async def test_24_reference_image_base64_legacy_works():
     assert resp.success is True
     h.gemini.generate.assert_called_once()
     assert h.gemini.generate.call_args.kwargs["reference_image"] == PNG_B64
+
+
+@pytest.mark.asyncio
+async def test_p0_rejects_multiple_explicit_reference_sources():
+    user = _user()
+    with _Harness() as h:
+        with pytest.raises(Exception) as exc:
+            await generate_image(
+                body=ImageGenerationRequest(
+                    prompt="edit it",
+                    model_id=GEMINI_MODEL,
+                    parent_artifact_id="art_parent",
+                    reference_image=PNG_B64,
+                ),
+                request=_make_request(),
+                user=user,
+                model_registry=_registry_stub("google"),
+            )
+
+    assert getattr(exc.value, "status_code", None) == 422
+    assert exc.value.detail["error_code"] == "multiple_reference_sources"
+    h.gemini.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_p0_task_status_db_fallback_uses_public_display_artifact_id():
+    task_id = "task_db_cold"
+    owner_scope = "u1"
+    with _Harness() as h:
+        raw = await h.storage.create_artifact(
+            session_id="s",
+            tenant_id="t1",
+            user_id="u1",
+            type="image",
+            format="png",
+            title="raw",
+            filename="raw.png",
+            content=PNG_1X1,
+            source="image_generation",
+            variant="raw",
+            parent_artifact_id=None,
+            owner_scope=owner_scope,
+        )
+        display = await h.storage.create_artifact(
+            session_id="s",
+            tenant_id="t1",
+            user_id="u1",
+            type="image",
+            format="png",
+            title="display",
+            filename="display.png",
+            content=PNG_1X1,
+            source="image_generation_watermarked",
+            variant="display",
+            parent_artifact_id=raw.artifact_id,
+            owner_scope=owner_scope,
+        )
+        await h.state.insert_turn(
+            _POOL_SENTINEL,
+            turn_id="itn_cold",
+            session_id="s",
+            owner_scope=owner_scope,
+            task_id=task_id,
+            prompt="t",
+            model_id=GEMINI_MODEL,
+            style="default",
+            add_watermark=True,
+            parent_artifact_id=None,
+            output_artifact_id=raw.artifact_id,
+            status="completed",
+            error=None,
+            error_code=None,
+            client_request_id=None,
+            request_hash=None,
+            completed_at=datetime.now(timezone.utc),
+        )
+        _image_tasks.pop(task_id, None)
+        status = await get_image_task_status(
+            task_id=task_id,
+            request=_make_request(),
+            user=_user(),
+        )
+
+    assert status.output_artifact_id == raw.artifact_id
+    assert status.images[0].artifact_id == display.artifact_id
+    assert status.images[0].url.startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_p0_sync_short_wait_returns_202_when_task_still_running():
+    async def slow_generate(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return _gemini_image_result()
+
+    with _Harness() as h:
+        h.gemini.generate = AsyncMock(side_effect=slow_generate)
+        request = _make_request()
+        with patch.object(images_module, "_SYNC_WAIT_SECONDS", 0.001):
+            resp = await generate_image(
+                body=ImageGenerationRequest(
+                    prompt="slow edit",
+                    model_id=GEMINI_MODEL,
+                    reference_image=PNG_B64,
+                    add_watermark=False,
+                ),
+                request=request,
+                user=_user(),
+                model_registry=_registry_stub("google"),
+            )
+        assert getattr(resp, "status_code", None) == 202
+        payload = json.loads(resp.body)
+        assert payload["task_id"]
+        await asyncio.gather(*list(images_module._in_flight_workers), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_p0_fetch_url_creates_ready_blob_without_data_url_response():
+    with _Harness() as h:
+        h.storage._backend = _FakeBlobBackend()
+        with patch.object(images_module, "safe_fetch", new=AsyncMock(return_value=PNG_1X1)):
+            resp = await fetch_image_blob_from_url(
+                body=ImageBlobFetchUrlRequest(url="https://example.com/ref.png"),
+                request=_make_request(),
+                user=_user(),
+            )
+
+    assert resp.status == "ready"
+    assert resp.byte_size == len(PNG_1X1)
+    assert resp.content_sha256 is not None
+    assert resp.storage_key.startswith("image-blobs/")
 
 
 # ---- 25. Response payloads contain no base64 image data ----------------

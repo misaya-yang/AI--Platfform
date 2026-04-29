@@ -23,7 +23,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -194,28 +194,155 @@ async def advance_latest_artifact_cas(
     """
     if pool is None:
         return False
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT latest_artifact_id FROM assistant.image_sessions "
-                "WHERE session_id = $1 FOR UPDATE",
-                session_id,
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT latest_artifact_id FROM assistant.image_sessions "
+            "WHERE session_id = $1 FOR UPDATE",
+            session_id,
+        )
+        if row is None:
+            # Row missing — caller forgot to upsert. Refuse to silently
+            # create here; CAS semantics demand the row exist.
+            return False
+        current = row["latest_artifact_id"]
+        if current != expected_parent:
+            return False
+        await conn.execute(
+            "UPDATE assistant.image_sessions "
+            "SET latest_artifact_id = $1, updated_at = NOW() "
+            "WHERE session_id = $2",
+            new_artifact_id,
+            session_id,
+        )
+        return True
+
+
+# ----- image_blobs ---------------------------------------------------------
+
+
+async def create_image_blob(
+    pool,
+    *,
+    blob_id: str,
+    owner_scope: str,
+    content_sha256: str | None,
+    byte_size: int | None,
+    mime_type: str,
+    storage_key: str,
+    source: str,
+    status: str,
+    artifact_id: str | None = None,
+    error: str | None = None,
+) -> bool:
+    """Create or update an image blob pointer.
+
+    Real database failures intentionally propagate. Test/mock pools degrade to
+    ``False`` so route-unit tests can keep patching only the functions they
+    exercise.
+    """
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO assistant.image_blobs (
+                    blob_id, owner_scope, content_sha256, byte_size, mime_type,
+                    storage_key, source, status, artifact_id, error
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ON CONFLICT (blob_id) DO UPDATE SET
+                    content_sha256 = COALESCE(EXCLUDED.content_sha256, assistant.image_blobs.content_sha256),
+                    byte_size = COALESCE(EXCLUDED.byte_size, assistant.image_blobs.byte_size),
+                    mime_type = EXCLUDED.mime_type,
+                    storage_key = EXCLUDED.storage_key,
+                    source = EXCLUDED.source,
+                    status = EXCLUDED.status,
+                    artifact_id = COALESCE(EXCLUDED.artifact_id, assistant.image_blobs.artifact_id),
+                    error = EXCLUDED.error,
+                    completed_at = CASE
+                        WHEN EXCLUDED.status = 'ready' THEN NOW()
+                        ELSE assistant.image_blobs.completed_at
+                    END,
+                    updated_at = NOW()
+                """,
+                blob_id, owner_scope, content_sha256, byte_size, mime_type,
+                storage_key, source, status, artifact_id, error,
             )
-            if row is None:
-                # Row missing — caller forgot to upsert. Refuse to silently
-                # create here; CAS semantics demand the row exist.
-                return False
-            current = row["latest_artifact_id"]
-            if current != expected_parent:
-                return False
-            await conn.execute(
-                "UPDATE assistant.image_sessions "
-                "SET latest_artifact_id = $1, updated_at = NOW() "
-                "WHERE session_id = $2",
-                new_artifact_id,
-                session_id,
+    except (TypeError, AttributeError) as exc:
+        logger.debug("create_image_blob: non-real pool (%s) — False", exc)
+        return False
+    try:
+        return result.endswith(" 1")
+    except AttributeError:
+        return True
+
+
+async def get_image_blob(
+    pool,
+    *,
+    blob_id: str,
+    owner_scope: str | None = None,
+) -> dict | None:
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            if owner_scope is None:
+                row = await conn.fetchrow(
+                    "SELECT * FROM assistant.image_blobs WHERE blob_id = $1",
+                    blob_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM assistant.image_blobs "
+                    "WHERE blob_id = $1 AND owner_scope = $2",
+                    blob_id, owner_scope,
+                )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("get_image_blob: non-real pool (%s) — None", exc)
+        return None
+    return dict(row) if row else None
+
+
+async def update_image_blob_status(
+    pool,
+    *,
+    blob_id: str,
+    owner_scope: str,
+    status: str,
+    content_sha256: str | None = None,
+    byte_size: int | None = None,
+    mime_type: str | None = None,
+    artifact_id: str | None = None,
+    error: str | None = None,
+) -> bool:
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE assistant.image_blobs SET
+                    status = $3,
+                    content_sha256 = COALESCE($4, content_sha256),
+                    byte_size = COALESCE($5, byte_size),
+                    mime_type = COALESCE($6, mime_type),
+                    artifact_id = COALESCE($7, artifact_id),
+                    error = $8,
+                    completed_at = CASE WHEN $3 = 'ready' THEN NOW() ELSE completed_at END,
+                    updated_at = NOW()
+                WHERE blob_id = $1 AND owner_scope = $2
+                """,
+                blob_id, owner_scope, status, content_sha256, byte_size,
+                mime_type, artifact_id, error,
             )
-            return True
+    except (TypeError, AttributeError) as exc:
+        logger.debug("update_image_blob_status: non-real pool (%s) — False", exc)
+        return False
+    try:
+        return result.endswith(" 1")
+    except AttributeError:
+        return True
 
 
 # ----- image_turns ---------------------------------------------------------
@@ -240,6 +367,10 @@ async def insert_turn(
     client_request_id: str | None,
     request_hash: str | None,
     completed_at: datetime | None = None,
+    thought_signature: str | None = None,
+    provider_text: str | None = None,
+    output_artifact_ids: list[str] | None = None,
+    state: str | None = None,
 ) -> None:
     if pool is None:
         return
@@ -250,21 +381,29 @@ async def insert_turn(
                 turn_id, session_id, owner_scope, task_id, prompt, model_id,
                 style, add_watermark, parent_artifact_id, output_artifact_id,
                 status, error, error_code, client_request_id, request_hash,
-                completed_at
+                completed_at, thought_signature, provider_text,
+                output_artifact_ids, state
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17, $18, $19::jsonb, COALESCE($20, $11)
             )
             ON CONFLICT (turn_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 error = EXCLUDED.error,
                 error_code = EXCLUDED.error_code,
                 output_artifact_id = COALESCE(EXCLUDED.output_artifact_id, assistant.image_turns.output_artifact_id),
-                completed_at = COALESCE(EXCLUDED.completed_at, assistant.image_turns.completed_at)
+                completed_at = COALESCE(EXCLUDED.completed_at, assistant.image_turns.completed_at),
+                thought_signature = COALESCE(EXCLUDED.thought_signature, assistant.image_turns.thought_signature),
+                provider_text = COALESCE(EXCLUDED.provider_text, assistant.image_turns.provider_text),
+                output_artifact_ids = COALESCE(EXCLUDED.output_artifact_ids, assistant.image_turns.output_artifact_ids),
+                state = COALESCE(EXCLUDED.state, EXCLUDED.status)
             """,
             turn_id, session_id, owner_scope, task_id, prompt, model_id,
             style, add_watermark, parent_artifact_id, output_artifact_id,
             status, error, error_code, client_request_id, request_hash,
-            completed_at,
+            completed_at, thought_signature, provider_text,
+            json.dumps(output_artifact_ids) if output_artifact_ids is not None else None,
+            state,
         )
 
 
@@ -374,6 +513,198 @@ async def list_turns(
     return rows_d, next_cursor
 
 
+# ----- image_tasks ---------------------------------------------------------
+
+
+async def create_image_task(
+    pool,
+    *,
+    task_id: str,
+    owner_scope: str,
+    status: str,
+    prompt: str,
+    model_id: str,
+    request_payload: dict[str, Any],
+    progress: int = 0,
+    provider: str | None = None,
+    turn_id: str | None = None,
+    session_id: str | None = None,
+    parent_artifact_id: str | None = None,
+    output_artifact_id: str | None = None,
+    client_request_id: str | None = None,
+    request_hash: str | None = None,
+) -> bool:
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO assistant.image_tasks (
+                    task_id, owner_scope, status, prompt, model_id,
+                    request_payload, progress, provider, turn_id, session_id,
+                    parent_artifact_id, output_artifact_id, client_request_id,
+                    request_hash
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14
+                )
+                ON CONFLICT (task_id) DO NOTHING
+                """,
+                task_id, owner_scope, status, prompt, model_id,
+                json.dumps(request_payload, default=str), progress, provider,
+                turn_id, session_id, parent_artifact_id, output_artifact_id,
+                client_request_id, request_hash,
+            )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("create_image_task: non-real pool (%s) — False", exc)
+        return False
+    try:
+        return result.endswith(" 1")
+    except AttributeError:
+        return True
+
+
+async def update_image_task(
+    pool,
+    *,
+    task_id: str,
+    status: str | None = None,
+    progress: int | None = None,
+    provider: str | None = None,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+    error_code: str | None = None,
+    parent_artifact_id: str | None = None,
+    output_artifact_id: str | None = None,
+    locked_seconds: int | None = None,
+    increment_attempt: bool = False,
+) -> bool:
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            result_status = await conn.execute(
+                """
+                UPDATE assistant.image_tasks SET
+                    status = COALESCE($2, status),
+                    progress = COALESCE($3, progress),
+                    provider = COALESCE($4, provider),
+                    result = COALESCE($5::jsonb, result),
+                    error = $6,
+                    error_code = $7,
+                    parent_artifact_id = COALESCE($8, parent_artifact_id),
+                    output_artifact_id = COALESCE($9, output_artifact_id),
+                    locked_until = CASE
+                        WHEN $10::int IS NULL THEN locked_until
+                        ELSE NOW() + ($10::int * INTERVAL '1 second')
+                    END,
+                    attempt_count = attempt_count + CASE WHEN $11 THEN 1 ELSE 0 END,
+                    started_at = CASE
+                        WHEN $2 = 'running' AND started_at IS NULL THEN NOW()
+                        ELSE started_at
+                    END,
+                    completed_at = CASE
+                        WHEN $2 IN ('completed', 'failed', 'dead_letter') THEN NOW()
+                        ELSE completed_at
+                    END,
+                    updated_at = NOW()
+                WHERE task_id = $1
+                """,
+                task_id, status, progress, provider,
+                json.dumps(result, default=str) if result is not None else None,
+                error, error_code, parent_artifact_id, output_artifact_id,
+                locked_seconds, increment_attempt,
+            )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("update_image_task: non-real pool (%s) — False", exc)
+        return False
+    try:
+        return result_status.endswith(" 1")
+    except AttributeError:
+        return True
+
+
+async def get_image_task(pool, task_id: str) -> dict | None:
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM assistant.image_tasks WHERE task_id = $1",
+                task_id,
+            )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("get_image_task: non-real pool (%s) — None", exc)
+        return None
+    return dict(row) if row else None
+
+
+async def count_active_image_tasks(
+    pool,
+    *,
+    owner_scope: str | None = None,
+) -> int | None:
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            if owner_scope is None:
+                value = await conn.fetchval(
+                    "SELECT COUNT(*) FROM assistant.image_tasks "
+                    "WHERE status IN ('pending', 'running')",
+                )
+            else:
+                value = await conn.fetchval(
+                    "SELECT COUNT(*) FROM assistant.image_tasks "
+                    "WHERE owner_scope = $1 AND status IN ('pending', 'running')",
+                    owner_scope,
+                )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("count_active_image_tasks: non-real pool (%s) — None", exc)
+        return None
+    return int(value or 0)
+
+
+async def claim_next_image_tasks(
+    pool,
+    *,
+    limit: int,
+    visibility_seconds: int,
+) -> list[dict]:
+    """Claim queued tasks using Postgres ``FOR UPDATE SKIP LOCKED``."""
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """
+                    WITH picked AS (
+                        SELECT task_id
+                        FROM assistant.image_tasks
+                        WHERE status = 'pending'
+                          AND (locked_until IS NULL OR locked_until < NOW())
+                        ORDER BY created_at ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE assistant.image_tasks t SET
+                        status = 'running',
+                        locked_until = NOW() + ($2::int * INTERVAL '1 second'),
+                        attempt_count = attempt_count + 1,
+                        started_at = COALESCE(started_at, NOW()),
+                        updated_at = NOW()
+                    FROM picked
+                    WHERE t.task_id = picked.task_id
+                    RETURNING t.*
+                    """,
+                limit, visibility_seconds,
+            )
+    except (TypeError, AttributeError) as exc:
+        logger.debug("claim_next_image_tasks: non-real pool (%s) — []", exc)
+        return []
+    return [dict(r) for r in rows]
+
+
 # ----- Idempotency --------------------------------------------------------
 
 async def lookup_idempotent(
@@ -450,9 +781,15 @@ async def record_idempotent(
 
 __all__ = [
     "advance_latest_artifact_cas",
+    "claim_next_image_tasks",
+    "count_active_image_tasks",
     "compute_owner_scope",
     "compute_request_hash",
+    "create_image_blob",
+    "create_image_task",
+    "get_image_blob",
     "get_image_session",
+    "get_image_task",
     "get_turn",
     "get_turn_by_task",
     "insert_turn",
@@ -461,6 +798,8 @@ __all__ = [
     "new_turn_id",
     "record_idempotent",
     "set_locked_style",
+    "update_image_blob_status",
+    "update_image_task",
     "update_turn_status",
     "upsert_image_session",
 ]
