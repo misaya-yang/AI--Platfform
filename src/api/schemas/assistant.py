@@ -579,7 +579,7 @@ class ImageGenerationRequest(BaseModel):
             "possible — that path doesn't fetch a URL at all."
         ),
     )
-    add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -694,7 +694,7 @@ class AsyncImageGenerationRequest(BaseModel):
             "private/loopback rejected; 8 MB streaming cap."
         ),
     )
-    add_watermark: bool = Field(default=False, description="Add AI-generated watermark to output images")
+    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -723,7 +723,7 @@ class AsyncImageArtifact(BaseModel):
 
     artifact_id: str | None = Field(default=None, description="Artifact ID if saved")
     download_url: str | None = Field(default=None, description="Presigned download URL")
-    url: str = Field(..., description="Image data URL (data:image/png;base64,...)")
+    url: str = Field(..., description="Presigned S3 URL; data URL only in dev/test fallback")
     width: int | None = None
     height: int | None = None
 
