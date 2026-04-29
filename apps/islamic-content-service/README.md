@@ -107,6 +107,26 @@ Dua API routes:
 
 Dua data source: [Islamic Dua and Adhkar (Kaggle)](https://www.kaggle.com/datasets/ahsanneural/islamic-dua-and-adhkar-72-verified-duas), CC BY 4.0.
 
+## Full Data Audit
+
+The production handoff audit is checked into `scripts/` so it can be rerun after
+syncs, migrations, or data-source changes:
+
+```bash
+# DB invariants from a host with psql
+psql "$ISLAMIC_CONTENT_DATABASE__DSN" -f scripts/audit_full_data.sql
+
+# DB invariants against the default docker-compose PostgreSQL container
+docker cp scripts/audit_full_data.sql ai-gateway-pg:/tmp/audit_full_data.sql
+docker exec ai-gateway-pg psql -U postgres -d gateway -f /tmp/audit_full_data.sql
+
+# Public API walk
+python scripts/audit_full_api.py --base-url http://127.0.0.1:8091/api/v1
+```
+
+Healthy data should show `0` violations in the DB audit and
+`ALL GREEN - 0 violations` in the API audit.
+
 ## Notes
 
 - Public read APIs never call upstream Quran or Hadith sources directly.

@@ -14,6 +14,7 @@ from .clients.quran_foundation_client import QuranFoundationClient
 from .clients.quran_user_client import QuranUserClient
 from .config import Settings
 from .db import Database
+from .migrations import apply_migrations
 from .observability import configure_logging
 from .repositories.dua_repository import DuaRepository
 from .repositories.hadith_repository import HadithRepository
@@ -69,22 +70,8 @@ async def build_runtime(settings: Settings) -> Runtime:
     configure_logging(settings.app.log_level)
     db = Database(settings.database)
     await db.connect()
-    # In editable install: parents[2] = project root. In Docker: use /app.
-    src_relative = Path(__file__).resolve().parents[2] / "migrations"
-    migrations_dir = src_relative if src_relative.is_dir() else Path("/app/migrations")
     if settings.database.auto_migrate:
-        await db.migrate(migrations_dir / "001_init_schema.sql")
-        await db.migrate(migrations_dir / "002_dua_tables.sql")
-        await db.migrate(migrations_dir / "003_wahda_features.sql")
-        await db.migrate(migrations_dir / "004_share_conversations.sql")
-        await db.migrate(migrations_dir / "005_recommended_questions.sql")
-        await db.migrate(migrations_dir / "007_hadith_chapters.sql")
-        await db.migrate(migrations_dir / "008_strip_bidi_marks_arabic.sql")
-        await db.migrate(migrations_dir / "009_fix_cross_book_hadith_linkage.sql")
-        await db.migrate(migrations_dir / "010_drop_phantom_hadiths_and_recount.sql")
-        await db.migrate(migrations_dir / "011_drop_empty_books.sql")
-        await db.migrate(migrations_dir / "012_strip_replacement_and_advanced_bidi.sql")
-        await db.migrate(migrations_dir / "013_strip_bidi_quran_translations.sql")
+        await apply_migrations(db)
     cache = RedisCache(settings.cache)
     await cache.connect()
 

@@ -6,7 +6,6 @@ from typing import Any
 from ..db import Database
 from ..domain.constants import HADITH_SOURCE_API
 
-
 # Arabic body text from BOTH sources (sunnah.com + fawazahmed0 CDN) carries
 # embedded Unicode bidi marks — RLM (U+200F) before ~every period and LRM
 # (U+200E) — that the original publishers used as typesetting hints. They
@@ -62,6 +61,33 @@ def _hadith_sort_key(value: str) -> tuple[int, str]:
     if digits:
         return (int(digits), value)
     return (10**9, value)
+
+
+def _grade_rows_for_item(
+    hadith_item_id: int,
+    grades_by_language: dict[str, Any] | None,
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    seen: set[tuple[str, str]] = set()
+    for language, grades in (grades_by_language or {}).items():
+        if not language:
+            continue
+        for grade in grades or []:
+            graded_by = grade.get("graded_by")
+            key = (str(language), str(graded_by or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                (
+                    hadith_item_id,
+                    language,
+                    grade.get("grade"),
+                    graded_by,
+                    json.dumps(grade),
+                )
+            )
+    return rows
 
 
 class HadithRepository:
@@ -195,17 +221,7 @@ class HadithRepository:
                     localization_rows.append(
                         (hadith_item_id, "ar", chapter_title, _normalize_arabic(item["arabic_text"]))
                     )
-                for language, grades in (item.get("grades") or {}).items():
-                    for grade in grades or []:
-                        grade_rows.append(
-                            (
-                                hadith_item_id,
-                                language,
-                                grade.get("grade"),
-                                grade.get("graded_by"),
-                                json.dumps(grade),
-                            )
-                        )
+                grade_rows.extend(_grade_rows_for_item(hadith_item_id, item.get("grades")))
 
             if localization_rows:
                 await connection.executemany(
@@ -348,18 +364,7 @@ class HadithRepository:
                     """,
                     localization_rows,
                 )
-            grade_rows = []
-            for language, items in (hadith.get("grades") or {}).items():
-                for item in items or []:
-                    grade_rows.append(
-                        (
-                            hadith_item_id,
-                            language,
-                            item.get("grade"),
-                            item.get("graded_by"),
-                            json.dumps(item),
-                        )
-                    )
+            grade_rows = _grade_rows_for_item(hadith_item_id, hadith.get("grades"))
             if grade_rows:
                 await connection.executemany(
                     """

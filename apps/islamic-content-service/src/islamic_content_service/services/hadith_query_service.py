@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..cache import RedisCache
 from ..config import CacheSettings
@@ -105,13 +106,22 @@ class HadithQueryService:
         )
 
     async def get_chapters(
-        self, collection_name: str, book_number: str
+        self,
+        collection_name: str,
+        book_number: str,
+        *,
+        include_empty: bool = False,
     ) -> dict[str, Any]:
         async def _load() -> dict[str, Any]:
             collection, _ = await self.repository.get_books(collection_name)
             if collection is None:
                 raise NotReadyError(f"No Hadith collection found for {collection_name}")
             chapters = await self.repository.get_chapters(collection_name, book_number)
+            if not include_empty:
+                chapters = [
+                    chapter for chapter in chapters
+                    if (chapter.get("hadith_count") or 0) > 0
+                ]
             # Empty result: return 200 with empty chapters list rather
             # than 503 NotReadyError. Same rationale as get_book_items.
             return {
@@ -124,7 +134,7 @@ class HadithQueryService:
             }
 
         return await self._cached(
-            f"hadith:chapters:{collection_name}:{book_number}",
+            f"hadith:chapters:{collection_name}:{book_number}:{include_empty}",
             self.cache_settings.ttl_seconds,
             _load,
         )

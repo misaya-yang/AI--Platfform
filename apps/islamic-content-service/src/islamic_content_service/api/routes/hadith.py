@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from ...domain.errors import NotReadyError
+from ...services.hadith_query_service import HadithQueryService
 from ..deps import get_hadith_query_service
 from ..schemas.hadith import (
     HadithBookItemsResponse,
@@ -14,8 +16,6 @@ from ..schemas.hadith import (
     HadithRandomResponse,
     HadithSearchResponse,
 )
-from ...domain.errors import NotReadyError
-from ...services.hadith_query_service import HadithQueryService
 
 router = APIRouter(prefix="/hadith", tags=["Hadith"])
 
@@ -159,10 +159,18 @@ async def get_book_items(
 async def get_chapters(
     collection_name: str,
     book_number: str,
+    include_empty: bool = Query(
+        default=False,
+        description="Include source chapters that currently have no linked hadiths.",
+    ),
     service: HadithQueryService = Depends(get_hadith_query_service),
 ):
     try:
-        return await service.get_chapters(collection_name, book_number)
+        return await service.get_chapters(
+            collection_name,
+            book_number,
+            include_empty=include_empty,
+        )
     except NotReadyError as exc:
         raise _to_http_error(exc) from exc
 

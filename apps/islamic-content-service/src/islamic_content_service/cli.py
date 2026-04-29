@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 
 from .config import Settings
 from .db import Database
 from .main import build_runtime
+from .migrations import apply_migrations
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,11 +45,8 @@ async def _run() -> int:
         await db.connect()
         try:
             if args.db_command == "migrate":
-                src_relative = Path(__file__).resolve().parents[2] / "migrations"
-                migrations_dir = src_relative if src_relative.is_dir() else Path("/app/migrations")
-                await db.migrate(migrations_dir / "001_init_schema.sql")
-                await db.migrate(migrations_dir / "002_dua_tables.sql")
-                print("migration applied")
+                await apply_migrations(db)
+                print("migrations applied")
             elif args.db_command == "summary":
                 runtime = await build_runtime(settings)
                 try:

@@ -14,10 +14,7 @@ These tests pin the contract:
 
 from __future__ import annotations
 
-import pytest
-
 from islamic_content_service.repositories.hadith_repository import _normalize_arabic
-
 
 # Real-world sample, copied from prod's muslim/2349a row (truncated):
 # the U+200F appears right before each '.' in the original.
@@ -73,6 +70,11 @@ def test_normalize_arabic_strips_consecutive_marks():
     out = _normalize_arabic(text)
     assert "‏" not in out
     assert out == "اختبار.نهاية"
+
+
+def test_normalize_arabic_strips_advanced_bidi_and_replacement_char():
+    out = _normalize_arabic("قبل‫داخل‬بعد⁧نص⁩�")
+    assert out == "قبلداخلبعدنص"
 
 
 def test_normalize_arabic_realistic_muslim_2349a_excerpt():
