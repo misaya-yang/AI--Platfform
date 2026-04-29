@@ -32,7 +32,7 @@ type WorkspaceKey = "overview" | "reliability" | "governance" | "tracing";
 interface PanelSlot {
   type: PanelType;
   minHeight: number;
-  span: 1 | 2;
+  span: 1 | 2 | 3;
 }
 
 interface WorkspaceConfig {
@@ -103,6 +103,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const colors = getColors(darkMode);
   const { dateRange, serviceId, userId, lastRefresh } = useDashboardContext();
   const [workspace, setWorkspace] = useState<WorkspaceKey>(() => forceWorkspace || loadWorkspace());
+  const activeWorkspace = forceWorkspace || workspace;
 
   const servicesQuery = useServices();
   const healthQuery = useHealth();
@@ -157,11 +158,6 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
     staleTime: 30000,
   });
 
-  // Sync with parent-controlled workspace
-  if (forceWorkspace && forceWorkspace !== workspace) {
-    setWorkspace(forceWorkspace);
-  }
-
   const workspaceConfigs = useMemo<Record<WorkspaceKey, WorkspaceConfig>>(
     () => ({
       overview: {
@@ -172,10 +168,10 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
         ),
         intent: t("dashboard.workspace.overview.intent", "Live operations"),
         panels: [
-          { type: "service-health", span: 2, minHeight: 340 },
-          { type: "performance", span: 1, minHeight: 430 },
-          { type: "token-usage", span: 1, minHeight: 430 },
-          { type: "provider-status", span: 2, minHeight: 360 },
+          { type: "service-health", span: 2, minHeight: 262 },
+          { type: "performance", span: 1, minHeight: 300 },
+          { type: "token-usage", span: 1, minHeight: 300 },
+          { type: "provider-status", span: 2, minHeight: 300 },
         ],
       },
       reliability: {
@@ -186,9 +182,9 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
         ),
         intent: t("dashboard.workspace.reliability.intent", "Incident response"),
         panels: [
-          { type: "failure-analysis", span: 1, minHeight: 500 },
-          { type: "security-events", span: 1, minHeight: 500 },
-          { type: "request-trace", span: 2, minHeight: 620 },
+          { type: "failure-analysis", span: 1, minHeight: 336 },
+          { type: "security-events", span: 2, minHeight: 336 },
+          { type: "request-trace", span: 3, minHeight: 472 },
         ],
       },
       governance: {
@@ -199,10 +195,10 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
         ),
         intent: t("dashboard.workspace.governance.intent", "Spend governance"),
         panels: [
-          { type: "cost-analysis", span: 1, minHeight: 520 },
-          { type: "user-quota", span: 1, minHeight: 520 },
-          { type: "token-usage", span: 2, minHeight: 460 },
-          { type: "provider-status", span: 2, minHeight: 360 },
+          { type: "cost-analysis", span: 1, minHeight: 360 },
+          { type: "user-quota", span: 1, minHeight: 360 },
+          { type: "token-usage", span: 1, minHeight: 336 },
+          { type: "provider-status", span: 3, minHeight: 300 },
         ],
       },
       tracing: {
@@ -213,17 +209,18 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
         ),
         intent: t("dashboard.workspace.tracing.intent", "Trace explorer"),
         panels: [
-          { type: "request-trace", span: 2, minHeight: 680 },
-          { type: "failure-analysis", span: 1, minHeight: 500 },
-          { type: "performance", span: 1, minHeight: 500 },
+          { type: "request-trace", span: 2, minHeight: 520 },
+          { type: "performance", span: 1, minHeight: 336 },
+          { type: "failure-analysis", span: 3, minHeight: 300 },
         ],
       },
     }),
     [t]
   );
 
-  const activeConfig = workspaceConfigs[workspace];
+  const activeConfig = workspaceConfigs[activeWorkspace];
   const useSingleColumn = width < 1100;
+  const useThreeColumn = width >= 1180;
   const toneColors: Record<WorkspaceSignal["tone"], { fg: string; bg: string; border: string }> = {
     ok: { fg: colors.success, bg: colors.successSoft, border: `${colors.success}33` },
     warn: { fg: colors.warning, bg: colors.warningSoft, border: `${colors.warning}33` },
@@ -313,7 +310,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
           border: `1px solid ${colors.borderSoft}`,
           background: colors.cardBg,
           boxShadow: colors.shadowSm,
-          padding: "14px 16px",
+          padding: "11px 14px",
           marginBottom: LAYOUT.GRID_GAP,
         }}
       >
@@ -322,7 +319,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            gap: 18,
+            gap: 12,
             flexWrap: "wrap",
           }}
         >
@@ -331,10 +328,10 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                height: 22,
+                height: 20,
                 padding: "0 8px",
-                borderRadius: 6,
-                marginBottom: 8,
+                borderRadius: 5,
+                marginBottom: 6,
                 background: colors.operatorSoft,
                 color: colors.operator,
                 fontSize: 11,
@@ -347,7 +344,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
               style={{
                 ...TYPOGRAPHY.sectionTitle,
                 color: colors.textPrimary,
-                fontSize: 16,
+                fontSize: 15,
                 letterSpacing: "0",
               }}
             >
@@ -357,22 +354,22 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
               style={{
                 fontSize: 12,
                 color: colors.textSecondary,
-                marginTop: 4,
+                marginTop: 3,
               }}
             >
               {activeConfig.subtitle}
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {workspaceSignals[workspace].map((signal) => {
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {workspaceSignals[activeWorkspace].map((signal) => {
               const tone = toneColors[signal.tone];
               return (
                 <div
                   key={`${signal.label}-${signal.value}`}
                   style={{
-                    minWidth: 92,
-                    padding: "7px 10px",
+                    minWidth: 86,
+                    padding: "6px 9px",
                     borderRadius: 8,
                     border: `1px solid ${tone.border}`,
                     background: tone.bg,
@@ -452,6 +449,8 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
           display: "grid",
           gridTemplateColumns: useSingleColumn
             ? "minmax(0, 1fr)"
+            : useThreeColumn
+            ? "repeat(3, minmax(0, 1fr))"
             : "repeat(2, minmax(0, 1fr))",
           gap: useSingleColumn ? 12 : LAYOUT.GRID_GAP,
           alignItems: "stretch",
@@ -461,11 +460,18 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
           const PanelComponent = PANEL_COMPONENTS[slot.type];
           return (
             <div
-              key={`${workspace}-${slot.type}`}
+              key={`${activeWorkspace}-${slot.type}`}
               style={{
                 minHeight: slot.minHeight,
-                gridColumn:
-                  useSingleColumn || slot.span === 1 ? "auto" : "1 / -1",
+                height: slot.minHeight,
+                minWidth: 0,
+                gridColumn: useSingleColumn
+                  ? "auto"
+                  : useThreeColumn
+                  ? `span ${slot.span}`
+                  : slot.span === 1
+                  ? "auto"
+                  : "1 / -1",
               }}
             >
               <PanelComponent />

@@ -94,7 +94,7 @@ export function FailureAnalysisPanel() {
       sorter: (a: FailureBreakdownItem, b: FailureBreakdownItem) => a.failure_count - b.failure_count,
       defaultSortOrder: "descend" as const,
       render: (count: number) => (
-        <span style={{ fontWeight: 600, color: count > 0 ? "#ef4444" : colors.textSecondary }}>
+        <span style={{ fontWeight: 600, color: count > 0 ? colors.error : colors.textSecondary }}>
           {count}
         </span>
       ),
@@ -105,7 +105,7 @@ export function FailureAnalysisPanel() {
       key: "success_rate",
       width: 90,
       render: (rate: number) => {
-        const color = rate >= 95 ? "#10b981" : rate >= 80 ? "#f59e0b" : "#ef4444";
+        const color = rate >= 95 ? colors.success : rate >= 80 ? colors.warning : colors.error;
         return (
           <span style={{ fontWeight: 600, color }}>
             {rate.toFixed(1)}%
@@ -142,17 +142,17 @@ export function FailureAnalysisPanel() {
           padding: "8px 12px",
           borderRadius: 8,
           background: totalFailures > 0
-            ? darkMode ? "rgba(239, 68, 68, 0.1)" : "rgba(239, 68, 68, 0.05)"
-            : darkMode ? "rgba(16, 185, 129, 0.1)" : "rgba(16, 185, 129, 0.05)",
+            ? colors.errorBg
+            : colors.successBg,
           border: `1px solid ${totalFailures > 0
-            ? "rgba(239, 68, 68, 0.3)"
-            : "rgba(16, 185, 129, 0.3)"
+            ? `${colors.error}55`
+            : `${colors.success}55`
           }`,
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.failure.totalFailures", "总失败数")}:</span>
-          <span style={{ fontSize: 14, fontWeight: 700, color: totalFailures > 0 ? "#ef4444" : "#10b981" }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: totalFailures > 0 ? colors.error : colors.success }}>
             {totalFailures}
           </span>
         </div>

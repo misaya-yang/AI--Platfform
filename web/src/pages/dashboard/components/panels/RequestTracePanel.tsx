@@ -107,19 +107,19 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
       >
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>TTFB</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#06b6d4" }}>{formatDuration(trace.first_token_latency_ms || 0)}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.info }}>{formatDuration(trace.first_token_latency_ms || 0)}</div>
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>LLM</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#c9a84c" }}>{formatDuration(trace.llm_inference_duration_ms || 0)}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.gold }}>{formatDuration(trace.llm_inference_duration_ms || 0)}</div>
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>Retrieval</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#10b981" }}>{formatDuration(trace.retrieval_duration_ms || 0)}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.success }}>{formatDuration(trace.retrieval_duration_ms || 0)}</div>
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>Tool</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: "#f59e0b" }}>{formatDuration(trace.tool_call_duration_ms || 0)}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.warning }}>{formatDuration(trace.tool_call_duration_ms || 0)}</div>
         </div>
       </div>
 
@@ -139,10 +139,10 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
           const width = (span.duration_ms / maxDuration) * 100;
           const bgColor =
             span.status === "success"
-              ? "rgba(16, 185, 129, 0.7)"
-              : span.status === "error"
-              ? "rgba(239, 68, 68, 0.7)"
-              : "rgba(245, 158, 11, 0.7)";
+                ? colors.success
+                : span.status === "error"
+                ? colors.error
+                : colors.warning;
 
           return (
             <div
@@ -177,11 +177,11 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {span.status === "success" ? (
-                <CheckCircleOutlined style={{ color: "#10b981", fontSize: 14 }} />
+                <CheckCircleOutlined style={{ color: colors.success, fontSize: 14 }} />
               ) : span.status === "error" ? (
-                <ExclamationCircleOutlined style={{ color: "#ef4444", fontSize: 14 }} />
+                <ExclamationCircleOutlined style={{ color: colors.error, fontSize: 14 }} />
               ) : (
-                <ClockCircleOutlined style={{ color: "#f59e0b", fontSize: 14 }} />
+                <ClockCircleOutlined style={{ color: colors.warning, fontSize: 14 }} />
               )}
               <span style={{ fontSize: 12, color: colors.textPrimary }}>{span.name}</span>
             </div>
@@ -191,7 +191,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
                 style={{
                   fontSize: 12,
                   fontWeight: 600,
-                  color: span.duration_ms > 100 ? "#f59e0b" : colors.textSecondary,
+                  color: span.duration_ms > 100 ? colors.warning : colors.textSecondary,
                   minWidth: 60,
                   textAlign: "right",
                 }}
@@ -207,16 +207,16 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
         style={{
           marginTop: 12,
           padding: "8px 12px",
-          background: darkMode ? "rgba(59, 130, 246, 0.1)" : "rgba(59, 130, 246, 0.05)",
+          background: colors.infoBg,
           borderRadius: 6,
-          border: `1px solid ${darkMode ? "rgba(59, 130, 246, 0.3)" : "rgba(59, 130, 246, 0.2)"}`,
+          border: `1px solid ${colors.info}44`,
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
         }}
       >
         <span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.requestTrace.totalDuration")}</span>
-        <span style={{ fontSize: 14, fontWeight: 700, color: "#3b82f6" }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: colors.info }}>
           {formatDuration(trace.request_total_duration_ms || 0)}
         </span>
       </div>
@@ -492,7 +492,7 @@ export function RequestTracePanel() {
               rowKey="request_id"
               size="small"
               pagination={false}
-              scroll={{ y: 430 }}
+              scroll={{ y: 300 }}
               rowClassName={(item) => item.request_id === selectedTrace?.request_id ? "trace-row-active" : ""}
               onRow={(item) => ({
                 onClick: () => {
@@ -512,7 +512,7 @@ export function RequestTracePanel() {
               background: colors.cardBg,
               padding: 12,
               overflow: "auto",
-              maxHeight: 500,
+              maxHeight: 340,
             }}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>

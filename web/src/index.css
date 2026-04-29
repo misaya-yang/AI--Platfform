@@ -9,9 +9,9 @@
 
 @layer base {
   :root {
-    /* Cool-neutral canvas + violet brand (matches GPT dashboard mockup) */
-    --background: 220 20% 97%;
-    --foreground: 222 28% 10%;
+    /* Warm operational neutral + Hejaz green brand */
+    --background: 150 8% 95%;
+    --foreground: 152 15% 8%;
 
     --card: 0 0% 100%;
     --card-foreground: 222 28% 10%;
@@ -19,7 +19,7 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 28% 10%;
 
-    --primary: 234 87% 68%;                 /* #6674f4 indigo (design-handoff accent) */
+    --primary: 153 46% 19%;
     --primary-foreground: 220 20% 98%;
 
     --secondary: 220 14% 94%;
@@ -28,7 +28,7 @@
     --muted: 220 14% 94%;
     --muted-foreground: 220 8% 42%;
 
-    --accent: 234 87% 68%;                  /* indigo = brand (single accent) */
+    --accent: 153 46% 19%;
     --accent-foreground: 220 20% 98%;
 
     --destructive: 0 84% 60%;
@@ -42,7 +42,7 @@
 
     --border: 220 14% 91%;
     --input: 220 14% 91%;
-    --ring: 234 87% 68%;
+    --ring: 153 46% 19%;
 
     --radius: 0.5rem;
     --transition-fast: 150ms;
@@ -70,26 +70,26 @@
   }
 
   .dark {
-    /* Dark canvas — deep cool ink with violet brand */
-    --background: 222 30% 7%;
-    --foreground: 220 14% 90%;
+    /* Dark canvas — graphite green, not blue-black */
+    --background: 152 12% 6%;
+    --foreground: 150 5% 95%;
 
-    --card: 222 24% 11%;
-    --card-foreground: 220 14% 90%;
+    --card: 152 8% 11%;
+    --card-foreground: 150 5% 95%;
 
-    --popover: 222 24% 11%;
-    --popover-foreground: 220 14% 90%;
+    --popover: 152 8% 11%;
+    --popover-foreground: 150 5% 95%;
 
-    --primary: 234 92% 76%;                 /* indigo-400ish for dark */
-    --primary-foreground: 222 28% 10%;
+    --primary: 153 38% 58%;
+    --primary-foreground: 152 12% 6%;
 
-    --secondary: 222 18% 16%;
-    --secondary-foreground: 220 14% 90%;
+    --secondary: 152 6% 15%;
+    --secondary-foreground: 150 5% 95%;
 
-    --muted: 222 18% 16%;
-    --muted-foreground: 220 8% 60%;
+    --muted: 152 6% 15%;
+    --muted-foreground: 150 4% 62%;
 
-    --accent: 234 92% 76%;
+    --accent: 153 38% 58%;
     --accent-foreground: 220 20% 98%;
 
     --destructive: 0 72% 58%;
@@ -101,11 +101,11 @@
     --warning: 38 80% 55%;
     --warning-foreground: 38 70% 12%;
 
-    --border: 222 18% 20%;
-    --input: 222 18% 20%;
-    --ring: 234 92% 76%;
+    --border: 152 6% 18%;
+    --input: 152 6% 18%;
+    --ring: 153 38% 58%;
 
-    --sidebar-bg: 222 30% 7%;
+    --sidebar-bg: 152 12% 6%;
 
     /* Assistant UI scoped tokens — ALIGNED with global --background /
        --card / --muted / --border above so assistant page shares the

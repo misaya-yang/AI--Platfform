@@ -52,10 +52,10 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
   return (
     <div
       style={{
-        minHeight: 122,
-        padding: 14,
+        minHeight: 96,
+        padding: 12,
         borderRadius: 9,
-        background: colors.cardBg,
+        background: colors.innerBg,
         border: `1px solid ${status === "down" ? `${colors.error}44` : colors.borderSoft}`,
         display: "flex",
         flexDirection: "column",
@@ -88,7 +88,7 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
               {name}
             </span>
           </div>
-          <div style={{ marginTop: 6, color: colors.textMuted, fontSize: 11 }}>
+          <div style={{ marginTop: 4, color: colors.textMuted, fontSize: 11 }}>
             {t("dashboard.ops.routingNode", "Gateway route node")}
           </div>
         </div>
@@ -124,7 +124,7 @@ function ServiceStatusCard({ name, status, qps, latency, errorRate }: ServiceCar
             <div
               style={{
                 color: metric.color,
-                fontSize: 16,
+                fontSize: 15,
                 fontWeight: 700,
                 fontFamily: metric.label === "QPS" ? FONT_FAMILY.mono : FONT_FAMILY.sans,
                 overflow: "hidden",
@@ -210,22 +210,22 @@ export function ServiceHealthPanel() {
           display: "grid",
           gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
           gap: 10,
-          marginBottom: 16,
+          marginBottom: 12,
         }}
       >
         {summary.map((item) => (
           <div
             key={item.label}
             style={{
-              minHeight: 74,
-              padding: "11px 12px",
+              minHeight: 58,
+              padding: "8px 10px",
               borderRadius: 8,
               border: `1px solid ${colors.borderSoft}`,
               background: colors.innerBg,
             }}
           >
-            <div style={{ color: colors.textMuted, fontSize: 12, marginBottom: 8 }}>{item.label}</div>
-            <div style={{ color: item.color, fontSize: 22, fontWeight: 750, fontFeatureSettings: '"tnum"' }}>
+            <div style={{ color: colors.textMuted, fontSize: 11, marginBottom: 5 }}>{item.label}</div>
+            <div style={{ color: item.color, fontSize: 18, fontWeight: 750, fontFeatureSettings: '"tnum"' }}>
               {item.value}
             </div>
           </div>
@@ -236,8 +236,8 @@ export function ServiceHealthPanel() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-            gap: 12,
+            gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+            gap: 10,
           }}
         >
           {serviceCards.map((service) => (

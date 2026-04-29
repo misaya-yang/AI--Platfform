@@ -4,10 +4,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { DashboardProvider, useDashboardContext } from "./DashboardContext";
-import { KPICards } from "./components/KPICards";
-import { SummaryCharts } from "./components/SummaryCharts";
 import { DashboardLayout } from "./DashboardLayout";
-import { ProviderStatusCard } from "@/components/ProviderStatusCard";
 import { useAppStore } from "@/store/useAppStore";
 import { FONT_FAMILY, LAYOUT, getColors } from "./styles";
 import { Select, DatePicker } from "antd";
@@ -94,6 +91,7 @@ function DashboardContent() {
   ];
 
   const workspaceMap: Record<string, string> = {
+    summary: "overview",
     operations: "overview", reliability: "reliability", governance: "governance", tracing: "tracing",
   };
 
@@ -260,26 +258,12 @@ function DashboardContent() {
         </div>
 
         {/* ── Tab content ── */}
-        {activeTab === "summary" && (
-          <div style={{
-            padding: "20px 24px 28px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-          }}>
-            <KPICards />
-            <SummaryCharts />
-            <ProviderStatusCard />
-          </div>
-        )}
-        {activeTab !== "summary" && (
-          <div style={{ padding: "20px 0 28px", margin: `0 -${LAYOUT.GRID_GAP}px` }}>
-            <DashboardLayout
-              width={effectiveWidth}
-              forceWorkspace={workspaceMap[activeTab] as "overview" | "reliability" | "governance" | "tracing"}
-            />
-          </div>
-        )}
+        <div style={{ padding: "12px 0 18px", margin: `0 -${LAYOUT.GRID_GAP}px` }}>
+          <DashboardLayout
+            width={effectiveWidth}
+            forceWorkspace={workspaceMap[activeTab] as "overview" | "reliability" | "governance" | "tracing"}
+          />
+        </div>
       </div>
 
       <style>{`

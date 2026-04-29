@@ -17,6 +17,7 @@ import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary, getUsageBreakdown, getUsageTimeSeries } from "@/api/usage";
 import { useTranslation } from "react-i18next";
+import { getChartPalette, getColors } from "../../styles";
 
 function formatTokens(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -27,6 +28,7 @@ function formatTokens(num: number): string {
 export function TokenUsagePanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
 
   const summaryQuery = useQuery({
@@ -112,8 +114,9 @@ export function TokenUsagePanel() {
     tokens: point.total_tokens,
   }));
 
-  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
-  const modelColors = ["#1a4731", "#3daa73", "#6cc899", "#c9a84c", "#d9ab44"];
+  const gridColor = colors.divider;
+  const chartPalette = getChartPalette(darkMode);
+  const modelColors = [colors.accentDeep, colors.success, colors.info, colors.gold, colors.error];
 
   return (
     <PanelWrapper
@@ -128,10 +131,10 @@ export function TokenUsagePanel() {
             padding: "8px 12px",
             marginBottom: 12,
             borderRadius: 6,
-            background: darkMode ? "rgba(245, 158, 11, 0.12)" : "rgba(245, 158, 11, 0.08)",
-            border: "1px solid rgba(245, 158, 11, 0.4)",
+            background: colors.warningBg,
+            border: `1px solid ${colors.warning}66`,
             fontSize: 12,
-            color: "#f59e0b",
+            color: colors.warning,
             fontWeight: 500,
           }}
         >
@@ -141,7 +144,7 @@ export function TokenUsagePanel() {
 
       {/* Total and breakdown */}
       <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 24, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}>
           {formatTokens(totalTokens)}
           <span style={{ fontSize: 14, fontWeight: 400, marginLeft: 4 }}>{t("metrics.totalTokens")}</span>
         </div>
@@ -149,10 +152,10 @@ export function TokenUsagePanel() {
         {/* Input/Output bar */}
         <div style={{ marginTop: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-            <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
+            <span style={{ color: colors.textMuted }}>
               {t("cost.inputTokens")}: {formatTokens(inputTokens)} ({inputPercent.toFixed(0)}%)
             </span>
-            <span style={{ color: darkMode ? "#94a3b8" : "#64748b" }}>
+            <span style={{ color: colors.textMuted }}>
               {t("cost.outputTokens")}: {formatTokens(outputTokens)} ({(100 - inputPercent).toFixed(0)}%)
             </span>
           </div>
@@ -160,8 +163,8 @@ export function TokenUsagePanel() {
             percent={100}
             success={{ percent: inputPercent }}
             showInfo={false}
-            strokeColor="#1a4731"
-            railColor={darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0"}
+            strokeColor={colors.accentDeep}
+            railColor={colors.divider}
           />
         </div>
       </div>
@@ -170,7 +173,7 @@ export function TokenUsagePanel() {
       <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
         {/* Model breakdown */}
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.tokenUsage.modelBreakdown")}
           </div>
           {breakdown.slice(0, 3).map((item, index) => (
@@ -195,7 +198,7 @@ export function TokenUsagePanel() {
                 style={{
                   flex: 1,
                   fontSize: 11,
-                  color: darkMode ? "#e2e8f0" : "#475569",
+                  color: colors.textPrimary,
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
@@ -203,7 +206,7 @@ export function TokenUsagePanel() {
               >
                 {item.model || t("common.unknown")}
               </span>
-              <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>
+              <span style={{ fontSize: 11, color: colors.textMuted }}>
                 {item.percentage.toFixed(0)}%
               </span>
             </div>
@@ -212,11 +215,11 @@ export function TokenUsagePanel() {
 
         {/* Provider breakdown */}
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.tokenUsage.providerBreakdown")}
           </div>
           {providerBreakdown.slice(0, 3).map((item, index) => {
-            const providerColors = ["#06b6d4", "#f97316", "#22c55e", "#a855f7", "#ec4899"];
+            const providerColors = chartPalette;
             const providerName = item.provider || "unattributed";
             const displayName = providerName === "unattributed"
               ? "UNATTRIBUTED"
@@ -243,15 +246,15 @@ export function TokenUsagePanel() {
                   style={{
                     flex: 1,
                     fontSize: 11,
-                    color: darkMode ? "#e2e8f0" : "#475569",
+                  color: colors.textPrimary,
                   }}
                 >
                   {displayName}
                 </span>
-                <span style={{ fontSize: 11, color: "#10b981", fontWeight: 500 }}>
+                <span style={{ fontSize: 11, color: colors.success, fontWeight: 500 }}>
                   ${(item.cost_usd || 0).toFixed(2)}
                 </span>
-                <span style={{ fontSize: 11, color: darkMode ? "#64748b" : "#94a3b8" }}>
+                <span style={{ fontSize: 11, color: colors.textMuted }}>
                   {item.percentage.toFixed(0)}%
                 </span>
               </div>
@@ -273,7 +276,7 @@ export function TokenUsagePanel() {
           <Line
             type="monotone"
             dataKey="tokens"
-            stroke="#1a4731"
+            stroke={colors.accentDeep}
             strokeWidth={2}
             dot={false}
           />

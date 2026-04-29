@@ -20,6 +20,7 @@ import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { api } from "@/lib/api";
 import { useTranslation } from "react-i18next";
+import { getColors } from "../../styles";
 
 interface SecurityBreakdownResponse {
   items: Array<{
@@ -81,6 +82,7 @@ async function getSecurityTimeseries(params: {
 export function SecurityEventsPanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const { dateRange, granularity, lastRefresh } = useDashboardContext();
   const [timeRange, setTimeRange] = useState<"today" | "week">("today");
 
@@ -234,7 +236,7 @@ export function SecurityEventsPanel() {
   const dataStatus = authBreakdownQuery.data?.data_status || rateLimitBreakdownQuery.data?.data_status;
   const dataFreshness = authBreakdownQuery.data?.data_freshness_minutes ?? rateLimitBreakdownQuery.data?.data_freshness_minutes;
 
-  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
+  const gridColor = colors.divider;
 
   return (
     <PanelWrapper
@@ -263,12 +265,12 @@ export function SecurityEventsPanel() {
             style={{
               padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 22, fontWeight: 700, color: "#ef4444" }}>{authFailures}</div>
-            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.authFailed")}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: colors.error }}>{authFailures}</div>
+            <div style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.security.authFailed")}</div>
           </div>
         </Col>
         <Col span={6}>
@@ -276,12 +278,12 @@ export function SecurityEventsPanel() {
             style={{
               padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 22, fontWeight: 700, color: "#f59e0b" }}>{rateLimitHits}</div>
-            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.rateLimited")}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: colors.warning }}>{rateLimitHits}</div>
+            <div style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.security.rateLimited")}</div>
           </div>
         </Col>
         <Col span={6}>
@@ -289,12 +291,12 @@ export function SecurityEventsPanel() {
             style={{
               padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 22, fontWeight: 700, color: "#f97316" }}>{quotaExceeded}</div>
-            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.quotaExceeded", "配额超限")}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: colors.gold }}>{quotaExceeded}</div>
+            <div style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.security.quotaExceeded", "配额超限")}</div>
           </div>
         </Col>
         <Col span={6}>
@@ -302,14 +304,14 @@ export function SecurityEventsPanel() {
             style={{
               padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 22, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: colors.textPrimary }}>
               {authFailures + rateLimitHits + quotaExceeded}
             </div>
-            <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.security.total")}</div>
+            <div style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.security.total")}</div>
           </div>
         </Col>
       </Row>
@@ -328,19 +330,19 @@ export function SecurityEventsPanel() {
             labelFormatter={(label) => dayjs(label).format("YYYY-MM-DD HH:mm")}
           />
           <Legend wrapperStyle={{ fontSize: 10 }} />
-          <Bar dataKey="auth_failed" name={t("dashboard.security.authFailed")} fill="#ef4444" stackId="a" />
-          <Bar dataKey="rate_limited" name={t("dashboard.security.rateLimitedShort", "限流")} fill="#f59e0b" stackId="a" />
-          <Bar dataKey="quota_exceeded" name={t("dashboard.security.quotaExceeded", "配额超限")} fill="#f97316" stackId="a" />
+          <Bar dataKey="auth_failed" name={t("dashboard.security.authFailed")} fill={colors.error} stackId="a" />
+          <Bar dataKey="rate_limited" name={t("dashboard.security.rateLimitedShort", "限流")} fill={colors.warning} stackId="a" />
+          <Bar dataKey="quota_exceeded" name={t("dashboard.security.quotaExceeded", "配额超限")} fill={colors.gold} stackId="a" />
         </BarChart>
       </SafeResponsiveChart>
 
       {/* Top users */}
       <div>
-        <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
           {t("dashboard.security.topUsers")}
         </div>
         {userEvents.length === 0 ? (
-          <div style={{ fontSize: 12, color: darkMode ? "#64748b" : "#94a3b8", textAlign: "center", padding: "8px 0" }}>
+          <div style={{ fontSize: 12, color: colors.textMuted, textAlign: "center", padding: "8px 0" }}>
             {t("dashboard.security.noEvents", "当前时间范围内无安全事件")}
           </div>
         ) : (
@@ -355,18 +357,18 @@ export function SecurityEventsPanel() {
                 borderBottom: index < userEvents.length - 1 ? `1px solid ${gridColor}` : "none",
               }}
             >
-              <span style={{ fontSize: 12, color: darkMode ? "#e2e8f0" : "#475569" }}>
+              <span style={{ fontSize: 12, color: colors.textPrimary }}>
                 {index + 1}. {user.user}
               </span>
               <div style={{ display: "flex", gap: 10 }}>
                 {user.authFailed > 0 && (
-                  <span style={{ fontSize: 11, color: "#ef4444" }}>{t("dashboard.security.authFailedCount", { count: user.authFailed })}</span>
+                  <span style={{ fontSize: 11, color: colors.error }}>{t("dashboard.security.authFailedCount", { count: user.authFailed })}</span>
                 )}
                 {user.rateLimited > 0 && (
-                  <span style={{ fontSize: 11, color: "#f59e0b" }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
+                  <span style={{ fontSize: 11, color: colors.warning }}>{t("dashboard.security.rateLimitedCount", { count: user.rateLimited })}</span>
                 )}
                 {user.quotaExceeded > 0 && (
-                  <span style={{ fontSize: 11, color: "#f97316" }}>{t("dashboard.security.quotaExceededCount", { count: user.quotaExceeded })}</span>
+                  <span style={{ fontSize: 11, color: colors.gold }}>{t("dashboard.security.quotaExceededCount", { count: user.quotaExceeded })}</span>
                 )}
               </div>
             </div>

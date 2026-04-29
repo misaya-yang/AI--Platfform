@@ -11,6 +11,7 @@ import { getQuotaUsersOverview, type QuotaUserOverviewItem } from "@/api/usage";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useDashboardEntityLabels } from "../../hooks/useDashboardEntityLabels";
+import { getColors } from "../../styles";
 
 function formatTokens(num: number): string {
   if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
@@ -28,6 +29,7 @@ const STRATEGY_COLORS: Record<string, string> = {
 export function UserQuotaPanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const { lastRefresh } = useDashboardContext();
   const { resolveUserLabel } = useDashboardEntityLabels();
   const [sortBy, setSortBy] = useState<"daily_tokens" | "monthly_cost" | "status">("daily_tokens");
@@ -54,7 +56,7 @@ export function UserQuotaPanel() {
       width: 100,
       ellipsis: true,
       render: (text: string) => (
-        <span style={{ fontWeight: 500, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+        <span style={{ fontWeight: 500, color: colors.textPrimary }}>
           {resolveUserLabel(text)}
         </span>
       ),
@@ -73,16 +75,16 @@ export function UserQuotaPanel() {
                 <Progress
                   percent={percent}
                   size="small"
-                  strokeColor={percent >= 80 ? "#f59e0b" : "#3b82f6"}
+                  strokeColor={percent >= 80 ? colors.warning : colors.info}
                   showInfo={false}
                 />
-                <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
+                <div style={{ fontSize: 11, color: colors.textMuted }}>
                   {formatTokens(record.daily_tokens_used)}/{formatTokens(record.daily_tokens_limit!)}
                 </div>
               </>
             ) : (
-              <div style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>
-                {formatTokens(record.daily_tokens_used)} / <span style={{ color: "#10b981" }}>∞</span>
+              <div style={{ fontSize: 11, color: colors.textMuted }}>
+                {formatTokens(record.daily_tokens_used)} / <span style={{ color: colors.success }}>∞</span>
               </div>
             )}
           </div>
@@ -96,7 +98,7 @@ export function UserQuotaPanel() {
       render: (_: unknown, record: QuotaUserOverviewItem) => {
         const costUsd = record.monthly_cost_used_cents / 100;
         return (
-          <span style={{ fontWeight: 500, color: "#10b981" }}>
+          <span style={{ fontWeight: 500, color: colors.success }}>
             ${costUsd >= 1 ? costUsd.toFixed(2) : costUsd.toFixed(4)}
           </span>
         );
@@ -184,26 +186,26 @@ export function UserQuotaPanel() {
             marginBottom: 12,
             borderRadius: 8,
             background: summary.exceeded > 0 || summary.blocked > 0
-              ? darkMode ? "rgba(239, 68, 68, 0.15)" : "rgba(239, 68, 68, 0.08)"
-              : darkMode ? "rgba(245, 158, 11, 0.15)" : "rgba(245, 158, 11, 0.08)",
+              ? colors.errorBg
+              : colors.warningBg,
             border: summary.exceeded > 0 || summary.blocked > 0
-              ? "1px solid rgba(239, 68, 68, 0.4)"
-              : "1px solid rgba(245, 158, 11, 0.4)",
+              ? `1px solid ${colors.error}66`
+              : `1px solid ${colors.warning}66`,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               {summary.exceeded > 0 || summary.blocked > 0 ? (
-                <ExclamationCircleOutlined style={{ fontSize: 16, color: "#ef4444" }} />
+                <ExclamationCircleOutlined style={{ fontSize: 16, color: colors.error }} />
               ) : (
-                <WarningOutlined style={{ fontSize: 16, color: "#f59e0b" }} />
+                <WarningOutlined style={{ fontSize: 16, color: colors.warning }} />
               )}
               <div>
                 <div
                   style={{
                     fontSize: 13,
                     fontWeight: 600,
-                    color: summary.exceeded > 0 || summary.blocked > 0 ? "#ef4444" : "#f59e0b",
+                    color: summary.exceeded > 0 || summary.blocked > 0 ? colors.error : colors.warning,
                   }}
                 >
                   {summary.blocked > 0
@@ -215,7 +217,7 @@ export function UserQuotaPanel() {
                 <div
                   style={{
                     fontSize: 11,
-                    color: darkMode ? "#94a3b8" : "#64748b",
+                    color: colors.textMuted,
                     marginTop: 2,
                   }}
                 >

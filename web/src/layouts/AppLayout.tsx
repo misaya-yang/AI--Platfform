@@ -76,7 +76,7 @@ export function AppLayout() {
   const [isMobile, setIsMobile] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
-  const { themeMode, resolvedTheme, darkMode, setThemeMode, toggleDarkMode } = useAppStore();
+  const { resolvedTheme, darkMode, setThemeMode, toggleDarkMode } = useAppStore();
   const { user, clearAuth, hasPermission, forcePasswordChange, setForcePasswordChange } = useAuthStore();
   const location = useLocation();
   const navigate = useNavigate();
@@ -115,14 +115,24 @@ export function AppLayout() {
   ];
 
   const handleUserMenuClick = async ({ key }: { key: string }) => {
-    if (key === 'logout') { try { await logout(); } catch {} clearAuth(); navigate('/login'); }
+    if (key === 'logout') {
+      try {
+        await logout();
+      } catch {
+        // Still clear the local session if the server-side logout call fails.
+      }
+      clearAuth();
+      navigate('/login');
+    }
     else if (key === 'profile') setShowProfileModal(true);
     else if (key === 'change-password') setShowPasswordChange(true);
     else if (key === 'help') setHelpModalOpen(true);
   };
 
   useEffect(() => {
-    if (forcePasswordChange) setShowPasswordChange(true);
+    if (!forcePasswordChange) return;
+    const timer = window.setTimeout(() => setShowPasswordChange(true), 0);
+    return () => window.clearTimeout(timer);
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
@@ -249,7 +259,7 @@ export function AppLayout() {
         {/* Header */}
         <Header style={{
           padding: '0 20px', background: 'transparent',
-          borderBottom: darkMode ? '1px solid #2e3830' : '1px solid #dde1de',
+          borderBottom: '1px solid hsl(var(--border))',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           position: 'relative', zIndex: 50, height: 48,
         }}>
@@ -294,7 +304,7 @@ export function AppLayout() {
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
         /* Base nav link — editorial tone: slightly larger but thinner
-           text. 14.5px / weight 400 at -0.005em tracking reads as the
+           text. 14.5px / weight 400 reads as the
            kind of sans you see in tool chrome from Linear / Raycast
            rather than a SaaS admin dashboard. */
         .app-nav-link {
@@ -311,10 +321,10 @@ export function AppLayout() {
           align-items: center;
         }
         .app-nav-label {
-          font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+          font-family: "Geist Sans", "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
           font-size: 14.5px;
           font-weight: 400;
-          letter-spacing: -0.005em;
+          letter-spacing: 0;
           line-height: 1.25;
         }
 

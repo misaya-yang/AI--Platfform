@@ -21,6 +21,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { getUsageSummary, getUsageBreakdown, getUsageTimeSeries } from "@/api/usage";
 import { useTranslation } from "react-i18next";
 import { useDashboardEntityLabels } from "../../hooks/useDashboardEntityLabels";
+import { getChartPalette, getColors } from "../../styles";
 
 function formatCost(value: number): string {
   if (value >= 1) return `$${value.toFixed(2)}`;
@@ -30,6 +31,7 @@ function formatCost(value: number): string {
 export function CostAnalysisPanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const { dateRange, granularity, serviceId, userId, lastRefresh } = useDashboardContext();
   const { resolveServiceLabel } = useDashboardEntityLabels();
 
@@ -144,9 +146,10 @@ export function CostAnalysisPanel() {
     cost: point.cost_usd,
   }));
 
-  const pieColors = ["#1a4731", "#3daa73", "#c9a84c", "#d9ab44", "#dc3545"];
-  const providerPieColors = ["#1a4731", "#3daa73", "#6cc899", "#c9a84c", "#d9ab44"];
-  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
+  const chartPalette = getChartPalette(darkMode);
+  const pieColors = [colors.accentDeep, colors.success, colors.gold, colors.info, colors.error];
+  const providerPieColors = chartPalette;
+  const gridColor = colors.divider;
 
   return (
     <PanelWrapper
@@ -157,7 +160,7 @@ export function CostAnalysisPanel() {
       <div
         style={{
           fontSize: 11,
-          color: darkMode ? "#94a3b8" : "#64748b",
+          color: colors.textMuted,
           marginBottom: 10,
         }}
       >
@@ -165,50 +168,50 @@ export function CostAnalysisPanel() {
       </div>
 
       {/* Cost summary cards */}
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+      <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
         <Col span={8}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: colors.textPrimary }}>
               {formatCost(todayQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.today")}</div>
+            <div style={{ fontSize: 12, color: colors.textMuted }}>{t("dashboard.cost.today")}</div>
           </div>
         </Col>
         <Col span={8}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: colors.textPrimary }}>
               {formatCost(weekQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.week")}</div>
+            <div style={{ fontSize: 12, color: colors.textMuted }}>{t("dashboard.cost.week")}</div>
           </div>
         </Col>
         <Col span={8}>
           <div
             style={{
-              padding: 12,
+              padding: 10,
               borderRadius: 8,
-              background: darkMode ? "#0f172a" : "#f8fafc",
+              background: colors.innerBg,
               textAlign: "center",
             }}
           >
-            <div style={{ fontSize: 20, fontWeight: 700, color: darkMode ? "#f1f5f9" : "#1e293b" }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: colors.textPrimary }}>
               {formatCost(monthQuery.data?.total_cost_usd || 0)}
             </div>
-            <div style={{ fontSize: 12, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.cost.month")}</div>
+            <div style={{ fontSize: 12, color: colors.textMuted }}>{t("dashboard.cost.month")}</div>
           </div>
         </Col>
       </Row>
@@ -218,12 +221,12 @@ export function CostAnalysisPanel() {
         <div
           style={{
             padding: "8px 12px",
-            marginBottom: 12,
+            marginBottom: 10,
             borderRadius: 6,
-            background: darkMode ? "rgba(245, 158, 11, 0.12)" : "rgba(245, 158, 11, 0.08)",
-            border: "1px solid rgba(245, 158, 11, 0.4)",
+            background: colors.warningBg,
+            border: `1px solid ${colors.warning}66`,
             fontSize: 12,
-            color: "#f59e0b",
+            color: colors.warning,
             fontWeight: 500,
           }}
         >
@@ -232,19 +235,19 @@ export function CostAnalysisPanel() {
       )}
 
       {/* Pie charts and trend */}
-      <Row gutter={16}>
+      <Row gutter={14}>
         <Col span={5}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.cost.serviceBreakdown")}
           </div>
-          <SafeResponsiveChart height={100} minWidth={80} minHeight={80}>
+          <SafeResponsiveChart height={76} minWidth={72} minHeight={72}>
             <PieChart>
               <Pie
                 data={pieData}
                 cx="50%"
                 cy="50%"
-                innerRadius={25}
-                outerRadius={42}
+                innerRadius={20}
+                outerRadius={34}
                 dataKey="value"
                 labelLine={false}
               >
@@ -259,7 +262,7 @@ export function CostAnalysisPanel() {
             {pieData.slice(0, 3).map((item, index) => (
               <div key={index} style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
                 <div style={{ width: 6, height: 6, borderRadius: 2, background: pieColors[index], flexShrink: 0 }} />
-                <span style={{ fontSize: 10, color: darkMode ? "#94a3b8" : "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ fontSize: 10, color: colors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {item.name}
                 </span>
               </div>
@@ -267,17 +270,17 @@ export function CostAnalysisPanel() {
           </div>
         </Col>
         <Col span={5}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.cost.providerBreakdown", "按厂商分解")}
           </div>
-          <SafeResponsiveChart height={100} minWidth={80} minHeight={80}>
+          <SafeResponsiveChart height={76} minWidth={72} minHeight={72}>
             <PieChart>
               <Pie
                 data={providerPieData}
                 cx="50%"
                 cy="50%"
-                innerRadius={25}
-                outerRadius={42}
+                innerRadius={20}
+                outerRadius={34}
                 dataKey="value"
                 labelLine={false}
               >
@@ -292,7 +295,7 @@ export function CostAnalysisPanel() {
             {providerPieData.slice(0, 3).map((item, index) => (
               <div key={index} style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 3 }}>
                 <div style={{ width: 6, height: 6, borderRadius: 2, background: providerPieColors[index], flexShrink: 0 }} />
-                <span style={{ fontSize: 10, color: darkMode ? "#94a3b8" : "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span style={{ fontSize: 10, color: colors.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {item.name}
                 </span>
               </div>
@@ -300,10 +303,10 @@ export function CostAnalysisPanel() {
           </div>
         </Col>
         <Col span={14}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: darkMode ? "#94a3b8" : "#64748b", marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.cost.trend")}
           </div>
-          <SafeResponsiveChart height={150} minWidth={100} minHeight={100}>
+          <SafeResponsiveChart height={112} minWidth={100} minHeight={90}>
             <AreaChart data={chartData} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
               <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
               <XAxis
@@ -319,8 +322,8 @@ export function CostAnalysisPanel() {
               <Area
                 type="monotone"
                 dataKey="cost"
-                stroke="#10b981"
-                fill="rgba(16, 185, 129, 0.2)"
+                stroke={colors.success}
+                fill={colors.successBg}
                 strokeWidth={2}
               />
             </AreaChart>

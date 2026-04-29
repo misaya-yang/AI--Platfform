@@ -132,9 +132,9 @@ export function PanelWrapper({
           alignItems: "center",
           justifyContent: "space-between",
           padding: `0 ${LAYOUT.CARD_PADDING}px`,
-          height: 46,
+          height: 42,
           borderBottom: `1px solid ${colors.borderSoft}`,
-          background: darkMode ? "rgba(255,255,255,0.025)" : "#fff",
+          background: darkMode ? "rgba(255,255,255,0.018)" : "#fff",
           flexShrink: 0,
         }}
       >
@@ -199,8 +199,9 @@ export function PanelWrapper({
         style={{
           padding: noPadding ? 0 : LAYOUT.CARD_PADDING,
           flex: 1,
-          overflow: "auto",
+          overflow: "hidden",
           position: "relative",
+          minHeight: 0,
         }}
       >
         {isError ? (

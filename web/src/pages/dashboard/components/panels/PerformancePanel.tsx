@@ -18,12 +18,14 @@ import { useDashboardContext } from "../../DashboardContext";
 import { useAppStore } from "@/store/useAppStore";
 import { getPerformanceBreakdown } from "@/api/usage";
 import { useTranslation } from "react-i18next";
+import { getColors } from "../../styles";
 
 type LatencyMetric = "p50" | "p95" | "p99" | "avg";
 
 export function PerformancePanel() {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
+  const colors = getColors(darkMode);
   const { dateRange, granularity, lastRefresh } = useDashboardContext();
   const [selectedMetric, setSelectedMetric] = useState<LatencyMetric>("p95");
 
@@ -52,7 +54,7 @@ export function PerformancePanel() {
   }));
 
   const latestData = chartData[chartData.length - 1];
-  const gridColor = darkMode ? "rgba(255,255,255,0.08)" : "#e2e8f0";
+  const gridColor = colors.divider;
 
   const metricOptions = [
     { value: "avg", label: t("metrics.avgLatency") },
@@ -77,89 +79,89 @@ export function PerformancePanel() {
       }
     >
       {/* Summary stats */}
-      <Row gutter={16} style={{ marginBottom: 16 }}>
+      <Row gutter={12} style={{ marginBottom: 10 }}>
         <Col span={6}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P50</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>P50</span>}
             value={latestData?.p50 || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 16, color: darkMode ? "#f1f5f9" : "#1e293b" } }}
+            styles={{ content: { fontSize: 15, color: colors.textPrimary } }}
           />
         </Col>
         <Col span={6}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P95</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>P95</span>}
             value={latestData?.p95 || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 16, color: "#f59e0b" } }}
+            styles={{ content: { fontSize: 15, color: colors.warning } }}
           />
         </Col>
         <Col span={6}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>P99</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>P99</span>}
             value={latestData?.p99 || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 16, color: "#ef4444" } }}
+            styles={{ content: { fontSize: 15, color: colors.error } }}
           />
         </Col>
         <Col span={6}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>{t("dashboard.performance.avg")}</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>{t("dashboard.performance.avg")}</span>}
             value={latestData?.avgLatency || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 16, color: "#3b82f6" } }}
+            styles={{ content: { fontSize: 15, color: colors.info } }}
           />
         </Col>
       </Row>
 
       {/* Phase breakdown */}
-      <Row gutter={12} style={{ marginBottom: 16 }}>
+      <Row gutter={12} style={{ marginBottom: 8 }}>
         <Col span={8}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>TTFB</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>TTFB</span>}
             value={latestData?.ttfb || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#06b6d4" } }}
+            styles={{ content: { fontSize: 13, color: colors.info } }}
           />
         </Col>
         <Col span={8}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>LLM</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>LLM</span>}
             value={latestData?.llm || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#c9a84c" } }}
+            styles={{ content: { fontSize: 13, color: colors.gold } }}
           />
         </Col>
         <Col span={8}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Retrieval</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>Retrieval</span>}
             value={latestData?.retrieval || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#10b981" } }}
+            styles={{ content: { fontSize: 13, color: colors.success } }}
           />
         </Col>
       </Row>
-      <Row gutter={12} style={{ marginBottom: 8 }}>
+      <Row gutter={12} style={{ marginBottom: 6 }}>
         <Col span={12}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Tool Calls</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>Tool Calls</span>}
             value={latestData?.tool || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#f59e0b" } }}
+            styles={{ content: { fontSize: 13, color: colors.warning } }}
           />
         </Col>
         <Col span={12}>
           <Statistic
-            title={<span style={{ fontSize: 11, color: darkMode ? "#94a3b8" : "#64748b" }}>Overhead</span>}
+            title={<span style={{ fontSize: 11, color: colors.textMuted }}>Overhead</span>}
             value={latestData?.overhead || 0}
             suffix="ms"
-            styles={{ content: { fontSize: 14, color: "#ef4444" } }}
+            styles={{ content: { fontSize: 13, color: colors.error } }}
           />
         </Col>
       </Row>
 
       {/* Chart */}
-      <SafeResponsiveChart height={200} minWidth={100} minHeight={100}>
+      <SafeResponsiveChart height={138} minWidth={100} minHeight={100}>
         <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid stroke={gridColor} strokeDasharray="3 3" />
           <XAxis
@@ -177,8 +179,8 @@ export function PerformancePanel() {
           <Area
             type="monotone"
             dataKey={selectedMetric === "avg" ? "avgLatency" : selectedMetric}
-            stroke="#3b82f6"
-            fill="rgba(59, 130, 246, 0.2)"
+            stroke={colors.info}
+            fill={colors.infoBg}
             strokeWidth={2}
           />
         </AreaChart>

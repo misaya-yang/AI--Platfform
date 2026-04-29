@@ -20,11 +20,34 @@ const PROVIDER_META: Record<string, { color: string; letter: string }> = {
   anthropic:  { color: "#c76a3a", letter: "A" },
   deepseek:   { color: "#6366f1", letter: "D" },
   dashscope:  { color: "#ff6a00", letter: "A" }, // 阿里云
+  alibaba:    { color: "#ff6a00", letter: "A" },
+  qwen:       { color: "#ff6a00", letter: "Q" },
+  doubao:     { color: "#2f7d5a", letter: "D" },
+  volcengine: { color: "#2f7d5a", letter: "V" },
+  moonshot:   { color: "#3f708e", letter: "M" },
+  zhipu:      { color: "#786b92", letter: "Z" },
+  siliconflow:{ color: "#14543c", letter: "S" },
+  minimax:    { color: "#b7842e", letter: "M" },
+  xai:        { color: "#536159", letter: "X" },
+  mistral:    { color: "#d64545", letter: "M" },
+  cohere:     { color: "#3f708e", letter: "C" },
   google:     { color: "#4285f4", letter: "G" },
   gemini:     { color: "#4285f4", letter: "G" },
   vertex:     { color: "#34a853", letter: "V" },
   "google-vertex": { color: "#34a853", letter: "V" },
 };
+
+const EXPECTED_PROVIDER_KEYS = [
+  "openai",
+  "anthropic",
+  "google",
+  "deepseek",
+  "dashscope",
+  "doubao",
+  "moonshot",
+  "zhipu",
+  "siliconflow",
+];
 
 const ICON = {
   refresh: (
@@ -116,6 +139,34 @@ function StatusBadge({ on, tOn, tOff }: { on: boolean; tOn: string; tOff: string
       fontSize: 11.5, fontWeight: 500,
     }}>
       {tOff}
+    </span>
+  );
+}
+
+function ReadinessBadge({ state, label }: { state: "ready" | "warning" | "off"; label: string }) {
+  const { darkMode } = useAppStore();
+  const c = getColors(darkMode);
+  const tone = state === "ready"
+    ? { fg: c.success, bg: c.successBg }
+    : state === "warning"
+    ? { fg: c.warning, bg: c.warningBg }
+    : { fg: c.textMuted, bg: c.cardHover };
+
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      padding: "3px 9px",
+      borderRadius: 5,
+      background: tone.bg,
+      color: tone.fg,
+      fontSize: 11.5,
+      fontWeight: 650,
+      whiteSpace: "nowrap",
+    }}>
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: tone.fg }} />
+      {label}
     </span>
   );
 }
@@ -271,8 +322,95 @@ export function ProviderStatusCard() {
     return m;
   }, [usageByProvider]);
 
+  const usageItems = usageByProvider?.items ?? [];
+  const unattributedUsage = usageItems.find((item) => {
+    const provider = (item.provider || "").toLowerCase();
+    return provider.startsWith("unattributed") || provider === "unknown" || provider === "none";
+  });
+
   if (!providers || Object.keys(providers).length === 0) {
-    return null;
+    const isZh = i18n.language.startsWith("zh");
+    return (
+      <section style={{
+        background: c.cardBg,
+        borderRadius: LAYOUT.CARD_RADIUS,
+        border: `1px solid ${c.borderSoft}`,
+        padding: "14px 16px",
+        fontFamily: FONT_FAMILY.sans,
+        overflow: "hidden",
+        minHeight: "100%",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <span style={{ fontSize: 13.5, fontWeight: 650, color: c.textPrimary }}>
+            {t("services.providersStatus.title", "厂商状态")}
+          </span>
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={() => refetch()}
+            aria-label="refresh"
+            style={rowBtn(c)}
+            onMouseEnter={(e) => { e.currentTarget.style.background = c.cardHover; e.currentTarget.style.borderColor = c.border; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = c.cardBg; e.currentTarget.style.borderColor = c.borderSoft; }}
+          >
+            {ICON.refresh}
+          </button>
+        </div>
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(260px, 1.1fr) minmax(320px, 1.4fr)",
+            gap: 12,
+          }}
+        >
+          <div style={{ padding: 14, borderRadius: 8, background: c.innerBg, border: `1px solid ${c.warning}33` }}>
+            <div style={{ color: c.warning, fontSize: 12, fontWeight: 700, marginBottom: 6 }}>
+              {isZh ? "模型厂商健康接口未返回数据" : "Provider health returned no records"}
+            </div>
+            <div style={{ color: c.textSecondary, fontSize: 12, lineHeight: 1.6 }}>
+              {isZh
+                ? "前端已调用 /api/v1/health/providers，但没有拿到任何厂商状态。这里不会伪造模型列表，请先在后端完成厂商与模型配置。"
+                : "The frontend called /api/v1/health/providers, but the backend returned no provider records. The UI will not invent model data; configure providers and models in the backend first."}
+            </div>
+            {unattributedUsage && (
+              <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 6, background: c.warningBg, color: c.warning, fontSize: 12, fontWeight: 650 }}>
+                {isZh ? "已检测到未归因请求" : "Unattributed usage detected"} · {unattributedUsage.requests} req · ${Number(unattributedUsage.cost_usd || 0).toFixed(4)}
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding: 14, borderRadius: 8, background: c.innerBg, border: `1px solid ${c.borderSoft}` }}>
+            <div style={{ color: c.textPrimary, fontSize: 12, fontWeight: 700, marginBottom: 10 }}>
+              {isZh ? "建议接入清单" : "Suggested provider coverage"}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {EXPECTED_PROVIDER_KEYS.map((key) => {
+                const meta = PROVIDER_META[key] || { color: c.textMuted, letter: key[0]?.toUpperCase() || "?" };
+                return (
+                  <span
+                    key={key}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 7,
+                      padding: "6px 9px",
+                      borderRadius: 7,
+                      border: `1px solid ${c.borderSoft}`,
+                      background: c.cardBg,
+                      color: c.textSecondary,
+                      fontSize: 12,
+                    }}
+                  >
+                    <ProviderAvatar color={meta.color} letter={meta.letter} />
+                    {key}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </section>
+    );
   }
 
   const list = Object.entries(providers).sort(([ka, a], [kb, b]) => {
@@ -284,6 +422,9 @@ export function ProviderStatusCard() {
   });
 
   const totalModels = list.reduce((sum, [, p]) => sum + (p.model_count || 0), 0);
+  const configuredProviders = list.filter(([, p]) => p.configured).length;
+  const readyProviders = list.filter(([, p]) => p.configured && p.model_count > 0).length;
+  const integrationGaps = list.length - readyProviders + (unattributedUsage ? 1 : 0);
   const cols = "2fr 0.9fr 0.9fr 1fr 1.6fr 1.1fr 0.9fr 0.9fr";
   const pad = "13px 18px";
 
@@ -295,6 +436,9 @@ export function ProviderStatusCard() {
       padding: "16px 18px",
       fontFamily: FONT_FAMILY.sans,
       overflow: "hidden",
+      height: "100%",
+      display: "flex",
+      flexDirection: "column",
     }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
@@ -311,12 +455,32 @@ export function ProviderStatusCard() {
           <span style={{
             display: "inline-flex", alignItems: "center", gap: 5,
             padding: "3px 9px", borderRadius: 5,
+            background: c.successBg, color: c.success,
+            fontWeight: 600, fontSize: 11,
+          }}>
+            <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.success }} />
+            {configuredProviders}/{list.length} {i18n.language.startsWith("zh") ? "已配置" : "configured"}
+          </span>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            padding: "3px 9px", borderRadius: 5,
             background: c.accentBg, color: c.accent,
             fontWeight: 600, fontSize: 11,
           }}>
             <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.accent }} />
             {totalModels} {t("services.providersStatus.modelUnit", i18n.language.startsWith("zh") ? "个模型" : "models")}
           </span>
+          {integrationGaps > 0 && (
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              padding: "3px 9px", borderRadius: 5,
+              background: c.warningBg, color: c.warning,
+              fontWeight: 650, fontSize: 11,
+            }}>
+              <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.warning }} />
+              {integrationGaps} {i18n.language.startsWith("zh") ? "个接入缺口" : "gaps"}
+            </span>
+          )}
           <button
             onClick={() => refetch()}
             aria-label="refresh"
@@ -345,7 +509,7 @@ export function ProviderStatusCard() {
       </div>
 
       {/* Table grid — negative margin so lines go edge-to-edge */}
-      <div style={{ margin: "0 -18px -16px", borderTop: `1px solid ${c.divider}` }}>
+      <div style={{ margin: "0 -18px -16px", borderTop: `1px solid ${c.divider}`, flex: 1, overflow: "auto", minHeight: 0 }}>
         {/* Header row */}
         <div style={{
           display: "grid", gridTemplateColumns: cols,
@@ -382,7 +546,8 @@ export function ProviderStatusCard() {
           const usage = usageMap[key.toLowerCase()];
           const hasUsage = !!usage && usage.requests > 0;
           const on = p.configured;
-          const health = on ? 100 : null;
+          const ready = p.configured && p.model_count > 0;
+          const health = ready ? 100 : p.configured ? 35 : null;
           const isLast = i === list.length - 1;
 
           return (
@@ -416,9 +581,15 @@ export function ProviderStatusCard() {
                 {p.model_count > 0 ? p.model_count : "—"}
               </span>
               <span>
-                <StatusBadge on={on}
-                  tOn={t("services.providersStatus.table.enabled", "已启用")}
-                  tOff={t("services.providersStatus.unconfigured", i18n.language.startsWith("zh") ? "未配置" : "Unconfigured")}
+                <ReadinessBadge
+                  state={ready ? "ready" : on ? "warning" : "off"}
+                  label={
+                    ready
+                      ? t("services.providersStatus.table.enabled", "已启用")
+                      : on
+                      ? (i18n.language.startsWith("zh") ? "无模型" : "No models")
+                      : t("services.providersStatus.unconfigured", i18n.language.startsWith("zh") ? "未配置" : "Unconfigured")
+                  }
                 />
               </span>
               <span><HealthBar score={health} /></span>
