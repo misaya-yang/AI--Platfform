@@ -41,7 +41,8 @@ def _resolve_schema_root() -> Path:
     Resolution order:
       1. ``DATABASE_SCHEMA_DIR`` env var (operator override).
       2. Walk up from this file looking for a sibling ``database/schema.sql``.
-      3. Legacy 3-parents fallback (only correct under the old src/ layout).
+      3. Check runtime working-directory candidates such as Docker's ``/app``.
+      4. Legacy 3-parents fallback (only correct under the old src/ layout).
     """
     override = os.environ.get("DATABASE_SCHEMA_DIR")
     if override:
@@ -50,6 +51,10 @@ def _resolve_schema_root() -> Path:
     for ancestor in here.parents:
         if (ancestor / "database" / "schema.sql").is_file():
             return ancestor / "database"
+    cwd = Path.cwd().resolve()
+    for candidate in (cwd / "database", Path("/app/database")):
+        if (candidate / "schema.sql").is_file():
+            return candidate
     return here.parent.parent.parent / "database"
 
 
