@@ -263,6 +263,17 @@
     "actions": {
       "fullscreen": "Fullscreen"
     },
+    "command": {
+      "subtitle": "AI Gateway operations, reliability, governance and request trace observability"
+    },
+    "ops": {
+      "services": "Services",
+      "activeRuns": "Trace samples",
+      "routingNode": "Gateway route node"
+    },
+    "governance": {
+      "quotaRisk": "Quota risk"
+    },
     "panel": {
       "loadError": "Failed to load data"
     },
@@ -353,6 +364,8 @@
       "availability": "Availability",
       "errorRate": "Error rate",
       "errorRateLabel": "Error rate",
+      "degraded": "Degraded/down",
+      "empty": "No service health data",
       "status": {
         "healthy": "Healthy",
         "degraded": "Degraded",
@@ -429,9 +442,12 @@
       "title": "Request Trace",
       "loading": "Loading trace...",
       "searchPlaceholder": "Search request ID...",
+      "requestId": "Request ID",
       "notFound": "Request not found",
       "emptyTitle": "No traces",
       "emptyDesc": "Trace data will appear here once requests are processed.",
+      "detailTitle": "Trace Details",
+      "detailHint": "Stage latency, tokens, cost and safe metadata",
       "demoHint": "Showing sample data",
       "totalDuration": "Total duration",
       "status": {
@@ -457,23 +473,27 @@
     },
     "workspace": {
       "overview": {
-        "title": "Operations Overview",
-        "subtitle": "Monitor service stability, request throughput & cost trends",
-        "short": "Overview"
+        "title": "Operations Console",
+        "subtitle": "Start with service availability, then throughput, latency, provider routing and capacity headroom",
+        "intent": "Live operations",
+        "short": "Operations"
       },
       "reliability": {
         "title": "Failures & Reliability",
-        "subtitle": "Breakdown by error type, pinpoint root causes quickly",
+        "subtitle": "Track SLOs, error budget, failure roots and slow-request risk",
+        "intent": "Incident response",
         "short": "Reliability"
       },
       "governance": {
         "title": "Cost & Quota Governance",
-        "subtitle": "Budget control, user quotas and overage policy enforcement",
+        "subtitle": "Focus on spend, quota pressure, attribution gaps and policy enforcement",
+        "intent": "Spend governance",
         "short": "Governance"
       },
       "tracing": {
         "title": "Request Tracing",
-        "subtitle": "Sample slow/failed requests, inspect stage latency & failures",
+        "subtitle": "Inspect request ID, status, slow samples, stage latency, model, tokens and cost",
+        "intent": "Trace explorer",
         "short": "Tracing"
       }
     },

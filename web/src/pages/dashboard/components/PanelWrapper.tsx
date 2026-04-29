@@ -117,7 +117,7 @@ export function PanelWrapper({
       className={`h-full flex flex-col ${className}`}
       style={{
         borderRadius: LAYOUT.CARD_RADIUS,
-        border: `1px solid ${colors.border}`,
+        border: `1px solid ${colors.borderSoft}`,
         background: colors.cardBg,
         boxShadow: colors.shadowSm,
         overflow: "hidden",
@@ -132,9 +132,9 @@ export function PanelWrapper({
           alignItems: "center",
           justifyContent: "space-between",
           padding: `0 ${LAYOUT.CARD_PADDING}px`,
-          height: 48,
-          borderBottom: `1px solid ${colors.border}`,
-          background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.015)",
+          height: 46,
+          borderBottom: `1px solid ${colors.borderSoft}`,
+          background: darkMode ? "rgba(255,255,255,0.025)" : "#fff",
           flexShrink: 0,
         }}
       >
@@ -142,9 +142,9 @@ export function PanelWrapper({
           <span
             style={{
               fontSize: 15,
-              fontWeight: 700,
+              fontWeight: 650,
               color: colors.textPrimary,
-              letterSpacing: "-0.01em",
+              letterSpacing: "0",
             }}
           >
             {title}
@@ -164,13 +164,13 @@ export function PanelWrapper({
                   width: 32,
                   height: 32,
                   borderRadius: 8,
-                  background: colors.innerBg,
+                  background: colors.cardBg,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   cursor: "pointer",
                   transition: TRANSITION.normal,
-                  border: `1px solid ${colors.border}`,
+                  border: `1px solid ${colors.borderSoft}`,
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.background = darkMode ? colors.borderHover : colors.border;

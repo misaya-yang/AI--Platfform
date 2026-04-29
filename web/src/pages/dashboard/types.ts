@@ -64,7 +64,8 @@ export type PanelType =
   | "user-quota"
   | "security-events"
   | "request-trace"
-  | "failure-analysis";
+  | "failure-analysis"
+  | "provider-status";
 
 // KPI card data
 export interface KPIData {
@@ -211,4 +212,5 @@ export const DEFAULT_PANELS: PanelConfig[] = [
   { id: "user-quota", title: "User Quota", type: "user-quota", visible: true },
   { id: "security-events", title: "Security Events", type: "security-events", visible: true },
   { id: "request-trace", title: "Request Trace", type: "request-trace", visible: true },
+  { id: "provider-status", title: "Provider Status", type: "provider-status", visible: true },
 ];

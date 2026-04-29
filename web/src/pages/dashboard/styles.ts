@@ -5,7 +5,7 @@ export const SPACING = {
   xs: 4, sm: 8, md: 12, lg: 16, xl: 20, '2xl': 24, '3xl': 32, '4xl': 40, '5xl': 56, '6xl': 72,
 } as const;
 
-export const RADIUS = { sm: 6, md: 8, lg: 12 } as const;
+export const RADIUS = { sm: 5, md: 8, lg: 10 } as const;
 
 export const TYPOGRAPHY = {
   pageTitle:    { fontSize: 17, fontWeight: 600, letterSpacing: '-0.2px', lineHeight: 1.2 },
@@ -42,7 +42,7 @@ export const ELEVATION = (dark: boolean) => ({
 export const LAYOUT = {
   CARD_GAP: 14,
   CARD_PADDING: 16,
-  CARD_RADIUS: 12,
+  CARD_RADIUS: 10,
   PAGE_PADDING: 0,
   KPI_HEIGHT: 'auto' as unknown as number,
   PANEL_MIN_HEIGHT: 400,
@@ -61,10 +61,10 @@ export const LAYOUT = {
 // indigo accent stable (with minor brightness lift).
 export const getColors = (darkMode: boolean) => ({
   // Canvas
-  pageBg:    darkMode ? '#0c0f16' : '#f5f6f8',
+  pageBg:    darkMode ? '#0c0f16' : '#f4f6f5',
   cardBg:    darkMode ? '#161a24' : '#ffffff',
-  cardHover: darkMode ? '#1b2130' : '#f3f4f7',   // T.hover
-  innerBg:   darkMode ? '#111622' : '#fafbfc',   // T.surfaceAlt
+  cardHover: darkMode ? '#1b2130' : '#f1f4f3',   // T.hover
+  innerBg:   darkMode ? '#111622' : '#f8faf9',   // T.surfaceAlt
 
   // Borders
   border:      darkMode ? '#2a3042' : '#e6e8ee',  // T.border
@@ -80,17 +80,20 @@ export const getColors = (darkMode: boolean) => ({
   textFaint:     darkMode ? '#4e5362' : '#b7bac3',  // T.textFaint
 
   // Signature indigo — the ONE accent
-  accent:       darkMode ? '#8794ff' : '#6674f4',   // T.accent
-  accentBright: darkMode ? '#9ea9ff' : '#7b87f6',
-  accentDeep:   darkMode ? '#6674f4' : '#5663e8',   // T.accentHover
-  accentSoft:   darkMode ? '#232958' : '#eef0fe',   // T.accentSoft
+  accent:       darkMode ? '#9aa6ff' : '#6674f4',   // active nav/tab only
+  accentBright: darkMode ? '#b0b9ff' : '#7b87f6',
+  accentDeep:   darkMode ? '#7784ff' : '#5663e8',
+  accentSoft:   darkMode ? '#232958' : '#eef0fe',
+  operator:     darkMode ? '#5dd6a6' : '#14543c',
+  operatorSoft: darkMode ? 'rgba(93,214,166,0.12)' : '#edf7f2',
+  navy:         darkMode ? '#93a4bc' : '#1f3448',
 
   // Semantic
   success:      darkMode ? '#34d399' : '#10b981',
   successSoft:  darkMode ? 'rgba(16,185,129,0.12)' : '#ecfdf5',
   error:        darkMode ? '#f87171' : '#ef4444',
   errorSoft:    darkMode ? 'rgba(239,68,68,0.12)' : '#fef2f2',
-  warning:      darkMode ? '#fbbf24' : '#f59e0b',
+  warning:      darkMode ? '#fbbf24' : '#d98906',
   warningSoft:  darkMode ? 'rgba(245,158,11,0.12)' : '#fffbeb',
   danger:       darkMode ? '#f87171' : '#ef4444',
 

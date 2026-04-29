@@ -115,25 +115,43 @@ function DashboardContent() {
     >
       <div style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH }}>
 
-        {/* ── Title + timestamp row (matches design TopBar) */}
+        {/* ── Command header ── */}
         <div style={{
           display: "flex", alignItems: "center", gap: 16,
           padding: "16px 24px 0",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
         }}>
-          <h1 style={{
-            fontSize: 17, fontWeight: 600, color: c.textPrimary,
-            margin: 0, letterSpacing: "-0.2px",
-          }}>
-            {t("metrics.title", "监控面板")}
-          </h1>
-          <div style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "4px 10px", borderRadius: 999,
-            background: c.innerBg, border: `1px solid ${c.borderSoft}`,
-            fontSize: 12, color: c.textSecondary, fontFamily: FONT_FAMILY.mono,
-          }}>
-            <span style={{ display: "flex", color: c.textMuted }}>{ICON.clock}</span>
-            <span>{dayjs(lastRefresh).format("YYYY-MM-DD HH:mm:ss")}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+            <div style={{
+              width: 4,
+              height: 28,
+              borderRadius: 999,
+              background: c.operator,
+              flexShrink: 0,
+            }} />
+            <div>
+              <h1 style={{
+                fontSize: 18, fontWeight: 700, color: c.textPrimary,
+                margin: 0, letterSpacing: "0",
+              }}>
+                {t("metrics.title", "监控面板")}
+              </h1>
+              <div style={{ fontSize: 12, color: c.textSecondary, marginTop: 3 }}>
+                {t("dashboard.command.subtitle", "AI Gateway operations, reliability, governance and trace observability")}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "5px 10px", borderRadius: 8,
+              background: c.cardBg, border: `1px solid ${c.borderSoft}`,
+              fontSize: 12, color: c.textSecondary, fontFamily: FONT_FAMILY.mono,
+            }}>
+              <span style={{ display: "flex", color: c.textMuted }}>{ICON.clock}</span>
+              <span>{dayjs(lastRefresh).format("YYYY-MM-DD HH:mm:ss")}</span>
+            </div>
           </div>
         </div>
 

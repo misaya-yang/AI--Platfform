@@ -1,4 +1,4 @@
-import { Input, Empty, Tag, Spin, Button, List, Segmented } from "antd";
+import { Input, Empty, Tag, Spin, Button, Table, Segmented } from "antd";
 import {
   SearchOutlined,
   ReloadOutlined,
@@ -65,7 +65,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
   const maxDuration = Math.max(trace.request_total_duration_ms || 0, 1);
 
   return (
-    <div style={{ marginTop: 16 }}>
+    <div>
       <div
         style={{
           display: "flex",
@@ -220,6 +220,34 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
           {formatDuration(trace.request_total_duration_ms || 0)}
         </span>
       </div>
+
+      <div
+        style={{
+          marginTop: 8,
+          display: "grid",
+          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gap: 8,
+        }}
+      >
+        <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
+          <div style={{ fontSize: 11, color: colors.textMuted }}>{t("metrics.totalTokens", "Token 消耗")}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.textPrimary }}>
+            {(trace.input_tokens + trace.output_tokens).toLocaleString()}
+          </div>
+        </div>
+        <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
+          <div style={{ fontSize: 11, color: colors.textMuted }}>{t("analytics.cost", "成本")}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: colors.success }}>
+            ${trace.total_cost_usd >= 1 ? trace.total_cost_usd.toFixed(2) : trace.total_cost_usd.toFixed(4)}
+          </div>
+        </div>
+        <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
+          <div style={{ fontSize: 11, color: colors.textMuted }}>trace_id</div>
+          <div style={{ fontSize: 12, fontWeight: 650, color: colors.textPrimary, overflow: "hidden", textOverflow: "ellipsis" }}>
+            {trace.trace_id || "-"}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -310,6 +338,72 @@ export function RequestTracePanel() {
   }, []);
 
   const hasActiveFilter = traceFilter.status || traceFilter.error_type || traceFilter.sample_reason;
+  const selectedTrace = trace || filteredTraces[0] || null;
+  const traceColumns = [
+    {
+      title: t("dashboard.requestTrace.requestId", "请求 ID"),
+      dataIndex: "request_id",
+      key: "request_id",
+      width: 220,
+      ellipsis: true,
+      render: (requestId: string, item: RequestTrace) => (
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: colors.textPrimary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {requestId}
+          </div>
+          <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {resolveServiceLabel(item.service_id)} · {resolveUserLabel(item.user_id)}
+          </div>
+        </div>
+      ),
+    },
+    {
+      title: t("common.model", "模型"),
+      key: "model",
+      width: 180,
+      render: (_: unknown, item: RequestTrace) => (
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: colors.textPrimary, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {item.model || "-"}
+          </div>
+          <div style={{ fontSize: 11, color: colors.textMuted }}>{item.provider || "-"}</div>
+        </div>
+      ),
+    },
+    {
+      title: t("common.status", "状态"),
+      dataIndex: "status",
+      key: "status",
+      width: 92,
+      render: (status: RequestTrace["status"]) => (
+        <Tag color={status === "success" ? "success" : "error" } style={{ margin: 0, borderRadius: 5 }}>
+          {status}
+        </Tag>
+      ),
+    },
+    {
+      title: t("metrics.avgLatency", "延迟"),
+      dataIndex: "request_total_duration_ms",
+      key: "latency",
+      width: 86,
+      render: (duration: number) => (
+        <span style={{ fontSize: 12, fontWeight: 650, color: duration > 5000 ? colors.warning : colors.textPrimary }}>
+          {formatDuration(duration)}
+        </span>
+      ),
+    },
+    {
+      title: t("analytics.cost", "成本"),
+      dataIndex: "total_cost_usd",
+      key: "cost",
+      width: 86,
+      render: (cost: number) => (
+        <span style={{ fontSize: 12, fontWeight: 650, color: colors.success }}>
+          {cost > 0 ? `$${cost >= 1 ? cost.toFixed(2) : cost.toFixed(4)}` : "—"}
+        </span>
+      ),
+    },
+  ];
 
   return (
     <PanelWrapper
@@ -372,44 +466,77 @@ export function RequestTracePanel() {
         <div style={{ textAlign: "center", padding: 40 }}>
           <Spin tip={t("dashboard.requestTrace.loading")} />
         </div>
-      ) : trace ? (
-        <TraceTimeline trace={trace} />
       ) : error ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span style={{ color: colors.textMuted }}>{error}</span>} />
       ) : filteredTraces.length > 0 ? (
-        <List
-          size="small"
-          dataSource={filteredTraces}
-          renderItem={(item) => (
-            <List.Item
-              style={{ cursor: "pointer" }}
-              onClick={() => {
-                setTrace(item);
-                setSearchId(item.request_id);
-                setError(null);
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", width: "100%", gap: 8 }}>
-                <div style={{ display: "flex", flexDirection: "column" }}>
-                  <span style={{ fontSize: 12, color: colors.textPrimary }}>{item.request_id}</span>
-                  <span style={{ fontSize: 11, color: colors.textMuted }}>
-                    {resolveServiceLabel(item.service_id)} · {resolveUserLabel(item.user_id)} · {item.provider} / {item.model}
-                  </span>
+        <div
+          className="trace-explorer-grid"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(520px, 1.25fr) minmax(380px, 0.95fr)",
+            gap: 14,
+            alignItems: "stretch",
+          }}
+        >
+          <div
+            style={{
+              border: `1px solid ${colors.borderSoft}`,
+              borderRadius: 8,
+              overflow: "hidden",
+              minWidth: 0,
+            }}
+          >
+            <Table
+              dataSource={filteredTraces}
+              columns={traceColumns}
+              rowKey="request_id"
+              size="small"
+              pagination={false}
+              scroll={{ y: 430 }}
+              rowClassName={(item) => item.request_id === selectedTrace?.request_id ? "trace-row-active" : ""}
+              onRow={(item) => ({
+                onClick: () => {
+                  setTrace(item);
+                  setSearchId(item.request_id);
+                  setError(null);
+                },
+                style: { cursor: "pointer" },
+              })}
+            />
+          </div>
+          <div
+            style={{
+              minWidth: 0,
+              border: `1px solid ${colors.borderSoft}`,
+              borderRadius: 8,
+              background: colors.cardBg,
+              padding: 12,
+              overflow: "auto",
+              maxHeight: 500,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: colors.textPrimary }}>
+                  {t("dashboard.requestTrace.detailTitle", "Trace 详情")}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                  <Tag color={item.status === "success" ? "success" : "error"} style={{ margin: 0 }}>{item.status}</Tag>
-                  {item.error_type && <Tag color="red" style={{ margin: 0 }}>{item.error_type}</Tag>}
-                  <span style={{ fontSize: 11, color: colors.textMuted }}>{formatDuration(item.request_total_duration_ms)}</span>
-                  {item.total_cost_usd > 0 && (
-                    <span style={{ fontSize: 11, color: "#10b981", fontWeight: 500 }}>
-                      ${item.total_cost_usd >= 1 ? item.total_cost_usd.toFixed(2) : item.total_cost_usd.toFixed(4)}
-                    </span>
-                  )}
+                <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
+                  {t("dashboard.requestTrace.detailHint", "阶段耗时、Token、成本与安全元数据")}
                 </div>
               </div>
-            </List.Item>
-          )}
-        />
+              {selectedTrace?.sample_reason && <Tag style={{ margin: 0 }}>{selectedTrace.sample_reason}</Tag>}
+            </div>
+            {selectedTrace ? <TraceTimeline trace={selectedTrace} /> : null}
+          </div>
+          <style>{`
+            .trace-row-active > td {
+              background: ${darkMode ? "rgba(135,148,255,0.14)" : "rgba(20,84,60,0.06)"} !important;
+            }
+            @media (max-width: 1180px) {
+              .trace-explorer-grid { grid-template-columns: minmax(0, 1fr) !important; }
+            }
+          `}</style>
+        </div>
       ) : (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}

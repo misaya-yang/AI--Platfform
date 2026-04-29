@@ -1,5 +1,7 @@
 import { useMemo, useState, type ComponentType } from "react";
 import { Segmented, Tooltip } from "antd";
+import { useQuery } from "@tanstack/react-query";
+import dayjs from "dayjs";
 import {
   DashboardOutlined,
   FundProjectionScreenOutlined,
@@ -8,6 +10,10 @@ import {
 } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
+import { ProviderStatusCard } from "@/components/ProviderStatusCard";
+import { useHealth, useServices } from "@/hooks/useServices";
+import { getQuotaUsersOverview, getUsageSummary, listRequestTraces } from "@/api/usage";
+import { useDashboardContext } from "./DashboardContext";
 import { getColors, LAYOUT, TYPOGRAPHY } from "./styles";
 import type { PanelType } from "./types";
 import {
@@ -32,7 +38,14 @@ interface PanelSlot {
 interface WorkspaceConfig {
   title: string;
   subtitle: string;
+  intent: string;
   panels: PanelSlot[];
+}
+
+interface WorkspaceSignal {
+  label: string;
+  value: string;
+  tone: "ok" | "warn" | "critical" | "neutral";
 }
 
 const WORKSPACE_STORAGE_KEY = "dashboard-workspace-v2";
@@ -46,6 +59,7 @@ const PANEL_COMPONENTS: Record<PanelType, ComponentType> = {
   "security-events": SecurityEventsPanel,
   "request-trace": RequestTracePanel,
   "failure-analysis": FailureAnalysisPanel,
+  "provider-status": ProviderStatusCard,
 };
 
 function loadWorkspace(): WorkspaceKey {
@@ -73,6 +87,11 @@ function saveWorkspace(workspace: WorkspaceKey) {
   }
 }
 
+function formatCost(value: number): string {
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  return `$${value.toFixed(4)}`;
+}
+
 interface DashboardLayoutProps {
   width?: number;
   forceWorkspace?: WorkspaceKey;
@@ -82,10 +101,63 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
   const colors = getColors(darkMode);
+  const { dateRange, serviceId, userId, lastRefresh } = useDashboardContext();
   const [workspace, setWorkspace] = useState<WorkspaceKey>(() => forceWorkspace || loadWorkspace());
 
+  const servicesQuery = useServices();
+  const healthQuery = useHealth();
+  const summaryQuery = useQuery({
+    queryKey: ["dashboard-workspace-summary", dateRange, serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      getUsageSummary({
+        start_date: dateRange[0],
+        end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+      }),
+    staleTime: 30000,
+  });
+  const todayCostQuery = useQuery({
+    queryKey: ["dashboard-workspace-cost-today", serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      getUsageSummary({
+        start_date: dayjs().format("YYYY-MM-DD"),
+        end_date: dayjs().format("YYYY-MM-DD"),
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+      }),
+    staleTime: 30000,
+  });
+  const monthCostQuery = useQuery({
+    queryKey: ["dashboard-workspace-cost-month", serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      getUsageSummary({
+        start_date: dayjs().startOf("month").format("YYYY-MM-DD"),
+        end_date: dayjs().format("YYYY-MM-DD"),
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+      }),
+    staleTime: 30000,
+  });
+  const quotaQuery = useQuery({
+    queryKey: ["dashboard-workspace-quota", lastRefresh.getTime()],
+    queryFn: () => getQuotaUsersOverview({ limit: 20, sort_by: "status" }),
+    staleTime: 30000,
+  });
+  const tracesQuery = useQuery({
+    queryKey: ["dashboard-workspace-traces", dateRange, serviceId, userId, lastRefresh.getTime()],
+    queryFn: () =>
+      listRequestTraces({
+        start_date: dateRange[0],
+        end_date: dateRange[1],
+        service_id: serviceId !== "all" ? serviceId : undefined,
+        user_id: userId !== "all" ? userId : undefined,
+        limit: 15,
+      }),
+    staleTime: 30000,
+  });
+
   // Sync with parent-controlled workspace
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   if (forceWorkspace && forceWorkspace !== workspace) {
     setWorkspace(forceWorkspace);
   }
@@ -93,50 +165,55 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const workspaceConfigs = useMemo<Record<WorkspaceKey, WorkspaceConfig>>(
     () => ({
       overview: {
-        title: t("dashboard.workspace.overview.title", "运营总览"),
+        title: t("dashboard.workspace.overview.title", "运营控制台"),
         subtitle: t(
           "dashboard.workspace.overview.subtitle",
-          "关注服务稳定性、请求吞吐与核心成本走势"
+          "先看服务是否可用，再看吞吐、延迟、厂商路由与容量余量"
         ),
+        intent: t("dashboard.workspace.overview.intent", "Live operations"),
         panels: [
-          { type: "service-health", span: 2, minHeight: 380 },
-          { type: "performance", span: 1, minHeight: 460 },
-          { type: "token-usage", span: 1, minHeight: 460 },
-          { type: "cost-analysis", span: 2, minHeight: 520 },
+          { type: "service-health", span: 2, minHeight: 340 },
+          { type: "performance", span: 1, minHeight: 430 },
+          { type: "token-usage", span: 1, minHeight: 430 },
+          { type: "provider-status", span: 2, minHeight: 360 },
         ],
       },
       reliability: {
         title: t("dashboard.workspace.reliability.title", "故障与可靠性"),
         subtitle: t(
           "dashboard.workspace.reliability.subtitle",
-          "按错误类型拆分成功率，快速定位最可能的故障根因"
+          "围绕 SLO、错误预算、失败根因与慢请求来定位风险"
         ),
+        intent: t("dashboard.workspace.reliability.intent", "Incident response"),
         panels: [
           { type: "failure-analysis", span: 1, minHeight: 500 },
           { type: "security-events", span: 1, minHeight: 500 },
-          { type: "request-trace", span: 2, minHeight: 540 },
+          { type: "request-trace", span: 2, minHeight: 620 },
         ],
       },
       governance: {
         title: t("dashboard.workspace.governance.title", "成本与配额治理"),
         subtitle: t(
           "dashboard.workspace.governance.subtitle",
-          "聚焦预算控制、用户配额和超额策略执行状态"
+          "聚焦预算消耗、用户配额、归因缺口与策略执行状态"
         ),
+        intent: t("dashboard.workspace.governance.intent", "Spend governance"),
         panels: [
           { type: "cost-analysis", span: 1, minHeight: 520 },
           { type: "user-quota", span: 1, minHeight: 520 },
           { type: "token-usage", span: 2, minHeight: 460 },
+          { type: "provider-status", span: 2, minHeight: 360 },
         ],
       },
       tracing: {
         title: t("dashboard.workspace.tracing.title", "请求追踪"),
         subtitle: t(
           "dashboard.workspace.tracing.subtitle",
-          "按慢请求/失败请求抽样，查看阶段耗时和故障落点"
+          "按请求 ID、状态与慢请求样本查看阶段耗时、模型、Token 与成本"
         ),
+        intent: t("dashboard.workspace.tracing.intent", "Trace explorer"),
         panels: [
-          { type: "request-trace", span: 2, minHeight: 620 },
+          { type: "request-trace", span: 2, minHeight: 680 },
           { type: "failure-analysis", span: 1, minHeight: 500 },
           { type: "performance", span: 1, minHeight: 500 },
         ],
@@ -147,18 +224,96 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
 
   const activeConfig = workspaceConfigs[workspace];
   const useSingleColumn = width < 1100;
+  const toneColors: Record<WorkspaceSignal["tone"], { fg: string; bg: string; border: string }> = {
+    ok: { fg: colors.success, bg: colors.successSoft, border: `${colors.success}33` },
+    warn: { fg: colors.warning, bg: colors.warningSoft, border: `${colors.warning}33` },
+    critical: { fg: colors.error, bg: colors.errorSoft, border: `${colors.error}33` },
+    neutral: { fg: colors.navy, bg: colors.innerBg, border: colors.borderSoft },
+  };
+  const services = servicesQuery.data || [];
+  const health = healthQuery.data || {};
+  const healthyCount = services.filter((service) => health[service.service_id]?.status === "healthy").length;
+  const availability = services.length > 0 ? (healthyCount / services.length) * 100 : 0;
+  const errorRate = Math.max(0, 100 - (summaryQuery.data?.success_rate ?? 100));
+  const traces = tracesQuery.data || [];
+  const failedTraceCount = traces.filter((trace) => trace.status === "error").length;
+  const slowTraceCount = traces.filter((trace) => trace.sample_reason === "slow_request" || trace.request_total_duration_ms > 5000).length;
+  const sampledTraceCount = traces.filter((trace) => trace.sample_reason === "baseline_sample").length;
+  const quotaSummary = quotaQuery.data?.summary;
+  const quotaRiskCount = (quotaSummary?.warning || 0) + (quotaSummary?.exceeded || 0) + (quotaSummary?.blocked || 0);
+  const successRate = summaryQuery.data?.success_rate ?? 0;
+  const workspaceSignals: Record<WorkspaceKey, WorkspaceSignal[]> = {
+    overview: [
+      {
+        label: t("dashboard.serviceHealth.availability", "可用率"),
+        value: services.length > 0 ? `${availability.toFixed(1)}%` : "—",
+        tone: availability >= 99 || services.length === 0 ? "ok" : availability >= 90 ? "warn" : "critical",
+      },
+      {
+        label: t("dashboard.serviceHealth.errorRate", "错误率"),
+        value: `${errorRate.toFixed(2)}%`,
+        tone: errorRate > 5 ? "critical" : errorRate > 1 ? "warn" : "ok",
+      },
+      {
+        label: t("dashboard.ops.services", "服务总数"),
+        value: String(services.length),
+        tone: "neutral",
+      },
+      {
+        label: t("dashboard.ops.activeRuns", "追踪样本"),
+        value: String(traces.length),
+        tone: "neutral",
+      },
+    ],
+    reliability: [
+      { label: "SLO", value: "99.5%", tone: "neutral" },
+      {
+        label: t("metrics.successRate", "成功率"),
+        value: summaryQuery.data ? `${successRate.toFixed(1)}%` : "—",
+        tone: successRate >= 99.5 ? "ok" : successRate >= 95 ? "warn" : "critical",
+      },
+      {
+        label: t("dashboard.requestTrace.tab.error", "失败请求"),
+        value: String(failedTraceCount),
+        tone: failedTraceCount > 0 ? "critical" : "ok",
+      },
+      {
+        label: t("dashboard.requestTrace.tab.slow", "慢请求"),
+        value: String(slowTraceCount),
+        tone: slowTraceCount > 0 ? "warn" : "ok",
+      },
+    ],
+    governance: [
+      { label: t("dashboard.cost.month", "本月"), value: formatCost(monthCostQuery.data?.total_cost_usd || 0), tone: "neutral" },
+      { label: t("dashboard.cost.today", "今日"), value: formatCost(todayCostQuery.data?.total_cost_usd || 0), tone: "ok" },
+      {
+        label: t("dashboard.governance.quotaRisk", "配额风险"),
+        value: String(quotaRiskCount),
+        tone: quotaRiskCount > 0 ? "warn" : "ok",
+      },
+      {
+        label: t("metrics.totalTokens", "Token 消耗"),
+        value: summaryQuery.data?.total_tokens ? `${Math.round(summaryQuery.data.total_tokens / 1000)}K` : "0",
+        tone: "neutral",
+      },
+    ],
+    tracing: [
+      { label: t("dashboard.requestTrace.tab.all", "全部"), value: String(traces.length), tone: "neutral" },
+      { label: t("dashboard.requestTrace.tab.error", "失败请求"), value: String(failedTraceCount), tone: failedTraceCount > 0 ? "critical" : "ok" },
+      { label: t("dashboard.requestTrace.tab.slow", "慢请求"), value: String(slowTraceCount), tone: slowTraceCount > 0 ? "warn" : "ok" },
+      { label: t("dashboard.requestTrace.tab.sampled", "采样"), value: String(sampledTraceCount), tone: "neutral" },
+    ],
+  };
 
   return (
     <div style={{ minHeight: "100%" }}>
-      {!forceWorkspace && <div
+      <div
         style={{
           borderRadius: LAYOUT.CARD_RADIUS,
-          border: `1px solid ${colors.border}`,
-          background: darkMode
-            ? `linear-gradient(120deg, ${colors.cardBg}, ${colors.cardHover})`
-            : "linear-gradient(120deg, rgba(255,255,255,0.98), rgba(248,250,252,0.92))",
+          border: `1px solid ${colors.borderSoft}`,
+          background: colors.cardBg,
           boxShadow: colors.shadowSm,
-          padding: "16px 18px",
+          padding: "14px 16px",
           marginBottom: LAYOUT.GRID_GAP,
         }}
       >
@@ -167,16 +322,33 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            gap: 16,
+            gap: 18,
             flexWrap: "wrap",
           }}
         >
-          <div style={{ minWidth: 280 }}>
+          <div style={{ minWidth: 300, flex: "1 1 420px" }}>
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                height: 22,
+                padding: "0 8px",
+                borderRadius: 6,
+                marginBottom: 8,
+                background: colors.operatorSoft,
+                color: colors.operator,
+                fontSize: 11,
+                fontWeight: 650,
+              }}
+            >
+              {activeConfig.intent}
+            </div>
             <div
               style={{
                 ...TYPOGRAPHY.sectionTitle,
                 color: colors.textPrimary,
-                letterSpacing: "-0.02em",
+                fontSize: 16,
+                letterSpacing: "0",
               }}
             >
               {activeConfig.title}
@@ -192,63 +364,88 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             </div>
           </div>
 
-          <Segmented
-            size="middle"
-            value={workspace}
-            onChange={(value) => {
-              const next = value as WorkspaceKey;
-              setWorkspace(next);
-              saveWorkspace(next);
-            }}
-            options={[
-              {
-                value: "overview",
-                label: (
-                  <Tooltip title={t("dashboard.workspace.overview.title", "运营总览")}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <DashboardOutlined />
-                      {t("dashboard.workspace.overview.short", "总览")}
-                    </span>
-                  </Tooltip>
-                ),
-              },
-              {
-                value: "reliability",
-                label: (
-                  <Tooltip title={t("dashboard.workspace.reliability.title", "故障与可靠性")}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <FundProjectionScreenOutlined />
-                      {t("dashboard.workspace.reliability.short", "可靠性")}
-                    </span>
-                  </Tooltip>
-                ),
-              },
-              {
-                value: "governance",
-                label: (
-                  <Tooltip title={t("dashboard.workspace.governance.title", "成本与配额治理")}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <SafetyCertificateOutlined />
-                      {t("dashboard.workspace.governance.short", "治理")}
-                    </span>
-                  </Tooltip>
-                ),
-              },
-              {
-                value: "tracing",
-                label: (
-                  <Tooltip title={t("dashboard.workspace.tracing.title", "请求追踪")}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                      <ApartmentOutlined />
-                      {t("dashboard.workspace.tracing.short", "追踪")}
-                    </span>
-                  </Tooltip>
-                ),
-              },
-            ]}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {workspaceSignals[workspace].map((signal) => {
+              const tone = toneColors[signal.tone];
+              return (
+                <div
+                  key={`${signal.label}-${signal.value}`}
+                  style={{
+                    minWidth: 92,
+                    padding: "7px 10px",
+                    borderRadius: 8,
+                    border: `1px solid ${tone.border}`,
+                    background: tone.bg,
+                  }}
+                >
+                  <div style={{ fontSize: 11, color: colors.textMuted, marginBottom: 2 }}>{signal.label}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: tone.fg, fontFeatureSettings: '"tnum"' }}>
+                    {signal.value}
+                  </div>
+                </div>
+              );
+            })}
+
+            {!forceWorkspace && (
+              <Segmented
+                size="middle"
+                value={workspace}
+                onChange={(value) => {
+                  const next = value as WorkspaceKey;
+                  setWorkspace(next);
+                  saveWorkspace(next);
+                }}
+                options={[
+                  {
+                    value: "overview",
+                    label: (
+                      <Tooltip title={t("dashboard.workspace.overview.title", "运营控制台")}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <DashboardOutlined />
+                          {t("dashboard.workspace.overview.short", "运营")}
+                        </span>
+                      </Tooltip>
+                    ),
+                  },
+                  {
+                    value: "reliability",
+                    label: (
+                      <Tooltip title={t("dashboard.workspace.reliability.title", "故障与可靠性")}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <FundProjectionScreenOutlined />
+                          {t("dashboard.workspace.reliability.short", "可靠性")}
+                        </span>
+                      </Tooltip>
+                    ),
+                  },
+                  {
+                    value: "governance",
+                    label: (
+                      <Tooltip title={t("dashboard.workspace.governance.title", "成本与配额治理")}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <SafetyCertificateOutlined />
+                          {t("dashboard.workspace.governance.short", "治理")}
+                        </span>
+                      </Tooltip>
+                    ),
+                  },
+                  {
+                    value: "tracing",
+                    label: (
+                      <Tooltip title={t("dashboard.workspace.tracing.title", "请求追踪")}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <ApartmentOutlined />
+                          {t("dashboard.workspace.tracing.short", "追踪")}
+                        </span>
+                      </Tooltip>
+                    ),
+                  },
+                ]}
+              />
+            )}
+          </div>
         </div>
-      </div>}
+      </div>
 
       <div
         style={{

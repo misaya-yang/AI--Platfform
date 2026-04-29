@@ -263,6 +263,17 @@
     "actions": {
       "fullscreen": "全屏"
     },
+    "command": {
+      "subtitle": "AI Gateway 运营、可靠性、治理与请求追踪观测"
+    },
+    "ops": {
+      "services": "服务总数",
+      "activeRuns": "追踪样本",
+      "routingNode": "Gateway 路由节点"
+    },
+    "governance": {
+      "quotaRisk": "配额风险"
+    },
     "panel": {
       "loadError": "数据加载失败"
     },
@@ -353,6 +364,8 @@
       "availability": "可用率",
       "errorRate": "错误率",
       "errorRateLabel": "错误率",
+      "degraded": "降级/不可用",
+      "empty": "暂无服务健康数据",
       "status": {
         "healthy": "健康",
         "degraded": "降级",
@@ -429,9 +442,12 @@
       "title": "请求追踪",
       "loading": "加载追踪中...",
       "searchPlaceholder": "搜索请求 ID...",
+      "requestId": "请求 ID",
       "notFound": "未找到请求",
       "emptyTitle": "暂无追踪",
       "emptyDesc": "请求处理后将在此显示追踪数据",
+      "detailTitle": "Trace 详情",
+      "detailHint": "阶段耗时、Token、成本与安全元数据",
       "demoHint": "展示示例数据",
       "totalDuration": "总耗时",
       "status": {
@@ -457,23 +473,27 @@
     },
     "workspace": {
       "overview": {
-        "title": "运营总览",
-        "subtitle": "关注服务稳定性、请求吞吐与核心成本走势",
-        "short": "总览"
+        "title": "运营控制台",
+        "subtitle": "先看服务是否可用，再看吞吐、延迟、厂商路由与容量余量",
+        "intent": "实时运营",
+        "short": "运营"
       },
       "reliability": {
         "title": "故障与可靠性",
-        "subtitle": "按错误类型拆分成功率，快速定位最可能的故障根因",
+        "subtitle": "围绕 SLO、错误预算、失败根因与慢请求来定位风险",
+        "intent": "故障响应",
         "short": "可靠性"
       },
       "governance": {
         "title": "成本与配额治理",
-        "subtitle": "聚焦预算控制、用户配额和超额策略执行状态",
+        "subtitle": "聚焦预算消耗、用户配额、归因缺口与策略执行状态",
+        "intent": "成本治理",
         "short": "治理"
       },
       "tracing": {
         "title": "请求追踪",
-        "subtitle": "按慢请求/失败请求抽样，查看阶段耗时和故障落点",
+        "subtitle": "按请求 ID、状态与慢请求样本查看阶段耗时、模型、Token 与成本",
+        "intent": "Trace 探索",
         "short": "追踪"
       }
     },
@@ -1810,12 +1830,14 @@
       "titleWithDuration": "活动 · {{duration}}",
       "description": "助手推理与工具调用的分步记录。",
       "empty": "暂无活动记录。",
+      "steps_one": "{{count}} 步",
       "steps_other": "{{count}} 步",
       "thinking": "思考中",
       "thought": "思考过程",
       "running": "执行中…",
       "statusCompleted": "已完成",
       "errorFallback": "步骤失败",
+      "foundResults_one": "{{count}} 条结果",
       "foundResults_other": "{{count}} 条结果",
       "step": {
         "searchWeb": "搜索网页 \"{{query}}\"",
