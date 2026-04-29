@@ -19,13 +19,14 @@ import type { SourceFilter, RefreshInterval } from "./types";
 const { RangePicker } = DatePicker;
 
 type DashTab = "summary" | "operations" | "reliability" | "governance" | "tracing";
+const DASHBOARD_TAB_STORAGE_KEY = "dashboard-tab-v2";
 
 function loadTab(): DashTab {
   try {
-    const s = localStorage.getItem("dashboard-tab-v1");
+    const s = localStorage.getItem(DASHBOARD_TAB_STORAGE_KEY);
     if (s === "summary" || s === "operations" || s === "reliability" || s === "governance" || s === "tracing") return s;
   } catch { /* */ }
-  return "summary";
+  return "operations";
 }
 
 // ── Design-handoff SVG icons (clock, refresh, expand, chev, cal) ─────
@@ -81,7 +82,7 @@ function DashboardContent() {
 
   const handleTabChange = (tab: DashTab) => {
     setActiveTab(tab);
-    try { localStorage.setItem("dashboard-tab-v1", tab); } catch { /* */ }
+    try { localStorage.setItem(DASHBOARD_TAB_STORAGE_KEY, tab); } catch { /* */ }
   };
 
   const tabs: { key: DashTab; label: string }[] = [
