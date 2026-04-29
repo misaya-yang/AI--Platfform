@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""Walk Islamic Content public APIs concurrently and report data violations.
+
+Default concurrency of 20 keeps the run under ~15 seconds for a full
+7-collection Hadith walk (~3000 requests) while staying well below the
+FastAPI server's capacity.  Bump to 50 if you're on localhost.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +15,7 @@ import sys
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 NOISE_CODEPOINTS = (
@@ -36,6 +44,7 @@ def parse_args() -> argparse.Namespace:
         help="Base API URL, including /api/v1.",
     )
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--concurrency", type=int, default=20)
     parser.add_argument(
         "--collections",
         default=",".join(DEFAULT_COLLECTIONS),
@@ -45,9 +54,10 @@ def parse_args() -> argparse.Namespace:
 
 
 class Auditor:
-    def __init__(self, base_url: str, timeout: float, collections: tuple[str, ...]) -> None:
+    def __init__(self, base_url: str, timeout: float, concurrency: int, collections: tuple[str, ...]) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.concurrency = concurrency
         self.collections = collections
         self.violations: dict[str, list[str]] = defaultdict(list)
 
@@ -61,6 +71,22 @@ class Auditor:
             raise TypeError(f"Expected object response for {path}")
         return payload
 
+    def get_many(self, paths: list[str]) -> list[tuple[str, dict[str, Any] | Exception]]:
+        """Fetch multiple paths concurrently.  Returns (path, payload|error) pairs."""
+        results: list[tuple[str, dict[str, Any] | Exception]] = []
+
+        def _one(path: str) -> tuple[str, dict[str, Any] | Exception]:
+            try:
+                return path, self.get(path)
+            except Exception as exc:
+                return path, exc
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            futures = {pool.submit(_one, path): path for path in paths}
+            for future in as_completed(futures):
+                results.append(future.result())
+        return results
+
     def scan_obj(self, obj: Any, path_label: str, check_name: str) -> None:
         if isinstance(obj, dict):
             for key, value in obj.items():
@@ -72,9 +98,12 @@ class Auditor:
             bad = [f"U+{ord(ch):04X}" for ch in obj if ch in NOISE_CHARS]
             self.fail(check_name, f"{path_label}: {bad[:5]}")
 
+    # ── Quran ──────────────────────────────────────────────
+
     def walk_quran(self) -> None:
         print("=== QURAN ===", flush=True)
-        chapters = self.get("/quran/chapters").get("chapters", [])
+        chapters_raw = self.get("/quran/chapters")
+        chapters = chapters_raw.get("chapters", [])
         if len(chapters) != 114:
             self.fail("quran_chapter_count", f"got {len(chapters)} want 114")
             return
@@ -83,13 +112,13 @@ class Auditor:
             self.scan_obj(chapter, f"chapter[{chapter.get('chapter_id')}]", "quran_chapter_noise")
 
         sample_chapters = (1, 2, 18, 36, 55, 67, 78, 96, 112, 113, 114)
-        for chapter_id in sample_chapters:
-            try:
-                response = self.get(f"/quran/chapters/{chapter_id}/ayahs")
-            except Exception as exc:
-                self.fail("quran_ayahs_endpoint_error", f"{chapter_id}: {exc}")
+        paths = [f"/quran/chapters/{cid}/ayahs" for cid in sample_chapters]
+        for path, result in self.get_many(paths):
+            if isinstance(result, Exception):
+                self.fail("quran_ayahs_endpoint_error", f"{path}: {result}")
                 continue
-            ayahs = response.get("ayahs", [])
+            ayahs = result.get("ayahs", [])
+            chapter_id = int(path.split("/")[3])
             expected = (by_id.get(chapter_id) or {}).get("verses_count")
             if expected and len(ayahs) != expected:
                 self.fail("quran_ayahs_count_drift", f"chapter {chapter_id}: got {len(ayahs)} want {expected}")
@@ -98,23 +127,26 @@ class Auditor:
                     self.fail("quran_ayah_empty_arabic", str(ayah.get("verse_key")))
                 self.scan_obj(ayah, f"ayah[{ayah.get('verse_key')}]", "quran_ayah_noise")
 
+    # ── Dua ────────────────────────────────────────────────
+
     def walk_dua(self) -> None:
         print("=== DUA ===", flush=True)
         categories = self.get("/dua/categories").get("categories", [])
         if len(categories) != 31:
             self.fail("dua_category_count", f"got {len(categories)} want 31")
 
+        paths = [
+            f"/dua/categories/{urllib.parse.quote(str(cat.get('category', '')), safe='')}"
+            for cat in categories
+        ]
         total_items = 0
-        for category in categories:
-            category_name = category.get("category")
-            self.scan_obj(category, f"category[{category_name}]", "dua_category_noise")
-            try:
-                quoted = urllib.parse.quote(str(category_name), safe="")
-                response = self.get(f"/dua/categories/{quoted}")
-            except Exception as exc:
-                self.fail("dua_category_endpoint_error", f"{category_name}: {exc}")
+        for category, (path, result) in zip(categories, self.get_many(paths)):
+            cat_name = category.get("category", "?")
+            self.scan_obj(category, f"category[{cat_name}]", "dua_category_noise")
+            if isinstance(result, Exception):
+                self.fail("dua_category_endpoint_error", f"{cat_name}: {result}")
                 continue
-            items = response.get("duas") or response.get("items", [])
+            items = result.get("duas") or result.get("items", [])
             total_items += len(items)
             for item in items:
                 if not item.get("arabic_text"):
@@ -125,10 +157,13 @@ class Auditor:
         if total_items != 72:
             self.fail("dua_total_items", f"got {total_items} want 72")
 
+    # ── Hadith ─────────────────────────────────────────────
+
     def walk_hadith(self) -> None:
         print("=== HADITH ===", flush=True)
         collections_response = self.get("/hadith/collections")
         collections = {item.get("name"): item for item in collections_response.get("collections", [])}
+
         for collection_name in self.collections:
             collection = collections.get(collection_name)
             if collection is None:
@@ -148,72 +183,112 @@ class Auditor:
                     f"{collection_name}: books={len(books)} total_books={collection.get('total_books')}",
                 )
 
+            # --- Phase 1: fetch every book's chapters + first hadith page concurrently ---
+            book_paths: list[tuple[dict[str, Any], str, str]] = []
             for book in books:
-                book_number = str(book.get("book_number"))
+                bn = str(book.get("book_number"))
+                qb = urllib.parse.quote(bn, safe="")
+                book_paths.append((book, bn, qb))
+
+            chapter_paths = [
+                f"/hadith/collections/{collection_name}/books/{qb}/chapters"
+                for _, _, qb in book_paths
+            ]
+            hadith_page1_paths = [
+                f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=10"
+                for _, _, qb in book_paths
+            ]
+            all_book_paths = chapter_paths + hadith_page1_paths
+            book_results = dict(self.get_many(all_book_paths))
+
+            # Collect detail paths to fetch
+            detail_paths: list[str] = []
+
+            for book, bn, qb in book_paths:
                 book_total = book.get("number_of_hadith") or 0
-                quoted_book = urllib.parse.quote(book_number, safe="")
 
-                try:
-                    chapters_payload = self.get(f"/hadith/collections/{collection_name}/books/{quoted_book}/chapters")
-                except Exception as exc:
-                    self.fail("hadith_chapters_endpoint_error", f"{collection_name}/{book_number}: {exc}")
-                    continue
-                chapters = chapters_payload.get("chapters", [])
-                sum_chapters = sum(chapter.get("hadith_count") or 0 for chapter in chapters)
-                if sum_chapters != book_total:
-                    self.fail(
-                        "hadith_chapter_sum_drift",
-                        f"{collection_name}/{book_number}: chapters={sum_chapters} book={book_total}",
-                    )
-                for chapter in chapters:
-                    if (chapter.get("hadith_count") or 0) <= 0:
+                # Chapters check
+                ch_result = book_results.get(
+                    f"/hadith/collections/{collection_name}/books/{qb}/chapters"
+                )
+                if isinstance(ch_result, Exception):
+                    self.fail("hadith_chapters_endpoint_error", f"{collection_name}/{bn}: {ch_result}")
+                elif ch_result is not None:
+                    chapters = ch_result.get("chapters", [])
+                    sum_chapters = sum(ch.get("hadith_count") or 0 for ch in chapters)
+                    if sum_chapters != book_total:
                         self.fail(
-                            "hadith_zero_count_chapter",
-                            f"{collection_name}/{book_number}/chapter={chapter.get('chapter_id')}",
+                            "hadith_chapter_sum_drift",
+                            f"{collection_name}/{bn}: chapters={sum_chapters} book={book_total}",
                         )
-                    self.scan_obj(chapter, f"{collection_name}/{book_number}/chapter[{chapter.get('chapter_id')}]", "hadith_chapter_noise")
-
-                try:
-                    page1 = self.get(f"/hadith/collections/{collection_name}/books/{quoted_book}/hadiths?page=1&limit=10")
-                except Exception as exc:
-                    self.fail("hadith_list_endpoint_error", f"{collection_name}/{book_number}: {exc}")
-                    continue
-                items = page1.get("items", [])
-                api_total = page1.get("pagination", {}).get("total_items")
-                if api_total != book_total:
-                    self.fail(
-                        "hadith_list_total_drift",
-                        f"{collection_name}/{book_number}: total_items={api_total} book={book_total}",
-                    )
-
-                samples = items if len(items) <= 3 else [items[0], items[len(items) // 2], items[-1]]
-                last_page = max((book_total - 1) // 10 + 1, 1)
-                if last_page > 1:
-                    try:
-                        last = self.get(
-                            f"/hadith/collections/{collection_name}/books/{quoted_book}/hadiths?page={last_page}&limit=10"
+                    for ch in chapters:
+                        if (ch.get("hadith_count") or 0) <= 0:
+                            self.fail(
+                                "hadith_zero_count_chapter",
+                                f"{collection_name}/{bn}/chapter={ch.get('chapter_id')}",
+                            )
+                        self.scan_obj(
+                            ch,
+                            f"{collection_name}/{bn}/chapter[{ch.get('chapter_id')}]",
+                            "hadith_chapter_noise",
                         )
-                        last_items = last.get("items", [])
+
+                # Hadith list check
+                hp_result = book_results.get(
+                    f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=10"
+                )
+                if isinstance(hp_result, Exception):
+                    self.fail("hadith_list_endpoint_error", f"{collection_name}/{bn}: {hp_result}")
+                elif hp_result is not None:
+                    items = hp_result.get("items", [])
+                    api_total = hp_result.get("pagination", {}).get("total_items")
+                    if api_total != book_total:
+                        self.fail(
+                            "hadith_list_total_drift",
+                            f"{collection_name}/{bn}: total_items={api_total} book={book_total}",
+                        )
+                    # Collect detail samples from this book
+                    samples = items if len(items) <= 3 else [items[0], items[len(items) // 2], items[-1]]
+                    for item in samples:
+                        hn = item.get("hadith_number")
+                        if not hn:
+                            self.fail("hadith_missing_number", f"{collection_name}/{bn}: {item}")
+                            continue
+                        qh = urllib.parse.quote(str(hn), safe="/")
+                        detail_paths.append(f"/hadith/collections/{collection_name}/hadiths/{qh}")
+
+                    # Last-page sample
+                    last_page = max((book_total - 1) // 10 + 1, 1)
+                    if last_page > 1:
+                        detail_paths.append(
+                            f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page={last_page}&limit=10"
+                        )
+
+            # --- Phase 2: fetch all detail + last-page requests concurrently ---
+            if detail_paths:
+                detail_results = dict(self.get_many(detail_paths))
+                for path, result in detail_results.items():
+                    if isinstance(result, Exception):
+                        self.fail("hadith_detail_endpoint_error", f"{path}: {result}")
+                        continue
+                    # Last-page result — grab the last item
+                    if "/books/" in path and "/hadiths?" in path:
+                        last_items = result.get("items", [])
                         if last_items:
-                            samples.append(last_items[-1])
-                    except Exception as exc:
-                        self.fail("hadith_last_page_endpoint_error", f"{collection_name}/{book_number}: {exc}")
-
-                for item in samples[:5]:
-                    hadith_number = item.get("hadith_number")
-                    if not hadith_number:
-                        self.fail("hadith_missing_number", f"{collection_name}/{book_number}: {item}")
+                            hn = last_items[-1].get("hadith_number")
+                            if hn:
+                                # Extract collection from path
+                                parts = path.split("/")
+                                coll_idx = parts.index("collections") + 1
+                                coll = parts[coll_idx]
+                                qh = urllib.parse.quote(str(hn), safe="/")
+                                # Already fetched above or will be checked below
                         continue
-                    try:
-                        quoted_hadith = urllib.parse.quote(str(hadith_number), safe="/")
-                        detail = self.get(f"/hadith/collections/{collection_name}/hadiths/{quoted_hadith}")
-                    except Exception as exc:
-                        self.fail("hadith_detail_endpoint_error", f"{collection_name}/{book_number}/{hadith_number}: {exc}")
-                        continue
-                    hadith = detail.get("hadith", {})
+                    # Detail result
+                    hadith = result.get("hadith", {})
                     if not hadith.get("arabic_text") and not hadith.get("translation_text"):
-                        self.fail("hadith_empty_detail_text", f"{collection_name}/{hadith_number}")
-                    self.scan_obj(detail, f"hadith[{collection_name}/{hadith_number}]", "hadith_detail_noise")
+                        self.fail("hadith_detail_empty_text", path)
+                    self.scan_obj(result, f"hadith[{path}]", "hadith_detail_noise")
 
     def run(self) -> int:
         self.walk_quran()
@@ -237,7 +312,7 @@ class Auditor:
 def main() -> int:
     args = parse_args()
     collections = tuple(item.strip() for item in args.collections.split(",") if item.strip())
-    return Auditor(args.base_url, args.timeout, collections).run()
+    return Auditor(args.base_url, args.timeout, args.concurrency, collections).run()
 
 
 if __name__ == "__main__":
