@@ -171,7 +171,7 @@ export function FailureAnalysisPanel() {
         rowKey={(record) => `${record.dimension_value}-${record.error_type}`}
         size="small"
         pagination={false}
-        scroll={{ y: 200 }}
+        scroll={{ x: 480, y: 200 }}
         style={{ background: "transparent" }}
         locale={{ emptyText: t("dashboard.failure.noFailures", "当前时间范围内无失败记录") }}
       />

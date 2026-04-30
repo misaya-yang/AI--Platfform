@@ -35,7 +35,6 @@ import type { TFunction } from "i18next";
 import {
   buildTextParts,
   combineAbortSignals,
-  createTimeoutSignal,
   estimateTokens,
   extractHistoryAssistantContent,
   extractHistoryToolCalls,
@@ -66,10 +65,6 @@ const TRANSPARENT_PROXY_STREAM_MAX_MS = readPositiveMsEnv(
 const TRANSPARENT_PROXY_CONTENT_IDLE_MS = readPositiveMsEnv(
   "VITE_PROXY_CONTENT_IDLE_MS",
   6000
-);
-const TRANSPARENT_PROXY_THREAD_INIT_TIMEOUT_MS = readPositiveMsEnv(
-  "VITE_PROXY_THREAD_INIT_TIMEOUT_MS",
-  8000
 );
 
 // ---------------------------------------------------------------------------
@@ -144,7 +139,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
     serviceId,
     activeService,
     sessionEnabled,
-    messagesRef: _messagesRef,
     setMessages,
     setLoading,
     activeSessionId,

@@ -521,8 +521,9 @@ export function PlaygroundPage() {
                   document.body.removeChild(ta);
                 }
                 alert(`Share link copied to clipboard!\n${shareUrl}`);
-              } catch (e: any) {
-                alert(`Failed to create share link: ${e?.message || "unknown error"}`);
+              } catch (e: unknown) {
+                const message = e instanceof Error ? e.message : "unknown error";
+                alert(`Failed to create share link: ${message}`);
               }
             }}
             onRegenerate={() => {

@@ -243,14 +243,15 @@ export function AssistantPage() {
   // When something opens Artifacts (SSE delivery, user affordance),
   // close Activity.
   useEffect(() => {
-    if (showArtifacts && activityMessageId) {
-      setActivityMessageId(null);
-    }
+    if (!showArtifacts || !activityMessageId) return;
+    const timer = window.setTimeout(() => setActivityMessageId(null), 0);
+    return () => window.clearTimeout(timer);
   }, [showArtifacts, activityMessageId]);
 
   // If the user switches sessions, drop any stale Activity selection.
   useEffect(() => {
-    setActivityMessageId(null);
+    const timer = window.setTimeout(() => setActivityMessageId(null), 0);
+    return () => window.clearTimeout(timer);
   }, [activeSessionId]);
 
   // If the currently-open Activity message is no longer in the list
@@ -258,7 +259,8 @@ export function AssistantPage() {
   useEffect(() => {
     if (!activityMessageId) return;
     if (!messages.some((m) => m.id === activityMessageId)) {
-      setActivityMessageId(null);
+      const timer = window.setTimeout(() => setActivityMessageId(null), 0);
+      return () => window.clearTimeout(timer);
     }
   }, [messages, activityMessageId]);
 

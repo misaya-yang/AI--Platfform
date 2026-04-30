@@ -241,7 +241,7 @@ export function UserQuotaPanel() {
         rowKey="user_id"
         size="small"
         pagination={false}
-        scroll={{ y: 200 }}
+        scroll={{ x: 540, y: 200 }}
         style={{
           background: "transparent",
         }}

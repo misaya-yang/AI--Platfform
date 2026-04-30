@@ -1,24 +1,24 @@
 /* Surface & ink tokens — semantic layer above base colors */
 :root {
   color-scheme: light;
-  --surface-canvas: 150 8% 95%;
+  --surface-canvas: 210 20% 96%;
   --surface-panel: 0 0% 100%;
   --surface-elevated: 0 0% 100%;
-  --ink-strong: 152 15% 8%;
-  --ink-muted: 150 4% 46%;
-  --line-subtle: 150 6% 88%;
-  --accent-strong: 153 46% 19%;
-  --accent-warm: 43 50% 54%;
+  --ink-strong: 220 24% 14%;
+  --ink-muted: 216 14% 43%;
+  --line-subtle: 215 18% 86%;
+  --accent-strong: 212 39% 35%;
+  --accent-warm: 35 50% 56%;
 }
 
 .dark {
   color-scheme: dark;
-  --surface-canvas: 152 12% 6%;
-  --surface-panel: 152 8% 11%;
-  --surface-elevated: 152 6% 14%;
-  --ink-strong: 150 5% 95%;
-  --ink-muted: 150 4% 55%;
-  --line-subtle: 152 6% 18%;
-  --accent-strong: 153 38% 42%;
-  --accent-warm: 43 42% 58%;
+  --surface-canvas: 220 21% 8%;
+  --surface-panel: 219 21% 12%;
+  --surface-elevated: 218 21% 16%;
+  --ink-strong: 210 25% 95%;
+  --ink-muted: 214 13% 66%;
+  --line-subtle: 218 18% 22%;
+  --accent-strong: 214 39% 68%;
+  --accent-warm: 35 50% 62%;
 }

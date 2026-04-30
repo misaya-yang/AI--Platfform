@@ -3,7 +3,6 @@
  * Collapsible card with tool timeline and result rendering.
  */
 import React, { useState } from "react";
-import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { SubAgentState } from "../types";
@@ -16,7 +15,6 @@ const TYPE_META: Record<string, { icon: string; label: string; bg: string; borde
 };
 
 export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
-  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
   const meta = TYPE_META[subAgent.agentType] || TYPE_META.explore;
   const isRunning = subAgent.status === "running";

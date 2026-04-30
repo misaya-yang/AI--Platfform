@@ -71,11 +71,12 @@ const statusConfig = {
 /** Live elapsed time counter for running tools */
 function ElapsedTimer({ className }: { className?: string }) {
   const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef(performance.now());
+  const startRef = useRef<number | null>(null);
 
   useEffect(() => {
+    startRef.current = performance.now();
     const id = setInterval(() => {
-      setElapsed((performance.now() - startRef.current) / 1000);
+      setElapsed((performance.now() - (startRef.current ?? performance.now())) / 1000);
     }, 100);
     return () => clearInterval(id);
   }, []);
@@ -100,20 +101,12 @@ export function ToolCallBlock({
   stepNumber,
 }: ToolCallBlockProps) {
   const { t } = useTranslation();
-  const [isExpanded, setIsExpanded] = useState(false);
   const status = toolCall.status || "pending";
   const config = statusConfig[status] || statusConfig.pending;
   const StatusIcon = config.icon;
   const isRunning = status === "running";
-  const prevStatusRef = useRef(status);
-
-  // Auto-expand when running
-  useEffect(() => {
-    if (status === "running" && prevStatusRef.current !== "running") {
-      setIsExpanded(true);
-    }
-    prevStatusRef.current = status;
-  }, [status]);
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const isExpanded = userExpanded ?? isRunning;
 
   // Parse arguments
   const rawArgs = argsText ?? toolCall.arguments ?? "";
@@ -199,7 +192,7 @@ export function ToolCallBlock({
 
       {/* Compact Header — single line: chevron + icon + name + args + status */}
       <button
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={() => setUserExpanded((current) => !(current ?? isRunning))}
         className={cn(
           "flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left",
           "transition-colors duration-150",
@@ -227,6 +220,11 @@ export function ToolCallBlock({
 
         {/* Tool name + inline args — all on one line */}
         <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
+          {stepNumber != null && (
+            <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 flex-shrink-0">
+              #{stepNumber}
+            </span>
+          )}
           <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate flex-shrink-0">
             {formatToolName(toolCall.name)}
           </span>

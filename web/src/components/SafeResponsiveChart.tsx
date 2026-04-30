@@ -5,8 +5,16 @@
  *
  * This prevents the "The width(-1) and height(-1) of chart should be greater than 0" error.
  */
-import { useRef, useEffect, useState, type ReactNode } from "react";
-import { ResponsiveContainer } from "recharts";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  useRef,
+  useEffect,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 
 interface SafeResponsiveChartProps {
   children: ReactNode;
@@ -16,6 +24,11 @@ interface SafeResponsiveChartProps {
   minHeight?: number;
   className?: string;
   style?: React.CSSProperties;
+}
+
+interface ChartDimensionProps {
+  width?: number;
+  height?: number;
 }
 
 export function SafeResponsiveChart({
@@ -28,14 +41,22 @@ export function SafeResponsiveChart({
   style,
 }: SafeResponsiveChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [isReady, setIsReady] = useState(false);
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
     const checkDimensions = () => {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) {
-          setIsReady(true);
+          const nextSize = {
+            width: Math.max(Math.floor(rect.width), minWidth),
+            height: Math.max(Math.floor(rect.height), minHeight),
+          };
+          setSize((current) =>
+            current?.width === nextSize.width && current?.height === nextSize.height
+              ? current
+              : nextSize,
+          );
         }
       }
     };
@@ -56,7 +77,18 @@ export function SafeResponsiveChart({
       clearTimeout(timeoutId);
       resizeObserver.disconnect();
     };
-  }, []);
+  }, [minWidth, minHeight]);
+
+  const chartChildren = size
+    ? Children.map(children, (child) =>
+        isValidElement<ChartDimensionProps>(child)
+          ? cloneElement(child as ReactElement<ChartDimensionProps>, {
+              width: size.width,
+              height: size.height,
+            })
+          : child,
+      )
+    : null;
 
   return (
     <div
@@ -70,10 +102,8 @@ export function SafeResponsiveChart({
         ...style,
       }}
     >
-      {isReady ? (
-        <ResponsiveContainer width="100%" height="100%">
-          {children}
-        </ResponsiveContainer>
+      {size ? (
+        chartChildren
       ) : (
         <div
           style={{

@@ -666,26 +666,18 @@ export function KnowledgeDatasetsPage() {
   };
 
   return (
-    <div style={{ maxWidth: 1400, margin: "0 auto" }}>
+    <div style={{ maxWidth: 1400, margin: "0 auto", paddingTop: 12 }}>
       {/* 页面标题区 */}
-      <div style={{ marginBottom: 24 }}>
+      <div style={{ marginBottom: 12 }}>
         <div
           style={{
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 8,
+            justifyContent: "flex-end",
+            gap: 12,
+            flexWrap: "wrap",
           }}
         >
-          <div>
-            <Title level={3} style={{ margin: 0, fontWeight: 600 }}>
-              {t("knowledge.datasets.title")}
-            </Title>
-            <Text type="secondary" style={{ fontSize: 14 }}>
-              {t("knowledge.datasets.subtitle")}
-            </Text>
-          </div>
-
           <Space size={12}>
             <Button
               icon={<ReloadOutlined spin={datasetsQuery.isFetching} />}

@@ -2,7 +2,7 @@
  * Exam Detail Page — view attempts, stats, question analysis, AI reports.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type ComponentProps } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
@@ -17,6 +17,7 @@ import {
   Trophy,
   AlertCircle,
   ClipboardList,
+  type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +47,20 @@ import {
 import { StreamOutput } from "@/components/StreamOutput";
 
 type Tab = "participants" | "questions" | "analysis";
+type BadgeVariant = ComponentProps<typeof Badge>["variant"];
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const maybe = error as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = maybe.response?.data?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (typeof maybe.message === "string" && maybe.message) return maybe.message;
+  }
+  return fallback;
+}
 
 export function ExamDetailPage() {
   const { t } = useTranslation();
@@ -99,8 +114,8 @@ export function ExamDetailPage() {
     try {
       await publishExam(examId);
       load();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed"));
     }
   };
 
@@ -109,8 +124,8 @@ export function ExamDetailPage() {
     try {
       await closeExam(examId);
       load();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed"));
     }
   };
 
@@ -121,8 +136,8 @@ export function ExamDetailPage() {
       const result = await analyzeExam(examId);
       setActiveReport({ report_id: result.report_id, content: result.content, model_id: "qwen3.6-plus", generated_at: new Date().toISOString() });
       load(); // refresh reports list
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Analysis failed");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Analysis failed"));
     } finally {
       setAnalyzing(false);
     }
@@ -165,7 +180,7 @@ export function ExamDetailPage() {
     );
   }
 
-  const statusColor = exam.status === "published" ? "default" : exam.status === "closed" ? "outline" : "secondary";
+  const statusColor: BadgeVariant = exam.status === "published" ? "default" : exam.status === "closed" ? "outline" : "secondary";
 
   return (
     <div className="space-y-6 p-6 max-w-6xl mx-auto">
@@ -178,7 +193,7 @@ export function ExamDetailPage() {
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-semibold">{exam.title}</h1>
-              <Badge variant={statusColor as any}>{exam.status}</Badge>
+              <Badge variant={statusColor}>{exam.status}</Badge>
             </div>
             {exam.description && <p className="text-muted-foreground mt-1">{exam.description}</p>}
             <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
@@ -275,7 +290,7 @@ export function ExamDetailPage() {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function StatCard({ icon: Icon, label, value }: { icon: any; label: string; value: string | number }) {
+function StatCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string | number }) {
   return (
     <div className="rounded-xl border bg-card p-4 flex items-center gap-3">
       <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
@@ -425,10 +440,27 @@ function AnalysisTab({
             <span className="text-xs text-muted-foreground">({t("exams.analysis.reportCount", { count: reports.length })})</span>
           )}
         </div>
-        <Button onClick={onAnalyze} disabled={analyzing} className="gap-2">
-          {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Brain className="h-4 w-4" />}
-          {analyzing ? t("exams.analysis.analyzing") : report ? t("exams.analysis.regenerate") : t("exams.analysis.generate")}
-        </Button>
+        <div className="flex items-center gap-2">
+          {reports.length > 0 && (
+            <select
+              className="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
+              value={report?.report_id ?? ""}
+              onChange={(event) => {
+                if (event.target.value) onSelectReport(event.target.value);
+              }}
+            >
+              {reports.map((item) => (
+                <option key={item.report_id} value={item.report_id}>
+                  {new Date(item.generated_at).toLocaleString()}
+                </option>
+              ))}
+            </select>
+          )}
+          <Button onClick={onAnalyze} disabled={analyzing} className="gap-2">
+            {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Brain className="h-4 w-4" />}
+            {analyzing ? t("exams.analysis.analyzing") : report ? t("exams.analysis.regenerate") : t("exams.analysis.generate")}
+          </Button>
+        </div>
       </div>
 
       {report ? (

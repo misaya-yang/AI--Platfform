@@ -7,7 +7,6 @@ import {
   Loader2,
   AlertCircle,
   Wrench,
-  Clock3,
   ListTodo,
   Brain,
 } from "lucide-react";
@@ -68,7 +67,6 @@ export function ProcessSummaryBar({ summary }: ProcessSummaryBarProps) {
   const canExpand = stepTotal > 0 || toolTotal > 0 || hasContextBudget || hasContextCompacted || hasThinkingPhase;
   // Only show error if the overall run has finished AND no step/tool succeeded.
   // During streaming, don't flash "执行失败" for intermediate tool failures — the model may retry.
-  const isRunFinished = summary.status === "succeeded" || summary.status === "failed";
   const anyStepCompleted = summary.steps.some((s) => s.status === "completed");
   const anyToolCompleted = summary.tools.some((s) => s.status === "completed");
   const hasError =

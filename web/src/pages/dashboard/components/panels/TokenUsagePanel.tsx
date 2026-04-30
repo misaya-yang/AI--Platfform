@@ -170,9 +170,17 @@ export function TokenUsagePanel() {
       </div>
 
       {/* Distribution sections - side by side */}
-      <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gap: 16,
+          marginBottom: 16,
+          minWidth: 0,
+        }}
+      >
         {/* Model breakdown */}
-        <div style={{ flex: 1 }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.tokenUsage.modelBreakdown")}
           </div>
@@ -214,7 +222,7 @@ export function TokenUsagePanel() {
         </div>
 
         {/* Provider breakdown */}
-        <div style={{ flex: 1 }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: colors.textSecondary, marginBottom: 8 }}>
             {t("dashboard.tokenUsage.providerBreakdown")}
           </div>
@@ -246,7 +254,11 @@ export function TokenUsagePanel() {
                   style={{
                     flex: 1,
                     fontSize: 11,
-                  color: colors.textPrimary,
+                    color: colors.textPrimary,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    minWidth: 0,
                   }}
                 >
                   {displayName}

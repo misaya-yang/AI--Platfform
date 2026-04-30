@@ -110,7 +110,11 @@ export function QuizPage() {
       setResult(data);
       setPageState("result");
       // Remember submission in localStorage to prevent re-take on page reload
-      try { localStorage.setItem(`quiz_submitted_${shareCode}`, JSON.stringify(data)); } catch {}
+      try {
+        localStorage.setItem(`quiz_submitted_${shareCode}`, JSON.stringify(data));
+      } catch {
+        // Storage may be unavailable in private or embedded contexts.
+      }
     } catch {
       setError("Failed to submit quiz. Please try again.");
     } finally {

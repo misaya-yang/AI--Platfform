@@ -20,7 +20,15 @@ export interface ConnectorSearchResult {
   excerpt: string;
   url?: string;
   type: string;
-  [key: string]: any;
+  [key: string]: unknown;
+}
+
+export interface ConnectedConnector {
+  provider: string;
+  display_name?: string;
+  status?: string | null;
+  connected_at?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export async function listAvailableConnectors(): Promise<ConnectorInfo[]> {
@@ -28,8 +36,8 @@ export async function listAvailableConnectors(): Promise<ConnectorInfo[]> {
   return data;
 }
 
-export async function listMyConnectors(): Promise<any[]> {
-  const { data } = await api.get("/api/v1/connectors/mine");
+export async function listMyConnectors(): Promise<ConnectedConnector[]> {
+  const { data } = await api.get<ConnectedConnector[]>("/api/v1/connectors/mine");
   return data;
 }
 

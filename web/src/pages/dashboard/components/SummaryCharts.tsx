@@ -224,16 +224,26 @@ function Donut({
   const cy = size / 2;
   const C = 2 * Math.PI * r;
   const total = data.reduce((a, b) => a + b.pct, 0) || 1;
-  let offset = 0;
+  const segments = data.reduce<{
+    offset: number;
+    items: Array<{ d: DonutSlice; i: number; dash: string; dashOffset: number }>;
+  }>(
+    (acc, d, i) => {
+      const frac = d.pct / total;
+      const len = C * frac - 2; // small gap
+      const dash = `${Math.max(len, 0)} ${C}`;
+      return {
+        offset: acc.offset + C * frac,
+        items: [...acc.items, { d, i, dash, dashOffset: -acc.offset }],
+      };
+    },
+    { offset: 0, items: [] },
+  ).items;
+
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
       <circle cx={cx} cy={cy} r={r} fill="none" stroke={c.divider} strokeWidth={thickness - 2} />
-      {data.map((d, i) => {
-        const frac = d.pct / total;
-        const len = C * frac - 2; // small gap
-        const dash = `${Math.max(len, 0)} ${C}`;
-        const dashOffset = -offset;
-        offset += C * frac;
+      {segments.map(({ d, i, dash, dashOffset }) => {
         return (
           <circle
             key={i}

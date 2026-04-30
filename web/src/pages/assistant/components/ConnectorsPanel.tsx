@@ -11,7 +11,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { useTranslation } from "react-i18next";
 import {
   listConnections,
   createConnection,
@@ -26,8 +25,29 @@ interface ConnectorsPanelProps {
   onClose: () => void;
 }
 
+interface ConfluenceMcpStatus {
+  mcp_active?: boolean;
+  tools?: Array<{ name: string; description: string }>;
+}
+
+interface ConfluenceActivateResponse extends ConfluenceMcpStatus {
+  tool_count?: number;
+}
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const maybe = error as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = maybe.response?.data?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (typeof maybe.message === "string" && maybe.message) return maybe.message;
+  }
+  return fallback;
+}
+
 export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps) {
-  const { t } = useTranslation();
   const navigate = useNavigate();
   const [connections, setConnections] = useState<ConfluenceConnection[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,10 +70,10 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
       const data = await listConnections();
       setConnections(data);
       // Check MCP status
-      if (data.some((c: any) => c.status === "active")) {
+      if (data.some((c) => c.status === "active")) {
         try {
-          const { data: status } = await api.get("/api/v1/connectors/confluence/mcp-status");
-          setMcpActive(status.mcp_active);
+          const { data: status } = await api.get<ConfluenceMcpStatus>("/api/v1/connectors/confluence/mcp-status");
+          setMcpActive(Boolean(status.mcp_active));
           setMcpTools(status.tools || []);
         } catch { /* ignore */ }
       }
@@ -64,7 +84,11 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
   }, []);
 
   useEffect(() => {
-    if (open) loadConnections();
+    if (!open) return;
+    const timer = window.setTimeout(() => {
+      void loadConnections();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [open, loadConnections]);
 
   const handleQuickConnect = async () => {
@@ -83,9 +107,9 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
       });
       setShowAddForm(false);
       setFormName(""); setFormDomain(""); setFormEmail(""); setFormToken("");
-      loadConnections();
-    } catch (err: any) {
-      setFormError(err?.response?.data?.detail || err?.message || "连接失败");
+      void loadConnections();
+    } catch (err: unknown) {
+      setFormError(apiErrorMessage(err, "连接失败"));
     }
     setFormSubmitting(false);
   };
@@ -94,7 +118,7 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
     if (!confirm("确定要删除此连接？")) return;
     try {
       await deleteConnection(id);
-      loadConnections();
+      void loadConnections();
     } catch { /* ignore */ }
   };
 
@@ -102,20 +126,20 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
     try {
       const result = await testConnection(id);
       alert(result.status === "success" ? "✅ 连接正常" : `❌ ${result.message}`);
-    } catch (err: any) {
-      alert(`测试失败: ${err?.message}`);
+    } catch (err: unknown) {
+      alert(`测试失败: ${apiErrorMessage(err, "未知错误")}`);
     }
   };
 
   const handleActivateMCP = async () => {
     setActivating(true);
     try {
-      const { data } = await api.post("/api/v1/connectors/confluence/activate");
+      const { data } = await api.post<ConfluenceActivateResponse>("/api/v1/connectors/confluence/activate");
       setMcpActive(true);
       setMcpTools(data.tools || []);
-      alert(`✅ AI 工具已激活！发现 ${data.tool_count} 个 Confluence 工具`);
-    } catch (err: any) {
-      alert(`激活失败: ${err?.response?.data?.detail || err?.message}`);
+      alert(`✅ AI 工具已激活！发现 ${data.tool_count ?? data.tools?.length ?? 0} 个 Confluence 工具`);
+    } catch (err: unknown) {
+      alert(`激活失败: ${apiErrorMessage(err, "未知错误")}`);
     }
     setActivating(false);
   };

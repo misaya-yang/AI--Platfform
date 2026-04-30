@@ -1,6 +1,6 @@
 // Dashboard design tokens for the AI Gateway operations console.
-// The palette intentionally stays quiet and operational: graphite canvas,
-// green status accents, warm gold for attention, and steel for charts.
+// The palette intentionally stays quiet and operational: graphite slate,
+// steel product chrome, muted success, and restrained amber for attention.
 
 export const SPACING = {
   xs: 4, sm: 8, md: 12, lg: 16, xl: 20, '2xl': 24, '3xl': 32, '4xl': 40, '5xl': 56, '6xl': 72,
@@ -41,15 +41,15 @@ export const ELEVATION = (dark: boolean) => ({
 });
 
 export const LAYOUT = {
-  CARD_GAP: 12,
-  CARD_PADDING: 14,
+  CARD_GAP: 16,
+  CARD_PADDING: 16,
   CARD_RADIUS: 8,
   PAGE_PADDING: 0,
   KPI_HEIGHT: 'auto' as unknown as number,
   PANEL_MIN_HEIGHT: 320,
-  DASHBOARD_MIN_CONTENT_WIDTH: 1020,
-  GRID_GAP: 12,
-  SECTION_GAP: 12,
+  DASHBOARD_MIN_CONTENT_WIDTH: 1180,
+  GRID_GAP: 16,
+  SECTION_GAP: 16,
   KPI_COLUMNS: 5,
   PROVIDER_COLUMNS: 5,
   FIVE_COL_MIN_ITEM_WIDTH: 190,
@@ -58,76 +58,76 @@ export const LAYOUT = {
 
 export const getColors = (darkMode: boolean) => ({
   // Canvas
-  pageBg:    darkMode ? '#0f1411' : '#f3f5f2',
-  cardBg:    darkMode ? '#171d19' : '#fbfcfb',
-  cardHover: darkMode ? '#1d241f' : '#eef2ef',
-  innerBg:   darkMode ? '#121713' : '#f6f8f6',
+  pageBg:    darkMode ? '#11141a' : '#f4f6f8',
+  cardBg:    darkMode ? '#181d25' : '#ffffff',
+  cardHover: darkMode ? '#202734' : '#eef2f7',
+  innerBg:   darkMode ? '#151922' : '#f7f9fb',
 
   // Borders
-  border:      darkMode ? '#2f3a33' : '#dfe5e0',
-  borderSoft:  darkMode ? '#263029' : '#e9eeea',
-  divider:     darkMode ? '#222b25' : '#edf1ee',
-  borderHover: darkMode ? '#425047' : '#cbd6ce',
-  borderStrong: darkMode ? '#536157' : '#b8c4bc',
+  border:      darkMode ? '#303948' : '#d9dee6',
+  borderSoft:  darkMode ? '#252d39' : '#e8edf3',
+  divider:     darkMode ? '#222936' : '#edf1f5',
+  borderHover: darkMode ? '#3b4657' : '#c9d3df',
+  borderStrong: darkMode ? '#4c5a6d' : '#aebdce',
 
   // Ink
-  textPrimary:   darkMode ? '#edf1ec' : '#17211b',
-  textSecondary: darkMode ? '#aeb9b0' : '#536159',
-  textMuted:     darkMode ? '#838f86' : '#7b8780',
-  textFaint:     darkMode ? '#5d6961' : '#a9b3ad',
+  textPrimary:   darkMode ? '#eef2f6' : '#1a202b',
+  textSecondary: darkMode ? '#a6b0bf' : '#505c6e',
+  textMuted:     darkMode ? '#7f8b9b' : '#6f7c8e',
+  textFaint:     darkMode ? '#596578' : '#a0aab8',
 
   // Brand and operations accents
-  accent:       darkMode ? '#78c89c' : '#1a6a45',
-  accentBright: darkMode ? '#95d7b2' : '#248457',
-  accentDeep:   darkMode ? '#4ba774' : '#14543c',
-  accentSoft:   darkMode ? 'rgba(120,200,156,0.14)' : '#e8f4ee',
-  operator:     darkMode ? '#78c89c' : '#14543c',
-  operatorSoft: darkMode ? 'rgba(120,200,156,0.12)' : '#edf7f2',
-  navy:         darkMode ? '#a8b8c9' : '#25394b',
+  accent:       darkMode ? '#8fa9cf' : '#37577c',
+  accentBright: darkMode ? '#b7c9e4' : '#4f6f96',
+  accentDeep:   darkMode ? '#6d8bb3' : '#29435f',
+  accentSoft:   darkMode ? 'rgba(143,169,207,0.14)' : '#e8eef6',
+  operator:     darkMode ? '#8fa9cf' : '#37577c',
+  operatorSoft: darkMode ? 'rgba(143,169,207,0.12)' : '#e9eff7',
+  navy:         darkMode ? '#b7c9e4' : '#29435f',
 
   // Semantic
-  success:      darkMode ? '#78c89c' : '#18945c',
-  successSoft:  darkMode ? 'rgba(120,200,156,0.13)' : '#e8f7ef',
+  success:      darkMode ? '#69b58d' : '#2f8f68',
+  successSoft:  darkMode ? 'rgba(105,181,141,0.13)' : '#e7f4ee',
   error:        darkMode ? '#ee7d78' : '#d64545',
   errorSoft:    darkMode ? 'rgba(238,125,120,0.13)' : '#fff0ef',
-  warning:      darkMode ? '#d9ba6a' : '#b7842e',
-  warningSoft:  darkMode ? 'rgba(217,186,106,0.14)' : '#fbf4df',
+  warning:      darkMode ? '#d0a96b' : '#ae7c32',
+  warningSoft:  darkMode ? 'rgba(208,169,107,0.14)' : '#f7eddb',
   danger:       darkMode ? '#ee7d78' : '#d64545',
 
   // Back-compat aliases
-  gold:   darkMode ? '#d9ba6a' : '#c9a84c',
-  purple: darkMode ? '#b6a9c9' : '#786b92',
-  info:   darkMode ? '#89a9c5' : '#3f708e',
+  gold:   darkMode ? '#d0a96b' : '#ae7c32',
+  purple: darkMode ? '#a7a0ba' : '#746f86',
+  info:   darkMode ? '#8fa9cf' : '#4f6f96',
 
   // Tinted fills
-  successBg: darkMode ? 'rgba(120,200,156,0.15)' : '#e8f7ef',
-  warningBg: darkMode ? 'rgba(217,186,106,0.15)' : '#fbf4df',
+  successBg: darkMode ? 'rgba(105,181,141,0.15)' : '#e7f4ee',
+  warningBg: darkMode ? 'rgba(208,169,107,0.15)' : '#f7eddb',
   errorBg:   darkMode ? 'rgba(238,125,120,0.15)' : '#fff0ef',
-  accentBg:  darkMode ? 'rgba(120,200,156,0.15)' : '#e8f4ee',
-  purpleBg:  darkMode ? 'rgba(182,169,201,0.14)' : '#f2eef6',
-  infoBg:    darkMode ? 'rgba(137,169,197,0.14)' : '#edf4f8',
+  accentBg:  darkMode ? 'rgba(143,169,207,0.15)' : '#e9eff7',
+  purpleBg:  darkMode ? 'rgba(167,160,186,0.14)' : '#f1eff5',
+  infoBg:    darkMode ? 'rgba(143,169,207,0.14)' : '#e9eff7',
 
   shadowSm: darkMode ? 'none' : '0 1px 2px rgba(16,18,24,0.04)',
   shadowMd: darkMode ? 'none' : '0 4px 16px rgba(16,18,24,0.05)',
   shadowLg: darkMode ? 'none' : '0 8px 32px rgba(16,18,24,0.08)',
 
   // Legacy gradient keys
-  accentGradient:  darkMode ? 'linear-gradient(135deg,#78c89c,#4ba774)' : 'linear-gradient(135deg,#1a6a45,#14543c)',
-  successGradient: darkMode ? 'linear-gradient(135deg,#78c89c,#4ba774)' : 'linear-gradient(135deg,#18945c,#116a42)',
-  warningGradient: darkMode ? 'linear-gradient(135deg,#d9ba6a,#b8934f)' : 'linear-gradient(135deg,#c9a84c,#a77e2a)',
+  accentGradient:  darkMode ? 'linear-gradient(135deg,#8fa9cf,#6d8bb3)' : 'linear-gradient(135deg,#37577c,#29435f)',
+  successGradient: darkMode ? 'linear-gradient(135deg,#69b58d,#4d9470)' : 'linear-gradient(135deg,#2f8f68,#237251)',
+  warningGradient: darkMode ? 'linear-gradient(135deg,#d0a96b,#b88f55)' : 'linear-gradient(135deg,#ae7c32,#8e6329)',
   errorGradient:   darkMode ? 'linear-gradient(135deg,#ee7d78,#d66761)' : 'linear-gradient(135deg,#d64545,#b83535)',
-  purpleGradient:  darkMode ? 'linear-gradient(135deg,#b6a9c9,#8f84a4)' : 'linear-gradient(135deg,#786b92,#5f5577)',
+  purpleGradient:  darkMode ? 'linear-gradient(135deg,#a7a0ba,#827b96)' : 'linear-gradient(135deg,#746f86,#595566)',
 });
 
 // ── KPI per-metric color map (dashboard.jsx KPIS) ─────────────────────
 export const getKpiAccents = (darkMode: boolean) => {
   const c = getColors(darkMode);
   return {
-    requests: { fg: c.accent, bg: c.accentBg  }, // indigo
-    cost:     { fg: c.success, bg: c.successBg }, // green
-    latency:  { fg: c.info,   bg: c.infoBg    }, // cyan
-    success:  { fg: c.success, bg: c.successBg }, // green
-    tokens:   { fg: c.purple, bg: c.purpleBg  }, // purple
+    requests: { fg: c.accent, bg: c.accentBg },
+    cost:     { fg: c.success, bg: c.successBg },
+    latency:  { fg: c.info,   bg: c.infoBg },
+    success:  { fg: c.success, bg: c.successBg },
+    tokens:   { fg: c.purple, bg: c.purpleBg },
   };
 };
 
@@ -135,14 +135,14 @@ export const getKpiAccents = (darkMode: boolean) => {
 export const getChartPalette = (darkMode: boolean) => {
   const c = getColors(darkMode);
   return darkMode ? [
-    '#78c89c', '#89a9c5', '#d9ba6a', '#ee7d78', '#b6a9c9', c.textFaint,
+    '#8fa9cf', '#d0a96b', '#69b58d', '#ee7d78', '#a7a0ba', c.textFaint,
   ] : [
-    '#1a6a45',
-    '#3f708e',
-    '#c9a84c',
+    '#37577c',
+    '#ae7c32',
+    '#2f8f68',
     '#d64545',
-    '#786b92',
-    '#c6cec8',
+    '#746f86',
+    '#c1c9d4',
   ];
 };
 

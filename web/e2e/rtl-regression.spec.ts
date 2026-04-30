@@ -5,8 +5,8 @@
  *
  * Uses mock API routes to verify UI behavior without a live backend.
  */
-import { expect, test, type Page, type Route } from "@playwright/test";
-import { seedClientPrefs, toSseBody } from "./support/helpers";
+import { expect, test, type Page } from "@playwright/test";
+import { seedClientPrefs } from "./support/helpers";
 
 const MOCK_SERVICE_ID = "__builtin_assistant__";
 const MOCK_SESSION_ID = "rtl-test-session-001";

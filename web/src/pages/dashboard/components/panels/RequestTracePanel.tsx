@@ -65,27 +65,38 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
   const maxDuration = Math.max(trace.request_total_duration_ms || 0, 1);
 
   return (
-    <div>
+    <div style={{ minWidth: 0 }}>
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
-          alignItems: "center",
+          alignItems: "flex-start",
           marginBottom: 16,
           padding: "12px 16px",
           background: colors.innerBg,
           borderRadius: 8,
           border: `1px solid ${colors.border}`,
           gap: 12,
+          flexWrap: "wrap",
+          minWidth: 0,
         }}
       >
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600, color: colors.textPrimary }}>{trace.request_id}</div>
+        <div style={{ minWidth: 0, flex: "1 1 260px" }}>
+          <div
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: colors.textPrimary,
+              overflowWrap: "anywhere",
+            }}
+          >
+            {trace.request_id}
+          </div>
           <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
             {trace.timestamp ? new Date(trace.timestamp).toLocaleString() : "-"}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end", minWidth: 0 }}>
           <Tag color={trace.status === "success" ? "success" : "error"}>
             {trace.status === "success" ? t("dashboard.requestTrace.status.success") : t("dashboard.requestTrace.status.error")}
           </Tag>
@@ -100,7 +111,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(112px, 1fr))",
           gap: 8,
           marginBottom: 16,
         }}
@@ -173,9 +184,11 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
               background: colors.innerBg,
               borderRadius: 6,
               border: `1px solid ${colors.border}`,
+              gap: 12,
+              minWidth: 0,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
               {span.status === "success" ? (
                 <CheckCircleOutlined style={{ color: colors.success, fontSize: 14 }} />
               ) : span.status === "error" ? (
@@ -183,9 +196,9 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
               ) : (
                 <ClockCircleOutlined style={{ color: colors.warning, fontSize: 14 }} />
               )}
-              <span style={{ fontSize: 12, color: colors.textPrimary }}>{span.name}</span>
+              <span style={{ fontSize: 12, color: colors.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{span.name}</span>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
               <span style={{ fontSize: 11, color: colors.textMuted }}>+{formatDuration(span.start_offset_ms)}</span>
               <span
                 style={{
@@ -213,6 +226,8 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
         }}
       >
         <span style={{ fontSize: 12, color: colors.textSecondary }}>{t("dashboard.requestTrace.totalDuration")}</span>
@@ -225,7 +240,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
         style={{
           marginTop: 8,
           display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))",
           gap: 8,
         }}
       >
@@ -243,7 +258,7 @@ function TraceTimeline({ trace }: { trace: RequestTrace }) {
         </div>
         <div style={{ padding: 8, border: `1px solid ${colors.border}`, borderRadius: 6, background: colors.innerBg }}>
           <div style={{ fontSize: 11, color: colors.textMuted }}>trace_id</div>
-          <div style={{ fontSize: 12, fontWeight: 650, color: colors.textPrimary, overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div style={{ fontSize: 12, fontWeight: 650, color: colors.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {trace.trace_id || "-"}
           </div>
         </div>
@@ -411,15 +426,26 @@ export function RequestTracePanel() {
       onRefresh={() => recentQuery.refetch()}
       loading={recentQuery.isLoading}
     >
+      <div
+        className="request-trace-panel"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          minHeight: 0,
+          minWidth: 0,
+          containerType: "inline-size",
+        }}
+      >
       {/* 搜索栏 */}
-      <div id="request-trace-panel" style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+      <div id="request-trace-panel" className="trace-toolbar" style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap", flexShrink: 0, minWidth: 0 }}>
         <Input
           placeholder={t("dashboard.requestTrace.searchPlaceholder")}
           prefix={<SearchOutlined style={{ color: colors.textMuted }} />}
           value={searchId}
           onChange={(e) => setSearchId(e.target.value)}
           onPressEnter={handleSearch}
-          style={{ flex: 1 }}
+          style={{ flex: "1 1 260px", minWidth: 0 }}
         />
         <Button type="primary" icon={<SearchOutlined />} onClick={handleSearch} loading={loading}>
           {t("common.search")}
@@ -432,7 +458,7 @@ export function RequestTracePanel() {
       </div>
 
       {/* 筛选 Tab */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap", flexShrink: 0, minWidth: 0 }}>
         <Segmented
           size="small"
           value={activeTab}
@@ -463,19 +489,25 @@ export function RequestTracePanel() {
       </div>
 
       {loading ? (
-        <div style={{ textAlign: "center", padding: 40 }}>
+        <div style={{ textAlign: "center", padding: 40, flex: 1 }}>
           <Spin tip={t("dashboard.requestTrace.loading")} />
         </div>
       ) : error ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span style={{ color: colors.textMuted }}>{error}</span>} />
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span style={{ color: colors.textMuted }}>{error}</span>} />
+        </div>
       ) : filteredTraces.length > 0 ? (
         <div
           className="trace-explorer-grid"
           style={{
             display: "grid",
-            gridTemplateColumns: "minmax(520px, 1.25fr) minmax(380px, 0.95fr)",
-            gap: 14,
+            gridTemplateColumns: "minmax(0, 1.18fr) minmax(300px, 0.82fr)",
+            gap: 12,
             alignItems: "stretch",
+            flex: 1,
+            minHeight: 0,
+            minWidth: 0,
+            overflow: "hidden",
           }}
         >
           <div
@@ -484,6 +516,7 @@ export function RequestTracePanel() {
               borderRadius: 8,
               overflow: "hidden",
               minWidth: 0,
+              minHeight: 0,
             }}
           >
             <Table
@@ -492,7 +525,7 @@ export function RequestTracePanel() {
               rowKey="request_id"
               size="small"
               pagination={false}
-              scroll={{ y: 300 }}
+              scroll={{ x: 680, y: 300 }}
               rowClassName={(item) => item.request_id === selectedTrace?.request_id ? "trace-row-active" : ""}
               onRow={(item) => ({
                 onClick: () => {
@@ -505,18 +538,20 @@ export function RequestTracePanel() {
             />
           </div>
           <div
+            className="trace-detail-panel"
             style={{
               minWidth: 0,
+              minHeight: 0,
+              height: "100%",
               border: `1px solid ${colors.borderSoft}`,
               borderRadius: 8,
               background: colors.cardBg,
               padding: 12,
               overflow: "auto",
-              maxHeight: 340,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-              <div>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12, minWidth: 0 }}>
+              <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: colors.textPrimary }}>
                   {t("dashboard.requestTrace.detailTitle", "Trace 详情")}
                 </div>
@@ -532,25 +567,46 @@ export function RequestTracePanel() {
             .trace-row-active > td {
               background: ${darkMode ? "rgba(135,148,255,0.14)" : "rgba(20,84,60,0.06)"} !important;
             }
-            @media (max-width: 1180px) {
-              .trace-explorer-grid { grid-template-columns: minmax(0, 1fr) !important; }
+            .request-trace-panel .ant-table-wrapper,
+            .request-trace-panel .ant-spin-nested-loading,
+            .request-trace-panel .ant-spin-container,
+            .request-trace-panel .ant-table,
+            .request-trace-panel .ant-table-container {
+              min-width: 0;
+            }
+            .request-trace-panel .ant-table-body {
+              overflow: auto !important;
+            }
+            @container (max-width: 900px) {
+              .trace-explorer-grid {
+                grid-template-columns: minmax(0, 1fr) !important;
+                overflow: auto !important;
+                align-content: start;
+              }
+              .trace-detail-panel { min-height: 300px; }
+            }
+            @container (max-width: 520px) {
+              .trace-toolbar .ant-input-affix-wrapper { flex-basis: 100% !important; }
             }
           `}</style>
         </div>
       ) : (
-        <Empty
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={
-            <div style={{ color: colors.textMuted }}>
-              <p>{activeTab !== "all"
-                ? t("dashboard.requestTrace.emptyFiltered", "当前筛选条件下无匹配的请求追踪")
-                : t("dashboard.requestTrace.emptyTitle")
-              }</p>
-              <p style={{ fontSize: 12, marginTop: 4 }}>{t("dashboard.requestTrace.emptyDesc")}</p>
-            </div>
-          }
-        />
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <div style={{ color: colors.textMuted }}>
+                <p>{activeTab !== "all"
+                  ? t("dashboard.requestTrace.emptyFiltered", "当前筛选条件下无匹配的请求追踪")
+                  : t("dashboard.requestTrace.emptyTitle")
+                }</p>
+                <p style={{ fontSize: 12, marginTop: 4 }}>{t("dashboard.requestTrace.emptyDesc")}</p>
+              </div>
+            }
+          />
+        </div>
       )}
+      </div>
     </PanelWrapper>
   );
 }

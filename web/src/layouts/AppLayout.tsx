@@ -22,6 +22,7 @@ import {
   Monitor,
   Menu,
   Lock,
+  type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAppStore } from "@/store/useAppStore";
@@ -41,26 +42,59 @@ const { Text } = Typography;
 // 18px keeps the collapsed rail comfortable without cramping.
 const NAV_ICON_SIZE = 18;
 const NAV_ICON_STROKE = 1.5;
+const HEADER_HEIGHT = 56;
 
-const navItems = [
-  { key: "/dashboard", labelKey: "nav.dashboard", icon: <LayoutDashboard size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:dashboard:view" },
-  { key: "/services", labelKey: "nav.services", icon: <Server size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:services:view" },
-  { key: "/knowledge", labelKey: "nav.knowledge", icon: <BookOpen size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "knowledge:dataset:view" },
-  { key: "/playground", labelKey: "nav.playground", icon: <Zap size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "conversation:playground:access" },
-  { key: "/assistant", labelKey: "nav.assistant", icon: <Bot size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "conversation:playground:access" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: <ListTodo size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: null },
-  { key: "/users", labelKey: "nav.users", icon: <Users size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "user:list" },
-  { key: "/settings", labelKey: "nav.settings", icon: <Settings size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />, permission: "console:settings:view" },
+type NavItem = {
+  key: string;
+  labelKey: string;
+  icon: LucideIcon;
+  permission: string | null;
+};
+
+const navItems: NavItem[] = [
+  { key: "/dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard, permission: "console:dashboard:view" },
+  { key: "/services", labelKey: "nav.services", icon: Server, permission: "console:services:view" },
+  { key: "/knowledge", labelKey: "nav.knowledge", icon: BookOpen, permission: "knowledge:dataset:view" },
+  { key: "/playground", labelKey: "nav.playground", icon: Zap, permission: "conversation:playground:access" },
+  { key: "/assistant", labelKey: "nav.assistant", icon: Bot, permission: "conversation:playground:access" },
+  { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: null },
+  { key: "/users", labelKey: "nav.users", icon: Users, permission: "user:list" },
+  { key: "/settings", labelKey: "nav.settings", icon: Settings, permission: "console:settings:view" },
 ];
 
-function getPageTitleKey(pathname: string): string {
+function NavItemIcon({ icon: Icon, size = NAV_ICON_SIZE }: { icon: LucideIcon; size?: number }) {
+  return <Icon size={size} strokeWidth={NAV_ICON_STROKE} />;
+}
+
+function getPageChrome(pathname: string) {
   const segment = pathname.split("/")[1] || "dashboard";
-  const map: Record<string, string> = {
-    dashboard: "nav.dashboard", services: "nav.services", knowledge: "nav.knowledge",
-    playground: "nav.playground", assistant: "nav.assistant", tasks: "nav.tasks",
-    users: "nav.users", settings: "nav.settings", exams: "nav.exams",
+  const map: Record<string, { titleKey: string; titleFallback: string; subtitleKey?: string; subtitleFallback?: string }> = {
+    dashboard: {
+      titleKey: "metrics.title",
+      titleFallback: "Monitoring Dashboard",
+      subtitleKey: "dashboard.command.subtitle",
+      subtitleFallback: "AI Gateway operations, reliability, governance and request trace observability",
+    },
+    services: {
+      titleKey: "services.page.title",
+      titleFallback: "Service Management",
+      subtitleKey: "services.page.subtitle",
+      subtitleFallback: "Manage all your AI services, providers, and models in one place.",
+    },
+    knowledge: {
+      titleKey: "knowledge.datasets.title",
+      titleFallback: "Knowledge Base Management",
+      subtitleKey: "knowledge.datasets.subtitle",
+      subtitleFallback: "Manage and search your AI knowledge assets",
+    },
+    playground: { titleKey: "nav.playground", titleFallback: "Playground" },
+    assistant: { titleKey: "nav.assistant", titleFallback: "AI Assistant" },
+    tasks: { titleKey: "nav.tasks", titleFallback: "Tasks" },
+    users: { titleKey: "nav.users", titleFallback: "Users" },
+    settings: { titleKey: "nav.settings", titleFallback: "Settings" },
+    exams: { titleKey: "nav.exams", titleFallback: "Exams" },
   };
-  return map[segment] || "nav.dashboard";
+  return map[segment] || map.dashboard;
 }
 
 function getInitials(name?: string): string {
@@ -142,11 +176,34 @@ export function AppLayout() {
   const SIDER_WIDTH = 187;
   const siderOffset = isMobile ? (collapsed ? -SIDER_WIDTH : 0) : 0;
   const contentMarginLeft = isMobile ? 0 : collapsed ? 64 : SIDER_WIDTH;
-  const pageTitleKey = getPageTitleKey(location.pathname);
+  const floatingSidebarOpen = isMobile && !collapsed;
   const userInitials = getInitials(user?.display_name || user?.user_id);
+  const pageChrome = getPageChrome(location.pathname);
+  const pageTitle = t(pageChrome.titleKey, pageChrome.titleFallback);
+  const pageSubtitle = pageChrome.subtitleKey
+    ? t(pageChrome.subtitleKey, pageChrome.subtitleFallback || "")
+    : "";
+
+  useEffect(() => {
+    if (!floatingSidebarOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCollapsed(true);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [floatingSidebarOpen]);
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
+      {floatingSidebarOpen && (
+        <button
+          type="button"
+          aria-label={t("nav.closeSidebar", "Close sidebar")}
+          className="app-sidebar-hit-area"
+          style={{ left: SIDER_WIDTH }}
+          onClick={() => setCollapsed(true)}
+        />
+      )}
       <Sider
         collapsible collapsed={collapsed} onCollapse={setCollapsed} trigger={null}
         width={SIDER_WIDTH} collapsedWidth={isMobile ? 0 : 64}
@@ -176,6 +233,7 @@ export function AppLayout() {
                 <NavLink
                   key={item.key}
                   to={item.key}
+                  onClick={() => { if (isMobile) setCollapsed(true); }}
                   className={({ isActive }) =>
                     `app-nav-link relative group flex items-center rounded-lg transition-colors duration-140 ease-out ${
                       collapsed ? 'justify-center py-[11px]' : 'gap-[10px] px-[10px] py-[11px]'
@@ -194,7 +252,9 @@ export function AppLayout() {
                           }}
                         />
                       )}
-                      <span className="app-nav-icon flex-shrink-0">{item.icon}</span>
+                      <span className="app-nav-icon flex-shrink-0">
+                        <NavItemIcon icon={item.icon} />
+                      </span>
                       {!collapsed && (
                         <span className="app-nav-label truncate">
                           {t(item.labelKey)}
@@ -258,23 +318,29 @@ export function AppLayout() {
       <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100vh' }}>
         {/* Header */}
         <Header style={{
-          padding: '0 20px', background: 'transparent',
+          padding: isMobile ? '0 10px' : '0 16px',
+          background: 'hsl(var(--background) / 0.9)',
+          backdropFilter: 'blur(12px)',
           borderBottom: '1px solid hsl(var(--border))',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          position: 'relative', zIndex: 50, height: 48,
+          gap: 12, position: 'relative', zIndex: 50, height: HEADER_HEIGHT,
+          lineHeight: 'normal',
         }}>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             {isMobile && (
-              <button onClick={() => setCollapsed(p => !p)} className="h-8 w-8 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
+              <button onClick={() => setCollapsed(p => !p)} className="h-8 w-8 flex-shrink-0 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
                 <Menu size={18} />
               </button>
             )}
-            {!location.pathname.startsWith("/dashboard") && (
-              <span className="text-sm font-medium text-foreground">{t(pageTitleKey)}</span>
-            )}
+            <div className="app-header-title min-w-0">
+              <div className="app-header-title-text truncate">{pageTitle}</div>
+              {pageSubtitle && (
+                <div className="app-header-subtitle truncate">{pageSubtitle}</div>
+              )}
+            </div>
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-            <div className="flex items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
+            <div className="flex flex-shrink-0 items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
               <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-primary bg-primary/10 border border-primary/15">
                 {userInitials}
               </div>
@@ -285,7 +351,7 @@ export function AppLayout() {
           </Dropdown>
         </Header>
 
-        <Content style={{ padding: isMobile ? '8px' : '0 20px 20px 20px', minHeight: 'calc(100vh - 48px)', overflow: 'auto' }}>
+        <Content style={{ padding: isMobile ? '8px' : '12px 18px 18px', minHeight: `calc(100vh - ${HEADER_HEIGHT}px)`, overflow: 'auto' }}>
           <div className="page-transition"><Outlet /></div>
         </Content>
       </Layout>
@@ -300,6 +366,17 @@ export function AppLayout() {
 
       <style>{`
         .ant-layout-sider-children { box-shadow: none !important; }
+        .app-sidebar-hit-area {
+          position: fixed;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          z-index: 90;
+          padding: 0;
+          border: 0;
+          background: transparent;
+          cursor: default;
+        }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
 
@@ -348,6 +425,32 @@ export function AppLayout() {
         }
         .dark .app-nav-item-active { background: hsl(var(--primary) / 0.18); }
         .dark .app-nav-item-active:hover { background: hsl(var(--primary) / 0.24); }
+
+        .app-header-title {
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          gap: 2px;
+        }
+        .app-header-title-text {
+          color: hsl(var(--foreground));
+          font-size: 14.5px;
+          font-weight: 650;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+        .app-header-subtitle {
+          color: hsl(var(--muted-foreground));
+          font-size: 12px;
+          font-weight: 400;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        @media (max-width: 720px) {
+          .app-header-subtitle {
+            display: none;
+          }
+        }
       `}</style>
     </Layout>
   );

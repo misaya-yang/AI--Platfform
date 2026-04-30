@@ -1,22 +1,22 @@
 import type { ThemeConfig } from 'antd';
 
-// Hejaz Islamic education platform — deep green + warm gold palette
+// AI Gateway operations console — graphite slate + steel + restrained amber palette
 
 export const colors = {
   primary: {
-    50: '#f0faf4', 100: '#d5f0e0', 200: '#a8e0c1', 300: '#6cc899',
-    400: '#3daa73', 500: '#1a4731', 600: '#163d2a', 700: '#123322',
-    800: '#0e291b', 900: '#0a1f14',
+    50: '#f3f6fa', 100: '#e4ebf3', 200: '#c9d6e5', 300: '#a8bdd4',
+    400: '#7f9bbd', 500: '#4f6f96', 600: '#37577c', 700: '#29435f',
+    800: '#1f3349', 900: '#172538',
   },
   neutral: {
-    50: '#f7f8f7', 100: '#eef0ef', 200: '#dde1de', 300: '#c4cac6',
-    400: '#98a29b', 500: '#6d786f', 600: '#4d574f', 700: '#3a433c',
-    800: '#272e29', 900: '#161b17', 950: '#0c100d',
+    50: '#f6f7f9', 100: '#ebeef2', 200: '#d9dee6', 300: '#c1c9d4',
+    400: '#99a5b4', 500: '#6f7c8e', 600: '#505c6e', 700: '#394352',
+    800: '#222a35', 900: '#171d26', 950: '#10141a',
   },
   gold: {
-    50: '#fdf9ef', 100: '#f9f0d5', 200: '#f0dca6', 300: '#e5c472',
-    400: '#d9ab44', 500: '#c9a84c', 600: '#b08f3a', 700: '#8e7230',
-    800: '#6b5625', 900: '#4a3c1a',
+    50: '#fbf6ec', 100: '#f3e8cf', 200: '#e7d0a3', 300: '#d8b571',
+    400: '#c79a4e', 500: '#ae7c32', 600: '#8e6329', 700: '#6f4d23',
+    800: '#543b1e', 900: '#3a2a17',
   },
 };
 
@@ -32,21 +32,21 @@ const sharedComponents: ThemeConfig['components'] = {
 
 export const lightTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#1a4731',
-    colorInfo: '#3daa73',
-    colorSuccess: '#22c55e',
-    colorWarning: '#d9ab44',
+    colorPrimary: '#37577c',
+    colorInfo: '#4f6f96',
+    colorSuccess: '#2f8f68',
+    colorWarning: '#ae7c32',
     colorError: '#dc3545',
     fontFamily: '"Geist Sans", "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
     fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
     colorBgContainer: '#ffffff',
     colorBgElevated: '#ffffff',
-    colorBgLayout: '#f0f2f0',
-    colorText: '#161b17',
-    colorTextSecondary: '#4d574f',
-    colorTextTertiary: '#6d786f',
-    colorBorder: '#dde1de',
-    colorBorderSecondary: '#eef0ef',
+    colorBgLayout: '#f4f6f8',
+    colorText: '#1a202b',
+    colorTextSecondary: '#505c6e',
+    colorTextTertiary: '#6f7c8e',
+    colorBorder: '#d9dee6',
+    colorBorderSecondary: '#ebeef2',
     borderRadius: 6,
     borderRadiusLG: 8,
     borderRadiusSM: 6,
@@ -58,9 +58,9 @@ export const lightTheme: ThemeConfig = {
     ...sharedComponents,
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(26,71,49,0.06)',
-      itemSelectedColor: '#1a4731',
-      itemHoverBg: '#eef0ef',
+      itemSelectedBg: 'rgba(55,87,124,0.09)',
+      itemSelectedColor: '#29435f',
+      itemHoverBg: '#ebeef2',
       itemBorderRadius: 6,
     },
   },
@@ -68,21 +68,21 @@ export const lightTheme: ThemeConfig = {
 
 export const darkTheme: ThemeConfig = {
   token: {
-    colorPrimary: '#3daa73',
-    colorInfo: '#3daa73',
-    colorSuccess: '#4ade80',
-    colorWarning: '#e5c472',
+    colorPrimary: '#8fa9cf',
+    colorInfo: '#8fa9cf',
+    colorSuccess: '#69b58d',
+    colorWarning: '#d0a96b',
     colorError: '#f87171',
     fontFamily: '"Geist Sans", "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
     fontFamilyCode: '"IBM Plex Mono", "JetBrains Mono", "SFMono-Regular", Menlo, monospace',
-    colorBgContainer: '#1a211c',
-    colorBgElevated: '#212923',
-    colorBgLayout: '#0c100d',
-    colorText: '#eef0ef',
-    colorTextSecondary: '#98a29b',
-    colorTextTertiary: '#6d786f',
-    colorBorder: '#2e3830',
-    colorBorderSecondary: '#212923',
+    colorBgContainer: '#181d25',
+    colorBgElevated: '#202734',
+    colorBgLayout: '#11141a',
+    colorText: '#eef2f6',
+    colorTextSecondary: '#a6b0bf',
+    colorTextTertiary: '#7f8b9b',
+    colorBorder: '#303948',
+    colorBorderSecondary: '#252d39',
     borderRadius: 6,
     borderRadiusLG: 8,
     borderRadiusSM: 6,
@@ -94,8 +94,8 @@ export const darkTheme: ThemeConfig = {
     ...sharedComponents,
     Menu: {
       itemBg: 'transparent',
-      itemSelectedBg: 'rgba(61,170,115,0.08)',
-      itemSelectedColor: '#6cc899',
+      itemSelectedBg: 'rgba(143,169,207,0.12)',
+      itemSelectedColor: '#b7c9e4',
       itemHoverBg: 'rgba(255,255,255,0.04)',
       itemBorderRadius: 6,
     },

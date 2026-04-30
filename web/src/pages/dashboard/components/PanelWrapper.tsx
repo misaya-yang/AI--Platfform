@@ -24,8 +24,9 @@ function PanelSkeleton({ darkMode }: { darkMode: boolean }) {
             height: i === 0 ? 20 : 14,
             width: `${w * 100}%`,
             borderRadius: 6,
-            background: shimmerBg,
+            backgroundImage: shimmerBg,
             backgroundSize: "200px 100%",
+            backgroundRepeat: "no-repeat",
             animation: "shimmer 1.5s ease-in-out infinite",
             marginBottom: 12,
           }}
@@ -136,15 +137,20 @@ export function PanelWrapper({
           borderBottom: `1px solid ${colors.borderSoft}`,
           background: darkMode ? "rgba(255,255,255,0.018)" : "#fff",
           flexShrink: 0,
+          gap: 10,
+          minWidth: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 auto" }}>
           <span
             style={{
               fontSize: 15,
               fontWeight: 650,
               color: colors.textPrimary,
               letterSpacing: "0",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
             {title}
@@ -154,7 +160,7 @@ export function PanelWrapper({
           )}
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
           {extra}
           {onRefresh && (
             <Tooltip title={t("common.refresh")}>
@@ -199,9 +205,11 @@ export function PanelWrapper({
         style={{
           padding: noPadding ? 0 : LAYOUT.CARD_PADDING,
           flex: 1,
-          overflow: "hidden",
+          overflow: noPadding ? "hidden" : "auto",
           position: "relative",
           minHeight: 0,
+          minWidth: 0,
+          overscrollBehavior: "contain",
         }}
       >
         {isError ? (

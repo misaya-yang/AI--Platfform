@@ -3,46 +3,46 @@
 @tailwind utilities;
 
 /* ═══════════════════════════════════════════
-   AI Gateway — Islamic education platform
-   Deep green (#1a4731) + warm gold (#c9a84c)
+   AI Gateway — professional operations console
+   Slate/steel neutrals with restrained amber attention
    ═══════════════════════════════════════════ */
 
 @layer base {
   :root {
-    /* Warm operational neutral + Hejaz green brand */
-    --background: 150 8% 95%;
-    --foreground: 152 15% 8%;
+    /* Calm operational neutral + steel primary */
+    --background: 210 20% 96%;
+    --foreground: 220 24% 14%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222 28% 10%;
+    --card-foreground: 220 24% 14%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 28% 10%;
+    --popover-foreground: 220 24% 14%;
 
-    --primary: 153 46% 19%;
+    --primary: 212 39% 35%;
     --primary-foreground: 220 20% 98%;
 
-    --secondary: 220 14% 94%;
-    --secondary-foreground: 222 20% 18%;
+    --secondary: 215 18% 92%;
+    --secondary-foreground: 220 22% 20%;
 
-    --muted: 220 14% 94%;
-    --muted-foreground: 220 8% 42%;
+    --muted: 215 18% 92%;
+    --muted-foreground: 216 14% 43%;
 
-    --accent: 153 46% 19%;
+    --accent: 212 39% 35%;
     --accent-foreground: 220 20% 98%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
 
-    --success: 160 84% 39%;                 /* emerald-500 */
+    --success: 158 46% 41%;
     --success-foreground: 0 0% 98%;
 
-    --warning: 38 92% 50%;
-    --warning-foreground: 38 80% 12%;
+    --warning: 35 54% 48%;
+    --warning-foreground: 36 45% 13%;
 
-    --border: 220 14% 91%;
-    --input: 220 14% 91%;
-    --ring: 153 46% 19%;
+    --border: 215 18% 86%;
+    --input: 215 18% 86%;
+    --ring: 212 39% 35%;
 
     --radius: 0.5rem;
     --transition-fast: 150ms;
@@ -50,82 +50,76 @@
 
     --sidebar-bg: 0 0% 100%;
 
-    /* Assistant UI scoped tokens — warm-neutral with green whisper (light).
-       Single accent is gold (--assistant-accent). No secondary hue.
+    /* Assistant UI scoped tokens — same steel operations palette (light).
+       Single attention hue is amber (--assistant-accent).
        Hierarchy: text-primary > text-secondary > text-tertiary. */
-    --assistant-canvas-bg: 150 10% 97%;
+    --assistant-canvas-bg: 210 20% 97%;
     --assistant-surface-bg: 0 0% 100%;         /* panel / chip inner */
-    --assistant-surface-soft: 150 8% 95%;      /* code block, muted fill */
-    --assistant-text-primary: 152 12% 12%;
-    --assistant-text-secondary: 150 5% 42%;
-    --assistant-text-tertiary: 150 4% 60%;
-    --assistant-border: 150 8% 88%;            /* hairline */
-    --assistant-border-soft: 150 8% 92%;       /* softer hairline */
-    --assistant-accent: 43 50% 45%;
-    --assistant-accent-soft: 43 55% 92%;       /* tinted bg for accent marker */
-    --assistant-chip-bg: 150 8% 95%;
-    --assistant-user-bubble: 150 8% 93%;
-    --assistant-shadow: 0 1px 2px rgba(20,14,8,.04), 0 4px 24px rgba(20,14,8,.04);
-    --assistant-shadow-lift: 0 2px 8px rgba(20,14,8,.06), 0 12px 40px rgba(20,14,8,.08);
+    --assistant-surface-soft: 215 18% 94%;      /* code block, muted fill */
+    --assistant-text-primary: 220 24% 14%;
+    --assistant-text-secondary: 216 14% 43%;
+    --assistant-text-tertiary: 216 10% 59%;
+    --assistant-border: 215 18% 86%;            /* hairline */
+    --assistant-border-soft: 215 18% 90%;       /* softer hairline */
+    --assistant-accent: 35 48% 46%;
+    --assistant-accent-soft: 36 48% 91%;       /* tinted bg for accent marker */
+    --assistant-chip-bg: 215 18% 94%;
+    --assistant-user-bubble: 215 18% 92%;
+    --assistant-shadow: 0 1px 2px rgba(20,24,32,.04), 0 4px 24px rgba(20,24,32,.04);
+    --assistant-shadow-lift: 0 2px 8px rgba(20,24,32,.06), 0 12px 40px rgba(20,24,32,.08);
   }
 
   .dark {
-    /* Dark canvas — graphite green, not blue-black */
-    --background: 152 12% 6%;
-    --foreground: 150 5% 95%;
+    /* Dark canvas — graphite slate, not green-black */
+    --background: 220 21% 8%;
+    --foreground: 210 25% 95%;
 
-    --card: 152 8% 11%;
-    --card-foreground: 150 5% 95%;
+    --card: 219 21% 12%;
+    --card-foreground: 210 25% 95%;
 
-    --popover: 152 8% 11%;
-    --popover-foreground: 150 5% 95%;
+    --popover: 219 21% 12%;
+    --popover-foreground: 210 25% 95%;
 
-    --primary: 153 38% 58%;
-    --primary-foreground: 152 12% 6%;
+    --primary: 214 39% 68%;
+    --primary-foreground: 220 21% 8%;
 
-    --secondary: 152 6% 15%;
-    --secondary-foreground: 150 5% 95%;
+    --secondary: 218 20% 17%;
+    --secondary-foreground: 210 25% 95%;
 
-    --muted: 152 6% 15%;
-    --muted-foreground: 150 4% 62%;
+    --muted: 218 20% 17%;
+    --muted-foreground: 214 13% 66%;
 
-    --accent: 153 38% 58%;
-    --accent-foreground: 220 20% 98%;
+    --accent: 214 39% 68%;
+    --accent-foreground: 220 21% 8%;
 
     --destructive: 0 72% 58%;
     --destructive-foreground: 0 0% 98%;
 
-    --success: 160 70% 50%;
+    --success: 158 45% 58%;
     --success-foreground: 0 0% 98%;
 
-    --warning: 38 80% 55%;
-    --warning-foreground: 38 70% 12%;
+    --warning: 35 50% 60%;
+    --warning-foreground: 36 45% 13%;
 
-    --border: 152 6% 18%;
-    --input: 152 6% 18%;
-    --ring: 153 38% 58%;
+    --border: 218 18% 22%;
+    --input: 218 18% 22%;
+    --ring: 214 39% 68%;
 
-    --sidebar-bg: 152 12% 6%;
+    --sidebar-bg: 220 21% 8%;
 
-    /* Assistant UI scoped tokens — ALIGNED with global --background /
-       --card / --muted / --border above so assistant page shares the
-       exact same palette as the rest of the app (hue 152 cool-green
-       near-black). Earlier pass introduced a private hue-30 warm-neutral
-       ladder here which read as a color-mismatched graft when users
-       switched between /dashboard and /assistant. Only the accent
-       (gold) is reserved for assistant-specific branding. */
-    --assistant-canvas-bg: 152 12% 6%;         /* = --background */
-    --assistant-surface-bg: 152 8% 11%;        /* = --card */
-    --assistant-surface-soft: 152 6% 15%;      /* = --muted */
-    --assistant-text-primary: 150 5% 92%;
-    --assistant-text-secondary: 150 5% 64%;    /* clearly readable on canvas */
-    --assistant-text-tertiary: 150 4% 45%;
-    --assistant-border: 152 6% 18%;            /* = --border */
-    --assistant-border-soft: 152 6% 14%;
-    --assistant-accent: 43 50% 60%;            /* gold, tuned for L=6 canvas */
-    --assistant-accent-soft: 43 32% 22%;
-    --assistant-chip-bg: 152 6% 13%;
-    --assistant-user-bubble: 152 6% 14%;
+    /* Assistant UI scoped tokens — aligned with global graphite slate. */
+    --assistant-canvas-bg: 220 21% 8%;         /* = --background */
+    --assistant-surface-bg: 219 21% 12%;       /* = --card */
+    --assistant-surface-soft: 218 20% 17%;     /* = --muted */
+    --assistant-text-primary: 210 25% 92%;
+    --assistant-text-secondary: 214 13% 66%;   /* clearly readable on canvas */
+    --assistant-text-tertiary: 214 10% 48%;
+    --assistant-border: 218 18% 22%;           /* = --border */
+    --assistant-border-soft: 218 18% 17%;
+    --assistant-accent: 35 50% 62%;            /* restrained amber */
+    --assistant-accent-soft: 35 32% 22%;
+    --assistant-chip-bg: 218 20% 16%;
+    --assistant-user-bubble: 218 20% 17%;
     --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
     --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }
@@ -212,7 +206,7 @@
 }
 
 /* ═══════════════════════════════════════════
-   Ant Design overrides — aligned to green/gold
+   Ant Design overrides — aligned to steel/amber
    ═══════════════════════════════════════════ */
 
 /* Button micro-interactions: scale(0.98) on active, color-deepen on hover */
@@ -266,7 +260,7 @@
 }
 .ant-card:hover { border-color: hsl(var(--primary) / 0.15) !important; }
 
-/* Input — green focus glow matching brand */
+/* Input — steel focus glow matching product chrome */
 .ant-input, .ant-input-affix-wrapper, .ant-select-selector { border-radius: var(--radius-sm) !important; }
 .ant-input:focus, .ant-input-focused, .ant-input-affix-wrapper-focused,
 .ant-select-focused .ant-select-selector {
@@ -313,7 +307,7 @@
 .ant-tabs-ink-bar { transition: left 0.2s var(--ease-out), width 0.2s var(--ease-out) !important; }
 
 /* ═══════════════════════════════════════════
-   Focus ring — green brand glow
+   Focus ring — steel product focus
    ═══════════════════════════════════════════ */
 
 :focus-visible {

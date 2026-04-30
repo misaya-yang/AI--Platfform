@@ -16,8 +16,9 @@ function ShimmerBlock({ width = "100%", height = 14, radius = 6 }: { width?: str
         width,
         height,
         borderRadius: radius,
-        background: bg,
+        backgroundImage: bg,
         backgroundSize: "200px 100%",
+        backgroundRepeat: "no-repeat",
         animation: "shimmer 1.5s ease-in-out infinite",
       }}
     />

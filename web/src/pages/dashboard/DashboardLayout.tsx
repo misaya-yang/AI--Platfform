@@ -27,7 +27,7 @@ import {
   FailureAnalysisPanel,
 } from "./components/panels";
 
-type WorkspaceKey = "overview" | "reliability" | "governance" | "tracing";
+type WorkspaceKey = "overview" | "operations" | "reliability" | "governance" | "tracing";
 
 interface PanelSlot {
   type: PanelType;
@@ -67,6 +67,7 @@ function loadWorkspace(): WorkspaceKey {
     const saved = localStorage.getItem(WORKSPACE_STORAGE_KEY);
     if (
       saved === "overview" ||
+      saved === "operations" ||
       saved === "reliability" ||
       saved === "governance" ||
       saved === "tracing"
@@ -161,17 +162,31 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const workspaceConfigs = useMemo<Record<WorkspaceKey, WorkspaceConfig>>(
     () => ({
       overview: {
-        title: t("dashboard.workspace.overview.title", "运营控制台"),
+        title: t("dashboard.workspace.overview.title", "总览态势"),
         subtitle: t(
           "dashboard.workspace.overview.subtitle",
-          "先看服务是否可用，再看吞吐、延迟、厂商路由与容量余量"
+          "跨服务、成本、模型接入与安全事件的高层态势"
         ),
-        intent: t("dashboard.workspace.overview.intent", "Live operations"),
+        intent: t("dashboard.workspace.overview.intent", "Executive overview"),
+        panels: [
+          { type: "provider-status", span: 2, minHeight: 300 },
+          { type: "cost-analysis", span: 1, minHeight: 300 },
+          { type: "service-health", span: 1, minHeight: 300 },
+          { type: "security-events", span: 2, minHeight: 300 },
+        ],
+      },
+      operations: {
+        title: t("dashboard.workspace.operations.title", "运营控制台"),
+        subtitle: t(
+          "dashboard.workspace.operations.subtitle",
+          "围绕服务可用性、吞吐、延迟、Token 和实时请求样本排障"
+        ),
+        intent: t("dashboard.workspace.operations.intent", "Live operations"),
         panels: [
           { type: "service-health", span: 2, minHeight: 262 },
           { type: "performance", span: 1, minHeight: 300 },
           { type: "token-usage", span: 1, minHeight: 300 },
-          { type: "provider-status", span: 2, minHeight: 300 },
+          { type: "request-trace", span: 2, minHeight: 300 },
         ],
       },
       reliability: {
@@ -209,9 +224,9 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
         ),
         intent: t("dashboard.workspace.tracing.intent", "Trace explorer"),
         panels: [
-          { type: "request-trace", span: 2, minHeight: 520 },
+          { type: "request-trace", span: 3, minHeight: 560 },
           { type: "performance", span: 1, minHeight: 336 },
-          { type: "failure-analysis", span: 3, minHeight: 300 },
+          { type: "failure-analysis", span: 2, minHeight: 300 },
         ],
       },
     }),
@@ -239,8 +254,27 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const quotaSummary = quotaQuery.data?.summary;
   const quotaRiskCount = (quotaSummary?.warning || 0) + (quotaSummary?.exceeded || 0) + (quotaSummary?.blocked || 0);
   const successRate = summaryQuery.data?.success_rate ?? 0;
+  const usesExternalTabs = Boolean(forceWorkspace);
   const workspaceSignals: Record<WorkspaceKey, WorkspaceSignal[]> = {
     overview: [
+      {
+        label: t("dashboard.serviceHealth.availability", "可用率"),
+        value: services.length > 0 ? `${availability.toFixed(1)}%` : "—",
+        tone: availability >= 99 || services.length === 0 ? "ok" : availability >= 90 ? "warn" : "critical",
+      },
+      { label: t("dashboard.cost.month", "本月成本"), value: formatCost(monthCostQuery.data?.total_cost_usd || 0), tone: "neutral" },
+      {
+        label: t("dashboard.governance.quotaRisk", "配额风险"),
+        value: String(quotaRiskCount),
+        tone: quotaRiskCount > 0 ? "warn" : "ok",
+      },
+      {
+        label: t("dashboard.requestTrace.tab.error", "失败请求"),
+        value: String(failedTraceCount),
+        tone: failedTraceCount > 0 ? "critical" : "ok",
+      },
+    ],
+    operations: [
       {
         label: t("dashboard.serviceHealth.availability", "可用率"),
         value: services.length > 0 ? `${availability.toFixed(1)}%` : "—",
@@ -306,12 +340,12 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
     <div style={{ minHeight: "100%" }}>
       <div
         style={{
-          borderRadius: LAYOUT.CARD_RADIUS,
-          border: `1px solid ${colors.borderSoft}`,
-          background: colors.cardBg,
-          boxShadow: colors.shadowSm,
-          padding: "11px 14px",
-          marginBottom: LAYOUT.GRID_GAP,
+          borderRadius: usesExternalTabs ? 0 : LAYOUT.CARD_RADIUS,
+          border: usesExternalTabs ? "none" : `1px solid ${colors.borderSoft}`,
+          background: usesExternalTabs ? "transparent" : colors.cardBg,
+          boxShadow: usesExternalTabs ? "none" : colors.shadowSm,
+          padding: usesExternalTabs ? "0 0 14px" : "11px 14px",
+          marginBottom: usesExternalTabs ? 2 : LAYOUT.GRID_GAP,
         }}
       >
         <div
@@ -323,7 +357,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             flexWrap: "wrap",
           }}
         >
-          <div style={{ minWidth: 300, flex: "1 1 420px" }}>
+          <div style={{ minWidth: 0, flex: "1 1 420px" }}>
             <div
               style={{
                 display: "inline-flex",
@@ -331,7 +365,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
                 height: 20,
                 padding: "0 8px",
                 borderRadius: 5,
-                marginBottom: 6,
+                marginBottom: usesExternalTabs ? 4 : 6,
                 background: colors.operatorSoft,
                 color: colors.operator,
                 fontSize: 11,
@@ -344,7 +378,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
               style={{
                 ...TYPOGRAPHY.sectionTitle,
                 color: colors.textPrimary,
-                fontSize: 15,
+                fontSize: usesExternalTabs ? 14 : 15,
                 letterSpacing: "0",
               }}
             >
@@ -355,6 +389,9 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
                 fontSize: 12,
                 color: colors.textSecondary,
                 marginTop: 3,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
               }}
             >
               {activeConfig.subtitle}
@@ -396,10 +433,21 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
                   {
                     value: "overview",
                     label: (
-                      <Tooltip title={t("dashboard.workspace.overview.title", "运营控制台")}>
+                      <Tooltip title={t("dashboard.workspace.overview.title", "总览态势")}>
                         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                           <DashboardOutlined />
-                          {t("dashboard.workspace.overview.short", "运营")}
+                          {t("dashboard.workspace.overview.short", "总览")}
+                        </span>
+                      </Tooltip>
+                    ),
+                  },
+                  {
+                    value: "operations",
+                    label: (
+                      <Tooltip title={t("dashboard.workspace.operations.title", "运营控制台")}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                          <FundProjectionScreenOutlined />
+                          {t("dashboard.workspace.operations.short", "运营")}
                         </span>
                       </Tooltip>
                     ),
@@ -452,7 +500,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             : useThreeColumn
             ? "repeat(3, minmax(0, 1fr))"
             : "repeat(2, minmax(0, 1fr))",
-          gap: useSingleColumn ? 12 : LAYOUT.GRID_GAP,
+          gap: LAYOUT.GRID_GAP,
           alignItems: "stretch",
         }}
       >

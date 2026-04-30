@@ -242,7 +242,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
     setActiveSessionId,
     localTitles,
     setLocalTitles,
-    // sessions -- used indirectly via sessionThreadIdRef
+    sessions,
     messages,
     abortControllerRef,
     currentRequestIdRef,
@@ -259,14 +259,28 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   } = opts;
 
   // Track the effective threadId for the SDK.
-  // We look it up from the session -> thread map.
+  // Render-phase data must come from state/props, not refs.
   const threadId = useMemo<string | null>(() => {
     if (!sessionEnabled || !activeSessionId) return null;
-    return sessionThreadIdRef.current[activeSessionId] ?? null;
-  }, [sessionEnabled, activeSessionId, sessionThreadIdRef]);
+    const activeSession = sessions.find(
+      (session) => session.session_id === activeSessionId,
+    );
+    const metadataThreadId = activeSession?.metadata?.langgraph_thread_id;
+    return typeof metadataThreadId === "string" && metadataThreadId
+      ? metadataThreadId
+      : null;
+  }, [sessionEnabled, activeSessionId, sessions]);
 
   const token = useAuthStore((s) => s.token);
   const staticAssistantId = resolveAssistantId(activeService);
+  const isLangGraphService = useMemo(() => {
+    return (
+      Boolean(activeService) &&
+      (activeService?.service_type === "langgraph" ||
+        activeService?.metadata?.adapter_type === "langgraph" ||
+        activeService?.metadata?.proxy_mode === "transparent")
+    );
+  }, [activeService]);
 
   // Discover the actual assistant ID from LangGraph at mount time.
   // The proxy config often doesn't carry graph_id, but LangGraph knows.
@@ -297,16 +311,6 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   }, [apiUrl, isLangGraphService, token]);
 
   const assistantId = discoveredAssistantId || staticAssistantId;
-
-  // Whether this service uses the LangGraph transparent proxy
-  const isLangGraphService = useMemo(() => {
-    return (
-      Boolean(activeService) &&
-      (activeService?.service_type === "langgraph" ||
-        activeService?.metadata?.adapter_type === "langgraph" ||
-        activeService?.metadata?.proxy_mode === "transparent")
-    );
-  }, [activeService]);
 
   // -------------------------------------------------------------------------
   // SDK useStream

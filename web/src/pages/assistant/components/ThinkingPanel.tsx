@@ -25,12 +25,14 @@ export function ThinkingPanel({
   className,
 }: ThinkingPanelProps) {
   const { t } = useTranslation();
-  const [isExpanded, setIsExpanded] = useState(isStreaming);
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const startTimeRef = useRef<number | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const content = streamingContent || finalContent || "";
+  const defaultExpanded = isStreaming;
+  const isExpanded = userExpanded ?? defaultExpanded;
 
   // Track elapsed time during streaming
   useEffect(() => {
@@ -49,12 +51,6 @@ export function ThinkingPanel({
       );
     }
   }, [isStreaming]);
-
-  // Auto-expand when streaming starts, collapse when done
-  useEffect(() => {
-    if (isStreaming) setIsExpanded(true);
-    else if (streamingContent === undefined && finalContent) setIsExpanded(false);
-  }, [isStreaming, streamingContent, finalContent]);
 
   // Auto-scroll to bottom during streaming
   useEffect(() => {
@@ -80,7 +76,7 @@ export function ThinkingPanel({
           Violet removed (single-accent rule). */}
       <button
         type="button"
-        onClick={() => setIsExpanded((v) => !v)}
+        onClick={() => setUserExpanded((current) => !(current ?? defaultExpanded))}
         className="flex items-center gap-2 py-1.5 text-xs font-medium italic text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))] transition-colors select-none w-full text-left"
       >
         <Brain

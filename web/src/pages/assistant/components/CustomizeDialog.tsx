@@ -11,8 +11,6 @@ import {
   Upload,
   Trash2,
   RefreshCw,
-  Check,
-  X,
   Loader2,
   ChevronDown,
   Zap,
@@ -46,6 +44,19 @@ import {
 interface CustomizeDialogProps {
   open: boolean;
   onClose: () => void;
+}
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const maybe = error as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = maybe.response?.data?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (typeof maybe.message === "string" && maybe.message) return maybe.message;
+  }
+  return fallback;
 }
 
 export function CustomizeDialog({ open, onClose }: CustomizeDialogProps) {
@@ -118,8 +129,8 @@ function SkillsTab() {
     try {
       await uploadSkill(file);
       await load();
-    } catch (err: any) {
-      alert(err?.response?.data?.detail || "Upload failed");
+    } catch (err: unknown) {
+      alert(apiErrorMessage(err, "Upload failed"));
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
@@ -262,8 +273,8 @@ function MCPTab() {
     try {
       await refreshMCPServer(name);
       await load();
-    } catch (err: any) {
-      alert(err?.response?.data?.detail || "Refresh failed");
+    } catch (err: unknown) {
+      alert(apiErrorMessage(err, "Refresh failed"));
     } finally {
       setRefreshing(null);
     }

@@ -13,7 +13,6 @@ import {
   Clock,
   BarChart3,
   ExternalLink,
-  MoreHorizontal,
   Copy,
   Check,
   Loader2,
@@ -45,6 +44,7 @@ import {
   type CreateExamRequest,
 } from "@/api/exams";
 import { listQuizzes } from "@/api/quiz";
+import type { QuizData } from "@/pages/assistant/types";
 
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
   draft: { label: "Draft", variant: "secondary" },
@@ -53,8 +53,23 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secon
   archived: { label: "Archived", variant: "destructive" },
 };
 
+type ExamListParams = Parameters<typeof listExams>[0];
+type QuizOption = Pick<QuizData, "quiz_id" | "title" | "question_count">;
+
+function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object") {
+    const maybe = error as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = maybe.response?.data?.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (typeof maybe.message === "string" && maybe.message) return maybe.message;
+  }
+  return fallback;
+}
+
 export function ExamsPage() {
-  const { t } = useTranslation();
   const navigate = useNavigate();
 
   const [exams, setExams] = useState<Exam[]>([]);
@@ -68,9 +83,9 @@ export function ExamsPage() {
   const loadExams = useCallback(async () => {
     setLoading(true);
     try {
-      const params: Record<string, unknown> = { limit: 50 };
+      const params: ExamListParams = { limit: 50 };
       if (statusFilter !== "all") params.status = statusFilter;
-      const data = await listExams(params as any);
+      const data = await listExams(params);
       setExams(data.exams);
       setTotal(data.total);
     } catch {
@@ -90,8 +105,8 @@ export function ExamsPage() {
     try {
       await publishExam(exam.exam_id);
       loadExams();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed to publish");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed to publish"));
     }
   };
 
@@ -100,8 +115,8 @@ export function ExamsPage() {
     try {
       await closeExam(exam.exam_id);
       loadExams();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed to close");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed to close"));
     }
   };
 
@@ -153,9 +168,9 @@ export function ExamsTabContent() {
   const loadExams = useCallback(async () => {
     setLoading(true);
     try {
-      const params: Record<string, unknown> = { limit: 50 };
+      const params: ExamListParams = { limit: 50 };
       if (statusFilter !== "all") params.status = statusFilter;
-      const data = await listExams(params as any);
+      const data = await listExams(params);
       setExams(data.exams);
       setTotal(data.total);
     } catch {
@@ -175,8 +190,8 @@ export function ExamsTabContent() {
     try {
       await publishExam(exam.exam_id);
       loadExams();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed to publish");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed to publish"));
     }
   };
 
@@ -185,8 +200,8 @@ export function ExamsTabContent() {
     try {
       await closeExam(exam.exam_id);
       loadExams();
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed to close");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed to close"));
     }
   };
 
@@ -419,7 +434,7 @@ function CreateExamDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [quizzes, setQuizzes] = useState<Array<{ quiz_id: string; title: string; question_count: number }>>([]);
+  const [quizzes, setQuizzes] = useState<QuizOption[]>([]);
   const [selectedQuiz, setSelectedQuiz] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -430,16 +445,15 @@ function CreateExamDialog({
 
   useEffect(() => {
     if (open) {
-      listQuizzes({ limit: 100 }).then((data) => setQuizzes(data.quizzes as any));
+      listQuizzes({ limit: 100 }).then((data) => setQuizzes(data.quizzes));
     }
   }, [open]);
 
   useEffect(() => {
-    if (selectedQuiz && !title) {
-      const q = quizzes.find((q) => q.quiz_id === selectedQuiz);
-      if (q) setTitle(q.title);
-    }
-  }, [selectedQuiz]);
+    if (!selectedQuiz || title) return;
+    const q = quizzes.find((quiz) => quiz.quiz_id === selectedQuiz);
+    if (q) setTitle(q.title);
+  }, [selectedQuiz, title, quizzes]);
 
   const handleCreate = async () => {
     if (!selectedQuiz || !title) return;
@@ -459,8 +473,8 @@ function CreateExamDialog({
       setSelectedQuiz("");
       setTitle("");
       setDescription("");
-    } catch (e: any) {
-      alert(e?.response?.data?.detail || "Failed to create exam");
+    } catch (e: unknown) {
+      alert(apiErrorMessage(e, "Failed to create exam"));
     } finally {
       setCreating(false);
     }

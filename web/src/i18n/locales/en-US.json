@@ -127,7 +127,8 @@
     "settings": "Settings",
     "collapseSidebar": "Collapse sidebar",
     "expandSidebar": "Expand sidebar",
-    "toggleSidebar": "Toggle sidebar"
+    "toggleSidebar": "Toggle sidebar",
+    "closeSidebar": "Close sidebar"
   },
   "analytics": {
     "title": "Usage Analytics",
@@ -473,8 +474,14 @@
     },
     "workspace": {
       "overview": {
+        "title": "Overview",
+        "subtitle": "High-level posture across services, cost, model access and security events",
+        "intent": "Executive overview",
+        "short": "Overview"
+      },
+      "operations": {
         "title": "Operations Console",
-        "subtitle": "Start with service availability, then throughput, latency, provider routing and capacity headroom",
+        "subtitle": "Triage availability, throughput, latency, token usage and live request samples",
         "intent": "Live operations",
         "short": "Operations"
       },

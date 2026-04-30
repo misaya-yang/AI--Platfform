@@ -296,18 +296,9 @@ export function ServicesPage() {
   };
 
   return (
-    <div className="space-y-6 p-1">
-      <div className="flex flex-col gap-2 mb-8">
-        <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-gray-900 to-gray-600 dark:from-gray-100 dark:to-gray-400 bg-clip-text text-transparent">
-          {t("services.page.title", "Service Management")}
-        </h1>
-        <p className="text-muted-foreground text-lg">
-          {t("services.page.subtitle", "Manage all your AI services, providers, and models in one place.")}
-        </p>
-      </div>
-
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-border/40 pb-4">
+    <div className="space-y-4 p-1 pt-3">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-border/40 pb-3">
           <TabsList className="bg-muted/50 p-1 h-auto rounded-xl">
             <TabsTrigger
               value="services"

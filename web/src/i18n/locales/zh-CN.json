@@ -127,7 +127,8 @@
     "settings": "系统设置",
     "collapseSidebar": "收起侧栏",
     "expandSidebar": "展开侧栏",
-    "toggleSidebar": "切换侧栏"
+    "toggleSidebar": "切换侧栏",
+    "closeSidebar": "关闭侧栏"
   },
   "analytics": {
     "title": "使用量分析",
@@ -473,8 +474,14 @@
     },
     "workspace": {
       "overview": {
+        "title": "总览态势",
+        "subtitle": "跨服务、成本、模型接入与安全事件的高层态势",
+        "intent": "总览",
+        "short": "总览"
+      },
+      "operations": {
         "title": "运营控制台",
-        "subtitle": "先看服务是否可用，再看吞吐、延迟、厂商路由与容量余量",
+        "subtitle": "围绕服务可用性、吞吐、延迟、Token 和实时请求样本排障",
         "intent": "实时运营",
         "short": "运营"
       },
