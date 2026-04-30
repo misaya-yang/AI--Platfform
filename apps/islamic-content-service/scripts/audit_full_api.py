@@ -11,11 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from math import ceil
 from typing import Any
 
 NOISE_CODEPOINTS = (
@@ -34,6 +36,18 @@ NOISE_CODEPOINTS = (
 )
 NOISE_CHARS = tuple(chr(cp) for cp in NOISE_CODEPOINTS)
 DEFAULT_COLLECTIONS = ("bukhari", "muslim", "abudawud", "tirmidhi", "nasai", "ibnmajah", "nawawi")
+PLACEHOLDER_EN_RE = re.compile(
+    r"^(chapter\s*:?\s*|additional hadiths \(not grouped by sunnah\.com\)|introduction \(unmapped preamble hadiths\))$",
+    re.IGNORECASE,
+)
+PLACEHOLDER_AR = {"", "باب", "باب:", "باب :", "،", ".", ":"}
+
+
+def is_placeholder_chapter_title(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    return bool(PLACEHOLDER_EN_RE.fullmatch(text)) or text in PLACEHOLDER_AR
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,19 +64,37 @@ def parse_args() -> argparse.Namespace:
         default=",".join(DEFAULT_COLLECTIONS),
         help="Comma-separated hadith collection slugs to walk.",
     )
+    parser.add_argument(
+        "--deep-lists",
+        action="store_true",
+        help="Fetch every paginated Hadith book-item page and scan every summary row.",
+    )
     return parser.parse_args()
 
 
 class Auditor:
-    def __init__(self, base_url: str, timeout: float, concurrency: int, collections: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float,
+        concurrency: int,
+        collections: tuple[str, ...],
+        *,
+        deep_lists: bool,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.concurrency = concurrency
         self.collections = collections
+        self.deep_lists = deep_lists
         self.violations: dict[str, list[str]] = defaultdict(list)
+        self.warnings: dict[str, list[str]] = defaultdict(list)
 
     def fail(self, check: str, detail: str) -> None:
         self.violations[check].append(detail)
+
+    def warn(self, check: str, detail: str) -> None:
+        self.warnings[check].append(detail)
 
     def get(self, path: str) -> dict[str, Any]:
         with urllib.request.urlopen(f"{self.base_url}{path}", timeout=self.timeout) as response:
@@ -140,7 +172,7 @@ class Auditor:
             for cat in categories
         ]
         total_items = 0
-        for category, (path, result) in zip(categories, self.get_many(paths)):
+        for category, (_path, result) in zip(categories, self.get_many(paths), strict=True):
             cat_name = category.get("category", "?")
             self.scan_obj(category, f"category[{cat_name}]", "dua_category_noise")
             if isinstance(result, Exception):
@@ -195,7 +227,7 @@ class Auditor:
                 for _, _, qb in book_paths
             ]
             hadith_page1_paths = [
-                f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=10"
+                f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=200"
                 for _, _, qb in book_paths
             ]
             all_book_paths = chapter_paths + hadith_page1_paths
@@ -222,20 +254,28 @@ class Auditor:
                             f"{collection_name}/{bn}: chapters={sum_chapters} book={book_total}",
                         )
                     for ch in chapters:
-                        if (ch.get("hadith_count") or 0) <= 0:
+                        if is_placeholder_chapter_title(ch.get("chapter_title")):
                             self.fail(
-                                "hadith_zero_count_chapter",
-                                f"{collection_name}/{bn}/chapter={ch.get('chapter_id')}",
+                                "hadith_placeholder_chapter_title",
+                                (
+                                    f"{collection_name}/{bn}/chapter={ch.get('chapter_id')}: "
+                                    f"{ch.get('chapter_title')!r}"
+                                ),
                             )
-                        self.scan_obj(
-                            ch,
-                            f"{collection_name}/{bn}/chapter[{ch.get('chapter_id')}]",
-                            "hadith_chapter_noise",
-                        )
+                        for field in ("title_en", "title_ar"):
+                            if ch.get(field) is not None and is_placeholder_chapter_title(ch.get(field)):
+                                self.fail(
+                                    "hadith_placeholder_chapter_field",
+                                    (
+                                        f"{collection_name}/{bn}/chapter={ch.get('chapter_id')}/"
+                                        f"{field}: {ch.get(field)!r}"
+                                    ),
+                                )
+                        self.scan_obj(ch, f"{collection_name}/{bn}/chapter[{ch.get('chapter_id')}]", "hadith_chapter_noise")
 
                 # Hadith list check
                 hp_result = book_results.get(
-                    f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=10"
+                    f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page=1&limit=200"
                 )
                 if isinstance(hp_result, Exception):
                     self.fail("hadith_list_endpoint_error", f"{collection_name}/{bn}: {hp_result}")
@@ -250,6 +290,7 @@ class Auditor:
                     # Collect detail samples from this book
                     samples = items if len(items) <= 3 else [items[0], items[len(items) // 2], items[-1]]
                     for item in samples:
+                        self._scan_hadith_summary_item(collection_name, bn, item)
                         hn = item.get("hadith_number")
                         if not hn:
                             self.fail("hadith_missing_number", f"{collection_name}/{bn}: {item}")
@@ -258,11 +299,14 @@ class Auditor:
                         detail_paths.append(f"/hadith/collections/{collection_name}/hadiths/{qh}")
 
                     # Last-page sample
-                    last_page = max((book_total - 1) // 10 + 1, 1)
-                    if last_page > 1:
+                    last_page = max(ceil(book_total / 200), 1)
+                    if last_page > 1 and not self.deep_lists:
                         detail_paths.append(
-                            f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page={last_page}&limit=10"
+                            f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page={last_page}&limit=200"
                         )
+
+            if self.deep_lists:
+                self._walk_hadith_book_pages(collection_name, book_paths)
 
             # --- Phase 2: fetch all detail + last-page requests concurrently ---
             if detail_paths:
@@ -275,20 +319,75 @@ class Auditor:
                     if "/books/" in path and "/hadiths?" in path:
                         last_items = result.get("items", [])
                         if last_items:
-                            hn = last_items[-1].get("hadith_number")
-                            if hn:
-                                # Extract collection from path
-                                parts = path.split("/")
-                                coll_idx = parts.index("collections") + 1
-                                coll = parts[coll_idx]
-                                qh = urllib.parse.quote(str(hn), safe="/")
-                                # Already fetched above or will be checked below
+                            parts = path.split("/")
+                            coll_idx = parts.index("collections") + 1
+                            book_idx = parts.index("books") + 1
+                            self.scan_obj(
+                                last_items[-1],
+                                f"hadith_last_page[{path}]",
+                                "hadith_list_noise",
+                            )
+                            self._scan_hadith_summary_item(
+                                parts[coll_idx],
+                                urllib.parse.unquote(parts[book_idx]),
+                                last_items[-1],
+                            )
                         continue
                     # Detail result
                     hadith = result.get("hadith", {})
                     if not hadith.get("arabic_text") and not hadith.get("translation_text"):
                         self.fail("hadith_detail_empty_text", path)
                     self.scan_obj(result, f"hadith[{path}]", "hadith_detail_noise")
+
+    def _scan_hadith_summary_item(self, collection_name: str, book_number: str, item: dict[str, Any]) -> None:
+        label = f"{collection_name}/{book_number}/{item.get('hadith_number')}"
+        if not item.get("hadith_number"):
+            self.fail("hadith_summary_missing_number", label)
+        for field in ("title", "section_title", "chapter_title"):
+            value = item.get(field)
+            if value is not None and is_placeholder_chapter_title(value):
+                self.fail("hadith_summary_placeholder_title", f"{label}/{field}: {value!r}")
+        if not str(item.get("arabic_preview_text") or "").strip():
+            self.fail("hadith_summary_empty_arabic", label)
+        if not str(item.get("preview_text") or "").strip():
+            self.warn("hadith_summary_empty_translation_source_gap", label)
+        self.scan_obj(item, f"hadith_summary[{label}]", "hadith_list_noise")
+
+    def _walk_hadith_book_pages(
+        self,
+        collection_name: str,
+        book_paths: list[tuple[dict[str, Any], str, str]],
+    ) -> None:
+        paths: list[tuple[str, str, int, str]] = []
+        for book, bn, qb in book_paths:
+            book_total = book.get("number_of_hadith") or 0
+            pages = max(ceil(book_total / 200), 1)
+            for page in range(1, pages + 1):
+                path = f"/hadith/collections/{collection_name}/books/{qb}/hadiths?page={page}&limit=200"
+                paths.append((bn, path, page, qb))
+
+        page_results = dict(self.get_many([path for _, path, _, _ in paths]))
+        seen_by_book: dict[str, int] = defaultdict(int)
+        for bn, path, _page, _qb in paths:
+            result = page_results.get(path)
+            if isinstance(result, Exception):
+                self.fail("hadith_list_endpoint_error", f"{collection_name}/{bn}: {result}")
+                continue
+            if result is None:
+                self.fail("hadith_list_endpoint_error", f"{collection_name}/{bn}: missing result for {path}")
+                continue
+            items = result.get("items", [])
+            seen_by_book[bn] += len(items)
+            for item in items:
+                self._scan_hadith_summary_item(collection_name, bn, item)
+
+        for book, bn, _qb in book_paths:
+            book_total = book.get("number_of_hadith") or 0
+            if seen_by_book[bn] != book_total:
+                self.fail(
+                    "hadith_deep_list_count_drift",
+                    f"{collection_name}/{bn}: pages={seen_by_book[bn]} book={book_total}",
+                )
 
     def run(self) -> int:
         self.walk_quran()
@@ -297,6 +396,13 @@ class Auditor:
 
         print("=== FINAL REPORT ===", flush=True)
         if not self.violations:
+            if self.warnings:
+                for check, details in self.warnings.items():
+                    print(f"\n[WARN:{check}] {len(details)} item(s)")
+                    for detail in details[:10]:
+                        print(f"  - {detail}")
+                    if len(details) > 10:
+                        print(f"  ... {len(details) - 10} more")
             print("ALL GREEN - 0 violations across Quran, Dua, and Hadith")
             return 0
 
@@ -312,7 +418,13 @@ class Auditor:
 def main() -> int:
     args = parse_args()
     collections = tuple(item.strip() for item in args.collections.split(",") if item.strip())
-    return Auditor(args.base_url, args.timeout, args.concurrency, collections).run()
+    return Auditor(
+        args.base_url,
+        args.timeout,
+        args.concurrency,
+        collections,
+        deep_lists=args.deep_lists,
+    ).run()
 
 
 if __name__ == "__main__":

@@ -178,7 +178,8 @@ SELECT 'D10.dua_null_bytes' AS check,
 SELECT 'H1.cross_book' AS check, COUNT(*) AS violations
 FROM hadith_items hi
 JOIN hadith_chapters hc ON hc.id = hi.chapter_ref_id
-WHERE hi.book_number <> hc.book_number;
+WHERE hi.collection_name <> hc.collection_name
+   OR hi.book_number <> hc.book_number;
 
 \echo H2: hadith_items without chapter_ref_id
 SELECT 'H2.orphan_hadiths' AS check, COUNT(*) AS violations
@@ -289,6 +290,77 @@ SELECT 'H15.hadith_null_bytes' AS check,
 SELECT 'H16.html_entities_in_text' AS check,
        SUM(CASE WHEN body_text ~ '&(amp|lt|gt|quot|nbsp|#[0-9]+);' THEN 1 ELSE 0 END) AS body_rows
 FROM hadith_localizations;
+
+\echo H17: source-backed chapter titles are not placeholders
+WITH normalized AS (
+    SELECT
+        lower(trim(coalesce(replace(replace(title_en, chr(8207), ''), chr(8206), ''), ''))) AS title_en_clean,
+        trim(coalesce(replace(replace(title_ar, chr(8207), ''), chr(8206), ''), '')) AS title_ar_clean
+    FROM hadith_chapters
+    WHERE coalesce(hadith_count, 0) > 0
+      AND coalesce(source_api, '') <> 'synthetic-catchall'
+)
+SELECT 'H17.chapter_title_placeholders' AS check,
+       SUM(CASE WHEN title_en_clean IN (
+           '',
+           'chapter',
+           'chapter:',
+           'additional hadiths (not grouped by sunnah.com)',
+           'introduction (unmapped preamble hadiths)'
+       ) THEN 1 ELSE 0 END) AS title_en,
+       SUM(CASE WHEN title_ar_clean IN ('', 'باب', 'باب:', 'باب :', '،', '.', ':') THEN 1 ELSE 0 END) AS title_ar
+FROM normalized;
+
+\echo H18: synthetic catch-all rows are isolated from source-backed chapters
+SELECT 'H18.synthetic_catchall_inventory' AS check,
+       collection_name,
+       COUNT(*) AS chapters,
+       SUM(hadith_count) AS hadiths
+FROM hadith_chapters
+WHERE source_api = 'synthetic-catchall'
+GROUP BY collection_name
+ORDER BY collection_name;
+
+\echo H19: collection and book titles are real labels, not defaults
+SELECT 'H19.collection_book_title_placeholders' AS check,
+       (SELECT COUNT(*)
+        FROM hadith_collections
+        WHERE length(trim(coalesce(title, ''))) = 0
+           OR lower(trim(title)) IN ('collection', 'unknown', 'default')) AS collections,
+       (SELECT COUNT(*)
+        FROM hadith_books
+        WHERE length(trim(coalesce(title, ''))) = 0
+           OR lower(trim(title)) IN ('book', 'unknown', 'default')
+           OR title ~* '^(book|chapter) ?[0-9]*$') AS books;
+
+\echo H20: Arabic localization is present for every Hadith item
+SELECT 'H20.missing_ar_localization' AS check, COUNT(*) AS violations
+FROM hadith_items hi
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM hadith_localizations hl
+    WHERE hl.hadith_item_id = hi.id
+      AND hl.language = 'ar'
+      AND hl.body_text IS NOT NULL
+      AND length(trim(hl.body_text)) > 0
+);
+
+\echo H21: source translation gaps inventory by language
+SELECT 'H21.localization_gap_inventory' AS check,
+       lang.language,
+       COUNT(*) AS rows
+FROM hadith_items hi
+CROSS JOIN (VALUES ('ar'), ('en')) AS lang(language)
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM hadith_localizations hl
+    WHERE hl.hadith_item_id = hi.id
+      AND hl.language = lang.language
+      AND hl.body_text IS NOT NULL
+      AND length(trim(hl.body_text)) > 0
+)
+GROUP BY lang.language
+ORDER BY lang.language;
 
 \echo
 \echo ##############################################################
