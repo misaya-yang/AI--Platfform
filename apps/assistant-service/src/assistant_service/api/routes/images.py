@@ -841,11 +841,7 @@ async def _persist_and_get_url(
     if not artifact_storage or not raw_b64:
         # Fallback path: data URL response, no artifacts.
         if add_watermark and raw_b64:
-            try:
-                cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
-            except Exception as e:
-                logger.warning("Watermark failed for image %d: %s", index, e)
-                cb64, mt = raw_b64, raw_mt
+            cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
         else:
             cb64, mt = raw_b64, raw_mt
         return None, GeneratedImage(
@@ -885,13 +881,10 @@ async def _persist_and_get_url(
     except Exception as e:
         logger.warning("Failed to save raw image artifact: %s", e)
         # Fall back to data URL as response, no artifact.
-        cb64 = raw_b64
-        mt = raw_mt
         if add_watermark:
-            try:
-                cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
-            except Exception as we:
-                logger.warning("Watermark failed for image %d: %s", index, we)
+            cb64, mt = await asyncio.to_thread(apply_watermark_b64, raw_b64)
+        else:
+            cb64, mt = raw_b64, raw_mt
         return None, GeneratedImage(
             url=f"data:{mt};base64,{cb64}",
             width=width, height=height, artifact_id=None,

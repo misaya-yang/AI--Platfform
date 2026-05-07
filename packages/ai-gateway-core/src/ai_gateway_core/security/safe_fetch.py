@@ -54,6 +54,7 @@ from __future__ import annotations
 import dataclasses
 import ipaddress
 import logging
+import os
 import socket
 import ssl
 from urllib.parse import urljoin, urlparse
@@ -364,6 +365,17 @@ def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _build_allowlist(
+    explicit: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    """Build effective allowlist from explicit arg + CALLBACK_URL_ALLOWLIST env."""
+    env_raw = os.environ.get("CALLBACK_URL_ALLOWLIST", "").strip()
+    env_hosts = tuple(h.strip() for h in env_raw.split(",") if h.strip())
+    if explicit:
+        return explicit + env_hosts
+    return env_hosts
+
+
 def validate_callback_url(
     url: str,
     *,
@@ -376,6 +388,10 @@ def validate_callback_url(
     ``follow_redirects=False`` and a short timeout so a hostile server
     can't redirect us into the private network mid-transaction.
 
+    Whitelist: set ``CALLBACK_URL_ALLOWLIST`` env var to a comma-separated
+    list of hosts (e.g. ``10.1.10.32,internal-api.company.com``). Hosts
+    on the allowlist bypass the private/loopback check entirely.
+
     Note: this is validate-only, so DNS rebinding is still possible
     between this check and the actual POST. For full DNS-rebinding-safe
     POST, use the same DNS-pinned transport pattern as ``safe_fetch``.
@@ -385,11 +401,10 @@ def validate_callback_url(
     """
     scheme, host, port, _ = _split_url(url)
 
-    if allowed_hosts is not None and not _host_matches(host, allowed_hosts):
-        raise SafeFetchError(
-            f"callback host {host!r} not in allowlist",
-            status_code=400,
-        )
+    effective = _build_allowlist(allowed_hosts)
+    # Host is on the allowlist → bypass all further checks
+    if effective and _host_matches(host, effective):
+        return url
 
     ok, info = is_safe_destination(host, port)
     if not ok:

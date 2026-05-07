@@ -29,6 +29,17 @@ from assistant_service.core.tools.smart_image_generator import (
 from ai_gateway_core.enums import StylePreset
 
 
+@pytest.fixture(autouse=True)
+def _mock_watermark():
+    """Tests use fake base64 payloads that aren't valid images.
+    Watermarking is tested in test_image_redesign.py with real data."""
+    with patch(
+        "assistant_service.api.routes.images.apply_watermark_b64",
+        return_value=("d2F0ZXJtYXJrZWQ=", "image/png"),
+    ):
+        yield
+
+
 # =============================================================================
 # Helpers
 # =============================================================================

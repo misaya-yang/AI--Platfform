@@ -125,13 +125,15 @@ def apply_watermark(image_bytes: bytes) -> bytes:
     """
     wm = _load_watermark()
     if wm is None:
-        return image_bytes
+        raise RuntimeError(
+            f"watermark.png not found at {_WATERMARK_PATH} — "
+            "required when add_watermark=True"
+        )
 
     try:
         base = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
     except Exception as e:
-        logger.warning("[Watermark] Cannot open image: %s", e)
-        return image_bytes
+        raise RuntimeError(f"Cannot open image for watermarking: {e}") from e
 
     target_width = int(base.width * _WATERMARK_SCALE)
     scale = target_width / wm.width
@@ -180,12 +182,10 @@ def apply_watermark(image_bytes: bytes) -> bytes:
 def apply_watermark_b64(b64_data: str) -> tuple[str, str]:
     """Apply watermark to a base64-encoded image. Returns (new_b64, 'image/png').
 
-    On any failure, returns the original (b64, 'image/png') unchanged.
+    Raises on any failure (missing watermark asset, invalid base64, etc.).
+    Callers that set ``add_watermark=True`` must handle the exception as a
+    hard failure — never silently return an un-watermarked image.
     """
-    try:
-        raw = base64.b64decode(b64_data)
-        watermarked = apply_watermark(raw)
-        return base64.b64encode(watermarked).decode("utf-8"), "image/png"
-    except Exception as e:
-        logger.warning("[Watermark] apply_watermark_b64 failed: %s", e)
-        return b64_data, "image/png"
+    raw = base64.b64decode(b64_data)
+    watermarked = apply_watermark(raw)
+    return base64.b64encode(watermarked).decode("utf-8"), "image/png"
