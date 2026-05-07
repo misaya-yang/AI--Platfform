@@ -170,6 +170,13 @@ export function AppLayout() {
   }, [forcePasswordChange]);
 
   const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
+  // model_tester is playground-only — suppress assistant/tasks even when
+  // they share the same underlying permission or have no permission gate.
+  const userRoles = user?.roles || [];
+  const isModelTesterOnly = userRoles.length === 1 && userRoles[0] === "model_tester";
+  const finalNavItems = isModelTesterOnly
+    ? filteredNavItems.filter(item => item.key === "/playground")
+    : filteredNavItems;
   // 187 = 220 × 0.85 (narrowed 15% per 2026-04-24 feedback). Keeps
   // "Knowledge Base" on one line with the 14.5px/400 label and a 12px
   // icon-gap, verified at 1440×900.
@@ -229,7 +236,7 @@ export function AppLayout() {
               gives items a small breath without floating apart. */}
           <nav className="flex-1 overflow-y-auto px-2.5 scrollbar-hide py-4">
             <div className="flex flex-col gap-[3px]">
-              {filteredNavItems.map((item) => (
+              {finalNavItems.map((item) => (
                 <NavLink
                   key={item.key}
                   to={item.key}
