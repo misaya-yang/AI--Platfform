@@ -375,6 +375,7 @@ async def insert_turn(
     if pool is None:
         logger.warning("insert_turn: pool is None, turn %s not persisted", turn_id)
         return
+    _state = state or status   # Resolve before SQL to avoid COALESCE type mismatch
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -386,7 +387,7 @@ async def insert_turn(
                 output_artifact_ids, state
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17, $18, $19::jsonb, COALESCE($20, $11)
+                $17, $18, $19::jsonb, $20
             )
             ON CONFLICT (turn_id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -404,7 +405,7 @@ async def insert_turn(
             status, error, error_code, client_request_id, request_hash,
             completed_at, thought_signature, provider_text,
             json.dumps(output_artifact_ids) if output_artifact_ids is not None else None,
-            state,
+            _state,
         )
 
 
