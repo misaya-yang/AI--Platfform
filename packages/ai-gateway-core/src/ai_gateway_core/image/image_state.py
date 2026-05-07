@@ -42,7 +42,7 @@ def _db_safe(default):
             try:
                 return await fn(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001
-                logger.debug("%s: DB unavailable (%s) — fallback", fn.__name__, exc)
+                logger.warning("%s: DB unavailable (%s) — fallback", fn.__name__, exc)
                 return default() if callable(default) else default
         return wrapper
     return deco
@@ -373,6 +373,7 @@ async def insert_turn(
     state: str | None = None,
 ) -> None:
     if pool is None:
+        logger.warning("insert_turn: pool is None, turn %s not persisted", turn_id)
         return
     async with pool.acquire() as conn:
         await conn.execute(

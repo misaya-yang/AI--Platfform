@@ -2947,8 +2947,10 @@ async def submit_image_generation(
             client_request_id=body.client_request_id,
             request_hash=request_hash,
         )
+        logger.info("insert_turn succeeded: turn_id=%s task_id=%s session_id=%s",
+                     turn_id, task_id, body.session_id)
     except Exception as exc:
-        logger.warning("insert pending turn failed (artifact=%s): %s", task_id, exc)
+        logger.warning("insert pending turn failed (task_id=%s): %s", task_id, exc)
 
     session_mgr = get_session_manager(request)
     worker = asyncio.create_task(
