@@ -61,7 +61,19 @@ export function LoginPage() {
       const normalized = trimmed.includes("@") ? trimmed.toLowerCase() : `${trimmed.toLowerCase()}@${allowedDomain}`;
       const res = await login({ email: normalized, password });
       setAuth(res.access_token, res.user, res.force_password_change, rememberMe);
-      if (res.force_password_change) setShowPasswordChange(true); else navigate("/");
+      if (res.force_password_change) {
+        setShowPasswordChange(true);
+      } else {
+        // Route users without dashboard access to playground instead of 403
+        const perms = res.user.permissions || [];
+        const hasDashboard = perms.includes("console:dashboard:view") || perms.includes("admin:*");
+        const hasPlayground = perms.includes("conversation:playground:access");
+        if (!hasDashboard && hasPlayground) {
+          navigate("/assistant");
+        } else {
+          navigate("/");
+        }
+      }
     } catch (err: unknown) {
       const ax = err as AxiosError<ApiErrorPayload>;
       const status = ax.response?.status;
@@ -155,7 +167,14 @@ export function LoginPage() {
         </div>
       </div>
 
-      <PasswordChangeModal open={showPasswordChange} onComplete={() => { setShowPasswordChange(false); navigate("/"); }} />
+      <PasswordChangeModal open={showPasswordChange} onComplete={() => {
+        setShowPasswordChange(false);
+        const user = useAuthStore.getState().user;
+        const perms = user?.permissions || [];
+        const hasDashboard = perms.includes("console:dashboard:view") || perms.includes("admin:*");
+        const hasPlayground = perms.includes("conversation:playground:access");
+        navigate(!hasDashboard && hasPlayground ? "/assistant" : "/");
+      }} />
     </div>
   );
 }
