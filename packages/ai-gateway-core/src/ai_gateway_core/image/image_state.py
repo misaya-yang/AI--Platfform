@@ -323,13 +323,13 @@ async def update_image_blob_status(
             result = await conn.execute(
                 """
                 UPDATE assistant.image_blobs SET
-                    status = $3,
-                    content_sha256 = COALESCE($4, content_sha256),
+                    status = $3::varchar,
+                    content_sha256 = COALESCE($4::varchar, content_sha256),
                     byte_size = COALESCE($5, byte_size),
-                    mime_type = COALESCE($6, mime_type),
-                    artifact_id = COALESCE($7, artifact_id),
-                    error = $8,
-                    completed_at = CASE WHEN $3 = 'ready' THEN NOW() ELSE completed_at END,
+                    mime_type = COALESCE($6::varchar, mime_type),
+                    artifact_id = COALESCE($7::varchar, artifact_id),
+                    error = $8::text,
+                    completed_at = CASE WHEN $3::varchar = 'ready' THEN NOW() ELSE completed_at END,
                     updated_at = NOW()
                 WHERE blob_id = $1 AND owner_scope = $2
                 """,
@@ -425,12 +425,12 @@ async def update_turn_status(
         await conn.execute(
             """
             UPDATE assistant.image_turns SET
-                status = $2,
-                output_artifact_id = COALESCE($3, output_artifact_id),
-                error = $4,
-                error_code = $5,
+                status = $2::varchar,
+                output_artifact_id = COALESCE($3::varchar, output_artifact_id),
+                error = $4::text,
+                error_code = $5::varchar,
                 completed_at = CASE
-                    WHEN $2 IN ('completed', 'failed') THEN NOW()
+                    WHEN $2::varchar IN ('completed', 'failed') THEN NOW()
                     ELSE completed_at
                 END
             WHERE turn_id = $1
@@ -588,14 +588,14 @@ async def update_image_task(
             result_status = await conn.execute(
                 """
                 UPDATE assistant.image_tasks SET
-                    status = COALESCE($2, status),
+                    status = COALESCE($2::varchar, status),
                     progress = COALESCE($3, progress),
-                    provider = COALESCE($4, provider),
+                    provider = COALESCE($4::varchar, provider),
                     result = COALESCE($5::jsonb, result),
-                    error = $6,
-                    error_code = $7,
-                    parent_artifact_id = COALESCE($8, parent_artifact_id),
-                    output_artifact_id = COALESCE($9, output_artifact_id),
+                    error = $6::text,
+                    error_code = $7::varchar,
+                    parent_artifact_id = COALESCE($8::varchar, parent_artifact_id),
+                    output_artifact_id = COALESCE($9::varchar, output_artifact_id),
                     locked_until = CASE
                         WHEN $10::int IS NULL THEN locked_until
                         ELSE NOW() + ($10::int * INTERVAL '1 second')

@@ -34,7 +34,9 @@ _CORNER_ANALYSIS_PAD_PX = 6          # extra context for corner analysis
 _FALLBACK_BRIGHTNESS = 128.0         # if corner analysis fails
 _PNG_COMPRESS_LEVEL = 1              # 0-9; 1 = fast encode (PIL default 6)
 
-_WATERMARK_PATH = Path(__file__).resolve().parents[3] / "assets" / "watermark.png"
+# Ship watermark alongside the module so pip-install (site-packages) and
+# local dev (repo checkout) both resolve the same file.
+_WATERMARK_PATH = Path(__file__).parent / "assets" / "watermark.png"
 _watermark_cache: Image.Image | None = None
 
 
