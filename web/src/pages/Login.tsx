@@ -69,7 +69,7 @@ export function LoginPage() {
         const hasDashboard = perms.includes("console:dashboard:view") || perms.includes("admin:*");
         const hasPlayground = perms.includes("conversation:playground:access");
         if (!hasDashboard && hasPlayground) {
-          navigate("/assistant");
+          navigate("/playground");
         } else {
           navigate("/");
         }
@@ -173,7 +173,7 @@ export function LoginPage() {
         const perms = user?.permissions || [];
         const hasDashboard = perms.includes("console:dashboard:view") || perms.includes("admin:*");
         const hasPlayground = perms.includes("conversation:playground:access");
-        navigate(!hasDashboard && hasPlayground ? "/assistant" : "/");
+        navigate(!hasDashboard && hasPlayground ? "/playground" : "/");
       }} />
     </div>
   );
