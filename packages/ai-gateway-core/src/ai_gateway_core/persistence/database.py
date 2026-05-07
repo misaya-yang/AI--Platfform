@@ -432,13 +432,19 @@ class DatabaseStorage:
             await conn.execute(sql)
 
     async def _schema_is_missing(self) -> bool:
-        """Detect whether core tables are missing (e.g., first run)."""
+        """Detect whether core tables are missing (e.g., first run).
+
+        Phase 6 schema split: tables live in per-service schemas
+        (gateway, assistant, knowledge). Checking ``public.*`` would
+        return NULL after migration and falsely trigger auto-init,
+        causing shadow tables to be created in the wrong schema.
+        """
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
             # Use to_regclass for a cheap existence check.
-            services = await conn.fetchval("SELECT to_regclass('public.services')")
-            datasets = await conn.fetchval("SELECT to_regclass('public.datasets')")
+            services = await conn.fetchval("SELECT to_regclass('gateway.services')")
+            datasets = await conn.fetchval("SELECT to_regclass('knowledge.datasets')")
             return services is None or datasets is None
 
     async def _auto_initialize_schema(self) -> None:

@@ -213,7 +213,7 @@ class Container:
         return DatabaseStorage(
             dsn=self.settings.database.dsn,
             enabled=self.settings.database.enabled,
-            auto_init=getattr(self.settings.database, "auto_init", True),
+            auto_init=getattr(self.settings.database, "auto_init", False),
             permission_cache_ttl_seconds=getattr(
                 self.settings.database, "permission_cache_ttl_seconds", 60
             ),

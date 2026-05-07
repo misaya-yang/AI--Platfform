@@ -368,9 +368,9 @@ class DatabaseStorage:
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
-            # Use to_regclass for a cheap existence check.
-            services = await conn.fetchval("SELECT to_regclass('public.services')")
-            datasets = await conn.fetchval("SELECT to_regclass('public.datasets')")
+            # Phase 6: check per-service schemas, not public.
+            services = await conn.fetchval("SELECT to_regclass('gateway.services')")
+            datasets = await conn.fetchval("SELECT to_regclass('knowledge.datasets')")
             return services is None or datasets is None
 
     async def _auto_initialize_schema(self) -> None:
