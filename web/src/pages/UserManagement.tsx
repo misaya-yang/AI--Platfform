@@ -480,6 +480,7 @@ export function UserManagementPage() {
                           admin: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20",
                           manager: "bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20",
                           user: "bg-slate-500/10 text-slate-500 dark:text-slate-400 border-slate-400/20",
+                          model_tester: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20",
                         };
                         const colorClass = roleColors[role.toLowerCase()] || roleColors.user;
                         return (
