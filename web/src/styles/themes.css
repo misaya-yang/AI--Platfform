@@ -13,13 +13,12 @@
 
 .dark {
   color-scheme: dark;
-  /* Warm graphite — deep charcoal with bronze accents, not cold blue-black */
-  --surface-canvas: 30 6% 9%;
-  --surface-panel: 30 5% 12%;
-  --surface-elevated: 30 5% 15%;
-  --ink-strong: 35 15% 94%;
-  --ink-muted: 30 10% 58%;
-  --line-subtle: 30 8% 20%;
-  --accent-strong: 35 42% 58%;
+  --surface-canvas: 220 21% 8%;
+  --surface-panel: 219 21% 12%;
+  --surface-elevated: 218 21% 16%;
+  --ink-strong: 210 25% 95%;
+  --ink-muted: 214 13% 66%;
+  --line-subtle: 218 18% 22%;
+  --accent-strong: 214 39% 68%;
   --accent-warm: 35 50% 62%;
 }

@@ -441,9 +441,8 @@ export function AppLayout() {
         }
         .app-header-title-text {
           color: hsl(var(--foreground));
-          font-family: var(--font-serif);
-          font-size: 15px;
-          font-weight: 700;
+          font-size: 14.5px;
+          font-weight: 650;
           line-height: 1.15;
           letter-spacing: 0;
         }

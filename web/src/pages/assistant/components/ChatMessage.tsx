@@ -379,7 +379,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
           <AttachmentsDisplay attachments={message.attachments} useV2={ASSISTANT_UI_V2} />
           <div
             className={cn(
-              "rounded-lg px-5 py-3",
+              "rounded-3xl px-5 py-3",
               ASSISTANT_UI_V2
                 ? "bg-[hsl(var(--assistant-user-bubble))] text-[hsl(var(--assistant-text-primary))]"
                 : "bg-primary text-white shadow-sm shadow-primary/15",
