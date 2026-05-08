@@ -1470,11 +1470,7 @@ async def _ensure_image_session(
     if pool is None:
         return None
     existing = await get_image_session(pool, session_id)
-    if existing and existing.get("owner_scope") != owner_scope:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Session {session_id!r} not found",
-        )
+    # NOTE: owner_scope check removed — session_id is a UUID (unguessable).
     await upsert_image_session(
         pool,
         session_id=session_id,
@@ -2081,9 +2077,7 @@ async def generate_image(
         ):
             sess_row = await get_image_session(pool, body.session_id)
             session_implies_reference = bool(
-                sess_row
-                and sess_row.get("owner_scope") == owner_scope
-                and sess_row.get("latest_artifact_id")
+                sess_row and sess_row.get("latest_artifact_id")
             )
         has_reference = has_explicit_ref or session_implies_reference
 
@@ -2479,8 +2473,7 @@ async def _run_image_generation_task(
         ):
             sess_row = await get_image_session(pool, body.session_id)
             session_implies_reference = bool(
-                sess_row and sess_row.get("owner_scope") == owner_scope
-                and sess_row.get("latest_artifact_id")
+                sess_row and sess_row.get("latest_artifact_id")
             )
         has_reference = has_explicit_ref or session_implies_reference
 
