@@ -216,7 +216,7 @@ class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1, max_length=4000)
     model_id: str = "qwen-image-2.0"
     n: int = Field(1, ge=1, le=4)
-    size: str | None = "1024*1024"
+    size: str | None = "1536*1536"
     style: StylePreset = Field(default=StylePreset.DEFAULT)
     session_id: str | None = None
     reference_artifact_id: str | None = Field(
@@ -2241,7 +2241,7 @@ async def generate_image(
                 message="Image provider concurrency is saturated",
             ):
                 res = await router_svc.generate(
-                    prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+                    prompt=styled_prompt, n=body.n, size=body.size or "1536*1536",
                     style=dashscope_tag, negative_prompt=negative_prompt,
                     aspect_ratio=aspect_ratio,
                     prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
@@ -2614,7 +2614,7 @@ async def _run_image_generation_task(
                 message="Image provider concurrency is saturated",
             ):
                 res = await router_svc.generate(
-                    prompt=styled_prompt, n=body.n, size=body.size or "1024*1024",
+                    prompt=styled_prompt, n=body.n, size=body.size or "1536*1536",
                     style=dashscope_tag, negative_prompt=negative_prompt,
                     aspect_ratio=aspect_ratio,
                     prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,

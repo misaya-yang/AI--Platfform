@@ -56,7 +56,7 @@ class SmartImageGenerator:
         self,
         prompt: str,
         n: int = 1,
-        size: str = "1024*1024",
+        size: str = "1536*1536",
         style: str = "<auto>",
         negative_prompt: str = "",
         aspect_ratio: str = "1:1",
@@ -76,6 +76,9 @@ class SmartImageGenerator:
         doubao = get_doubao_image_generator()
 
         # Doubao/Volcengine first (when explicitly preferred)
+        # Map internal "1536*1536" format to Gemini "1536x1536" format.
+        gemini_image_size = size.replace("*", "x") if size else None
+
         if prefer_doubao and doubao.is_configured:
             doubao_res = await doubao.generate(prompt=prompt, n=n, size=size)
             if doubao_res.success:
@@ -86,7 +89,7 @@ class SmartImageGenerator:
             # Doubao failed: fallback to Gemini → DashScope
             logger.warning("Doubao image generation failed, trying fallback. err=%s", doubao_res.error)
             if gemini.is_configured:
-                gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
+                gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size)
                 if gemini_res.success:
                     return SmartImageGenerationResult(
                         success=True, provider="google", images=gemini_res.images,
@@ -106,7 +109,7 @@ class SmartImageGenerator:
 
         # Gemini first (if preferred + configured)
         if prefer_gemini and gemini.is_configured:
-            gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio)
+            gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size)
             if gemini_res.success:
                 return SmartImageGenerationResult(
                     success=True,

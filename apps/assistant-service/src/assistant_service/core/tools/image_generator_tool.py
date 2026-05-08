@@ -58,10 +58,10 @@ IMAGE_GENERATION_DEFINITION = ToolDefinition(
         ToolParameter(
             name="size",
             type="string",
-            description="Image size: '1024*1024', '720*1280', '1280*720'.",
+            description="Image size: '1536*1536', '1024*1024', '720*1280', '1280*720'.",
             required=False,
-            default="1024*1024",
-            enum=["1024*1024", "720*1280", "1280*720"],
+            default="1536*1536",
+            enum=["1536*1536", "1024*1024", "720*1280", "1280*720"],
         ),
         ToolParameter(
             name="style",
@@ -186,7 +186,7 @@ class DashScopeImageGenerator:
         self,
         prompt: str,
         negative_prompt: str = "",
-        size: str = "1024*1024",
+        size: str = "1536*1536",
         style: str = "<auto>",
         n: int = 1,
         model_override: str | None = None,
@@ -394,7 +394,7 @@ class ImageGeneratorExecutor(ToolExecutor):
         """Execute image generation."""
         prompt = request.arguments.get("prompt", "")
         negative_prompt = request.arguments.get("negative_prompt", "")
-        size = request.arguments.get("size", "1024*1024")
+        size = request.arguments.get("size", "1536*1536")
         style = request.arguments.get("style", "<auto>")
         n = request.arguments.get("n", 1)
 
