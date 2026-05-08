@@ -6,6 +6,8 @@ interface ProtectedRouteProps {
   requiredPermission?: string;
   requiredPermissions?: string[];
   requireAll?: boolean; // if true, require all permissions; if false (default), require any
+  blockOnlyRole?: string;
+  blockRedirectTo?: string;
 }
 
 export function ProtectedRoute({
@@ -13,6 +15,8 @@ export function ProtectedRoute({
   requiredPermission,
   requiredPermissions = [],
   requireAll = false,
+  blockOnlyRole,
+  blockRedirectTo = "/403",
 }: ProtectedRouteProps) {
   const location = useLocation();
   const hydrated = useAuthStore((state) => state.hydrated);
@@ -20,6 +24,7 @@ export function ProtectedRoute({
   const sessionValidation = useAuthStore((state) => state.sessionValidation);
   const hasAnyPermission = useAuthStore((state) => state.hasAnyPermission);
   const hasAllPermissions = useAuthStore((state) => state.hasAllPermissions);
+  const user = useAuthStore((state) => state.user);
 
   // Show loading while waiting for hydration
   if (!hydrated || sessionValidation === "checking") {
@@ -33,6 +38,11 @@ export function ProtectedRoute({
   // Check if user is authenticated
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  const roles = user?.roles || [];
+  if (blockOnlyRole && roles.length === 1 && roles[0] === blockOnlyRole) {
+    return <Navigate to={blockRedirectTo} replace />;
   }
 
   // Check permissions

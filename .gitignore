@@ -8,6 +8,7 @@
 # copies (.env.copy) that prior ops sessions left behind — they contain
 # the same secrets as the live .env and must never be committed.
 .env
+/.env.example
 .env.local
 .env.*.local
 .env.bak

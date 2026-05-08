@@ -187,7 +187,7 @@ services:
 
       # LLM provider keys (assistant chat path — loaded by _init_assistant_service
       # in main.py). Separate chat-specific overrides route chat to free Intl
-      # endpoint without affecting image_gen / embedding (see .env.example).
+      # endpoint without affecting image_gen / embedding.
       DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
       DASHSCOPE_CHAT_API_KEY: "${DASHSCOPE_CHAT_API_KEY:-}"
       DASHSCOPE_CHAT_BASE_URL: "${DASHSCOPE_CHAT_BASE_URL:-}"

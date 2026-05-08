@@ -39,7 +39,7 @@ COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compos
 .PHONY: quickstart
 
 quickstart:                 ## 零配置一键部署 (首次使用)
-	@test -f .env || (echo "Auto-creating .env from defaults..." && cp .env.example .env)
+	@test -f .env || (echo "Missing .env. Create it from the deployment secret source before running quickstart." && exit 1)
 	@$(COMPOSE) up -d --build
 	@echo ""
 	@echo "AI Gateway is starting..."

@@ -30,9 +30,7 @@ for (const user of TEST_USERS) {
   test.describe(`model_tester user: ${user.email}`, () => {
     test("can log in and access playground", async ({ page }) => {
       await login(page, user.email, user.password);
-      // Default redirect may be /dashboard which shows 403 for model_tester.
-      // Navigate directly to playground to verify access.
-      await page.goto("/assistant");
+      await page.goto("/playground");
       await page.waitForLoadState("networkidle");
       // Verify playground content is visible
       const bodyText = await page.locator("body").textContent();
@@ -41,7 +39,7 @@ for (const user of TEST_USERS) {
 
     test("sees only playground in sidebar", async ({ page }) => {
       await login(page, user.email, user.password);
-      await page.goto("/assistant");
+      await page.goto("/playground");
       await page.waitForLoadState("networkidle");
 
       // Wait for sidebar to render
@@ -62,6 +60,13 @@ for (const user of TEST_USERS) {
       // Users should NOT be visible
       const usersVisible = await page.locator("nav >> text=/Users|用户/i").isVisible().catch(() => false);
       expect(usersVisible).toBe(false);
+    });
+
+    test("is redirected away from assistant", async ({ page }) => {
+      await login(page, user.email, user.password);
+      await page.goto("/assistant");
+      await page.waitForLoadState("networkidle");
+      await expect(page).toHaveURL(/\/playground/);
     });
 
     test("is blocked from dashboard (403)", async ({ page }) => {

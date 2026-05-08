@@ -87,7 +87,11 @@ export function AppRouter() {
         <Route
           path="/assistant"
           element={
-            <ProtectedRoute requiredPermission="conversation:playground:access">
+            <ProtectedRoute
+              requiredPermission="conversation:playground:access"
+              blockOnlyRole="model_tester"
+              blockRedirectTo="/playground"
+            >
               <AssistantPage />
             </ProtectedRoute>
           }

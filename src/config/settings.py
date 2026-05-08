@@ -603,7 +603,7 @@ class StorageSettings(BaseModel):
     local_base_path: str = "./data/images"
     url_expiry_seconds: int = 3600
     key_prefix: str = (
-        "dev"  # 环境前缀，如 "dev", "staging", "prod"（与 .env.example 和 docker-compose.yml 一致）
+        "dev"  # 环境前缀，如 "dev", "staging", "prod"（与 docker-compose.yml 一致）
     )
 
     s3: StorageS3Settings = Field(default_factory=StorageS3Settings)
