@@ -70,27 +70,27 @@
   }
 
   .dark {
-    /* Dark canvas — graphite slate, not green-black */
-    --background: 220 21% 8%;
-    --foreground: 210 25% 95%;
+    /* Warm dark canvas — deep charcoal with bronze warmth, not cold blue-black */
+    --background: 30 6% 9%;
+    --foreground: 35 15% 94%;
 
-    --card: 219 21% 12%;
-    --card-foreground: 210 25% 95%;
+    --card: 30 5% 12%;
+    --card-foreground: 35 15% 94%;
 
-    --popover: 219 21% 12%;
-    --popover-foreground: 210 25% 95%;
+    --popover: 30 5% 12%;
+    --popover-foreground: 35 15% 94%;
 
-    --primary: 214 39% 68%;
-    --primary-foreground: 220 21% 8%;
+    --primary: 35 42% 58%;
+    --primary-foreground: 30 6% 9%;
 
-    --secondary: 218 20% 17%;
-    --secondary-foreground: 210 25% 95%;
+    --secondary: 30 6% 16%;
+    --secondary-foreground: 35 15% 94%;
 
-    --muted: 218 20% 17%;
-    --muted-foreground: 214 13% 66%;
+    --muted: 30 5% 16%;
+    --muted-foreground: 30 10% 55%;
 
-    --accent: 214 39% 68%;
-    --accent-foreground: 220 21% 8%;
+    --accent: 35 42% 58%;
+    --accent-foreground: 30 6% 9%;
 
     --destructive: 0 72% 58%;
     --destructive-foreground: 0 0% 98%;
@@ -101,25 +101,25 @@
     --warning: 35 50% 60%;
     --warning-foreground: 36 45% 13%;
 
-    --border: 218 18% 22%;
-    --input: 218 18% 22%;
-    --ring: 214 39% 68%;
+    --border: 30 8% 20%;
+    --input: 30 8% 20%;
+    --ring: 35 42% 58%;
 
-    --sidebar-bg: 220 21% 8%;
+    --sidebar-bg: 30 6% 9%;
 
-    /* Assistant UI scoped tokens — aligned with global graphite slate. */
-    --assistant-canvas-bg: 220 21% 8%;         /* = --background */
-    --assistant-surface-bg: 219 21% 12%;       /* = --card */
-    --assistant-surface-soft: 218 20% 17%;     /* = --muted */
-    --assistant-text-primary: 210 25% 92%;
-    --assistant-text-secondary: 214 13% 66%;   /* clearly readable on canvas */
-    --assistant-text-tertiary: 214 10% 48%;
-    --assistant-border: 218 18% 22%;           /* = --border */
-    --assistant-border-soft: 218 18% 17%;
-    --assistant-accent: 35 50% 62%;            /* restrained amber */
-    --assistant-accent-soft: 35 32% 22%;
-    --assistant-chip-bg: 218 20% 16%;
-    --assistant-user-bubble: 218 20% 17%;
+    /* Assistant UI scoped tokens — warm charcoal with bronze accent */
+    --assistant-canvas-bg: 30 6% 9%;           /* = --background */
+    --assistant-surface-bg: 30 5% 12%;         /* = --card */
+    --assistant-surface-soft: 30 5% 16%;       /* = --muted */
+    --assistant-text-primary: 35 15% 94%;
+    --assistant-text-secondary: 30 10% 58%;    /* clearly readable on canvas */
+    --assistant-text-tertiary: 30 8% 45%;
+    --assistant-border: 30 8% 20%;             /* = --border */
+    --assistant-border-soft: 30 6% 15%;
+    --assistant-accent: 35 45% 60%;            /* warm bronze */
+    --assistant-accent-soft: 35 30% 20%;
+    --assistant-chip-bg: 30 5% 15%;
+    --assistant-user-bubble: 30 5% 17%;
     --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
     --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }
@@ -148,6 +148,10 @@
 
   .font-assistant {
     font-family: var(--font-sans);
+  }
+
+  .font-serif {
+    font-family: var(--font-serif);
   }
 
   .assistant-v2 { background: hsl(var(--assistant-canvas-bg)); color: hsl(var(--assistant-text-primary)); }
