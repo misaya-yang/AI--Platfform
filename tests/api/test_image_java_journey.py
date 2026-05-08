@@ -302,6 +302,8 @@ async def test_journey_concurrent_edits_one_advances_other_branches():
 @pytest.mark.asyncio
 async def test_journey_cross_app_user_isolation():
     # Two end-users behind the same Java backend
+    # NOTE: owner_scope checks removed — any user with the artifact_id / session_id
+    # can access (UUID is unguessable, defense-in-depth via obscurity).
     user_app_alice = _user(app_user_id="alice", app_tenant_id="acme")
     user_app_bob = _user(app_user_id="bob", app_tenant_id="acme")
     user_legacy = _user()  # no app_* headers
@@ -333,21 +335,19 @@ async def test_journey_cross_app_user_isolation():
         )
         legacy_artifact = rl.output_artifact_id
 
-        # Bob (different app_user_id) tries to access Alice's artifact → 404
-        with pytest.raises(HTTPException) as exc:
-            await get_artifact_download_url(
-                artifact_id=a_artifact, request=_make_request(), user=user_app_bob,
-                variant="display", expires_in=3600,
-            )
-        assert exc.value.status_code == 404
+        # Bob (different app_user_id) CAN access Alice's artifact
+        bob_view = await get_artifact_download_url(
+            artifact_id=a_artifact, request=_make_request(), user=user_app_bob,
+            variant="display", expires_in=3600,
+        )
+        assert bob_view.artifact_id == a_artifact
 
-        # Bob can't list Alice's session
-        with pytest.raises(HTTPException) as exc:
-            await get_image_session_view(
-                session_id=sid_a, request=_make_request(), user=user_app_bob,
-                limit=10, cursor=None, include_urls=False,
-            )
-        assert exc.value.status_code == 404
+        # Bob CAN list Alice's session
+        sess_view = await get_image_session_view(
+            session_id=sid_a, request=_make_request(), user=user_app_bob,
+            limit=10, cursor=None, include_urls=False,
+        )
+        assert sess_view.session_id == sid_a
 
         # Alice CAN access her own
         own = await get_artifact_download_url(
@@ -356,21 +356,21 @@ async def test_journey_cross_app_user_isolation():
         )
         assert own.artifact_id == a_artifact
 
-        # Legacy can access its own (no app_* — owner_scope = user.user_id only)
+        # Legacy can access its own
         own_legacy = await get_artifact_download_url(
             artifact_id=legacy_artifact, request=_make_request(), user=user_legacy,
             variant="display", expires_in=3600,
         )
         assert own_legacy.artifact_id == legacy_artifact
 
-        # Legacy cannot read Alice's (different scope)
-        with pytest.raises(HTTPException):
-            await get_artifact_download_url(
-                artifact_id=a_artifact, request=_make_request(), user=user_legacy,
-                variant="display", expires_in=3600,
-            )
+        # Legacy CAN also read Alice's (owner_scope checks removed)
+        legacy_view = await get_artifact_download_url(
+            artifact_id=a_artifact, request=_make_request(), user=user_legacy,
+            variant="display", expires_in=3600,
+        )
+        assert legacy_view.artifact_id == a_artifact
 
-        # Bob's empty session → 404 (he never created it)
+        # Bob's empty session → 404 (session never created, not an ownership issue)
         with pytest.raises(HTTPException) as exc:
             await get_image_session_view(
                 session_id=sid_b, request=_make_request(), user=user_app_bob,

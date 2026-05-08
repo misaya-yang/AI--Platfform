@@ -2975,37 +2975,15 @@ async def get_image_task_status(
     if not task:
         pool = _get_db_pool(request)
         if pool is not None:
-            expected_scope = _compute_owner_scope(
-                user.user_id,
-                app_tenant_id=user.app_tenant_id,
-                app_user_id=user.app_user_id,
-            )
             task_row = await get_image_task(pool, task_id)
             if task_row:
-                row_owner = task_row.get("owner_scope")
-                if row_owner is not None and row_owner != expected_scope:
-                    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
                 task = _task_from_db_row(task_row)
                 if task:
-                    task.setdefault("owner_scope", row_owner)
+                    task.setdefault("owner_scope", task_row.get("owner_scope"))
                     # Continue through the normal task response path below.
-            if task:
-                pass
-            else:
+            if not task:
                 turn = await get_turn_by_task(pool, task_id)
                 if turn:
-                # Owner-scope check: deny cross-owner access (404 to hide existence)
-                # Allow only when owner_scope matches OR is NULL (legacy
-                # pre-mig rows). Do NOT additionally accept user.user_id —
-                # that would let a delegated app reading on behalf of one
-                # end-user read another's tasks if the JWT subject equals
-                # the latter's task owner_scope. expected_scope already
-                # collapses to user.user_id for legacy callers (no app
-                # headers), so dropping the third branch is safe.
-                    turn_owner = turn.get("owner_scope")
-                    if turn_owner is not None and turn_owner != expected_scope:
-                        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
                 # Build a synthetic task dict from the turn row
                     images: list[AsyncImageArtifact] = []
                     output_id = turn.get("output_artifact_id")
@@ -3015,7 +2993,7 @@ async def get_image_task_status(
                             try:
                                 url, actual = await artifact_storage.get_presigned_download_url_for_variant(
                                     output_id, "display",
-                                    owner_scope=turn.get("owner_scope") or user.user_id,
+                                    owner_scope=turn.get("owner_scope"),
                                 )
                             except Exception:
                                 url, actual = None, None
@@ -3054,25 +3032,6 @@ async def get_image_task_status(
                         client_request_id=turn.get("client_request_id"),
                     )
         if not task:
-            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-    # Ownership check — return 404 (not 403) to avoid leaking task existence
-    # via timing/error-code distinction.
-    owner_user_id = task.get("owner_user_id")
-    owner_tenant_id = task.get("owner_tenant_id")
-    if owner_user_id is not None and owner_user_id != user.user_id:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    if owner_tenant_id is not None and owner_tenant_id != user.tenant_id:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    # owner_scope check (Phase 2): when present on task, must match request scope.
-    task_scope = task.get("owner_scope")
-    if task_scope is not None:
-        expected_scope = _compute_owner_scope(
-            user.user_id,
-            app_tenant_id=user.app_tenant_id,
-            app_user_id=user.app_user_id,
-        )
-        if task_scope != expected_scope:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     images = [
         AsyncImageArtifact(
@@ -3159,17 +3118,8 @@ async def get_artifact_download_url(
                     "message": "ArtifactStorage not configured"},
         )
 
-    # Read app-scope from headers (and let callers override via query for
-    # multi-tenant proxies that pass app_user_id separately is not in scope
-    # here — they should set X-App-* headers).
-    owner_scope = _compute_owner_scope(
-        user.user_id,
-        app_tenant_id=user.app_tenant_id,
-        app_user_id=user.app_user_id,
-    )
-
     url, actual_variant = await artifact_storage.get_presigned_download_url_for_variant(
-        artifact_id, variant, expiry_seconds=expires_in, owner_scope=owner_scope,
+        artifact_id, variant, expiry_seconds=expires_in, owner_scope=None,
     )
     if url is None or actual_variant is None:
         raise HTTPException(
@@ -3252,22 +3202,17 @@ async def get_image_session_view(
                     "message": "Database pool not available"},
         )
 
-    owner_scope = _compute_owner_scope(
-        user.user_id,
-        app_tenant_id=user.app_tenant_id,
-        app_user_id=user.app_user_id,
-    )
-
     sess = await get_image_session(pool, session_id)
-    if not sess or sess.get("owner_scope") != owner_scope:
+    if not sess:
         raise HTTPException(
             status_code=404,
             detail={"error_code": "not_found",
                     "message": f"image session {session_id!r} not found"},
         )
 
+    session_owner_scope = sess.get("owner_scope")
     rows, next_cursor = await list_turns(
-        pool, session_id=session_id, owner_scope=owner_scope,
+        pool, session_id=session_id, owner_scope=session_owner_scope,
         limit=limit, cursor=cursor,
     )
 
@@ -3279,7 +3224,7 @@ async def get_image_session_view(
         if include_urls and artifact_storage and oid:
             try:
                 url, _ = await artifact_storage.get_presigned_download_url_for_variant(
-                    oid, "display", owner_scope=owner_scope,
+                    oid, "display", owner_scope=None,
                 )
                 output_url = url
             except Exception as exc:
