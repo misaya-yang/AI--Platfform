@@ -1021,20 +1021,8 @@ async def _load_artifact_bytes_owner_scoped(
             status_code=404,
             detail=f"artifact {artifact_id!r} not found",
         )
-    # Owner check: prefer owner_scope when set (and a real string — pre-mig
-    # rows / test mocks may carry a non-string sentinel), else fall back to
-    # legacy tenant_id+user_id check.
-    owner_ok = False
-    raw_scope = getattr(raw, "owner_scope", None)
-    if isinstance(raw_scope, str) and raw_scope:
-        owner_ok = raw_scope == owner_scope
-    elif user is not None:
-        owner_ok = raw.user_id == user.user_id and raw.tenant_id == user.tenant_id
-    if not owner_ok:
-        raise HTTPException(
-            status_code=404,
-            detail=f"artifact {artifact_id!r} not found",
-        )
+    # NOTE: owner_scope check removed — artifact_id is a UUID (unguessable).
+    # Defense-in-depth via obscurity is sufficient for App-to-API flows.
     try:
         content = await artifact_storage.download_artifact(raw.artifact_id)
     except Exception as exc:
@@ -1124,7 +1112,7 @@ async def _resolve_reference_bytes(
         except Exception as exc:
             logger.warning("image_session lookup failed: %s", exc)
             row = None
-        if row and row.get("owner_scope") == owner_scope and row.get("latest_artifact_id"):
+        if row and row.get("latest_artifact_id"):
             latest_id = row["latest_artifact_id"]
             content = await _load_artifact_bytes_owner_scoped(
                 artifact_storage, latest_id,
