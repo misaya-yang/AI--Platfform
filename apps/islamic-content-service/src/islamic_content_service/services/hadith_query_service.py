@@ -57,6 +57,12 @@ class HadithQueryService:
             collection, books = await self.repository.get_books(collection_name)
             if collection is None:
                 raise NotReadyError(f"No Hadith collection found for {collection_name}")
+            # Filter out synthetic book 0 (unmapped-section bucket) — it has no
+            # real chapter data and confuses the frontend book-list UI.
+            books = [
+                book for book in books
+                if str(book.get("book_number") or "") != "0"
+            ]
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "screen": "hadith_books",
