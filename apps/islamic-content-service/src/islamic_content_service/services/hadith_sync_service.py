@@ -148,6 +148,7 @@ class HadithSyncService:
         missing_sections: list[str] = []
         zero_book_hadiths: list[str] = []
         duplicate_hadith_numbers: list[str] = []
+        empty_hadith_numbers: list[str] = []
         seen_hadith_numbers: set[str] = set()
         for item in english_hadiths:
             hadith_number_raw = item.get("hadithnumber")
@@ -156,6 +157,11 @@ class HadithSyncService:
             except (TypeError, ValueError):
                 continue
             hadith_number = str(hadith_number_int)
+            translation_text = self._clean_text(item.get("text"))
+            arabic_text = arabic_map.get(hadith_number_int, "")
+            if not translation_text and not arabic_text:
+                empty_hadith_numbers.append(hadith_number)
+                continue
             reference = item.get("reference") if isinstance(item.get("reference"), dict) else {}
             raw_section_number = reference.get("book")
             section_number = "" if raw_section_number is None else str(raw_section_number).strip()
@@ -180,8 +186,8 @@ class HadithSyncService:
                     "chapter_id": section_number,
                     "hadith_number": hadith_number,
                     "chapter_title": section_title,
-                    "translation_text": self._clean_text(item.get("text")),
-                    "arabic_text": arabic_map.get(hadith_number_int, ""),
+                    "translation_text": translation_text,
+                    "arabic_text": arabic_text,
                     "grades": {"en": item.get("grades") or []},
                 }
             )
@@ -211,6 +217,12 @@ class HadithSyncService:
                 "Collection %s contains %d duplicate hadithnumber values in CDN; keeping first occurrence per number",
                 collection_name,
                 len(duplicate_hadith_numbers),
+            )
+        if empty_hadith_numbers:
+            logger.warning(
+                "Collection %s skipped %d CDN phantom hadiths with no English or Arabic body text",
+                collection_name,
+                len(empty_hadith_numbers),
             )
 
         # Nested chapter hierarchy (collection → book → chapter → hadith) is

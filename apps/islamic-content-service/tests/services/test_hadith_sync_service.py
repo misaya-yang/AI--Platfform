@@ -135,6 +135,28 @@ async def test_hadith_sync_service_buckets_cdn_zero_book_gaps():
 
 
 @pytest.mark.asyncio
+async def test_hadith_sync_service_skips_empty_cdn_phantom_hadiths():
+    client = AsyncMock()
+    client.is_configured.return_value = True
+    client.get_editions = AsyncMock(return_value=_catalog())
+    gap_payload = _english_payload()
+    gap_payload["hadiths"].append(
+        {"hadithnumber": 4, "text": "", "grades": [], "reference": {"book": 0, "hadith": 0}}
+    )
+    client.get_edition = AsyncMock(side_effect=[gap_payload, _arabic_payload()])
+    repository = AsyncMock()
+    sync_repository = AsyncMock()
+    service = HadithSyncService(HadithSettings(sync_collections=["bukhari"]), client, repository, sync_repository)
+
+    metrics = await service.sync()
+
+    assert metrics == {"collections": 1, "books": 2, "hadith_items": 3}
+    _, books, hadiths = repository.replace_collection.await_args.args
+    assert [book["book_number"] for book in books] == ["1", "2"]
+    assert [item["hadith_number"] for item in hadiths] == ["1", "2", "3"]
+
+
+@pytest.mark.asyncio
 async def test_hadith_sync_service_deduplicates_duplicate_hadith_numbers():
     client = AsyncMock()
     client.is_configured.return_value = True

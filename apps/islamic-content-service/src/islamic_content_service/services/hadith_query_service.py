@@ -57,11 +57,19 @@ class HadithQueryService:
             collection, books = await self.repository.get_books(collection_name)
             if collection is None:
                 raise NotReadyError(f"No Hadith collection found for {collection_name}")
-            # Filter out synthetic book 0 (unmapped-section bucket) — it has no
-            # real chapter data and confuses the frontend book-list UI.
+
+            def _has_hadiths(book: dict[str, Any]) -> bool:
+                try:
+                    return int(book.get("number_of_hadith") or 0) > 0
+                except (TypeError, ValueError):
+                    return False
+
+            # Some upstream collections have a real Book 0, while others only
+            # had an empty synthetic/unmapped bucket after source cleanup.
+            # Preserve contentful Book 0 rows and hide only empty ones.
             books = [
                 book for book in books
-                if str(book.get("book_number") or "") != "0"
+                if str(book.get("book_number") or "") != "0" or _has_hadiths(book)
             ]
             return {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
