@@ -4,13 +4,14 @@ LLM Provider Service.
 Manages LLM provider configurations including API keys and endpoints.
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from ai_gateway_core.logging import get_logger
 
 from ...core.crypto import decrypt_value, encrypt_value
-from ai_gateway_core.logging import get_logger
 from ...persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)
@@ -256,6 +257,64 @@ class ProviderService:
             return {"success": False, "message": f"Connection failed: {str(e)}"}
         except Exception as e:
             return {"success": False, "message": f"Error: {str(e)}"}
+
+    async def get_runtime_provider_config(
+        self,
+        tenant_id: str,
+        provider_id: str,
+    ) -> dict[str, Any]:
+        """Return provider config with decrypted key for internal Agent calls."""
+        provider = await self.get_provider(tenant_id, provider_id)
+        if not provider:
+            raise ValueError(f"Provider not found: {provider_id}")
+
+        api_key = await self._get_api_key(tenant_id, provider_id)
+        result = dict(provider)
+        result["api_key"] = api_key
+        result["runtime_provider"] = self.to_runtime_provider(result)
+        result["runtime_base_url"] = self.normalize_runtime_base_url(result)
+        result["allow_environment_credentials"] = self.allows_environment_credentials(result)
+        return result
+
+    @staticmethod
+    def to_runtime_provider(provider: Mapping[str, Any]) -> str:
+        """Map DB provider metadata to the small runtime provider vocabulary."""
+        api_type = str(provider.get("api_type") or "").strip().lower()
+        provider_id = str(provider.get("provider_id") or "").strip().lower()
+        base_url = str(provider.get("base_url") or "").strip().lower()
+
+        if api_type in {"google", "google-ai-studio"}:
+            return "gemini"
+        if api_type in {"google-vertex", "vertex"}:
+            return "vertex"
+        if api_type in {"dashscope", "aliyun"}:
+            return "dashscope"
+        if "dashscope.aliyuncs.com" in base_url or provider_id.startswith("dashscope"):
+            return "dashscope"
+        if api_type in {"openai", "openai-compatible"}:
+            return "openai"
+        return api_type
+
+    @classmethod
+    def normalize_runtime_base_url(cls, provider: Mapping[str, Any]) -> str | None:
+        """Normalize provider base URL for the runtime SDK adapter."""
+        base_url = str(provider.get("base_url") or "").strip().rstrip("/")
+        runtime_provider = cls.to_runtime_provider(provider)
+        if runtime_provider == "dashscope":
+            if not base_url:
+                return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            if base_url.endswith("/compatible-mode"):
+                return f"{base_url}/v1"
+            return base_url
+        return base_url or None
+
+    @staticmethod
+    def allows_environment_credentials(provider: Mapping[str, Any]) -> bool:
+        """Whether this provider may rely on Agent-side environment credentials."""
+        return bool(
+            provider.get("allow_environment_credentials")
+            or provider.get("uses_environment_credentials")
+        )
 
     async def _get_api_key(
         self,

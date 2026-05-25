@@ -45,6 +45,10 @@ export interface ProviderTestResult {
   latency_ms?: number;
 }
 
+export const providerQueryKeys = {
+  all: ["providers"] as const,
+};
+
 // =============================================================================
 // API Functions
 // =============================================================================

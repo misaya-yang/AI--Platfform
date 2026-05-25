@@ -62,6 +62,7 @@ class ServiceRegistry:
         self._validate_service(service)
         await self.storage.save(service)
         self._cache[service.service_id] = service
+        self._adapter_cache.pop(service.service_id, None)
 
     async def register_from_config(self, config_path: str) -> None:
         path = Path(config_path)

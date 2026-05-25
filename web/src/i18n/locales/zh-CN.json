@@ -2801,6 +2801,22 @@
         "sessionHint": "在服务端保持会话上下文",
         "save": "保存基础配置"
       },
+      "model": {
+        "title": "Agent 模型",
+        "provider": "Provider",
+        "providerPlaceholder": "选择 Provider",
+        "providerRequired": "需要 Provider",
+        "providerDisabled": "Provider 已禁用",
+        "model": "模型",
+        "modelPlaceholder": "选择模型",
+        "modelRequired": "需要模型",
+        "temperature": "Temperature",
+        "keyConfigured": "API key 已配置",
+        "keyMissing": "API key 缺失",
+        "modelEnabled": "模型已启用",
+        "modelDisabled": "模型已禁用",
+        "overrideInvalid": "请选择已启用、已配置 API key 的 Provider 和已启用模型。"
+      },
       "rateLimit": {
         "enable": "启用限流",
         "enableHint": "防止突发流量",

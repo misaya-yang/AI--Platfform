@@ -2801,6 +2801,22 @@
         "sessionHint": "Maintain session context on the server",
         "save": "Save Basic Settings"
       },
+      "model": {
+        "title": "Agent Model",
+        "provider": "Provider",
+        "providerPlaceholder": "Select provider",
+        "providerRequired": "Provider required",
+        "providerDisabled": "Provider disabled",
+        "model": "Model",
+        "modelPlaceholder": "Select model",
+        "modelRequired": "Model required",
+        "temperature": "Temperature",
+        "keyConfigured": "API key configured",
+        "keyMissing": "API key missing",
+        "modelEnabled": "Model enabled",
+        "modelDisabled": "Model disabled",
+        "overrideInvalid": "Select an enabled provider with an API key and an enabled model."
+      },
       "rateLimit": {
         "enable": "Enable Rate Limit",
         "enableHint": "Protect service from burst traffic",

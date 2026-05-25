@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -23,7 +23,9 @@ import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { getService, updateService, deleteService as deleteServiceDef } from "@/api/gateway";
-import type { ServiceDetail } from "@/types/gateway";
+import * as providersApi from "@/api/providers";
+import * as modelsApi from "@/api/models";
+import type { ServiceDetail, ServiceModelOverride } from "@/types/gateway";
 import { useTranslation } from "react-i18next";
 
 interface ServiceConfig {
@@ -92,6 +94,25 @@ function detectLangGraphService(serviceDetail?: ServiceDetail): boolean {
     adapterType === "langgraph" ||
     (proxyMode === "transparent" && hasAssistantIdentity)
   );
+}
+
+function readModelOverride(value: unknown): ServiceModelOverride {
+  if (!value || typeof value !== "object") {
+    return { enabled: false, temperature: 0.1 };
+  }
+
+  const override = value as Record<string, unknown>;
+  const temperature =
+    typeof override.temperature === "number" && Number.isFinite(override.temperature)
+      ? override.temperature
+      : 0.1;
+
+  return {
+    enabled: Boolean(override.enabled),
+    provider_id: typeof override.provider_id === "string" ? override.provider_id : undefined,
+    model_id: typeof override.model_id === "string" ? override.model_id : undefined,
+    temperature,
+  };
 }
 
 async function getServiceConfig(serviceId: string): Promise<ServiceConfigResponse> {
@@ -173,6 +194,57 @@ export function ServiceConfigDialog({
     graph_id: "",
     session_enabled: true,
   });
+  const [modelOverrideForm, setModelOverrideForm] = useState<ServiceModelOverride>({
+    enabled: false,
+    temperature: 0.1,
+  });
+
+  const selectedProviderId = modelOverrideForm.provider_id || "";
+  const providersQuery = useQuery({
+    queryKey: providersApi.providerQueryKeys.all,
+    queryFn: () => providersApi.listProviders(true),
+    enabled: open && isLangGraphService,
+  });
+  const modelsQuery = useQuery({
+    queryKey: modelsApi.modelQueryKeys.byProvider(selectedProviderId, true),
+    queryFn: () => modelsApi.listModels(selectedProviderId, true),
+    enabled: open && isLangGraphService && Boolean(selectedProviderId),
+  });
+
+  const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
+  const models = useMemo(() => modelsQuery.data ?? [], [modelsQuery.data]);
+  const selectableProviders = useMemo(
+    () => providers.filter((provider) => provider.is_enabled),
+    [providers]
+  );
+  const providerModels = useMemo(
+    () => models.filter((model) => model.provider_id === selectedProviderId),
+    [models, selectedProviderId]
+  );
+  const selectableModels = useMemo(
+    () => providerModels.filter((model) => model.is_enabled),
+    [providerModels]
+  );
+  const selectedProvider = providers.find(
+    (provider) => provider.provider_id === modelOverrideForm.provider_id
+  );
+  const selectedModel = providerModels.find(
+    (model) => model.model_id === modelOverrideForm.model_id
+  );
+  const temperature = modelOverrideForm.temperature;
+  const temperatureInvalid =
+    modelOverrideForm.enabled &&
+    (typeof temperature !== "number" || temperature < 0 || temperature > 2);
+  const overrideInvalid = Boolean(
+    isLangGraphService &&
+      modelOverrideForm.enabled &&
+      (!selectedProvider ||
+        !selectedProvider.is_enabled ||
+        !selectedProvider.has_api_key ||
+        !selectedModel ||
+        !selectedModel.is_enabled ||
+        temperatureInvalid)
+  );
 
   // 当配置加载后更新表单
   /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from props */
@@ -208,6 +280,7 @@ export function ServiceConfigDialog({
       graph_id: String(cc.graph_id || cc.assistant_id || ""),
       session_enabled: Boolean(serviceDetail.session_enabled ?? true),
     });
+    setModelOverrideForm(readModelOverride(cc.model_override));
   }, [serviceDetail]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -259,6 +332,22 @@ export function ServiceConfigDialog({
     updateMutation.mutate({ priority: priorityForm });
   };
 
+  const handleProviderChange = (providerId: string) => {
+    setModelOverrideForm((current) => ({
+      ...current,
+      provider_id: providerId,
+      model_id: current.provider_id === providerId ? current.model_id : undefined,
+    }));
+  };
+
+  const handleTemperatureChange = (value: string) => {
+    const parsed = Number(value);
+    setModelOverrideForm((current) => ({
+      ...current,
+      temperature: Number.isFinite(parsed) ? parsed : null,
+    }));
+  };
+
   const handleDelete = () => {
     if (confirm(t("services.configDialog.deleteConfirm", { name: serviceName }))) {
       deleteMutation.mutate();
@@ -282,6 +371,10 @@ export function ServiceConfigDialog({
         setBasicError(t("services.configDialog.basic.graphIdRequired"));
         return;
       }
+      if (overrideInvalid) {
+        setBasicError(t("services.configDialog.model.overrideInvalid"));
+        return;
+      }
 
       patch.connector_config = {
         ...(serviceDetail.connector_config || {}),
@@ -289,6 +382,12 @@ export function ServiceConfigDialog({
         upstream_url: deploymentUrl,
         graph_id: graphId,
         assistant_id: graphId,
+        model_override: {
+          enabled: modelOverrideForm.enabled,
+          provider_id: modelOverrideForm.provider_id,
+          model_id: modelOverrideForm.model_id,
+          temperature: modelOverrideForm.temperature ?? null,
+        },
       };
       patch.metadata = {
         ...((serviceDetail.metadata || {}) as Record<string, unknown>),
@@ -383,6 +482,127 @@ export function ServiceConfigDialog({
                       </div>
                     </div>
 
+                    <Separator />
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <Label>{t("services.configDialog.model.title")}</Label>
+                        <Switch
+                          checked={modelOverrideForm.enabled}
+                          onCheckedChange={(checked) =>
+                            setModelOverrideForm({ ...modelOverrideForm, enabled: checked })
+                          }
+                        />
+                      </div>
+
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label>{t("services.configDialog.model.provider")}</Label>
+                          <Select
+                            value={modelOverrideForm.provider_id || ""}
+                            onValueChange={handleProviderChange}
+                            disabled={!modelOverrideForm.enabled || providersQuery.isLoading}
+                          >
+                            <SelectTrigger>
+                              <SelectValue
+                                placeholder={t("services.configDialog.model.providerPlaceholder")}
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {selectableProviders.map((provider) => (
+                                <SelectItem key={provider.provider_id} value={provider.provider_id}>
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate">{provider.display_name}</span>
+                                    <span className="text-xs text-muted-foreground">
+                                      {provider.has_api_key
+                                        ? t("services.configDialog.model.keyConfigured")
+                                        : t("services.configDialog.model.keyMissing")}
+                                    </span>
+                                  </div>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>{t("services.configDialog.model.model")}</Label>
+                          <Select
+                            value={modelOverrideForm.model_id || ""}
+                            onValueChange={(modelId) =>
+                              setModelOverrideForm({ ...modelOverrideForm, model_id: modelId })
+                            }
+                            disabled={
+                              !modelOverrideForm.enabled ||
+                              !modelOverrideForm.provider_id ||
+                              modelsQuery.isLoading
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue
+                                placeholder={t("services.configDialog.model.modelPlaceholder")}
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {selectableModels.map((model) => (
+                                <SelectItem key={model.model_id} value={model.model_id}>
+                                  {model.display_name || model.model_id}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label>{t("services.configDialog.model.temperature")}</Label>
+                        <Input
+                          type="number"
+                          min="0"
+                          max="2"
+                          step="0.1"
+                          value={modelOverrideForm.temperature ?? ""}
+                          onChange={(e) => handleTemperatureChange(e.target.value)}
+                          disabled={!modelOverrideForm.enabled}
+                        />
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <Badge
+                          variant={
+                            selectedProvider?.is_enabled && selectedProvider?.has_api_key
+                              ? "secondary"
+                              : "destructive"
+                          }
+                        >
+                          {selectedProvider
+                            ? !selectedProvider.is_enabled
+                              ? t("services.configDialog.model.providerDisabled")
+                              : selectedProvider.has_api_key
+                                ? t("services.configDialog.model.keyConfigured")
+                                : t("services.configDialog.model.keyMissing")
+                            : t("services.configDialog.model.providerRequired")}
+                        </Badge>
+                        <Badge
+                          variant={
+                            selectedModel?.is_enabled || !modelOverrideForm.model_id
+                              ? "secondary"
+                              : "destructive"
+                          }
+                        >
+                          {selectedModel
+                            ? selectedModel.is_enabled
+                              ? t("services.configDialog.model.modelEnabled")
+                              : t("services.configDialog.model.modelDisabled")
+                            : t("services.configDialog.model.modelRequired")}
+                        </Badge>
+                        {selectedProvider?.base_url && (
+                          <span className="min-w-0 truncate text-muted-foreground">
+                            {selectedProvider.base_url}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="flex items-center justify-between rounded-lg border p-3">
                       <div>
                         <Label>{t("services.configDialog.basic.sessionEnabled")}</Label>
@@ -402,7 +622,10 @@ export function ServiceConfigDialog({
               {basicError && <div className="text-sm text-destructive">{basicError}</div>}
 
               <div className="flex justify-end">
-                <Button onClick={handleSaveBasic} disabled={updateServiceMutation.isPending}>
+                <Button
+                  onClick={handleSaveBasic}
+                  disabled={updateServiceMutation.isPending || overrideInvalid}
+                >
                   {updateServiceMutation.isPending ? t("common.saving") : t("services.configDialog.basic.save")}
                 </Button>
               </div>
@@ -738,4 +961,3 @@ export function ServiceConfigDialog({
     </Dialog>
   );
 }
-

@@ -95,7 +95,7 @@ export function ServicesPage() {
 
   // Provider queries
   const providersQuery = useQuery({
-    queryKey: ["providers"],
+    queryKey: providersApi.providerQueryKeys.all,
     queryFn: () => providersApi.listProviders(true),
   });
   const providers = providersQuery.data || [];
@@ -120,7 +120,7 @@ export function ServicesPage() {
 
   // Model queries
   const modelsQuery = useQuery({
-    queryKey: ["models"],
+    queryKey: modelsApi.modelQueryKeys.all,
     queryFn: () => modelsApi.listModels(undefined, true),
   });
 

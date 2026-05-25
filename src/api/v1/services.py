@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import asdict
+from typing import Any
 
+from ai_gateway_core.enums import ServiceType
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.auth.permissions import (
@@ -18,7 +20,6 @@ from ...core.auth.service_access import (
     service_scope_matches,
 )
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.enums import ServiceType
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 
@@ -68,6 +69,9 @@ _SENSITIVE_CONNECTOR_FIELDS = {
     "langsmith_api_key",
     "headers",
 }
+
+_MODEL_OVERRIDE_SECRET_FIELDS = {"_api_key", "api_key"}
+_MODEL_OVERRIDE_EPOCH_IGNORED_FIELDS = {"cache_epoch"}
 
 
 def _current_trace_id(request: Request) -> str:
@@ -234,6 +238,162 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
         connector_config["graph_id"] = assistant_id
 
 
+def _is_langgraph_definition(definition: dict) -> bool:
+    connector_config = definition.get("connector_config")
+    connector_config = connector_config if isinstance(connector_config, dict) else {}
+    metadata = definition.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    service_type = definition.get("service_type")
+    service_type_value = (
+        service_type.value if hasattr(service_type, "value") else str(service_type or "")
+    )
+    adapter_type = str(metadata.get("adapter_type") or connector_config.get("adapter_type") or "")
+    proxy_mode = str(connector_config.get("proxy_mode") or metadata.get("proxy_mode") or "")
+    return (
+        service_type_value == "langgraph"
+        or adapter_type == "langgraph"
+        or (
+            proxy_mode == "transparent"
+            and bool(connector_config.get("graph_id") or connector_config.get("assistant_id"))
+        )
+    )
+
+
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _model_override_error(code: str, status_code: int = 422) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=code)
+
+
+def _coerce_cache_epoch(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _meaningful_model_override(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value.get(key)
+        for key in sorted(value)
+        if key not in _MODEL_OVERRIDE_EPOCH_IGNORED_FIELDS
+    }
+
+
+def _override_allows_environment_credentials(provider_service: Any, provider: dict) -> bool:
+    checker = getattr(provider_service, "allows_environment_credentials", None)
+    if callable(checker):
+        return bool(checker(provider))
+    return bool(
+        provider.get("allow_environment_credentials")
+        or provider.get("uses_environment_credentials")
+    )
+
+
+async def _validate_langgraph_model_override(
+    request: Request,
+    *,
+    tenant_id: str,
+    definition: dict,
+    previous_connector_config: dict | None = None,
+) -> None:
+    """Validate and normalize connector_config.model_override for LangGraph services."""
+    if not _is_langgraph_definition(definition):
+        return
+
+    connector_config = definition.get("connector_config")
+    if not isinstance(connector_config, dict):
+        return
+
+    raw_override = connector_config.get("model_override")
+    if raw_override is None:
+        return
+    if not isinstance(raw_override, dict):
+        raise _model_override_error("MODEL_OVERRIDE_INVALID")
+
+    if _MODEL_OVERRIDE_SECRET_FIELDS.intersection(str(key).lower() for key in raw_override):
+        raise _model_override_error("MODEL_OVERRIDE_API_KEY_FORBIDDEN")
+
+    model_override = dict(raw_override)
+    enabled = _as_bool(model_override.get("enabled"), default=False)
+    model_override["enabled"] = enabled
+
+    if "temperature" in model_override and model_override["temperature"] is not None:
+        try:
+            temperature = float(model_override["temperature"])
+        except (TypeError, ValueError) as exc:
+            raise _model_override_error("MODEL_OVERRIDE_TEMPERATURE_INVALID") from exc
+        if temperature < 0 or temperature > 2:
+            raise _model_override_error("MODEL_OVERRIDE_TEMPERATURE_INVALID")
+        model_override["temperature"] = temperature
+
+    previous_override = {}
+    if isinstance(previous_connector_config, dict):
+        previous_raw = previous_connector_config.get("model_override")
+        if isinstance(previous_raw, dict):
+            previous_override = previous_raw
+
+    previous_epoch = _coerce_cache_epoch(previous_override.get("cache_epoch"))
+    if _meaningful_model_override(model_override) != _meaningful_model_override(previous_override):
+        model_override["cache_epoch"] = previous_epoch + 1
+    else:
+        model_override["cache_epoch"] = previous_epoch
+
+    if not enabled:
+        connector_config["model_override"] = model_override
+        return
+
+    provider_id = str(model_override.get("provider_id") or "").strip()
+    model_id = str(model_override.get("model_id") or "").strip()
+    if not provider_id:
+        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_REQUIRED")
+    if not model_id:
+        raise _model_override_error("MODEL_OVERRIDE_MODEL_REQUIRED")
+
+    provider_service = getattr(request.app.state, "provider_service", None)
+    model_service = getattr(request.app.state, "model_service", None)
+    if provider_service is None or model_service is None:
+        raise _model_override_error("MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE", status_code=503)
+
+    provider = await provider_service.get_provider(tenant_id, provider_id)
+    if not provider:
+        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_NOT_FOUND")
+    if not bool(provider.get("is_enabled")):
+        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_DISABLED")
+
+    has_key = bool(provider.get("has_api_key"))
+    if not has_key and not _override_allows_environment_credentials(provider_service, provider):
+        raise _model_override_error("MODEL_OVERRIDE_API_KEY_MISSING")
+
+    get_provider_model = getattr(model_service, "get_provider_model", None)
+    if callable(get_provider_model):
+        model = await get_provider_model(tenant_id, provider_id, model_id)
+    else:
+        model = await model_service.get_model(
+            tenant_id,
+            model_id,
+            provider_id=provider_id,
+        )
+    if not model:
+        raise _model_override_error("MODEL_OVERRIDE_MODEL_NOT_FOUND")
+    if not bool(model.get("is_enabled")):
+        raise _model_override_error("MODEL_OVERRIDE_MODEL_DISABLED")
+
+    model_override["provider_id"] = provider_id
+    model_override["model_id"] = model_id
+    connector_config["model_override"] = model_override
+
+
 def _mask_sensitive_config(config: dict) -> dict:
     """脱敏敏感配置字段"""
     if not config:
@@ -247,8 +407,13 @@ def _mask_sensitive_config(config: dict) -> dict:
                 masked[key] = "***[hidden]***"
             else:
                 masked[key] = "***"
+        elif key == "hejaz_model" and isinstance(value, dict):
+            masked[key] = _mask_sensitive_config(value)
         else:
-            masked[key] = value
+            if isinstance(value, dict):
+                masked[key] = _mask_sensitive_config(value)
+            else:
+                masked[key] = value
     return masked
 
 
@@ -340,8 +505,15 @@ async def register_service(
         if isinstance(definition.get("metadata"), dict):
             normalized_definition["metadata"] = dict(definition["metadata"])
         _normalize_langgraph_connector_config(normalized_definition)
+        await _validate_langgraph_model_override(
+            request,
+            tenant_id=auth.tenant_id or "default",
+            definition=normalized_definition,
+        )
         service = registry._service_from_dict(normalized_definition)
         await registry.register(service)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"service_id": service.service_id, "status": "registered"}
@@ -532,10 +704,18 @@ async def update_service(
         base[k] = v
 
     _normalize_langgraph_connector_config(base)
+    await _validate_langgraph_model_override(
+        request,
+        tenant_id=auth.tenant_id or "default",
+        definition=base,
+        previous_connector_config=service.connector_config or {},
+    )
 
     try:
         updated = registry._service_from_dict(base)
         await registry.register(updated)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

@@ -2,8 +2,6 @@
  * Standalone Playwright config for model_tester role tests.
  * No global setup — each test performs its own login.
  */
-import path from "path";
-import { fileURLToPath } from "url";
 import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.E2E_BASE_URL!;

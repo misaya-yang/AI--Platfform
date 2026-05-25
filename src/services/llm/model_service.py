@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ...persistence.database import DatabaseStorage
 from ...services.billing.model_pricing import get_pricing_service
 
@@ -109,6 +110,19 @@ class ModelService:
             """
             row = await self.db.fetchrow(query, tenant_id, model_id)
         return self._row_to_dict(row) if row else None
+
+    async def get_provider_model(
+        self,
+        tenant_id: str,
+        provider_id: str,
+        model_id: str,
+    ) -> dict[str, Any] | None:
+        """Get a model scoped to one provider to avoid model_id ambiguity."""
+        return await self.get_model(
+            tenant_id=tenant_id,
+            model_id=model_id,
+            provider_id=provider_id,
+        )
 
     async def create_model(
         self,

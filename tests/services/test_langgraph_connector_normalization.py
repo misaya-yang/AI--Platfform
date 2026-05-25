@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.api.v1.services import _normalize_langgraph_connector_config
 from src.proxy.config_loader import ProxyConfigLoader
+from src.services.llm.provider_service import ProviderService
 
 
 def test_normalize_langgraph_connector_config_syncs_urls_and_ids():
@@ -60,3 +61,40 @@ def test_proxy_config_loader_heals_transparent_url_mismatch():
     config = loader._parse_service_row(row)
 
     assert config.upstream_url == "http://localhost:2025"
+
+
+def test_provider_service_maps_dashscope_runtime_defaults():
+    provider = {
+        "provider_id": "dashscope-main",
+        "api_type": "openai-compatible",
+        "base_url": "",
+    }
+
+    assert ProviderService.to_runtime_provider(provider) == "dashscope"
+    assert (
+        ProviderService.normalize_runtime_base_url(provider)
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+
+
+def test_provider_service_normalizes_dashscope_compatible_mode_url():
+    provider = {
+        "provider_id": "aliyun-prod",
+        "api_type": "dashscope",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/",
+    }
+
+    assert (
+        ProviderService.normalize_runtime_base_url(provider)
+        == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
+
+
+def test_provider_service_maps_google_studio_to_gemini():
+    provider = {
+        "provider_id": "gemini",
+        "api_type": "google-ai-studio",
+        "base_url": "https://generativelanguage.googleapis.com",
+    }
+
+    assert ProviderService.to_runtime_provider(provider) == "gemini"

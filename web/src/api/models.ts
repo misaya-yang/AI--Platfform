@@ -63,6 +63,12 @@ export interface ModelUpdate {
   sort_order?: number;
 }
 
+export const modelQueryKeys = {
+  all: ["models"] as const,
+  byProvider: (providerId: string, includeDisabled = false) =>
+    ["models", { providerId, includeDisabled }] as const,
+};
+
 // =============================================================================
 // API Functions
 // =============================================================================

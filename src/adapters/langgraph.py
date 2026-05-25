@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 
 # 定义流事件的结构
 from dataclasses import dataclass
 from typing import Any
 
-from ai_gateway_core.exceptions import ValidationFailedError
 from ai_gateway_core.enums import ConnectorType, ContentType, StreamEventType
+from ai_gateway_core.exceptions import ValidationFailedError
+
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, ToolCall, UnifiedResponse
 from .base import ProtocolAdapter
@@ -24,9 +27,46 @@ class StreamEvent:
     tool_call: ToolCall | None = None
 
 
+_SECRET_JSON_VALUE_RE = re.compile(
+    r'("?_?api_key"?\s*[:=]\s*)("[^"]*"|[^,\s}]+)',
+    re.IGNORECASE,
+)
+
+
+def _scrub_sensitive_text(value: str) -> str:
+    """Scrub provider credentials from upstream errors before logging/returning."""
+    if not value:
+        return ""
+    return _SECRET_JSON_VALUE_RE.sub(r'\1"***"', value)
+
+
+def _extract_langgraph_error(result: Any) -> str | None:
+    """Return a scrubbed LangGraph error payload when a 200 response embeds one."""
+    if not isinstance(result, dict) or "__error__" not in result:
+        return None
+
+    error = result.get("__error__")
+    if isinstance(error, dict):
+        error_type = error.get("error") or error.get("type") or "LangGraphError"
+        message = error.get("message") or error.get("detail") or ""
+        return _scrub_sensitive_text(f"{error_type}: {message}")
+    return _scrub_sensitive_text(str(error))
+
+
 class LangGraphAdapter(ProtocolAdapter):
     # 类级别的 session_id -> thread_id (UUID) 映射缓存
     _session_to_thread_map: dict[str, str] = {}
+    _provider_service: Any | None = None
+    _model_service: Any | None = None
+
+    @classmethod
+    def configure_model_control_plane(
+        cls,
+        provider_service: Any | None,
+        model_service: Any | None,
+    ) -> None:
+        cls._provider_service = provider_service
+        cls._model_service = model_service
 
     def __init__(self, service):
         super().__init__(service)
@@ -101,7 +141,7 @@ class LangGraphAdapter(ProtocolAdapter):
 
         return headers
 
-    def _build_run_config(
+    def _build_base_run_config(
         self, request: UnifiedRequest, thread_id: str | None = None
     ) -> dict[str, Any]:
         """Build LangGraph run config with gateway-injected `configurable` values."""
@@ -114,6 +154,8 @@ class LangGraphAdapter(ProtocolAdapter):
         if not isinstance(configurable, dict):
             configurable = {}
         configurable = dict(configurable)
+        # Browser/caller supplied model config is never authoritative.
+        configurable.pop("hejaz_model", None)
 
         # Merge in caller-provided configurable from request.context / request.parameters.
         for source in (request.context, request.parameters):
@@ -122,6 +164,8 @@ class LangGraphAdapter(ProtocolAdapter):
             src_cfg = source.get("configurable")
             if isinstance(src_cfg, dict):
                 for k, v in src_cfg.items():
+                    if k == "hejaz_model":
+                        continue
                     if k not in configurable and v is not None:
                         configurable[k] = v
             for k in ("dataset_id", "gateway_token"):
@@ -138,10 +182,86 @@ class LangGraphAdapter(ProtocolAdapter):
         run_config["configurable"] = configurable
         return run_config
 
+    async def _build_model_override_config(
+        self,
+        request: UnifiedRequest,
+    ) -> dict[str, Any] | None:
+        model_override = self.config.get("model_override")
+        if not isinstance(model_override, dict) or not model_override.get("enabled"):
+            return None
+
+        provider_service = self._provider_service
+        model_service = self._model_service
+        if provider_service is None or model_service is None:
+            raise ValidationFailedError("LangGraph model control plane is not initialized")
+
+        tenant_id = request.tenant_id or "default"
+        provider_id = str(model_override.get("provider_id") or "").strip()
+        model_id = str(model_override.get("model_id") or "").strip()
+        if not provider_id or not model_id:
+            raise ValidationFailedError("LangGraph model_override requires provider_id and model_id")
+
+        try:
+            provider = await provider_service.get_runtime_provider_config(tenant_id, provider_id)
+        except ValueError as exc:
+            raise ValidationFailedError("LangGraph model_override provider not found") from exc
+        if not bool(provider.get("is_enabled")):
+            raise ValidationFailedError("LangGraph model_override provider is disabled")
+
+        get_provider_model = getattr(model_service, "get_provider_model", None)
+        if callable(get_provider_model):
+            model = await get_provider_model(tenant_id, provider_id, model_id)
+        else:
+            model = await model_service.get_model(
+                tenant_id,
+                model_id,
+                provider_id=provider_id,
+            )
+        if not model:
+            raise ValidationFailedError("LangGraph model_override model not found")
+        if not bool(model.get("is_enabled")):
+            raise ValidationFailedError("LangGraph model_override model is disabled")
+
+        api_key = provider.get("api_key")
+        allow_environment = bool(provider.get("allow_environment_credentials"))
+        if not api_key and not allow_environment:
+            raise ValidationFailedError("LangGraph model_override provider has no API key")
+
+        api_key_fingerprint = (
+            hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16]
+            if api_key
+            else None
+        )
+
+        runtime_config = {
+            "enabled": True,
+            "tenant_id": tenant_id,
+            "provider_id": provider_id,
+            "provider": provider.get("runtime_provider"),
+            "model_id": model_id,
+            "model": model_id,
+            "temperature": model_override.get("temperature"),
+            "base_url": provider.get("runtime_base_url"),
+            "api_key_fingerprint": api_key_fingerprint,
+            "cache_epoch": str(model_override.get("cache_epoch") or "0"),
+        }
+        if api_key:
+            runtime_config["_api_key"] = api_key
+        return runtime_config
+
+    async def _build_run_config(
+        self, request: UnifiedRequest, thread_id: str | None = None
+    ) -> dict[str, Any]:
+        run_config = self._build_base_run_config(request, thread_id=thread_id)
+        model_override = await self._build_model_override_config(request)
+        if model_override:
+            run_config["configurable"]["hejaz_model"] = model_override
+        return run_config
+
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         messages = self._build_messages(request.inputs)
         if not self.remote:
-            run_config = self._build_run_config(request)
+            run_config = await self._build_run_config(request)
             result = await self.graph.ainvoke({"messages": messages}, run_config)
         else:
             result = await self._remote_wait(request, messages)
@@ -160,7 +280,7 @@ class LangGraphAdapter(ProtocolAdapter):
         if not self.remote:
             if not hasattr(self.graph, "astream_events"):
                 raise ValidationFailedError("graph does not support streaming")
-            run_config = self._build_run_config(request)
+            run_config = await self._build_run_config(request)
             # 追踪已处理的内容，用于去重
             seen_content_ids: set = set()
 
@@ -426,14 +546,20 @@ class LangGraphAdapter(ProtocolAdapter):
             # 确保 thread 存在并获取有效的 UUID thread_id
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             endpoint = self.thread_invoke_endpoint.format(thread_id=valid_thread_id)
-            payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
+            payload["config"] = await self._build_run_config(request, thread_id=valid_thread_id)
         else:
             endpoint = self.invoke_endpoint
-            payload["config"] = self._build_run_config(request)
+            payload["config"] = await self._build_run_config(request)
         try:
             # 构建认证头部
             auth_headers = self._build_auth_headers(request)
-            return await self.connector.post(endpoint, json=payload, headers=auth_headers)
+            result = await self.connector.post(endpoint, json=payload, headers=auth_headers)
+            embedded_error = _extract_langgraph_error(result)
+            if embedded_error:
+                raise ValidationFailedError(
+                    f"LangGraph invoke failed at {endpoint}: {embedded_error}"
+                )
+            return result
         except Exception as exc:
             # HTTPConnector uses httpx under the hood; surface readable upstream errors
             # instead of returning a generic 500.
@@ -441,7 +567,7 @@ class LangGraphAdapter(ProtocolAdapter):
 
             if isinstance(exc, httpx.HTTPStatusError):
                 status = exc.response.status_code
-                body = exc.response.text
+                body = _scrub_sensitive_text(exc.response.text)
                 raise ValidationFailedError(
                     f"LangGraph invoke failed ({status}) at {endpoint}: {body}"
                 ) from exc
@@ -471,10 +597,9 @@ class LangGraphAdapter(ProtocolAdapter):
             stream_mode = self.config.get("stream_mode")
         if stream_mode is None:
             stream_mode = ["messages", "updates"]
-        elif isinstance(stream_mode, str):
+        elif isinstance(stream_mode, str) and "," in stream_mode:
             # Support comma-separated string for convenience.
-            if "," in stream_mode:
-                stream_mode = [s.strip() for s in stream_mode.split(",") if s.strip()]
+            stream_mode = [s.strip() for s in stream_mode.split(",") if s.strip()]
 
         payload: dict[str, Any] = {
             "assistant_id": self.assistant_id,
@@ -512,10 +637,10 @@ class LangGraphAdapter(ProtocolAdapter):
             t_ensure_end = time.perf_counter()
             logger.info(f"[TIMING] _ensure_thread: {(t_ensure_end - t_ensure_start) * 1000:.2f}ms")
             endpoint = self.thread_stream_endpoint.format(thread_id=valid_thread_id)
-            payload["config"] = self._build_run_config(request, thread_id=valid_thread_id)
+            payload["config"] = await self._build_run_config(request, thread_id=valid_thread_id)
         else:
             endpoint = self.stream_endpoint
-            payload["config"] = self._build_run_config(request)
+            payload["config"] = await self._build_run_config(request)
 
         client = getattr(self.connector, "_client", None)
         if client is None:
@@ -548,9 +673,12 @@ class LangGraphAdapter(ProtocolAdapter):
 
                 if resp.status_code != 200:
                     error_text = await resp.aread()
-                    logger.error(f"LangGraph stream error: {resp.status_code} - {error_text}")
+                    scrubbed_error = _scrub_sensitive_text(error_text.decode("utf-8", errors="ignore"))
+                    logger.error(
+                        f"LangGraph stream error: {resp.status_code} - {scrubbed_error}"
+                    )
                     raise ValidationFailedError(
-                        f"LangGraph stream failed ({resp.status_code}) at {endpoint}: {error_text!r}"
+                        f"LangGraph stream failed ({resp.status_code}) at {endpoint}: {scrubbed_error}"
                     )
 
                 current_event_type = ""
@@ -981,15 +1109,14 @@ class LangGraphAdapter(ProtocolAdapter):
                         logger.debug(
                             f"[ToolMessage] artifact type={type(artifact).__name__}, value={artifact}"
                         )
-                    if isinstance(artifact, dict):
+                    if isinstance(artifact, dict) and "query" in artifact:
                         # RAG 工具的 artifact 可能包含 {"query": "...", ...}
-                        if "query" in artifact:
-                            final_args = json.dumps(
-                                {"query": artifact["query"]}, ensure_ascii=False
-                            )
-                            logger.debug(
-                                f"[ToolMessage] Extracted query from artifact: {final_args}"
-                            )
+                        final_args = json.dumps(
+                            {"query": artifact["query"]}, ensure_ascii=False
+                        )
+                        logger.debug(
+                            f"[ToolMessage] Extracted query from artifact: {final_args}"
+                        )
 
                     # 2. 尝试从 additional_kwargs 获取
                     if not final_args:

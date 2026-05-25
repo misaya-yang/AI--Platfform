@@ -115,6 +115,14 @@ export interface ServiceConfig {
   priority: ServicePriorityConfig;
 }
 
+export interface ServiceModelOverride {
+  enabled: boolean;
+  provider_id?: string;
+  model_id?: string;
+  temperature?: number | null;
+  cache_epoch?: number | string;
+}
+
 export interface ServiceDefinition {
   service_id: string;
   name: string;

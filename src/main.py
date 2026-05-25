@@ -828,6 +828,13 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.provider_service = ProviderService(container.database, encryption_key)
     app.state.model_service = ModelService(container.database)
 
+    from .adapters.langgraph import LangGraphAdapter
+
+    LangGraphAdapter.configure_model_control_plane(
+        app.state.provider_service,
+        app.state.model_service,
+    )
+
 
 async def _load_services_from_database(container: Container, settings: Settings) -> None:
     """从数据库加载服务"""
