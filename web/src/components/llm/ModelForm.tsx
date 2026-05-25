@@ -210,10 +210,28 @@ export function ModelForm({
       return a.label.localeCompare(b.label);
     });
   }, [providers, providerTemplates]);
-  const selectedProviderOption = providerOptions.find(
-    (option) => option.value === providerId
+  const selectableProviderOptions = useMemo(() => {
+    const runtimeReadyOptions = providerOptions.filter(
+      (option) =>
+        option.registered &&
+        option.hasApiKey &&
+        option.provider?.is_enabled !== false
+    );
+    if (runtimeReadyOptions.length > 0) {
+      return runtimeReadyOptions;
+    }
+
+    const registeredOptions = providerOptions.filter((option) => option.registered);
+    return registeredOptions.length > 0 ? registeredOptions : providerOptions;
+  }, [providerOptions]);
+  const selectedProviderOption = useMemo(
+    () => providerOptions.find((option) => option.value === providerId),
+    [providerId, providerOptions]
   );
-  const catalogModels = selectedProviderOption?.template?.default_models ?? [];
+  const catalogModels = useMemo(
+    () => selectedProviderOption?.template?.default_models ?? [],
+    [selectedProviderOption]
+  );
   const hasCatalogModels = !isEdit && catalogModels.length > 0;
   const knownModelProviders = useMemo(() => {
     const normalized = (modelId || "").trim().toLowerCase();
@@ -267,9 +285,9 @@ export function ModelForm({
       setShowAdvancedSettings(false);
       reset({
         model_id: "",
-        provider_id: providerOptions[0]?.value || "",
+        provider_id: selectableProviderOptions[0]?.value || "",
         catalog_model_id:
-          providerOptions[0]?.template?.default_models[0]?.model_id ||
+          selectableProviderOptions[0]?.template?.default_models[0]?.model_id ||
           CUSTOM_MODEL_VALUE,
         display_name: "",
         context_window: 128000,
@@ -283,7 +301,7 @@ export function ModelForm({
         sort_order: 0,
       });
     }
-  }, [model, providerOptions, reset]);
+  }, [model, reset, selectableProviderOptions]);
 
   useEffect(() => {
     if (isEdit || !modelId || !providerId) return;
@@ -344,7 +362,7 @@ export function ModelForm({
 
   const handleProviderChange = (value: string) => {
     setValue("provider_id", value);
-    const option = providerOptions.find((item) => item.value === value);
+    const option = selectableProviderOptions.find((item) => item.value === value);
     const firstCatalogModel = option?.template?.default_models[0];
     if (firstCatalogModel) {
       applyCatalogModel(firstCatalogModel, setValue);
@@ -393,7 +411,7 @@ export function ModelForm({
                       <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
                     </SelectTrigger>
                     <SelectContent>
-                      {providerOptions.map((option) => (
+                      {selectableProviderOptions.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
                         </SelectItem>
@@ -459,7 +477,10 @@ export function ModelForm({
                   }`}
                 />
               </CollapsibleTrigger>
-              <CollapsibleContent>
+              <CollapsibleContent
+                aria-hidden={!showAdvancedSettings}
+                className={showAdvancedSettings ? undefined : "hidden"}
+              >
                 <div className="grid gap-6 border-t border-border/70 p-4">
                   <section className="grid gap-4">
                     <h3 className="text-sm font-semibold text-foreground">
