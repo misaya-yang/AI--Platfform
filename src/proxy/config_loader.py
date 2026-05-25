@@ -46,6 +46,7 @@ class ProxyServiceConfig:
     graph_id: str | None = None  # LangGraph graph_id (graph name)
     default_model: str | None = None
     default_provider: str | None = None
+    model_override: dict[str, Any] | None = None
     path_rewrite: str | None = None  # 路径重写前缀，如 /api/v1
     strip_prefix: bool = True  # 是否去除 /proxy/{service_name} 前缀
 
@@ -288,6 +289,11 @@ class ProxyConfigLoader:
             graph_id=connector_config.get("graph_id"),
             default_model=default_model,
             default_provider=default_provider,
+            model_override=(
+                connector_config.get("model_override")
+                if isinstance(connector_config.get("model_override"), dict)
+                else None
+            ),
             path_rewrite=connector_config.get("path_rewrite"),
             strip_prefix=connector_config.get("strip_prefix", True),
             timeout_connect=connector_config.get("timeout_connect", 5.0),

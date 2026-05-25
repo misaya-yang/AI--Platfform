@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import time
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -37,7 +39,6 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitContext,
     RateLimitHeaders,
 )
-from ai_gateway_core.logging import get_logger
 from ...core.observability.metrics import get_metrics
 from ...core.utils import estimate_tokens
 from ...proxy import (
@@ -316,6 +317,159 @@ def _inject_gateway_domain_policy_metadata(
     gateway_dict.setdefault("domain_policy", "imam")
     metadata_dict["gateway"] = gateway_dict
     updated_payload["metadata"] = metadata_dict
+    return _encode_json_body(updated_payload)
+
+
+def _is_langgraph_proxy_service(service_config: ProxyServiceConfig | None) -> bool:
+    if not service_config:
+        return False
+    service_meta = service_config.metadata if isinstance(service_config.metadata, dict) else {}
+    adapter_type = str(service_meta.get("adapter_type") or "").strip().lower()
+    return (
+        adapter_type == "langgraph"
+        or bool((service_config.assistant_id or "").strip())
+        or bool((service_config.graph_id or "").strip())
+    )
+
+
+def _is_langgraph_run_path(method: str, path: str) -> bool:
+    if method.upper() not in {"POST", "PUT", "PATCH"}:
+        return False
+    normalized_path = "/" + str(path or "").strip().lstrip("/").lower()
+    return "/runs" in normalized_path
+
+
+def _scrub_caller_hejaz_model(body: bytes | None, method: str, path: str) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Remove browser-supplied runtime model config before Gateway-controlled injection."""
+    if not body or not _is_langgraph_run_path(method, path):
+        return body, None
+
+    payload = _decode_json_body(body)
+    if not isinstance(payload, dict):
+        return body, None
+
+    updated_payload = dict(payload)
+    run_config = updated_payload.get("config")
+    if not isinstance(run_config, dict):
+        return body, updated_payload
+
+    updated_config = dict(run_config)
+    configurable = updated_config.get("configurable")
+    if isinstance(configurable, dict) and "hejaz_model" in configurable:
+        updated_config["configurable"] = {
+            k: v for k, v in configurable.items() if k != "hejaz_model"
+        }
+        updated_payload["config"] = updated_config
+        return _encode_json_body(updated_payload), updated_payload
+
+    return body, updated_payload
+
+
+async def _inject_langgraph_model_override_config(
+    *,
+    request: Request,
+    body: bytes | None,
+    method: str,
+    path: str,
+    service_config: ProxyServiceConfig | None,
+    tenant_id: str,
+) -> bytes | None:
+    """
+    Inject Gateway-resolved LangGraph runtime model config for transparent proxy runs.
+
+    Browser-supplied ``hejaz_model`` is never authoritative. Provider, model and
+    API key are resolved server-side from the Gateway control plane.
+    """
+    body, payload = _scrub_caller_hejaz_model(body, method, path)
+    if (
+        not body
+        or payload is None
+        or not service_config
+        or not _is_langgraph_run_path(method, path)
+        or not _is_langgraph_proxy_service(service_config)
+    ):
+        return body
+
+    model_override = service_config.model_override
+    if not isinstance(model_override, dict) or not model_override.get("enabled"):
+        return body
+
+    provider_service = getattr(request.app.state, "provider_service", None)
+    model_service = getattr(request.app.state, "model_service", None)
+    if provider_service is None or model_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE",
+        )
+
+    effective_tenant = tenant_id or "default"
+    provider_id = str(model_override.get("provider_id") or "").strip()
+    model_id = str(model_override.get("model_id") or "").strip()
+    if not provider_id or not model_id:
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_INVALID")
+
+    try:
+        provider = await provider_service.get_runtime_provider_config(effective_tenant, provider_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_PROVIDER_NOT_FOUND") from exc
+
+    if not bool(provider.get("is_enabled")):
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_PROVIDER_DISABLED")
+
+    get_provider_model = getattr(model_service, "get_provider_model", None)
+    if callable(get_provider_model):
+        model = await get_provider_model(effective_tenant, provider_id, model_id)
+    else:
+        model = await model_service.get_model(
+            effective_tenant,
+            model_id,
+            provider_id=provider_id,
+        )
+    if not model:
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_MODEL_NOT_FOUND")
+    if not bool(model.get("is_enabled")):
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_MODEL_DISABLED")
+
+    api_key = provider.get("api_key")
+    allow_environment = bool(provider.get("allow_environment_credentials"))
+    if not api_key and not allow_environment:
+        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_API_KEY_MISSING")
+
+    api_key_fingerprint = (
+        hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16] if api_key else None
+    )
+    runtime_config = {
+        "enabled": True,
+        "tenant_id": effective_tenant,
+        "provider_id": provider_id,
+        "provider": provider.get("runtime_provider"),
+        "model_id": model_id,
+        "model": model_id,
+        "temperature": model_override.get("temperature"),
+        "base_url": provider.get("runtime_base_url"),
+        "api_key_fingerprint": api_key_fingerprint,
+        "cache_epoch": str(model_override.get("cache_epoch") or "0"),
+    }
+    if api_key:
+        runtime_config["_api_key"] = api_key
+
+    updated_payload = dict(payload)
+    run_config = updated_payload.get("config")
+    updated_config = dict(run_config) if isinstance(run_config, dict) else {}
+    configurable = updated_config.get("configurable")
+    updated_config["configurable"] = dict(configurable) if isinstance(configurable, dict) else {}
+    updated_config["configurable"]["hejaz_model"] = runtime_config
+    updated_payload["config"] = updated_config
+
+    logger.info(
+        "Injected LangGraph model override provider_id=%s model_id=%s cache_epoch=%s "
+        "api_key_fingerprint=%s",
+        provider_id,
+        model_id,
+        runtime_config["cache_epoch"],
+        api_key_fingerprint,
+    )
+
     return _encode_json_body(updated_payload)
 
 
@@ -971,6 +1125,14 @@ async def transparent_proxy_handler(
         method=request.method,
         path=path,
         service_config=service_config,
+    )
+    body = await _inject_langgraph_model_override_config(
+        request=request,
+        body=body,
+        method=request.method,
+        path=path,
+        service_config=service_config,
+        tenant_id=auth.tenant_id or user.tenant_id or "default",
     )
     t_body = time.perf_counter()
 

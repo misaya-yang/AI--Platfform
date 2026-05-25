@@ -84,6 +84,13 @@ def _current_trace_id(request: Request) -> str:
     return ""
 
 
+def _invalidate_proxy_config_cache(request: Request, service_id: str | None = None) -> None:
+    loader = getattr(request.app.state, "proxy_config_loader", None)
+    invalidate = getattr(loader, "invalidate", None)
+    if callable(invalidate):
+        invalidate(service_id)
+
+
 def _require_capability(request: Request, auth: AuthContext, capability: Capability) -> None:
     decision = check_capability(
         rbac=request.app.state.dispatcher.rbac,
@@ -512,6 +519,7 @@ async def register_service(
         )
         service = registry._service_from_dict(normalized_definition)
         await registry.register(service)
+        _invalidate_proxy_config_cache(request, service.service_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -714,6 +722,7 @@ async def update_service(
     try:
         updated = registry._service_from_dict(base)
         await registry.register(updated)
+        _invalidate_proxy_config_cache(request, service_id)
     except HTTPException:
         raise
     except Exception as exc:
@@ -740,6 +749,7 @@ async def delete_service(
             deleted = registry.storage._services.pop(service_id, None) is not None
 
     registry._cache.pop(service_id, None)
+    _invalidate_proxy_config_cache(request, service_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail="service not found")
