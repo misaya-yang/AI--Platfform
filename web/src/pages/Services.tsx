@@ -95,7 +95,7 @@ export function ServicesPage() {
 
   // Provider queries
   const providersQuery = useQuery({
-    queryKey: providersApi.providerQueryKeys.all,
+    queryKey: providersApi.providerQueryKeys.list(true),
     queryFn: () => providersApi.listProviders(true),
   });
   const providers = providersQuery.data || [];

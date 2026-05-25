@@ -47,6 +47,7 @@ export interface ProviderTestResult {
 
 export const providerQueryKeys = {
   all: ["providers"] as const,
+  list: (includeDisabled = false) => ["providers", { includeDisabled }] as const,
 };
 
 // =============================================================================

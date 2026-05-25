@@ -202,7 +202,7 @@ export function ServiceConfigDialog({
 
   const selectedProviderId = modelOverrideForm.provider_id || "";
   const providersQuery = useQuery({
-    queryKey: providersApi.providerQueryKeys.all,
+    queryKey: providersApi.providerQueryKeys.list(true),
     queryFn: () => providersApi.listProviders(true),
     enabled: open && isLangGraphService,
   });
@@ -215,7 +215,10 @@ export function ServiceConfigDialog({
   const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const models = useMemo(() => modelsQuery.data ?? [], [modelsQuery.data]);
   const selectableProviders = useMemo(
-    () => providers.filter((provider) => provider.is_enabled),
+    () =>
+      providers.filter(
+        (provider) => provider.is_enabled && provider.has_api_key
+      ),
     [providers]
   );
   const providerModels = useMemo(
@@ -495,9 +498,18 @@ export function ServiceConfigDialog({
                         <Label>{t("services.configDialog.model.title")}</Label>
                         <Switch
                           checked={modelOverrideForm.enabled}
-                          onCheckedChange={(checked) =>
-                            setModelOverrideForm({ ...modelOverrideForm, enabled: checked })
-                          }
+                          onCheckedChange={(checked) => {
+                            const nextProvider =
+                              modelOverrideForm.provider_id ||
+                              selectableProviders[0]?.provider_id;
+                            setModelOverrideForm({
+                              ...modelOverrideForm,
+                              enabled: checked,
+                              provider_id: checked
+                                ? nextProvider
+                                : modelOverrideForm.provider_id,
+                            });
+                          }}
                         />
                       </div>
 
@@ -527,6 +539,14 @@ export function ServiceConfigDialog({
                                   </div>
                                 </SelectItem>
                               ))}
+                              {selectableProviders.length === 0 && (
+                                <div className="px-3 py-2 text-sm text-muted-foreground">
+                                  {t(
+                                    "services.configDialog.model.noRuntimeProviders",
+                                    "No enabled provider with an API key is available."
+                                  )}
+                                </div>
+                              )}
                             </SelectContent>
                           </Select>
                         </div>
