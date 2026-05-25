@@ -161,6 +161,43 @@ function summarizeModelOverride(value: unknown) {
   };
 }
 
+function compactLogValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(String(value));
+}
+
+function formatModelDebugLine(data: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const push = (key: string, value: unknown) => {
+    parts.push(`${key}=${compactLogValue(value)}`);
+  };
+
+  push("stage", data.stage);
+  push("service_id", data.service_id);
+  push("service_name", data.service_name);
+  push("service_type", data.service_type);
+  push("adapter_type", data.adapter_type);
+  push("proxy_mode", data.proxy_mode);
+  push("transparent_proxy", data.transparent_proxy);
+  push("request_path", data.gateway_request_path);
+  push("thread_id", data.langgraph_thread_id);
+  push("upstream_base_url", data.upstream_base_url);
+  push("graph_id", data.graph_id);
+  push("assistant_id", data.assistant_id);
+
+  const override = asRecord(data.model_override);
+  if (override) {
+    push("override_enabled", override.enabled);
+    push("provider_id", override.provider_id);
+    push("model_id", override.model_id);
+    push("cache_epoch", override.cache_epoch);
+    push("temperature", override.temperature);
+  }
+
+  return `${MODEL_DEBUG_LABEL} ${parts.join(" ")}`;
+}
+
 async function logPlaygroundModelDebug({
   stage,
   serviceId,
@@ -189,14 +226,14 @@ async function logPlaygroundModelDebug({
     langgraph_thread_id: threadId ?? null,
   };
 
-  console.info(MODEL_DEBUG_LABEL, base);
+  console.info(formatModelDebugLine(base), base);
 
   try {
     const serviceDetail = await getService(serviceId);
     const connectorConfig = asRecord(serviceDetail.connector_config) ?? {};
     const metadata = asRecord(serviceDetail.metadata) ?? {};
 
-    console.info(MODEL_DEBUG_LABEL, {
+    const controlPlaneDebug = {
       ...base,
       stage: `${stage}:control-plane`,
       service_name:
@@ -215,13 +252,17 @@ async function logPlaygroundModelDebug({
       graph_id: asSafeString(connectorConfig.graph_id),
       assistant_id: asSafeString(connectorConfig.assistant_id),
       model_override: summarizeModelOverride(connectorConfig.model_override),
-    });
+    };
+
+    console.info(formatModelDebugLine(controlPlaneDebug), controlPlaneDebug);
   } catch (error) {
-    console.warn(MODEL_DEBUG_LABEL, {
+    const failedDebug = {
       ...base,
       stage: `${stage}:control-plane-fetch-failed`,
       error: error instanceof Error ? error.message : String(error),
-    });
+    };
+
+    console.warn(formatModelDebugLine(failedDebug), failedDebug);
   }
 }
 
