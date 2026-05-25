@@ -4,7 +4,7 @@
  * Modal form for creating/editing LLM providers.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
@@ -41,6 +41,7 @@ interface ProviderFormProps {
   onOpenChange: (open: boolean) => void;
   provider?: Provider | null;
   templates?: ProviderTemplate[];
+  templatesLoading?: boolean;
   onSubmit: (data: ProviderCreate | ProviderFromTemplateCreate | ProviderUpdate) => Promise<void>;
   loading?: boolean;
 }
@@ -76,6 +77,7 @@ export function ProviderForm({
   onOpenChange,
   provider,
   templates = [],
+  templatesLoading = false,
   onSubmit,
   loading,
 }: ProviderFormProps) {
@@ -87,6 +89,7 @@ export function ProviderForm({
   );
   const [advancedMode, setAdvancedMode] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const initializedFormKeyRef = useRef<string | null>(null);
   const selectedTemplate = templates.find(
     (template) => template.template_id === selectedTemplateId
   );
@@ -112,6 +115,17 @@ export function ProviderForm({
   const apiType = watch("api_type");
 
   useEffect(() => {
+    if (!open) {
+      initializedFormKeyRef.current = null;
+      return;
+    }
+
+    const formKey = provider ? `edit:${provider.provider_id}` : "create";
+    if (initializedFormKeyRef.current === formKey) return;
+    if (!provider && templatesLoading) return;
+
+    initializedFormKeyRef.current = formKey;
+
     if (provider) {
       setAdvancedMode(true);
       reset({
@@ -134,14 +148,14 @@ export function ProviderForm({
         is_enabled: true,
       });
     }
-  }, [guidedTemplates, provider, reset]);
+  }, [guidedTemplates, open, provider, reset, templatesLoading]);
 
   // Update base URL when API type changes (only for new providers)
   useEffect(() => {
-    if (!isEdit) {
+    if (!isEdit && advancedMode) {
       setValue("base_url", getDefaultBaseUrl(apiType));
     }
-  }, [apiType, isEdit, setValue]);
+  }, [advancedMode, apiType, isEdit, setValue]);
 
   useEffect(() => {
     if (!isEdit && selectedTemplate && !advancedMode) {

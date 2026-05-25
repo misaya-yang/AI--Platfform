@@ -227,9 +227,8 @@ function getCachedServiceDetail(serviceId: string): Promise<ServiceDetail> {
   const cached = serviceDebugDetailCache.get(serviceId);
   if (cached) return cached;
 
-  const pending = getService(serviceId).catch((error) => {
+  const pending = getService(serviceId).finally(() => {
     serviceDebugDetailCache.delete(serviceId);
-    throw error;
   });
   serviceDebugDetailCache.set(serviceId, pending);
   return pending;

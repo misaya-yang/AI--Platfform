@@ -545,6 +545,7 @@ export function ServicesPage() {
         }}
         provider={editingProvider}
         templates={providerTemplatesQuery.data || []}
+        templatesLoading={providerTemplatesQuery.isLoading}
         onSubmit={handleProviderSubmit}
         loading={createProviderMutation.isPending || updateProviderMutation.isPending}
       />
@@ -558,6 +559,8 @@ export function ServicesPage() {
         model={editingModel}
         providers={providers}
         providerTemplates={providerTemplatesQuery.data || []}
+        providersLoading={providersQuery.isLoading}
+        providerTemplatesLoading={providerTemplatesQuery.isLoading}
         onSubmit={handleModelSubmit}
         loading={createModelMutation.isPending || updateModelMutation.isPending}
       />

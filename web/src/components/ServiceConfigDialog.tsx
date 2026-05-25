@@ -294,6 +294,7 @@ export function ServiceConfigDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["service-config", serviceId] });
       queryClient.invalidateQueries({ queryKey: ["services"] });
+      queryClient.invalidateQueries({ queryKey: ["playground-services"] });
       onOpenChange(false);
     },
   });
@@ -303,6 +304,7 @@ export function ServiceConfigDialog({
     mutationFn: () => deleteServiceDef(serviceId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["services"] });
+      queryClient.invalidateQueries({ queryKey: ["playground-services"] });
       onOpenChange(false);
     },
   });
@@ -312,6 +314,7 @@ export function ServiceConfigDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["service-detail", serviceId] });
       queryClient.invalidateQueries({ queryKey: ["services"] });
+      queryClient.invalidateQueries({ queryKey: ["playground-services"] });
       onOpenChange(false);
     },
     onError: (err) => {

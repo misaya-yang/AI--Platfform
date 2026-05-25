@@ -4,7 +4,7 @@
  * Modal form for creating/editing LLM models.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
@@ -41,6 +41,8 @@ interface ModelFormProps {
   model?: LLMModel | null;
   providers: Provider[];
   providerTemplates?: ProviderTemplate[];
+  providersLoading?: boolean;
+  providerTemplatesLoading?: boolean;
   onSubmit: (data: ModelCreate | ModelUpdate) => Promise<void>;
   loading?: boolean;
 }
@@ -111,12 +113,33 @@ function applyCatalogModel(
   setValue("sort_order", catalogModel.sort_order);
 }
 
+function createCatalogModelDefaults(
+  catalogModel?: ProviderTemplate["default_models"][number]
+) {
+  return {
+    model_id: catalogModel?.model_id || "",
+    catalog_model_id: catalogModel?.model_id || CUSTOM_MODEL_VALUE,
+    display_name: catalogModel?.display_name || "",
+    context_window: catalogModel?.context_window ?? 128000,
+    max_output_tokens: catalogModel?.max_output_tokens ?? 4096,
+    supports_vision: catalogModel?.supports_vision ?? false,
+    supports_tools: catalogModel?.supports_tools ?? true,
+    input_price_per_1k: catalogModel?.input_price_per_1k ?? 0,
+    output_price_per_1k: catalogModel?.output_price_per_1k ?? 0,
+    access_level: (catalogModel?.access_level as ModelAccessLevel | undefined) ?? "public",
+    is_enabled: true,
+    sort_order: catalogModel?.sort_order ?? 0,
+  };
+}
+
 export function ModelForm({
   open,
   onOpenChange,
   model,
   providers,
   providerTemplates = [],
+  providersLoading = false,
+  providerTemplatesLoading = false,
   onSubmit,
   loading,
 }: ModelFormProps) {
@@ -124,6 +147,7 @@ export function ModelForm({
   const isEdit = !!model;
   const [advancedCatalogOverride, setAdvancedCatalogOverride] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const initializedFormKeyRef = useRef<string | null>(null);
 
   const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
     { value: "public", label: t("llm.model.accessLevels.public") },
@@ -262,6 +286,19 @@ export function ModelForm({
     !selectedProviderCatalogMatchesModel;
 
   useEffect(() => {
+    if (!open) {
+      initializedFormKeyRef.current = null;
+      return;
+    }
+
+    const formKey = model
+      ? `edit:${model.model_id}:${model.updated_at}`
+      : "create";
+    if (initializedFormKeyRef.current === formKey) return;
+    if (!model && (providersLoading || providerTemplatesLoading)) return;
+
+    initializedFormKeyRef.current = formKey;
+
     if (model) {
       setAdvancedCatalogOverride(false);
       setShowAdvancedSettings(true);
@@ -281,27 +318,23 @@ export function ModelForm({
         sort_order: model.sort_order,
       });
     } else {
+      const firstProviderOption = selectableProviderOptions[0];
+      const firstCatalogModel = firstProviderOption?.template?.default_models[0];
       setAdvancedCatalogOverride(false);
-      setShowAdvancedSettings(false);
+      setShowAdvancedSettings(!firstCatalogModel);
       reset({
-        model_id: "",
-        provider_id: selectableProviderOptions[0]?.value || "",
-        catalog_model_id:
-          selectableProviderOptions[0]?.template?.default_models[0]?.model_id ||
-          CUSTOM_MODEL_VALUE,
-        display_name: "",
-        context_window: 128000,
-        max_output_tokens: 4096,
-        supports_vision: false,
-        supports_tools: true,
-        input_price_per_1k: 0,
-        output_price_per_1k: 0,
-        access_level: "public",
-        is_enabled: true,
-        sort_order: 0,
+        ...createCatalogModelDefaults(firstCatalogModel),
+        provider_id: firstProviderOption?.value || "",
       });
     }
-  }, [model, reset, selectableProviderOptions]);
+  }, [
+    model,
+    open,
+    providerTemplatesLoading,
+    providersLoading,
+    reset,
+    selectableProviderOptions,
+  ]);
 
   useEffect(() => {
     if (isEdit || !modelId || !providerId) return;
