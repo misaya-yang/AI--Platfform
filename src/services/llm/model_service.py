@@ -186,6 +186,67 @@ class ModelService:
 
         return row_dict
 
+    async def upsert_model_from_catalog(
+        self,
+        *,
+        tenant_id: str,
+        provider_id: str,
+        model_id: str,
+        display_name: str,
+        context_window: int = 128000,
+        max_output_tokens: int = 4096,
+        supports_vision: bool = False,
+        supports_tools: bool = True,
+        input_price_per_1k: Decimal = Decimal("0"),
+        output_price_per_1k: Decimal = Decimal("0"),
+        access_level: str = "public",
+        sort_order: int = 0,
+        enable_new: bool = True,
+    ) -> tuple[str, dict[str, Any]]:
+        """Create or refresh catalog metadata for a provider-scoped model.
+
+        Existing rows keep their ``is_enabled`` value so an admin-disabled
+        model is not re-enabled by a later sync.
+        """
+        existing = await self.get_provider_model(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        if existing:
+            updated = await self.update_model(
+                tenant_id=tenant_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                display_name=display_name,
+                context_window=context_window,
+                max_output_tokens=max_output_tokens,
+                supports_vision=supports_vision,
+                supports_tools=supports_tools,
+                input_price_per_1k=input_price_per_1k,
+                output_price_per_1k=output_price_per_1k,
+                access_level=access_level,
+                sort_order=sort_order,
+            )
+            return "updated", updated or existing
+
+        created = await self.create_model(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            display_name=display_name,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
+            supports_vision=supports_vision,
+            supports_tools=supports_tools,
+            input_price_per_1k=input_price_per_1k,
+            output_price_per_1k=output_price_per_1k,
+            access_level=access_level,
+            is_enabled=enable_new,
+            sort_order=sort_order,
+        )
+        return "created", created
+
     async def update_model(
         self,
         tenant_id: str,

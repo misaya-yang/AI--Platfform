@@ -146,7 +146,7 @@ Run from Gateway root:
 ```bash
 cd /Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway
 source ~/miniconda3/bin/activate ai_gateway
-python -m pytest tests/services/test_provider_templates.py tests/api/test_provider_template_routes.py tests/services/test_model_catalog_sync.py -q
+python -m pytest tests/services/test_provider_templates.py tests/api/test_provider_template_routes.py tests/services/test_model_catalog_sync.py -q --no-cov
 npm --prefix web run lint
 npm --prefix web run build
 ```

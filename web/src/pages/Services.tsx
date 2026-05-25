@@ -33,7 +33,12 @@ import { useAppStore } from "@/store/useAppStore";
 import { ProviderCard, ProviderForm, ModelTable, ModelForm } from "@/components/llm";
 import * as providersApi from "@/api/providers";
 import * as modelsApi from "@/api/models";
-import type { Provider, ProviderCreate, ProviderUpdate } from "@/api/providers";
+import type {
+  Provider,
+  ProviderCreate,
+  ProviderFromTemplateCreate,
+  ProviderUpdate,
+} from "@/api/providers";
 import type { LLMModel, ModelCreate, ModelUpdate } from "@/api/models";
 import { ExamsTabContent } from "@/pages/exams";
 
@@ -98,6 +103,10 @@ export function ServicesPage() {
     queryKey: providersApi.providerQueryKeys.list(true),
     queryFn: () => providersApi.listProviders(true),
   });
+  const providerTemplatesQuery = useQuery({
+    queryKey: providersApi.providerQueryKeys.templates,
+    queryFn: providersApi.listProviderTemplates,
+  });
   const providers = providersQuery.data || [];
   const providerMap = providers.reduce(
     (acc, p) => ({ ...acc, [p.provider_id]: p.display_name }),
@@ -152,7 +161,10 @@ export function ServicesPage() {
 
   // Provider mutations
   const createProviderMutation = useMutation({
-    mutationFn: (data: ProviderCreate) => providersApi.createProvider(data),
+    mutationFn: (data: ProviderCreate | ProviderFromTemplateCreate) =>
+      "template_id" in data
+        ? providersApi.createProviderFromTemplate(data)
+        : providersApi.createProvider(data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["providers"] });
       setProviderFormOpen(false);
@@ -188,6 +200,39 @@ export function ServicesPage() {
     },
     onError: (err: Error) => {
       toast({ title: t("services.page.toast.deleteFailed"), description: getErrorMessage(err), variant: "destructive" });
+    },
+  });
+
+  const syncProviderModelsMutation = useMutation({
+    mutationFn: (providerId: string) => providersApi.syncProviderModels(providerId),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      toast({
+        title: t("services.page.toast.modelsSynced", "Models synced"),
+        description: t(
+          "services.page.toast.modelsSyncedDescription",
+          "Created {{created}}, updated {{updated}}, skipped {{skipped}}.",
+          {
+            created: result.created_models.length,
+            updated: result.updated_models.length,
+            skipped: result.skipped_models.length,
+          }
+        ),
+      });
+      if (result.discovery_warnings.length > 0) {
+        toast({
+          title: t("services.page.toast.syncWarnings", "Sync warnings"),
+          description: result.discovery_warnings.join(" "),
+        });
+      }
+    },
+    onError: (err: Error) => {
+      toast({
+        title: t("services.page.toast.syncFailed", "Model sync failed"),
+        description: getErrorMessage(err),
+        variant: "destructive",
+      });
     },
   });
 
@@ -248,7 +293,9 @@ export function ServicesPage() {
   }
 
   // Provider handlers
-  const handleProviderSubmit = async (data: ProviderCreate | ProviderUpdate) => {
+  const handleProviderSubmit = async (
+    data: ProviderCreate | ProviderFromTemplateCreate | ProviderUpdate
+  ) => {
     if (editingProvider) {
       await updateProviderMutation.mutateAsync({
         id: editingProvider.provider_id,
@@ -441,6 +488,11 @@ export function ServicesPage() {
                     provider={p}
                     onEdit={() => handleEditProvider(p)}
                     onDelete={() => handleDeleteProvider(p)}
+                    onSyncModels={() => syncProviderModelsMutation.mutate(p.provider_id)}
+                    syncingModels={
+                      syncProviderModelsMutation.isPending &&
+                      syncProviderModelsMutation.variables === p.provider_id
+                    }
                   />
                 ))}
               </div>
@@ -492,6 +544,7 @@ export function ServicesPage() {
           if (!open) setEditingProvider(null);
         }}
         provider={editingProvider}
+        templates={providerTemplatesQuery.data || []}
         onSubmit={handleProviderSubmit}
         loading={createProviderMutation.isPending || updateProviderMutation.isPending}
       />
@@ -504,6 +557,7 @@ export function ServicesPage() {
         }}
         model={editingModel}
         providers={providers}
+        providerTemplates={providerTemplatesQuery.data || []}
         onSubmit={handleModelSubmit}
         loading={createModelMutation.isPending || updateModelMutation.isPending}
       />

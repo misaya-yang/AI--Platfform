@@ -72,6 +72,84 @@ class ProviderTestResult(BaseModel):
     latency_ms: int | None = None
 
 
+class ProviderTemplateCredentialField(BaseModel):
+    """Credential field exposed by a provider template."""
+
+    name: str
+    label: str
+    field_type: str = "password"
+    required: bool = True
+    placeholder: str | None = None
+
+
+class ProviderTemplateModel(BaseModel):
+    """Trusted model metadata exposed by a provider template."""
+
+    model_id: str
+    display_name: str
+    context_window: int
+    max_output_tokens: int
+    supports_vision: bool
+    supports_tools: bool
+    input_price_per_1k: float
+    output_price_per_1k: float
+    access_level: str
+    sort_order: int
+
+
+class ProviderTemplateResponse(BaseModel):
+    """Provider template response for guided onboarding."""
+
+    template_id: str
+    display_name: str
+    description: str
+    default_provider_id: str
+    api_type: str
+    default_base_url: str
+    credential_fields: list[ProviderTemplateCredentialField]
+    discovery_strategy: str
+    default_models: list[ProviderTemplateModel]
+    advanced: bool = False
+
+
+class ProviderFromTemplateCreate(BaseModel):
+    """Request to create or update a provider from a template."""
+
+    template_id: str = Field(..., min_length=1)
+    provider_id: str | None = Field(None, min_length=1, max_length=50)
+    display_name: str | None = Field(None, min_length=1, max_length=100)
+    base_url: str | None = Field(None, max_length=500)
+    api_key: str | None = Field(None, description="API key (will be encrypted)")
+    is_enabled: bool = True
+
+
+class ProviderModelSyncSkipped(BaseModel):
+    """A discovered model that was not enabled by sync."""
+
+    model_id: str
+    reason: str
+
+
+class ProviderModelSyncItem(BaseModel):
+    """A model created or updated by provider model sync."""
+
+    model_id: str
+    provider_id: str
+    display_name: str
+    is_enabled: bool
+
+
+class ProviderModelSyncResult(BaseModel):
+    """Provider model sync response."""
+
+    provider_id: str
+    template_id: str | None = None
+    created_models: list[ProviderModelSyncItem]
+    updated_models: list[ProviderModelSyncItem]
+    skipped_models: list[ProviderModelSyncSkipped]
+    discovery_warnings: list[str]
+
+
 # ============================================================================
 # Model Schemas
 # ============================================================================

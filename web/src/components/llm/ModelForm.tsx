@@ -4,7 +4,7 @@
  * Modal form for creating/editing LLM models.
  */
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
@@ -27,13 +27,14 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import type { LLMModel, ModelCreate, ModelUpdate, ModelAccessLevel } from "@/api/models";
-import type { Provider } from "@/api/providers";
+import type { Provider, ProviderTemplate } from "@/api/providers";
 
 interface ModelFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   model?: LLMModel | null;
   providers: Provider[];
+  providerTemplates?: ProviderTemplate[];
   onSubmit: (data: ModelCreate | ModelUpdate) => Promise<void>;
   loading?: boolean;
 }
@@ -58,11 +59,13 @@ export function ModelForm({
   onOpenChange,
   model,
   providers,
+  providerTemplates = [],
   onSubmit,
   loading,
 }: ModelFormProps) {
   const { t } = useTranslation();
   const isEdit = !!model;
+  const [advancedCatalogOverride, setAdvancedCatalogOverride] = useState(false);
 
   const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
     { value: "public", label: t("llm.model.accessLevels.public") },
@@ -96,10 +99,28 @@ export function ModelForm({
   });
 
   const providerId = watch("provider_id");
+  const modelId = watch("model_id");
   const accessLevel = watch("access_level");
+  const knownModelProviders = useMemo(() => {
+    const normalized = (modelId || "").trim().toLowerCase();
+    if (!normalized) return [];
+    return providerTemplates
+      .filter((template) =>
+        template.default_models.some((catalogModel) => {
+          return catalogModel.model_id.toLowerCase() === normalized;
+        })
+      )
+      .map((template) => template.default_provider_id);
+  }, [modelId, providerTemplates]);
+  const catalogMismatch =
+    !isEdit &&
+    !advancedCatalogOverride &&
+    knownModelProviders.length > 0 &&
+    !knownModelProviders.includes(providerId);
 
   useEffect(() => {
     if (model) {
+      setAdvancedCatalogOverride(false);
       reset({
         model_id: model.model_id,
         provider_id: model.provider_id,
@@ -115,6 +136,7 @@ export function ModelForm({
         sort_order: model.sort_order,
       });
     } else {
+      setAdvancedCatalogOverride(false);
       reset({
         model_id: "",
         provider_id: providers[0]?.provider_id || "",
@@ -131,6 +153,28 @@ export function ModelForm({
       });
     }
   }, [model, providers, reset]);
+
+  useEffect(() => {
+    if (isEdit || !modelId || !providerId) return;
+
+    const template = providerTemplates.find(
+      (item) => item.default_provider_id === providerId
+    );
+    const catalogModel = template?.default_models.find(
+      (item) => item.model_id.toLowerCase() === modelId.trim().toLowerCase()
+    );
+    if (!catalogModel) return;
+
+    setValue("display_name", catalogModel.display_name);
+    setValue("context_window", catalogModel.context_window);
+    setValue("max_output_tokens", catalogModel.max_output_tokens);
+    setValue("supports_vision", catalogModel.supports_vision);
+    setValue("supports_tools", catalogModel.supports_tools);
+    setValue("input_price_per_1k", catalogModel.input_price_per_1k);
+    setValue("output_price_per_1k", catalogModel.output_price_per_1k);
+    setValue("access_level", catalogModel.access_level as ModelAccessLevel);
+    setValue("sort_order", catalogModel.sort_order);
+  }, [isEdit, modelId, providerId, providerTemplates, setValue]);
 
   const onFormSubmit = async (data: FormData) => {
     const submitData: ModelCreate | ModelUpdate = isEdit
@@ -236,6 +280,22 @@ export function ModelForm({
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+              )}
+
+              {catalogMismatch && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                  {t(
+                    "llm.model.catalogMismatch",
+                    "This model belongs to a known provider catalog. Switch to the matching provider or enable advanced override."
+                  )}{" "}
+                  <button
+                    type="button"
+                    className="font-semibold underline"
+                    onClick={() => setAdvancedCatalogOverride(true)}
+                  >
+                    {t("llm.model.enableAdvancedOverride", "Enable advanced override")}
+                  </button>
                 </div>
               )}
 
@@ -448,7 +508,7 @@ export function ModelForm({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={loading}>
+            <Button type="submit" disabled={loading || catalogMismatch}>
               {loading ? t("common.loading") : t("common.save")}
             </Button>
           </DialogFooter>

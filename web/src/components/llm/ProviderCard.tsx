@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   XCircle,
   Zap,
+  RefreshCw,
 } from "lucide-react";
 import type { Provider } from "@/api/providers";
 import { testProviderConnection, getApiTypeDisplayName } from "@/api/providers";
@@ -48,9 +49,17 @@ interface ProviderCardProps {
   provider: Provider;
   onEdit?: () => void;
   onDelete?: () => void;
+  onSyncModels?: () => void;
+  syncingModels?: boolean;
 }
 
-export function ProviderCard({ provider, onEdit, onDelete }: ProviderCardProps) {
+export function ProviderCard({
+  provider,
+  onEdit,
+  onDelete,
+  onSyncModels,
+  syncingModels = false,
+}: ProviderCardProps) {
   const { t } = useTranslation();
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
@@ -135,6 +144,16 @@ export function ProviderCard({ provider, onEdit, onDelete }: ProviderCardProps) 
 
           {/* Actions — visible on hover */}
           <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onSyncModels}
+              disabled={syncingModels}
+              className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted"
+              title={t("providers.actions.syncModels", "Sync models")}
+            >
+              <RefreshCw className={cn("h-4 w-4", syncingModels && "animate-spin")} />
+            </Button>
             <Button
               variant="ghost"
               size="icon"

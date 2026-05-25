@@ -4,7 +4,7 @@
  * Modal form for creating/editing LLM providers.
  */
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useForm } from "react-hook-form";
 import {
@@ -26,14 +26,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import type { Provider, ProviderCreate, ProviderUpdate } from "@/api/providers";
+import { cn } from "@/lib/utils";
+import type {
+  Provider,
+  ProviderCreate,
+  ProviderFromTemplateCreate,
+  ProviderTemplate,
+  ProviderUpdate,
+} from "@/api/providers";
 import { getDefaultBaseUrl } from "@/api/providers";
 
 interface ProviderFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   provider?: Provider | null;
-  onSubmit: (data: ProviderCreate | ProviderUpdate) => Promise<void>;
+  templates?: ProviderTemplate[];
+  onSubmit: (data: ProviderCreate | ProviderFromTemplateCreate | ProviderUpdate) => Promise<void>;
   loading?: boolean;
 }
 
@@ -67,11 +75,21 @@ export function ProviderForm({
   open,
   onOpenChange,
   provider,
+  templates = [],
   onSubmit,
   loading,
 }: ProviderFormProps) {
   const { t } = useTranslation();
   const isEdit = !!provider;
+  const guidedTemplates = useMemo(
+    () => templates.filter((template) => template.template_id !== "custom-openai-compatible"),
+    [templates]
+  );
+  const [advancedMode, setAdvancedMode] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const selectedTemplate = templates.find(
+    (template) => template.template_id === selectedTemplateId
+  );
 
   const {
     register,
@@ -95,6 +113,7 @@ export function ProviderForm({
 
   useEffect(() => {
     if (provider) {
+      setAdvancedMode(true);
       reset({
         provider_id: provider.provider_id,
         display_name: provider.display_name,
@@ -104,6 +123,8 @@ export function ProviderForm({
         is_enabled: provider.is_enabled,
       });
     } else {
+      setAdvancedMode(false);
+      setSelectedTemplateId(guidedTemplates[0]?.template_id || "");
       reset({
         provider_id: "",
         display_name: "",
@@ -113,7 +134,7 @@ export function ProviderForm({
         is_enabled: true,
       });
     }
-  }, [provider, reset]);
+  }, [guidedTemplates, provider, reset]);
 
   // Update base URL when API type changes (only for new providers)
   useEffect(() => {
@@ -122,7 +143,26 @@ export function ProviderForm({
     }
   }, [apiType, isEdit, setValue]);
 
+  useEffect(() => {
+    if (!isEdit && selectedTemplate && !advancedMode) {
+      setValue("api_type", selectedTemplate.api_type);
+      setValue("base_url", selectedTemplate.default_base_url || "");
+      setValue("provider_id", selectedTemplate.default_provider_id);
+      setValue("display_name", selectedTemplate.display_name);
+    }
+  }, [advancedMode, isEdit, selectedTemplate, setValue]);
+
   const onFormSubmit = async (data: FormData) => {
+    if (!isEdit && selectedTemplate && !advancedMode) {
+      const submitData: ProviderFromTemplateCreate = {
+        template_id: selectedTemplate.template_id,
+        api_key: data.api_key || undefined,
+        is_enabled: data.is_enabled,
+      };
+      await onSubmit(submitData);
+      return;
+    }
+
     const submitData: ProviderCreate | ProviderUpdate = isEdit
       ? {
           display_name: data.display_name,
@@ -155,8 +195,50 @@ export function ProviderForm({
           </DialogHeader>
 
           <div className="grid gap-4 py-4">
+            {!isEdit && guidedTemplates.length > 0 && (
+              <div className="grid gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <Label>{t("llm.provider.template", "Provider template")}</Label>
+                  <Button
+                    type="button"
+                    variant={advancedMode ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setAdvancedMode((value) => !value)}
+                  >
+                    {advancedMode
+                      ? t("llm.provider.guidedMode", "Guided")
+                      : t("llm.provider.advancedMode", "Advanced")}
+                  </Button>
+                </div>
+                {!advancedMode && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {guidedTemplates.map((template) => (
+                      <button
+                        key={template.template_id}
+                        type="button"
+                        onClick={() => setSelectedTemplateId(template.template_id)}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left transition-colors",
+                          selectedTemplateId === template.template_id
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-primary/50"
+                        )}
+                      >
+                        <span className="block text-sm font-semibold">
+                          {template.display_name}
+                        </span>
+                        <span className="block text-xs text-muted-foreground truncate">
+                          {template.discovery_strategy}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Provider ID (only for create) */}
-            {!isEdit && (
+            {!isEdit && advancedMode && (
               <div className="grid gap-2">
                 <Label htmlFor="provider_id">{t("llm.provider.providerId")}</Label>
                 <Input
@@ -177,7 +259,8 @@ export function ProviderForm({
             )}
 
             {/* Display Name */}
-            <div className="grid gap-2">
+            {(isEdit || advancedMode) && (
+              <div className="grid gap-2">
               <Label htmlFor="display_name">{t("llm.provider.displayName")}</Label>
               <Input
                 id="display_name"
@@ -188,9 +271,11 @@ export function ProviderForm({
                 <p className="text-sm text-destructive">{errors.display_name.message}</p>
               )}
             </div>
+            )}
 
             {/* API Type */}
-            <div className="grid gap-2">
+            {(isEdit || advancedMode) && (
+              <div className="grid gap-2">
               <Label htmlFor="api_type">{t("llm.provider.apiType")}</Label>
               <Select
                 value={apiType}
@@ -208,9 +293,11 @@ export function ProviderForm({
                 </SelectContent>
               </Select>
             </div>
+            )}
 
             {/* Base URL */}
-            <div className="grid gap-2">
+            {(isEdit || advancedMode) && (
+              <div className="grid gap-2">
               <Label htmlFor="base_url">{t("llm.provider.baseUrl")}</Label>
               <Input
                 id="base_url"
@@ -221,6 +308,7 @@ export function ProviderForm({
                 {t("llm.provider.baseUrlHint")}
               </p>
             </div>
+            )}
 
             {/* API Key */}
             <div className="grid gap-2">
