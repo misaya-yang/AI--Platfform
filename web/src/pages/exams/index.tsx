@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -487,6 +488,12 @@ function CreateExamDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>{t("exams.create.title")}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {t(
+              "exams.create.descriptionText",
+              "Create an exam draft from an existing quiz and configure score, retake, and time-limit settings."
+            )}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-2">

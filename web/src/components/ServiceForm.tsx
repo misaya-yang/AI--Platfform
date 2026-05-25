@@ -5,6 +5,7 @@ import YAML from "yaml";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -161,6 +162,12 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
       <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t("services.registerService")}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {t(
+              "services.registerServiceDescription",
+              "Register a LangGraph service by entering connection details or advanced YAML configuration."
+            )}
+          </DialogDescription>
         </DialogHeader>
 
         <Tabs value={tab} onValueChange={setTab}>
