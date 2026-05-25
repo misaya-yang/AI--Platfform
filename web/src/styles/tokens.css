@@ -27,7 +27,7 @@
   /* Z-index layers — 5 named tiers */
   --z-base: 0;
   --z-sticky: 10;
-  --z-dropdown: 20;
+  --z-dropdown: 70;
   --z-overlay: 30;
   --z-modal: 40;
 }
