@@ -519,18 +519,6 @@ class EnhancedSessionMessage(BaseModel):
 _REFERENCE_IMAGE_MAX_CHARS = 6_000_000
 
 
-class ImageModelOverrideConfig(BaseModel):
-    """Public image-generation model selector.
-
-    API keys are intentionally absent; Gateway resolves them from the
-    provider control plane before proxying to assistant-service.
-    """
-
-    enabled: bool = Field(default=False)
-    provider_id: str | None = Field(default=None, max_length=50)
-    model_id: str | None = Field(default=None, max_length=100)
-
-
 class ImageGenerationRequest(BaseModel):
     """Request for image generation (single-turn or multi-turn).
 
@@ -591,13 +579,7 @@ class ImageGenerationRequest(BaseModel):
             "possible — that path doesn't fetch a URL at all."
         ),
     )
-    add_watermark: bool = Field(
-        default=True, description="Add AI-generated watermark to output images"
-    )
-    image_model_override: ImageModelOverrideConfig | None = Field(
-        default=None,
-        description="Optional public image model selector. API keys are forbidden.",
-    )
+    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -647,9 +629,7 @@ class ImageGenerationResponse(BaseModel):
     images: list[GeneratedImage] = Field(default_factory=list, description="Generated images")
     task_id: str | None = None
     status: str | None = None
-    provider: str | None = Field(
-        default=None, description="Provider used for generation (dashscope/google)"
-    )
+    provider: str | None = Field(default=None, description="Provider used for generation (dashscope/google)")
     duration_ms: float | None = Field(default=None, description="Generation time in milliseconds")
     error: str | None = Field(default=None, description="Error message if failed")
     error_code: str | None = None
@@ -686,9 +666,7 @@ class AsyncImageGenerationRequest(BaseModel):
     )
     size: str | None = Field(default="1024*1024", description="Image size")
     n: int = Field(default=1, ge=1, le=4, description="Number of images to generate")
-    session_id: str | None = Field(
-        default=None, description="Session ID for stateful multi-turn editing"
-    )
+    session_id: str | None = Field(default=None, description="Session ID for stateful multi-turn editing")
     reference_artifact_id: str | None = Field(
         default=None,
         description=(
@@ -716,13 +694,7 @@ class AsyncImageGenerationRequest(BaseModel):
             "private/loopback rejected; 8 MB streaming cap."
         ),
     )
-    add_watermark: bool = Field(
-        default=True, description="Add AI-generated watermark to output images"
-    )
-    image_model_override: ImageModelOverrideConfig | None = Field(
-        default=None,
-        description="Optional public image model selector. API keys are forbidden.",
-    )
+    add_watermark: bool = Field(default=True, description="Add AI-generated watermark to output images")
     app_user_id: str | None = None
     app_tenant_id: str | None = None
     parent_artifact_id: str | None = None
@@ -730,9 +702,7 @@ class AsyncImageGenerationRequest(BaseModel):
     client_request_id: str | None = Field(default=None, max_length=128)
     return_variants: list[str] | None = None
     allow_branch: bool = False
-    callback_url: str | None = Field(
-        default=None, description="URL to POST results when generation completes"
-    )
+    callback_url: str | None = Field(default=None, description="URL to POST results when generation completes")
 
     @field_validator("style", mode="before")
     @classmethod
@@ -767,9 +737,7 @@ class AsyncImageTaskStatusResponse(BaseModel):
     prompt: str = Field(..., description="Original prompt")
     model_id: str = Field(..., description="Model used")
     provider: str | None = Field(default=None, description="Provider used")
-    images: list[AsyncImageArtifact] = Field(
-        default_factory=list, description="Generated images (when completed)"
-    )
+    images: list[AsyncImageArtifact] = Field(default_factory=list, description="Generated images (when completed)")
     duration_ms: float | None = Field(default=None, description="Total duration when completed")
     error: str | None = Field(default=None, description="Error message if failed")
     error_code: str | None = None

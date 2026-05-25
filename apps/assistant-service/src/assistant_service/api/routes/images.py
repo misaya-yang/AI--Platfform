@@ -93,7 +93,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ...auth import UserContext, get_user_context
 from ...core.models.model_registry import ModelRegistry
-from ...core.tools.gemini_image_tool import GeminiImageGenerator, get_gemini_image_generator
+from ...core.tools.gemini_image_tool import get_gemini_image_generator
 from ...core.tools.smart_image_generator import get_smart_image_generator
 from ..deps import get_model_registry, get_session_manager
 
@@ -116,7 +116,12 @@ _persistence_semaphore = asyncio.Semaphore(_PERSIST_CONCURRENCY)
 
 
 def _is_prod_env() -> bool:
-    env = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or os.getenv("ENV") or "").lower()
+    env = (
+        os.getenv("ENVIRONMENT")
+        or os.getenv("APP_ENV")
+        or os.getenv("ENV")
+        or ""
+    ).lower()
     return env in {"prod", "production"}
 
 
@@ -177,7 +182,6 @@ def _cap_result_images(result: Any, requested_n: int | None) -> None:
 # Schemas
 # -----------------------------------------------------------------------------
 
-
 class GeneratedImage(BaseModel):
     """Generated image — points to S3-backed artifact when storage is configured."""
 
@@ -194,7 +198,7 @@ class GeneratedImage(BaseModel):
     artifact_id: str | None = Field(
         default=None,
         description="Stable ID for this generated image. Use as `reference_image_url` "
-        "lookup or persist for later retrieval.",
+                    "lookup or persist for later retrieval.",
     )
 
 
@@ -253,10 +257,6 @@ class ImageGenerationRequest(BaseModel):
         ),
     )
     add_watermark: bool = True
-    hejaz_image_model: dict[str, Any] | None = Field(
-        default=None,
-        description="Gateway-internal image provider/model config. Browser clients must not send it.",
-    )
 
     # ------------- Image-redesign Phase 2 — multi-turn primitives -------------
     app_user_id: str | None = Field(
@@ -269,7 +269,9 @@ class ImageGenerationRequest(BaseModel):
     )
     app_tenant_id: str | None = Field(
         default=None,
-        description=("Tenant id of the calling app's end-user. See `app_user_id`."),
+        description=(
+            "Tenant id of the calling app's end-user. See `app_user_id`."
+        ),
     )
     parent_artifact_id: str | None = Field(
         default=None,
@@ -598,7 +600,6 @@ def _get_artifact_storage():
     (multi-turn won't work)."""
     try:
         from ai_gateway_core.storage import get_artifact_storage
-
         return get_artifact_storage()
     except Exception:
         return None
@@ -649,10 +650,7 @@ def _normalize_reference_image_b64(value: str) -> tuple[str, bytes, str]:
         if not sep:
             raise HTTPException(
                 status_code=422,
-                detail={
-                    "error_code": "validation_error",
-                    "message": "Invalid data URL reference_image",
-                },
+                detail={"error_code": "validation_error", "message": "Invalid data URL reference_image"},
             )
         if ";" in header:
             mime_type = header[5:].split(";", 1)[0] or mime_type
@@ -783,19 +781,13 @@ async def _download_blob_bytes(
     if len(content) > _REFERENCE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
-            detail={
-                "error_code": "reference_too_large",
-                "message": "reference blob exceeds size limit",
-            },
+            detail={"error_code": "reference_too_large", "message": "reference blob exceeds size limit"},
         )
     expected_sha = row.get("content_sha256")
     if expected_sha and _sha256_hex(content) != expected_sha:
         raise HTTPException(
             status_code=409,
-            detail={
-                "error_code": "blob_integrity_mismatch",
-                "message": "reference blob checksum mismatch",
-            },
+            detail={"error_code": "blob_integrity_mismatch", "message": "reference blob checksum mismatch"},
         )
     return content
 
@@ -854,9 +846,7 @@ async def _persist_and_get_url(
             cb64, mt = raw_b64, raw_mt
         return None, GeneratedImage(
             url=f"data:{mt};base64,{cb64}",
-            width=width,
-            height=height,
-            artifact_id=None,
+            width=width, height=height, artifact_id=None,
         )
 
     # Storage available — persist raw artifact first (always).
@@ -897,9 +887,7 @@ async def _persist_and_get_url(
             cb64, mt = raw_b64, raw_mt
         return None, GeneratedImage(
             url=f"data:{mt};base64,{cb64}",
-            width=width,
-            height=height,
-            artifact_id=None,
+            width=width, height=height, artifact_id=None,
         )
 
     # Optionally produce a thumbnail variant. Best-effort: any failure logs
@@ -934,9 +922,7 @@ async def _persist_and_get_url(
         # Single-artifact happy path.
         return raw_artifact_id, GeneratedImage(
             url=raw_url or f"data:{raw_mt};base64,{raw_b64}",
-            width=width,
-            height=height,
-            artifact_id=raw_artifact_id,
+            width=width, height=height, artifact_id=raw_artifact_id,
         )
 
     # add_watermark=True → store a separate watermarked artifact for the public URL.
@@ -971,16 +957,12 @@ async def _persist_and_get_url(
         # Degrade: return raw URL but still keep raw_artifact_id for history.
         return raw_artifact_id, GeneratedImage(
             url=raw_url or f"data:{raw_mt};base64,{raw_b64}",
-            width=width,
-            height=height,
-            artifact_id=raw_artifact_id,
+            width=width, height=height, artifact_id=raw_artifact_id,
         )
 
     return raw_artifact_id, GeneratedImage(
         url=public_url or raw_url or f"data:{raw_mt};base64,{raw_b64}",
-        width=width,
-        height=height,
-        artifact_id=public_artifact_id,
+        width=width, height=height, artifact_id=public_artifact_id,
     )
 
 
@@ -1024,8 +1006,7 @@ async def _load_artifact_bytes_owner_scoped(
         # path so legacy callers and unit-test mocks keep working.
         logger.debug(
             "find_variant unavailable on artifact %s (%s) — falling back to get_artifact",
-            artifact_id,
-            exc,
+            artifact_id, exc,
         )
         try:
             raw = await artifact_storage.get_artifact(artifact_id)
@@ -1095,10 +1076,7 @@ async def _resolve_reference_bytes(
         if len(content) > _REFERENCE_MAX_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail={
-                    "error_code": "reference_too_large",
-                    "message": "reference artifact exceeds size limit",
-                },
+                detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
             )
         return _b64.b64encode(content).decode(), body.parent_artifact_id
 
@@ -1113,10 +1091,7 @@ async def _resolve_reference_bytes(
         if len(content) > _REFERENCE_MAX_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail={
-                    "error_code": "reference_too_large",
-                    "message": "reference artifact exceeds size limit",
-                },
+                detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
             )
         return _b64.b64encode(content).decode(), body.reference_artifact_id
 
@@ -1140,18 +1115,13 @@ async def _resolve_reference_bytes(
         if row and row.get("latest_artifact_id"):
             latest_id = row["latest_artifact_id"]
             content = await _load_artifact_bytes_owner_scoped(
-                artifact_storage,
-                latest_id,
-                owner_scope=owner_scope,
-                user=user,
+                artifact_storage, latest_id,
+                owner_scope=owner_scope, user=user,
             )
             if len(content) > _REFERENCE_MAX_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail={
-                        "error_code": "reference_too_large",
-                        "message": "reference artifact exceeds size limit",
-                    },
+                    detail={"error_code": "reference_too_large", "message": "reference artifact exceeds size limit"},
                 )
             return _b64.b64encode(content).decode(), latest_id
 
@@ -1193,10 +1163,7 @@ async def _resolve_reference_bytes(
         if len(content) > _REFERENCE_MAX_BYTES:
             raise HTTPException(
                 status_code=413,
-                detail={
-                    "error_code": "reference_too_large",
-                    "message": "reference image exceeds size limit",
-                },
+                detail={"error_code": "reference_too_large", "message": "reference image exceeds size limit"},
             )
         if artifact_storage and db_pool is not None and owner_scope and user:
             try:
@@ -1256,8 +1223,9 @@ def _limit_replay_history(image_history: list[dict]) -> list[dict]:
     visual_seen = 0
     keep_reversed: list[dict] = []
     for turn in reversed(image_history):
-        is_visual_model = turn.get("role") == "model" and (
-            turn.get("artifact_id") or turn.get("image_base64") or turn.get("file_uri")
+        is_visual_model = (
+            turn.get("role") == "model"
+            and (turn.get("artifact_id") or turn.get("image_base64") or turn.get("file_uri"))
         )
         if is_visual_model:
             if visual_seen >= _REPLAY_MAX_VISUAL_TURNS:
@@ -1281,7 +1249,6 @@ async def _run_gemini_multi_turn(
     session_manager,
     user: UserContext,
     artifact_storage,
-    gemini_generator: GeminiImageGenerator | None = None,
 ):
     """Run one turn of a stateful multi-turn editing session.
 
@@ -1292,7 +1259,7 @@ async def _run_gemini_multi_turn(
     if not body.session_id:
         raise ValueError("session_id required for multi-turn flow")
 
-    gemini = gemini_generator or get_gemini_image_generator()
+    gemini = get_gemini_image_generator()
     if not gemini.is_configured:
         return None, None, "Gemini API key not configured for multi-turn image chat"
 
@@ -1311,7 +1278,9 @@ async def _run_gemini_multi_turn(
         image_history = session.metadata.get("image_chat_history", [])
         locked_preset = resolve_style_preset(session.metadata.get("style_preset"))
 
-    effective_preset = body.style if body.style is not StylePreset.DEFAULT else locked_preset
+    effective_preset = (
+        body.style if body.style is not StylePreset.DEFAULT else locked_preset
+    )
     styled_prompt = compose_styled_prompt(body.prompt, effective_preset)
 
     # Inflate history pointers → real bytes for Gemini's inlineData.
@@ -1329,9 +1298,7 @@ async def _run_gemini_multi_turn(
         message="Gemini image provider concurrency is saturated",
     ):
         res = await gemini.generate_chat(
-            contents=contents,
-            n=body.n,
-            aspect_ratio=aspect_ratio,
+            contents=contents, n=body.n, aspect_ratio=aspect_ratio,
         )
     return res, (session, image_history, effective_preset), None
 
@@ -1366,36 +1333,31 @@ async def _persist_multi_turn_result(
     session, image_history, effective_preset = session_state
     _cap_result_images(res, body.n)
 
-    persisted = await asyncio.gather(
-        *[
-            _persist_and_get_url_bounded(
-                img,
-                artifact_storage=artifact_storage,
-                session_id=body.session_id,
-                user=user,
-                prompt=body.prompt,
-                add_watermark=body.add_watermark,
-                width=width,
-                height=height,
-                index=i,
-                owner_scope=owner_scope,
-                turn_id=turn_id,
-                provider=provider,
-                model_id=model_id,
-                return_variants=return_variants,
-            )
-            for i, img in enumerate(res.images)
-        ]
-    )
+    persisted = await asyncio.gather(*[
+        _persist_and_get_url_bounded(
+            img,
+            artifact_storage=artifact_storage,
+            session_id=body.session_id,
+            user=user,
+            prompt=body.prompt,
+            add_watermark=body.add_watermark,
+            width=width,
+            height=height,
+            index=i,
+            owner_scope=owner_scope,
+            turn_id=turn_id,
+            provider=provider,
+            model_id=model_id,
+            return_variants=return_variants,
+        )
+        for i, img in enumerate(res.images)
+    ])
     canonical_artifact_id = persisted[0][0]
     generated_list = [gi for _, gi in persisted]
 
     if write_legacy_metadata and session_manager and session:
         append_image_turns(
-            image_history,
-            body.prompt,
-            res.images[0],
-            res.text,
+            image_history, body.prompt, res.images[0], res.text,
             artifact_id=canonical_artifact_id,
         )
         meta = dict(session.metadata or {})
@@ -1404,9 +1366,7 @@ async def _persist_multi_turn_result(
         try:
             await session_manager.update_metadata(body.session_id, meta)
         except Exception as exc:
-            logger.warning(
-                "Legacy image_chat_history write failed for %s: %s", body.session_id, exc
-            )
+            logger.warning("Legacy image_chat_history write failed for %s: %s", body.session_id, exc)
 
     return canonical_artifact_id, generated_list
 
@@ -1433,19 +1393,9 @@ def _get_db_pool(request: Request):
 
 def _request_payload_for_hash(body: ImageGenerationRequest) -> dict[str, Any]:
     """Stable dict used for idempotency request_hash computation."""
-    image_override = _runtime_image_model_config(body)
     return {
         "prompt": body.prompt,
         "model_id": body.model_id,
-        "image_model_override": (
-            {
-                "provider_id": image_override.get("provider_id"),
-                "model_id": image_override.get("model_id"),
-                "api_key_fingerprint": image_override.get("api_key_fingerprint"),
-            }
-            if image_override
-            else None
-        ),
         "n": body.n,
         "size": body.size,
         "style": getattr(body.style, "value", str(body.style)),
@@ -1462,67 +1412,6 @@ def _request_payload_for_hash(body: ImageGenerationRequest) -> dict[str, Any]:
         "return_variants": sorted(body.return_variants) if body.return_variants else None,
         "allow_branch": body.allow_branch,
     }
-
-
-def _runtime_image_model_config(body: ImageGenerationRequest) -> dict[str, Any] | None:
-    """Return Gateway-injected image model config without exposing raw keys in logs."""
-    override = body.hejaz_image_model
-    if not isinstance(override, dict) or not override.get("enabled"):
-        return None
-
-    provider_id = str(override.get("provider_id") or "").strip()
-    model_id = str(override.get("model_id") or override.get("model") or "").strip()
-    if not provider_id or not model_id:
-        return None
-
-    runtime = dict(override)
-    runtime["provider_id"] = provider_id
-    runtime["model_id"] = model_id
-    runtime["model"] = model_id
-    return runtime
-
-
-def _effective_image_model_id(body: ImageGenerationRequest) -> str:
-    override = _runtime_image_model_config(body)
-    if override:
-        return str(override["model_id"])
-    return body.model_id
-
-
-def _override_routing_provider(override: dict[str, Any] | None) -> str | None:
-    if not override:
-        return None
-    provider_id = str(override.get("provider_id") or "").strip().lower()
-    runtime_provider = str(override.get("provider") or "").strip().lower()
-    if provider_id in {"google", "google-vertex"} or runtime_provider in {"gemini", "vertex"}:
-        return "google"
-    if provider_id == "dashscope" or runtime_provider == "dashscope":
-        return "dashscope"
-    return provider_id or runtime_provider or None
-
-
-def _gemini_generator_for_override(
-    override: dict[str, Any] | None,
-) -> GeminiImageGenerator | None:
-    if not override:
-        return None
-    if _override_routing_provider(override) != "google":
-        return None
-    api_key = override.get("_api_key")
-    if not api_key:
-        return None
-    runtime_provider = str(override.get("provider") or "").lower()
-    provider_id = str(override.get("provider_id") or "").lower()
-    backend = (
-        "vertex" if runtime_provider == "vertex" or provider_id == "google-vertex" else "ai_studio"
-    )
-    base_url = override.get("base_url")
-    return GeminiImageGenerator(
-        api_key=str(api_key),
-        model=str(override.get("model_id") or override.get("model") or "") or None,
-        base_url=str(base_url) if base_url else None,
-        backend=backend,
-    )
 
 
 def _resolve_owner_scope(user: UserContext, body: ImageGenerationRequest) -> str:
@@ -1556,9 +1445,7 @@ async def _check_idempotency(
         return None, False, None
     request_hash = _compute_request_hash(_request_payload_for_hash(body))
     existing = await lookup_idempotent(
-        pool,
-        owner_scope=owner_scope,
-        client_request_id=body.client_request_id,
+        pool, owner_scope=owner_scope, client_request_id=body.client_request_id,
     )
     if existing:
         if existing["request_hash"] != request_hash:
@@ -1730,9 +1617,7 @@ async def _build_variants_response(
             continue
         try:
             url, actual = await artifact_storage.get_presigned_download_url_for_variant(
-                raw_artifact_id,
-                v,
-                owner_scope=owner_scope,
+                raw_artifact_id, v, owner_scope=owner_scope,
             )
         except Exception as exc:
             logger.warning("variant resolve failed for %s/%s: %s", raw_artifact_id, v, exc)
@@ -1760,28 +1645,19 @@ async def create_image_blob_upload_url(
     if pool is None and _requires_persistent_task_store():
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "db_unavailable",
-                "message": "Image blob database is unavailable",
-            },
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
         )
     artifact_storage = _get_artifact_storage()
     if not artifact_storage:
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "storage_unavailable",
-                "message": "ArtifactStorage not configured",
-            },
+            detail={"error_code": "storage_unavailable", "message": "ArtifactStorage not configured"},
         )
     mime_type = _validate_image_mime(body.mime_type)
     if body.byte_size is not None and body.byte_size > _REFERENCE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
-            detail={
-                "error_code": "reference_too_large",
-                "message": "image blob exceeds size limit",
-            },
+            detail={"error_code": "reference_too_large", "message": "image blob exceeds size limit"},
         )
     owner_scope = _compute_owner_scope(
         user.user_id,
@@ -1803,10 +1679,7 @@ async def create_image_blob_upload_url(
     if not upload or not upload.get("url"):
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "presigned_upload_unavailable",
-                "message": "Storage backend does not support presigned uploads",
-            },
+            detail={"error_code": "presigned_upload_unavailable", "message": "Storage backend does not support presigned uploads"},
         )
     await create_image_blob(
         pool,
@@ -1843,10 +1716,7 @@ async def complete_image_blob_upload(
     if pool is None and _requires_persistent_task_store():
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "db_unavailable",
-                "message": "Image blob database is unavailable",
-            },
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
         )
     owner_scope = _compute_owner_scope(
         user.user_id,
@@ -1862,10 +1732,7 @@ async def complete_image_blob_upload(
     if body.byte_size is not None and body.byte_size > _REFERENCE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
-            detail={
-                "error_code": "reference_too_large",
-                "message": "image blob exceeds size limit",
-            },
+            detail={"error_code": "reference_too_large", "message": "image blob exceeds size limit"},
         )
     artifact_storage = _get_artifact_storage()
     backend = _get_storage_backend(artifact_storage)
@@ -1873,10 +1740,7 @@ async def complete_image_blob_upload(
     if not exists:
         raise HTTPException(
             status_code=404,
-            detail={
-                "error_code": "upload_missing",
-                "message": "uploaded object was not found in storage",
-            },
+            detail={"error_code": "upload_missing", "message": "uploaded object was not found in storage"},
         )
     mime_type = _validate_image_mime(body.mime_type or row["mime_type"])
     await update_image_blob_status(
@@ -1911,19 +1775,13 @@ async def fetch_image_blob_from_url(
     if pool is None and _requires_persistent_task_store():
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "db_unavailable",
-                "message": "Image blob database is unavailable",
-            },
+            detail={"error_code": "db_unavailable", "message": "Image blob database is unavailable"},
         )
     artifact_storage = _get_artifact_storage()
     if not artifact_storage:
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "storage_unavailable",
-                "message": "ArtifactStorage not configured",
-            },
+            detail={"error_code": "storage_unavailable", "message": "ArtifactStorage not configured"},
         )
     try:
         content = await safe_fetch(
@@ -1968,9 +1826,7 @@ async def fetch_image_blob_from_url(
 # -----------------------------------------------------------------------------
 
 
-def _task_to_sync_response(
-    task: dict, *, idempotent_replay: bool = False
-) -> ImageGenerationResponse:
+def _task_to_sync_response(task: dict, *, idempotent_replay: bool = False) -> ImageGenerationResponse:
     status = task.get("status", "pending")
     images = [
         GeneratedImage(
@@ -2157,9 +2013,7 @@ async def generate_image(
         # 409 ``duplicate_request_in_flight`` rather than re-charging.
         # Async path is the canonical idempotent surface.
         replay_task_id, idem_conflict, request_hash = await _check_idempotency(
-            pool,
-            owner_scope=owner_scope,
-            body=body,
+            pool, owner_scope=owner_scope, body=body,
         )
         if idem_conflict:
             raise HTTPException(
@@ -2183,11 +2037,9 @@ async def generate_image(
             )
         if body.client_request_id and request_hash and pool is not None:
             claimed = await record_idempotent(
-                pool,
-                owner_scope=owner_scope,
+                pool, owner_scope=owner_scope,
                 client_request_id=body.client_request_id,
-                request_hash=request_hash,
-                task_id=turn_id,
+                request_hash=request_hash, task_id=turn_id,
             )
             if not claimed:
                 raise HTTPException(
@@ -2202,15 +2054,10 @@ async def generate_image(
                 )
 
         # ---- Provider routing pre-check --------------------------------
-        image_override = _runtime_image_model_config(body)
-        effective_model_id = _effective_image_model_id(body)
-        model_info = model_registry.get_model(effective_model_id) if model_registry else None
-        selected_provider = _override_routing_provider(image_override) or (
-            model_info.provider.value if model_info else None
-        )
+        model_info = model_registry.get_model(body.model_id) if model_registry else None
+        selected_provider = model_info.provider.value if model_info else None
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            effective_model_id,
-            selected_provider,
+            body.model_id, selected_provider,
         )
 
         has_explicit_ref = bool(
@@ -2224,20 +2071,23 @@ async def generate_image(
         # for routing purposes (we'll edit the prior image). We compute that
         # once here so routing decisions don't differ from persistence ones.
         session_implies_reference = False
-        if body.session_id and pool is not None and not has_explicit_ref:
+        if (
+            body.session_id and pool is not None
+            and not has_explicit_ref
+        ):
             sess_row = await get_image_session(pool, body.session_id)
-            session_implies_reference = bool(sess_row and sess_row.get("latest_artifact_id"))
+            session_implies_reference = bool(
+                sess_row and sess_row.get("latest_artifact_id")
+            )
         has_reference = has_explicit_ref or session_implies_reference
 
         if has_reference and not prefer_gemini:
             return ImageGenerationResponse(
-                success=False,
-                images=[],
-                provider=str(selected_provider or "unknown"),
+                success=False, images=[], provider=str(selected_provider or "unknown"),
                 duration_ms=(time.time() - start_time) * 1000,
                 error=(
                     f"reference image editing requires a Gemini model "
-                    f"(got model_id={effective_model_id!r}, provider={selected_provider!r}). "
+                    f"(got model_id={body.model_id!r}, provider={selected_provider!r}). "
                     "Drop the reference fields for fresh generation, or pick a "
                     "Gemini model_id (e.g. gemini-3-flash-preview)."
                 ),
@@ -2248,24 +2098,18 @@ async def generate_image(
         # ---- Ensure image_session row + concurrency check --------------
         if body.session_id:
             await _ensure_image_session(
-                pool,
-                session_id=body.session_id,
-                owner_scope=owner_scope,
-                user=user,
-                body=body,
+                pool, session_id=body.session_id, owner_scope=owner_scope,
+                user=user, body=body,
             )
             await _check_expected_parent(
-                pool,
-                session_id=body.session_id,
+                pool, session_id=body.session_id,
                 expected_parent=body.expected_parent_artifact_id,
             )
 
         # ---- Style lock ------------------------------------------------
         style_explicit = "style" in body.model_fields_set
         effective_style, new_locked_style, clear_lock = await _resolve_style_for_session(
-            pool,
-            session_id=body.session_id,
-            body_style=body.style,
+            pool, session_id=body.session_id, body_style=body.style,
             style_explicit=style_explicit,
         )
 
@@ -2277,27 +2121,17 @@ async def generate_image(
         if prefer_gemini and (has_explicit_ref or session_implies_reference):
             try:
                 ref_b64, resolved_parent = await _resolve_reference_bytes(
-                    body,
-                    artifact_storage=artifact_storage,
-                    user=user,
-                    owner_scope=owner_scope,
-                    db_pool=pool,
+                    body, artifact_storage=artifact_storage, user=user,
+                    owner_scope=owner_scope, db_pool=pool,
                 )
             except HTTPException as exc:
                 if exc.status_code == 404:
                     await _record_turn(
-                        pool,
-                        turn_id=turn_id,
-                        session_id=body.session_id,
-                        owner_scope=owner_scope,
-                        task_id=None,
-                        body=body,
-                        parent_artifact_id=None,
-                        output_artifact_id=None,
-                        status="failed",
-                        error="reference artifact not found",
-                        error_code="reference_not_found",
-                        request_hash=request_hash,
+                        pool, turn_id=turn_id, session_id=body.session_id,
+                        owner_scope=owner_scope, task_id=None, body=body,
+                        parent_artifact_id=None, output_artifact_id=None,
+                        status="failed", error="reference artifact not found",
+                        error_code="reference_not_found", request_hash=request_hash,
                     )
                 raise
 
@@ -2306,12 +2140,10 @@ async def generate_image(
         provider_label: str | None = None
 
         if prefer_gemini and ref_b64 is not None:
-            gemini = _gemini_generator_for_override(image_override) or get_gemini_image_generator()
+            gemini = get_gemini_image_generator()
             if not gemini.is_configured:
                 return ImageGenerationResponse(
-                    success=False,
-                    images=[],
-                    provider="none",
+                    success=False, images=[], provider="none",
                     duration_ms=(time.time() - start_time) * 1000,
                     error="Gemini API key not configured",
                     error_code="provider_unavailable",
@@ -2325,10 +2157,8 @@ async def generate_image(
                 message="Gemini image provider concurrency is saturated",
             ):
                 res = await gemini.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    aspect_ratio=aspect_ratio,
-                    reference_image=ref_b64,
+                    prompt=styled_prompt, n=body.n,
+                    aspect_ratio=aspect_ratio, reference_image=ref_b64,
                 )
             provider_label = "google"
         elif body.session_id and session_mgr and prefer_gemini:
@@ -2337,22 +2167,14 @@ async def generate_image(
             # has explicit parent_artifact_id we already resolved bytes above,
             # so this branch only fires for "session_id alone, never edited".
             res, session_state, err = await _run_gemini_multi_turn(
-                body,
-                aspect_ratio=aspect_ratio,
-                width=width,
-                height=height,
-                session_manager=session_mgr,
-                user=user,
+                body, aspect_ratio=aspect_ratio, width=width, height=height,
+                session_manager=session_mgr, user=user,
                 artifact_storage=artifact_storage,
-                gemini_generator=_gemini_generator_for_override(image_override),
             )
             if err:
                 return ImageGenerationResponse(
-                    success=False,
-                    images=[],
-                    provider="none",
-                    duration_ms=(time.time() - start_time) * 1000,
-                    error=err,
+                    success=False, images=[], provider="none",
+                    duration_ms=(time.time() - start_time) * 1000, error=err,
                     error_code="provider_unavailable",
                     session_id=body.session_id,
                     client_request_id=body.client_request_id,
@@ -2360,12 +2182,9 @@ async def generate_image(
             if not (res and res.success and res.images):
                 err_msg = (res.error if res else None) or "Image generation failed"
                 return ImageGenerationResponse(
-                    success=False,
-                    images=[],
-                    provider="google",
-                    duration_ms=(
-                        (res.duration_ms if res else None) or (time.time() - start_time) * 1000
-                    ),
+                    success=False, images=[], provider="google",
+                    duration_ms=((res.duration_ms if res else None)
+                                 or (time.time() - start_time) * 1000),
                     error=err_msg,
                     error_code="provider_failed",
                     session_id=body.session_id,
@@ -2373,37 +2192,28 @@ async def generate_image(
                 )
             # Persist via the legacy multi-turn helper (writes session metadata)
             raw_anchor, generated_list = await _persist_multi_turn_result(
-                body,
-                res=res,
-                session_state=session_state,
-                session_manager=session_mgr,
-                user=user,
+                body, res=res, session_state=session_state,
+                session_manager=session_mgr, user=user,
                 artifact_storage=artifact_storage,
-                width=width,
-                height=height,
+                width=width, height=height,
                 owner_scope=owner_scope,
                 turn_id=turn_id,
                 provider="google",
-                model_id=effective_model_id,
+                model_id=body.model_id,
                 return_variants=body.return_variants,
                 write_legacy_metadata=pool is None,
             )
             latest_advanced = await _post_generation_bookkeeping(
-                pool,
-                artifact_storage=artifact_storage,
-                turn_id=turn_id,
-                session_id=body.session_id,
-                owner_scope=owner_scope,
-                body=body,
+                pool, artifact_storage=artifact_storage,
+                turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, body=body,
                 resolved_parent=resolved_parent,
-                raw_anchor=raw_anchor,
-                request_hash=request_hash,
+                raw_anchor=raw_anchor, request_hash=request_hash,
                 new_locked_style=new_locked_style,
                 clear_lock=clear_lock,
             )
             return ImageGenerationResponse(
-                success=True,
-                images=generated_list,
+                success=True, images=generated_list,
                 provider="google",
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
                 session_id=body.session_id,
@@ -2431,16 +2241,11 @@ async def generate_image(
                 message="Image provider concurrency is saturated",
             ):
                 res = await router_svc.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    size=body.size or "1536*1536",
-                    style=dashscope_tag,
-                    negative_prompt=negative_prompt,
+                    prompt=styled_prompt, n=body.n, size=body.size or "1536*1536",
+                    style=dashscope_tag, negative_prompt=negative_prompt,
                     aspect_ratio=aspect_ratio,
-                    prefer_gemini=prefer_gemini,
-                    prefer_doubao=prefer_doubao,
+                    prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
                     dashscope_model=dashscope_model,
-                    image_model_override=image_override,
                 )
             provider_label = res.provider
 
@@ -2452,75 +2257,50 @@ async def generate_image(
                 err = f"{err} (blocked: {res.block_reason})"
                 error_code = "provider_blocked"
             await _record_turn(
-                pool,
-                turn_id=turn_id,
-                session_id=body.session_id,
-                owner_scope=owner_scope,
-                task_id=None,
-                body=body,
-                parent_artifact_id=resolved_parent,
-                output_artifact_id=None,
-                status="failed",
-                error=err,
-                error_code=error_code,
+                pool, turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, task_id=None, body=body,
+                parent_artifact_id=resolved_parent, output_artifact_id=None,
+                status="failed", error=err, error_code=error_code,
                 request_hash=request_hash,
             )
             return ImageGenerationResponse(
-                success=False,
-                images=[],
-                provider=provider_label,
+                success=False, images=[], provider=provider_label,
                 duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
-                error=err,
-                error_code=error_code,
+                error=err, error_code=error_code,
                 session_id=body.session_id,
                 client_request_id=body.client_request_id,
             )
 
         # ---- Persist artifacts ----------------------------------------
-        persisted = await asyncio.gather(
-            *[
-                _persist_and_get_url_bounded(
-                    img,
-                    artifact_storage=artifact_storage,
-                    session_id=body.session_id,
-                    user=user,
-                    prompt=body.prompt,
-                    add_watermark=body.add_watermark,
-                    width=width,
-                    height=height,
-                    index=i,
-                    owner_scope=owner_scope,
-                    turn_id=turn_id,
-                    parent_artifact_id=resolved_parent,
-                    provider=provider_label,
-                    model_id=effective_model_id,
-                    return_variants=body.return_variants,
-                )
-                for i, img in enumerate(res.images)
-            ]
-        )
+        persisted = await asyncio.gather(*[
+            _persist_and_get_url_bounded(
+                img, artifact_storage=artifact_storage,
+                session_id=body.session_id, user=user, prompt=body.prompt,
+                add_watermark=body.add_watermark, width=width, height=height,
+                index=i,
+                owner_scope=owner_scope, turn_id=turn_id,
+                parent_artifact_id=resolved_parent,
+                provider=provider_label, model_id=body.model_id,
+                return_variants=body.return_variants,
+            )
+            for i, img in enumerate(res.images)
+        ])
         raw_anchor = persisted[0][0] if persisted else None
         generated_list = [gi for _, gi in persisted]
 
         # ---- CAS advance + style lock + turn audit + idempotency claim
         latest_advanced = await _post_generation_bookkeeping(
-            pool,
-            artifact_storage=artifact_storage,
-            turn_id=turn_id,
-            session_id=body.session_id,
-            owner_scope=owner_scope,
-            body=body,
+            pool, artifact_storage=artifact_storage,
+            turn_id=turn_id, session_id=body.session_id,
+            owner_scope=owner_scope, body=body,
             resolved_parent=resolved_parent,
-            raw_anchor=raw_anchor,
-            request_hash=request_hash,
+            raw_anchor=raw_anchor, request_hash=request_hash,
             new_locked_style=new_locked_style,
             clear_lock=clear_lock,
         )
 
         return ImageGenerationResponse(
-            success=True,
-            images=generated_list,
-            provider=provider_label,
+            success=True, images=generated_list, provider=provider_label,
             duration_ms=res.duration_ms or (time.time() - start_time) * 1000,
             session_id=body.session_id,
             turn_id=turn_id,
@@ -2530,10 +2310,8 @@ async def generate_image(
             idempotent_replay=False,
             latest_advanced=latest_advanced,
             variants=await _build_variants_response(
-                artifact_storage,
-                raw_artifact_id=raw_anchor,
-                return_variants=body.return_variants,
-                owner_scope=owner_scope,
+                artifact_storage, raw_artifact_id=raw_anchor,
+                return_variants=body.return_variants, owner_scope=owner_scope,
             ),
         )
 
@@ -2544,25 +2322,15 @@ async def generate_image(
         # Best-effort failure-record so callers can audit via /image-sessions
         with suppress(Exception):
             await _record_turn(
-                pool,
-                turn_id=turn_id,
-                session_id=body.session_id,
-                owner_scope=owner_scope,
-                task_id=None,
-                body=body,
-                parent_artifact_id=None,
-                output_artifact_id=None,
-                status="failed",
-                error=str(e),
-                error_code="internal_error",
+                pool, turn_id=turn_id, session_id=body.session_id,
+                owner_scope=owner_scope, task_id=None, body=body,
+                parent_artifact_id=None, output_artifact_id=None,
+                status="failed", error=str(e), error_code="internal_error",
                 request_hash=None,
             )
         return ImageGenerationResponse(
-            success=False,
-            images=[],
-            provider="unknown",
-            duration_ms=(time.time() - start_time) * 1000,
-            error=str(e),
+            success=False, images=[], provider="unknown",
+            duration_ms=(time.time() - start_time) * 1000, error=str(e),
             error_code="internal_error",
             session_id=body.session_id,
             client_request_id=body.client_request_id,
@@ -2613,16 +2381,14 @@ async def _post_generation_bookkeeping(
     if session_id and raw_anchor and pool is not None and not body.allow_branch:
         try:
             latest_advanced = await advance_latest_artifact_cas(
-                pool,
-                session_id=session_id,
+                pool, session_id=session_id,
                 expected_parent=resolved_parent,
                 new_artifact_id=raw_anchor,
             )
             if not latest_advanced:
                 logger.info(
                     "latest_artifact CAS lost race session=%s parent=%s — output is a branch",
-                    session_id,
-                    resolved_parent,
+                    session_id, resolved_parent,
                 )
         except Exception as exc:
             logger.warning("advance_latest_artifact_cas failed: %s", exc)
@@ -2634,17 +2400,10 @@ async def _post_generation_bookkeeping(
     # Turn audit
     try:
         await _record_turn(
-            pool,
-            turn_id=turn_id,
-            session_id=session_id,
-            owner_scope=owner_scope,
-            task_id=None,
-            body=body,
-            parent_artifact_id=resolved_parent,
-            output_artifact_id=raw_anchor,
-            status="completed",
-            error=None,
-            error_code=None,
+            pool, turn_id=turn_id, session_id=session_id,
+            owner_scope=owner_scope, task_id=None, body=body,
+            parent_artifact_id=resolved_parent, output_artifact_id=raw_anchor,
+            status="completed", error=None, error_code=None,
             request_hash=request_hash,
             output_artifact_ids=[raw_anchor] if raw_anchor else None,
             state="completed",
@@ -2660,19 +2419,16 @@ async def _post_generation_bookkeeping(
     return latest_advanced
 
 
+
 # -----------------------------------------------------------------------------
 # POST /generate-image-async + GET /image-task/{task_id}
 # -----------------------------------------------------------------------------
 
 
 async def _run_image_generation_task(
-    task_id: str,
-    body: AsyncImageGenerationRequest,
-    model_registry: ModelRegistry,
-    user: UserContext,
-    session_manager=None,
-    redis=None,
-    pool=None,
+    task_id: str, body: AsyncImageGenerationRequest,
+    model_registry: ModelRegistry, user: UserContext,
+    session_manager=None, redis=None, pool=None,
 ) -> None:
     task = await _load_task(redis, task_id)
     if task is None:
@@ -2695,15 +2451,10 @@ async def _run_image_generation_task(
         await update_turn_status(pool, turn_id=turn_id, status="running")
 
     try:
-        image_override = _runtime_image_model_config(body)
-        effective_model_id = _effective_image_model_id(body)
-        model_info = model_registry.get_model(effective_model_id) if model_registry else None
-        selected_provider = _override_routing_provider(image_override) or (
-            model_info.provider.value if model_info else None
-        )
+        model_info = model_registry.get_model(body.model_id) if model_registry else None
+        selected_provider = model_info.provider.value if model_info else None
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            effective_model_id,
-            selected_provider,
+            body.model_id, selected_provider,
         )
         width, height, aspect_ratio = parse_image_size(body.size)
         task["progress"] = 30
@@ -2717,27 +2468,28 @@ async def _run_image_generation_task(
             or body.reference_image_url
         )
         session_implies_reference = False
-        if body.session_id and pool is not None and not has_explicit_ref:
+        if (
+            body.session_id and pool is not None and not has_explicit_ref
+        ):
             sess_row = await get_image_session(pool, body.session_id)
-            session_implies_reference = bool(sess_row and sess_row.get("latest_artifact_id"))
+            session_implies_reference = bool(
+                sess_row and sess_row.get("latest_artifact_id")
+            )
         has_reference = has_explicit_ref or session_implies_reference
 
         if has_reference and not prefer_gemini:
             task["status"] = "failed"
             task["error"] = (
                 f"reference image editing requires a Gemini model "
-                f"(got model_id={effective_model_id!r}, provider={selected_provider!r})"
+                f"(got model_id={body.model_id!r}, provider={selected_provider!r})"
             )
             task["error_code"] = "reference_requires_gemini"
             task["progress"] = 100
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
             await _store_task(redis, task_id, task, pool=pool)
             await update_turn_status(
-                pool,
-                turn_id=turn_id,
-                status="failed",
-                error=task["error"],
-                error_code="reference_requires_gemini",
+                pool, turn_id=turn_id, status="failed",
+                error=task["error"], error_code="reference_requires_gemini",
             )
             if body.callback_url:
                 try:
@@ -2749,9 +2501,7 @@ async def _run_image_generation_task(
         # Style lock resolution
         style_explicit = "style" in body.model_fields_set
         effective_style, new_locked_style, clear_lock = await _resolve_style_for_session(
-            pool,
-            session_id=body.session_id,
-            body_style=body.style,
+            pool, session_id=body.session_id, body_style=body.style,
             style_explicit=style_explicit,
         )
 
@@ -2760,11 +2510,8 @@ async def _run_image_generation_task(
         if prefer_gemini and has_reference:
             try:
                 ref_b64, resolved_parent = await _resolve_reference_bytes(
-                    body,
-                    artifact_storage=artifact_storage,
-                    user=user,
-                    owner_scope=owner_scope,
-                    db_pool=pool,
+                    body, artifact_storage=artifact_storage, user=user,
+                    owner_scope=owner_scope, db_pool=pool,
                 )
             except HTTPException as exc:
                 msg = exc.detail if isinstance(exc.detail, str) else "reference not found"
@@ -2776,11 +2523,8 @@ async def _run_image_generation_task(
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
                 await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
-                    pool,
-                    turn_id=turn_id,
-                    status="failed",
-                    error=msg,
-                    error_code="reference_not_found",
+                    pool, turn_id=turn_id, status="failed",
+                    error=msg, error_code="reference_not_found",
                 )
                 if body.callback_url:
                     with suppress(Exception):
@@ -2793,7 +2537,7 @@ async def _run_image_generation_task(
         styled_prompt = compose_styled_prompt(body.prompt, effective_style)
 
         if prefer_gemini and ref_b64 is not None:
-            gemini = _gemini_generator_for_override(image_override) or get_gemini_image_generator()
+            gemini = get_gemini_image_generator()
             if not gemini.is_configured:
                 task["status"] = "failed"
                 task["error"] = "Gemini API key not configured"
@@ -2802,11 +2546,8 @@ async def _run_image_generation_task(
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
                 await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
-                    pool,
-                    turn_id=turn_id,
-                    status="failed",
-                    error=task["error"],
-                    error_code="provider_unavailable",
+                    pool, turn_id=turn_id, status="failed",
+                    error=task["error"], error_code="provider_unavailable",
                 )
                 if body.callback_url:
                     with suppress(Exception):
@@ -2819,9 +2560,7 @@ async def _run_image_generation_task(
                 message="Gemini image provider concurrency is saturated",
             ):
                 res = await gemini.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    aspect_ratio=aspect_ratio,
+                    prompt=styled_prompt, n=body.n, aspect_ratio=aspect_ratio,
                     reference_image=ref_b64,
                 )
             provider_label = "google"
@@ -2829,14 +2568,9 @@ async def _run_image_generation_task(
         if res is None and body.session_id and session_manager and prefer_gemini:
             # Legacy session-history backed flow (no explicit parent)
             res, session_state, err = await _run_gemini_multi_turn(
-                body,
-                aspect_ratio=aspect_ratio,
-                width=width,
-                height=height,
-                session_manager=session_manager,
-                user=user,
+                body, aspect_ratio=aspect_ratio, width=width, height=height,
+                session_manager=session_manager, user=user,
                 artifact_storage=artifact_storage,
-                gemini_generator=_gemini_generator_for_override(image_override),
             )
             if err:
                 task["status"] = "failed"
@@ -2846,11 +2580,8 @@ async def _run_image_generation_task(
                 task["completed_at"] = datetime.now(timezone.utc).isoformat()
                 await _store_task(redis, task_id, task, pool=pool)
                 await update_turn_status(
-                    pool,
-                    turn_id=turn_id,
-                    status="failed",
-                    error=err,
-                    error_code="provider_unavailable",
+                    pool, turn_id=turn_id, status="failed",
+                    error=err, error_code="provider_unavailable",
                 )
                 if body.callback_url:
                     with suppress(Exception):
@@ -2858,18 +2589,14 @@ async def _run_image_generation_task(
                 return
             if res and res.success and res.images:
                 raw_anchor, generated_list = await _persist_multi_turn_result(
-                    body,
-                    res=res,
-                    session_state=session_state,
-                    session_manager=session_manager,
-                    user=user,
+                    body, res=res, session_state=session_state,
+                    session_manager=session_manager, user=user,
                     artifact_storage=artifact_storage,
-                    width=width,
-                    height=height,
+                    width=width, height=height,
                     owner_scope=owner_scope,
                     turn_id=turn_id,
                     provider="google",
-                    model_id=effective_model_id,
+                    model_id=body.model_id,
                     return_variants=body.return_variants,
                     write_legacy_metadata=pool is None,
                 )
@@ -2887,16 +2614,11 @@ async def _run_image_generation_task(
                 message="Image provider concurrency is saturated",
             ):
                 res = await router_svc.generate(
-                    prompt=styled_prompt,
-                    n=body.n,
-                    size=body.size or "1536*1536",
-                    style=dashscope_tag,
-                    negative_prompt=negative_prompt,
+                    prompt=styled_prompt, n=body.n, size=body.size or "1536*1536",
+                    style=dashscope_tag, negative_prompt=negative_prompt,
                     aspect_ratio=aspect_ratio,
-                    prefer_gemini=prefer_gemini,
-                    prefer_doubao=prefer_doubao,
+                    prefer_gemini=prefer_gemini, prefer_doubao=prefer_doubao,
                     dashscope_model=dashscope_model,
-                    image_model_override=image_override,
                 )
             provider_label = res.provider
 
@@ -2918,11 +2640,8 @@ async def _run_image_generation_task(
             task["completed_at"] = datetime.now(timezone.utc).isoformat()
             await _store_task(redis, task_id, task, pool=pool)
             await update_turn_status(
-                pool,
-                turn_id=turn_id,
-                status="failed",
-                error=err,
-                error_code=error_code,
+                pool, turn_id=turn_id, status="failed",
+                error=err, error_code=error_code,
             )
             if body.callback_url:
                 with suppress(Exception):
@@ -2932,28 +2651,19 @@ async def _run_image_generation_task(
         task["progress"] = 70
 
         if not generated_response_imgs:
-            persisted = await asyncio.gather(
-                *[
-                    _persist_and_get_url_bounded(
-                        img,
-                        artifact_storage=artifact_storage,
-                        session_id=body.session_id,
-                        user=user,
-                        prompt=body.prompt,
-                        add_watermark=body.add_watermark,
-                        width=width,
-                        height=height,
-                        index=i,
-                        owner_scope=owner_scope,
-                        turn_id=turn_id,
-                        parent_artifact_id=resolved_parent,
-                        provider=provider_label,
-                        model_id=effective_model_id,
-                        return_variants=body.return_variants,
-                    )
-                    for i, img in enumerate(res.images)
-                ]
-            )
+            persisted = await asyncio.gather(*[
+                _persist_and_get_url_bounded(
+                    img, artifact_storage=artifact_storage,
+                    session_id=body.session_id, user=user, prompt=body.prompt,
+                    add_watermark=body.add_watermark, width=width, height=height,
+                    index=i,
+                    owner_scope=owner_scope, turn_id=turn_id,
+                    parent_artifact_id=resolved_parent,
+                    provider=provider_label, model_id=body.model_id,
+                    return_variants=body.return_variants,
+                )
+                for i, img in enumerate(res.images)
+            ])
             generated_response_imgs = [gi for _, gi in persisted]
             raw_anchor = persisted[0][0] if persisted else None
 
@@ -2978,16 +2688,11 @@ async def _run_image_generation_task(
 
         # Post-success bookkeeping (CAS, locked_style, turn audit)
         latest_advanced = await _post_generation_bookkeeping(
-            pool,
-            artifact_storage=artifact_storage,
-            turn_id=turn_id,
-            session_id=body.session_id,
-            owner_scope=owner_scope,
-            body=body,
-            resolved_parent=resolved_parent,
-            raw_anchor=raw_anchor,
-            request_hash=request_hash,
-            new_locked_style=new_locked_style,
+            pool, artifact_storage=artifact_storage,
+            turn_id=turn_id, session_id=body.session_id,
+            owner_scope=owner_scope, body=body,
+            resolved_parent=resolved_parent, raw_anchor=raw_anchor,
+            request_hash=request_hash, new_locked_style=new_locked_style,
             clear_lock=clear_lock,
         )
         task["latest_advanced"] = latest_advanced
@@ -3004,11 +2709,8 @@ async def _run_image_generation_task(
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
         with suppress(Exception):
             await update_turn_status(
-                pool,
-                turn_id=turn_id,
-                status="failed",
-                error=task["error"],
-                error_code=task["error_code"],
+                pool, turn_id=turn_id, status="failed",
+                error=task["error"], error_code=task["error_code"],
             )
     except Exception as e:
         logger.exception("Async image generation task %s failed", task_id)
@@ -3020,11 +2722,8 @@ async def _run_image_generation_task(
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
         with suppress(Exception):
             await update_turn_status(
-                pool,
-                turn_id=turn_id,
-                status="failed",
-                error=str(e),
-                error_code="internal_error",
+                pool, turn_id=turn_id, status="failed",
+                error=str(e), error_code="internal_error",
             )
 
     await _store_task(redis, task_id, task, pool=pool)
@@ -3078,9 +2777,7 @@ async def submit_image_generation(
 
     # Idempotency check before any work
     replay_task_id, idem_conflict, request_hash = await _check_idempotency(
-        pool,
-        owner_scope=owner_scope,
-        body=body,
+        pool, owner_scope=owner_scope, body=body,
     )
     if idem_conflict:
         raise HTTPException(
@@ -3093,23 +2790,18 @@ async def submit_image_generation(
     if replay_task_id:
         task = await _load_task_any(getattr(request.app.state, "redis", None), pool, replay_task_id)
         return AsyncImageTaskSubmitResponse(
-            task_id=replay_task_id,
-            status=(task or {}).get("status", "pending"),
+            task_id=replay_task_id, status=(task or {}).get("status", "pending"),
             message="Idempotent replay — existing task returned",
         )
 
     # Image-session bootstrap + expected_parent CAS pre-check
     if body.session_id:
         await _ensure_image_session(
-            pool,
-            session_id=body.session_id,
-            owner_scope=owner_scope,
-            user=user,
-            body=body,
+            pool, session_id=body.session_id, owner_scope=owner_scope,
+            user=user, body=body,
         )
         await _check_expected_parent(
-            pool,
-            session_id=body.session_id,
+            pool, session_id=body.session_id,
             expected_parent=body.expected_parent_artifact_id,
         )
 
@@ -3117,18 +2809,11 @@ async def submit_image_generation(
     turn_id = new_turn_id()
     now = datetime.now(timezone.utc).isoformat()
     task = {
-        "task_id": task_id,
-        "status": "pending",
-        "progress": 0,
-        "prompt": body.prompt,
-        "model_id": body.model_id,
-        "provider": None,
-        "images": [],
-        "duration_ms": None,
-        "error": None,
+        "task_id": task_id, "status": "pending", "progress": 0,
+        "prompt": body.prompt, "model_id": body.model_id, "provider": None,
+        "images": [], "duration_ms": None, "error": None,
         "error_code": None,
-        "created_at": now,
-        "completed_at": None,
+        "created_at": now, "completed_at": None,
         "owner_user_id": user.user_id,
         "owner_tenant_id": user.tenant_id,
         "owner_scope": owner_scope,
@@ -3149,27 +2834,21 @@ async def submit_image_generation(
         # wrapped in _db_safe) — those propagate to the outer try/except
         # → 500 → caller retries → still safe.
         claimed = await record_idempotent(
-            pool,
-            owner_scope=owner_scope,
+            pool, owner_scope=owner_scope,
             client_request_id=body.client_request_id,
-            request_hash=request_hash,
-            task_id=task_id,
+            request_hash=request_hash, task_id=task_id,
         )
         if not claimed:
             existing = await lookup_idempotent(
-                pool,
-                owner_scope=owner_scope,
+                pool, owner_scope=owner_scope,
                 client_request_id=body.client_request_id,
             )
             if existing and existing["request_hash"] == request_hash:
                 task = await _load_task_any(
-                    getattr(request.app.state, "redis", None),
-                    pool,
-                    existing["task_id"],
+                    getattr(request.app.state, "redis", None), pool, existing["task_id"],
                 )
                 return AsyncImageTaskSubmitResponse(
-                    task_id=existing["task_id"],
-                    status=(task or {}).get("status", "pending"),
+                    task_id=existing["task_id"], status=(task or {}).get("status", "pending"),
                     message="Idempotent replay — existing task returned",
                 )
             if existing and existing["request_hash"] != request_hash:
@@ -3242,32 +2921,22 @@ async def submit_image_generation(
             client_request_id=body.client_request_id,
             request_hash=request_hash,
         )
-        logger.info(
-            "insert_turn succeeded: turn_id=%s task_id=%s session_id=%s",
-            turn_id,
-            task_id,
-            body.session_id,
-        )
+        logger.info("insert_turn succeeded: turn_id=%s task_id=%s session_id=%s",
+                     turn_id, task_id, body.session_id)
     except Exception as exc:
         logger.warning("insert pending turn failed (task_id=%s): %s", task_id, exc)
 
     session_mgr = get_session_manager(request)
     worker = asyncio.create_task(
         _run_image_generation_task(
-            task_id,
-            body,
-            model_registry,
-            user,
-            session_manager=session_mgr,
-            redis=redis,
-            pool=pool,
+            task_id, body, model_registry, user,
+            session_manager=session_mgr, redis=redis, pool=pool,
         )
     )
     _in_flight_workers.add(worker)
     worker.add_done_callback(_in_flight_workers.discard)
     return AsyncImageTaskSubmitResponse(
-        task_id=task_id,
-        status="pending",
+        task_id=task_id, status="pending",
         message="Image generation task submitted",
     )
 
@@ -3296,19 +2965,15 @@ async def get_image_task_status(
             if not task:
                 turn = await get_turn_by_task(pool, task_id)
                 if turn:
-                    # Build a synthetic task dict from the turn row
+                # Build a synthetic task dict from the turn row
                     images: list[AsyncImageArtifact] = []
                     output_id = turn.get("output_artifact_id")
                     if output_id:
                         artifact_storage = _get_artifact_storage()
                         if artifact_storage:
                             try:
-                                (
-                                    url,
-                                    actual,
-                                ) = await artifact_storage.get_presigned_download_url_for_variant(
-                                    output_id,
-                                    "display",
+                                url, actual = await artifact_storage.get_presigned_download_url_for_variant(
+                                    output_id, "display",
                                     owner_scope=turn.get("owner_scope"),
                                 )
                             except Exception:
@@ -3317,21 +2982,15 @@ async def get_image_task_status(
                                 public_id = output_id
                                 if actual and actual != "raw":
                                     try:
-                                        public_artifact = await artifact_storage.find_variant(
-                                            output_id, actual
-                                        )
-                                        public_id = getattr(
-                                            public_artifact, "artifact_id", output_id
-                                        )
+                                        public_artifact = await artifact_storage.find_variant(output_id, actual)
+                                        public_id = getattr(public_artifact, "artifact_id", output_id)
                                     except Exception:
                                         public_id = output_id
-                                images = [
-                                    AsyncImageArtifact(
-                                        artifact_id=public_id,
-                                        download_url=url,
-                                        url=url,
-                                    )
-                                ]
+                                images = [AsyncImageArtifact(
+                                    artifact_id=public_id,
+                                    download_url=url,
+                                    url=url,
+                                )]
                     completed_at = turn.get("completed_at")
                     created_at = turn.get("created_at")
                     return AsyncImageTaskStatusResponse(
@@ -3366,18 +3025,13 @@ async def get_image_task_status(
         for img in task.get("images", [])
     ]
     return AsyncImageTaskStatusResponse(
-        task_id=task["task_id"],
-        status=task["status"],
+        task_id=task["task_id"], status=task["status"],
         progress=task.get("progress", 0),
-        prompt=task["prompt"],
-        model_id=task["model_id"],
-        provider=task.get("provider"),
-        images=images,
-        duration_ms=task.get("duration_ms"),
-        error=task.get("error"),
+        prompt=task["prompt"], model_id=task["model_id"],
+        provider=task.get("provider"), images=images,
+        duration_ms=task.get("duration_ms"), error=task.get("error"),
         error_code=task.get("error_code"),
-        created_at=task["created_at"],
-        completed_at=task.get("completed_at"),
+        created_at=task["created_at"], completed_at=task.get("completed_at"),
         turn_id=task.get("turn_id"),
         session_id=task.get("session_id"),
         parent_artifact_id=task.get("parent_artifact_id"),
@@ -3433,37 +3087,33 @@ async def get_artifact_download_url(
     if variant not in ("raw", "display", "thumbnail"):
         raise HTTPException(
             status_code=422,
-            detail={
-                "error_code": "validation_error",
-                "message": "variant must be one of raw|display|thumbnail",
-            },
+            detail={"error_code": "validation_error",
+                    "message": "variant must be one of raw|display|thumbnail"},
         )
 
     artifact_storage = _get_artifact_storage()
     if not artifact_storage:
         raise HTTPException(
             status_code=503,
-            detail={
-                "error_code": "storage_unavailable",
-                "message": "ArtifactStorage not configured",
-            },
+            detail={"error_code": "storage_unavailable",
+                    "message": "ArtifactStorage not configured"},
         )
 
     url, actual_variant = await artifact_storage.get_presigned_download_url_for_variant(
-        artifact_id,
-        variant,
-        expiry_seconds=expires_in,
-        owner_scope=None,
+        artifact_id, variant, expiry_seconds=expires_in, owner_scope=None,
     )
     if url is None or actual_variant is None:
         raise HTTPException(
             status_code=404,
-            detail={"error_code": "not_found", "message": f"artifact {artifact_id!r} not found"},
+            detail={"error_code": "not_found",
+                    "message": f"artifact {artifact_id!r} not found"},
         )
 
     # Pull metadata for width/height/mime
     artifact = await artifact_storage.find_variant(artifact_id, actual_variant)
-    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
     return ArtifactDownloadUrlResponse(
         artifact_id=artifact_id,
         variant=actual_variant,
@@ -3529,26 +3179,22 @@ async def get_image_session_view(
     if pool is None:
         raise HTTPException(
             status_code=503,
-            detail={"error_code": "storage_unavailable", "message": "Database pool not available"},
+            detail={"error_code": "storage_unavailable",
+                    "message": "Database pool not available"},
         )
 
     sess = await get_image_session(pool, session_id)
     if not sess:
         raise HTTPException(
             status_code=404,
-            detail={
-                "error_code": "not_found",
-                "message": f"image session {session_id!r} not found",
-            },
+            detail={"error_code": "not_found",
+                    "message": f"image session {session_id!r} not found"},
         )
 
     session_owner_scope = sess.get("owner_scope")
     rows, next_cursor = await list_turns(
-        pool,
-        session_id=session_id,
-        owner_scope=session_owner_scope,
-        limit=limit,
-        cursor=cursor,
+        pool, session_id=session_id, owner_scope=session_owner_scope,
+        limit=limit, cursor=cursor,
     )
 
     artifact_storage = _get_artifact_storage() if include_urls else None
@@ -3559,33 +3205,29 @@ async def get_image_session_view(
         if include_urls and artifact_storage and oid:
             try:
                 url, _ = await artifact_storage.get_presigned_download_url_for_variant(
-                    oid,
-                    "display",
-                    owner_scope=None,
+                    oid, "display", owner_scope=None,
                 )
                 output_url = url
             except Exception as exc:
                 logger.warning("turn output URL resolve failed: %s", exc)
         created_at = row.get("created_at")
         completed_at = row.get("completed_at")
-        turns_out.append(
-            ImageTurnPublic(
-                turn_id=row["turn_id"],
-                task_id=row.get("task_id"),
-                prompt=row.get("prompt"),
-                model_id=row.get("model_id"),
-                style=row.get("style"),
-                add_watermark=bool(row.get("add_watermark", True)),
-                parent_artifact_id=row.get("parent_artifact_id"),
-                output_artifact_id=oid,
-                status=row.get("status", "unknown"),
-                error=row.get("error"),
-                error_code=row.get("error_code"),
-                created_at=created_at.isoformat() if created_at else "",
-                completed_at=completed_at.isoformat() if completed_at else None,
-                output_url=output_url,
-            )
-        )
+        turns_out.append(ImageTurnPublic(
+            turn_id=row["turn_id"],
+            task_id=row.get("task_id"),
+            prompt=row.get("prompt"),
+            model_id=row.get("model_id"),
+            style=row.get("style"),
+            add_watermark=bool(row.get("add_watermark", True)),
+            parent_artifact_id=row.get("parent_artifact_id"),
+            output_artifact_id=oid,
+            status=row.get("status", "unknown"),
+            error=row.get("error"),
+            error_code=row.get("error_code"),
+            created_at=created_at.isoformat() if created_at else "",
+            completed_at=completed_at.isoformat() if completed_at else None,
+            output_url=output_url,
+        ))
 
     sess_created = sess.get("created_at")
     sess_updated = sess.get("updated_at")

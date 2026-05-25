@@ -6,7 +6,6 @@ Pydantic models for LLM provider and model management endpoints.
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -77,8 +76,6 @@ class ProviderTestResult(BaseModel):
 # Model Schemas
 # ============================================================================
 
-ModelType = Literal["llm", "image", "multimodal", "embedding", "reranker"]
-
 
 class ModelBase(BaseModel):
     """Base model fields."""
@@ -90,10 +87,6 @@ class ModelBase(BaseModel):
         ..., min_length=1, max_length=50, description="Provider this model belongs to"
     )
     display_name: str = Field(..., min_length=1, max_length=100, description="Display name")
-    model_type: ModelType = Field(
-        default="llm",
-        description="Model type: llm, image, multimodal, embedding, or reranker",
-    )
     context_window: int = Field(default=128000, ge=1, description="Context window size in tokens")
     max_output_tokens: int = Field(default=4096, ge=1, description="Maximum output tokens")
     supports_vision: bool = Field(
@@ -133,7 +126,6 @@ class ModelUpdate(BaseModel):
 
     model_id: str | None = Field(None, min_length=1, max_length=100)
     display_name: str | None = Field(None, min_length=1, max_length=100)
-    model_type: ModelType | None = None
     context_window: int | None = Field(None, ge=1)
     max_output_tokens: int | None = Field(None, ge=1)
     supports_vision: bool | None = None

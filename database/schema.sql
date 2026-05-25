@@ -1443,8 +1443,6 @@ CREATE TABLE IF NOT EXISTS llm_models (
     model_id VARCHAR(100) NOT NULL,
     provider_id VARCHAR(50) NOT NULL,
     display_name VARCHAR(100) NOT NULL,
-    model_type VARCHAR(32) NOT NULL DEFAULT 'llm'
-        CHECK (model_type IN ('llm', 'image', 'multimodal', 'embedding', 'reranker')),
     context_window INTEGER DEFAULT 128000,
     max_output_tokens INTEGER DEFAULT 4096,
     supports_vision BOOLEAN DEFAULT FALSE,
@@ -1460,16 +1458,6 @@ CREATE TABLE IF NOT EXISTS llm_models (
 );
 
 COMMENT ON TABLE llm_models IS 'LLM 模型表：多租户模型配置与定价';
-
--- AI Assistant 服务级配置
-CREATE TABLE IF NOT EXISTS assistant_service_configs (
-    tenant_id VARCHAR(100) PRIMARY KEY,
-    image_model_override JSONB NOT NULL DEFAULT '{"enabled": false}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-COMMENT ON TABLE assistant_service_configs IS 'AI Assistant 服务级配置表';
 
 -- ============================================================
 -- 30. 文档版本控制
@@ -1781,8 +1769,6 @@ CREATE INDEX IF NOT EXISTS idx_llm_providers_enabled ON llm_providers(tenant_id,
 CREATE INDEX IF NOT EXISTS idx_llm_models_tenant ON llm_models(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_llm_models_provider ON llm_models(tenant_id, provider_id);
 CREATE INDEX IF NOT EXISTS idx_llm_models_enabled ON llm_models(tenant_id, is_enabled);
-CREATE INDEX IF NOT EXISTS idx_llm_models_tenant_provider_type
-    ON llm_models(tenant_id, provider_id, model_type, is_enabled);
 
 -- document_versions indexes
 CREATE INDEX IF NOT EXISTS idx_doc_versions_document ON document_versions(document_id);

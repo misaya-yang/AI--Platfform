@@ -63,7 +63,6 @@ class SmartImageGenerator:
         prefer_gemini: bool = True,
         prefer_doubao: bool = False,
         dashscope_model: str | None = None,
-        image_model_override: dict[str, Any] | None = None,
     ) -> SmartImageGenerationResult:
         """Single-turn image generation with provider routing.
 
@@ -71,18 +70,6 @@ class SmartImageGenerator:
         generate_chat), so this method only handles single-turn prompt → image.
         """
         start = time.time()
-
-        if image_model_override and image_model_override.get("enabled"):
-            return await self._generate_with_override(
-                image_model_override,
-                prompt=prompt,
-                n=n,
-                size=size,
-                style=style,
-                negative_prompt=negative_prompt,
-                aspect_ratio=aspect_ratio,
-                start_time=start,
-            )
 
         gemini = get_gemini_image_generator()
         dash = get_image_generator()
@@ -96,58 +83,33 @@ class SmartImageGenerator:
             doubao_res = await doubao.generate(prompt=prompt, n=n, size=size)
             if doubao_res.success:
                 return SmartImageGenerationResult(
-                    success=True,
-                    provider="doubao",
-                    images=doubao_res.images,
-                    duration_ms=doubao_res.duration_ms,
+                    success=True, provider="doubao",
+                    images=doubao_res.images, duration_ms=doubao_res.duration_ms,
                 )
             # Doubao failed: fallback to Gemini → DashScope
-            logger.warning(
-                "Doubao image generation failed, trying fallback. err=%s", doubao_res.error
-            )
+            logger.warning("Doubao image generation failed, trying fallback. err=%s", doubao_res.error)
             if gemini.is_configured:
-                gemini_res = await gemini.generate(
-                    prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size
-                )
+                gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size)
                 if gemini_res.success:
                     return SmartImageGenerationResult(
-                        success=True,
-                        provider="google",
-                        images=gemini_res.images,
-                        text=gemini_res.text,
-                        duration_ms=gemini_res.duration_ms,
-                        used_fallback=True,
+                        success=True, provider="google", images=gemini_res.images,
+                        text=gemini_res.text, duration_ms=gemini_res.duration_ms, used_fallback=True,
                     )
             if dash.is_configured:
-                dash_res = await dash.generate(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    size=size,
-                    style=style,
-                    n=n,
-                    model_override=dashscope_model,
-                )
+                dash_res = await dash.generate(prompt=prompt, negative_prompt=negative_prompt, size=size, style=style, n=n, model_override=dashscope_model)
                 return SmartImageGenerationResult(
-                    success=dash_res.success,
-                    provider="dashscope",
+                    success=dash_res.success, provider="dashscope",
                     images=dash_res.images if dash_res.success else [],
-                    error=dash_res.error,
-                    duration_ms=dash_res.duration_ms,
-                    used_fallback=True,
+                    error=dash_res.error, duration_ms=dash_res.duration_ms, used_fallback=True,
                 )
             return SmartImageGenerationResult(
-                success=False,
-                provider="doubao",
-                images=[],
-                error=doubao_res.error,
-                duration_ms=doubao_res.duration_ms,
+                success=False, provider="doubao", images=[],
+                error=doubao_res.error, duration_ms=doubao_res.duration_ms,
             )
 
         # Gemini first (if preferred + configured)
         if prefer_gemini and gemini.is_configured:
-            gemini_res = await gemini.generate(
-                prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size
-            )
+            gemini_res = await gemini.generate(prompt=prompt, n=n, aspect_ratio=aspect_ratio, image_size=gemini_image_size)
             if gemini_res.success:
                 return SmartImageGenerationResult(
                     success=True,
@@ -210,7 +172,6 @@ class SmartImageGenerator:
                 size=size,
                 style=style,
                 n=n,
-                model_override=dashscope_model,
             )
             if dash_res.success:
                 return SmartImageGenerationResult(
@@ -256,7 +217,6 @@ class SmartImageGenerator:
                 size=size,
                 style=style,
                 n=n,
-                model_override=dashscope_model,
             )
             return SmartImageGenerationResult(
                 success=dash_res.success,
@@ -288,105 +248,6 @@ class SmartImageGenerator:
             images=[],
             error="No image generation provider configured (missing GEMINI_API_KEY/GOOGLE_API_KEY and DASHSCOPE_API_KEY)",
             duration_ms=duration_ms,
-        )
-
-    async def _generate_with_override(
-        self,
-        override: dict[str, Any],
-        *,
-        prompt: str,
-        n: int,
-        size: str,
-        style: str,
-        negative_prompt: str,
-        aspect_ratio: str,
-        start_time: float,
-    ) -> SmartImageGenerationResult:
-        """Generate with an explicit Gateway-injected provider/model config.
-
-        Explicit image overrides do not fall back to another provider: the
-        operator selected a concrete image API in Gateway control plane.
-        """
-        provider_id = str(override.get("provider_id") or "").lower()
-        runtime_provider = str(override.get("provider") or "").lower()
-        model_id = str(override.get("model_id") or override.get("model") or "")
-        api_key = override.get("_api_key")
-        base_url = override.get("base_url")
-
-        if not api_key:
-            return SmartImageGenerationResult(
-                success=False,
-                provider=provider_id or "unknown",
-                images=[],
-                error="Gateway image provider API key is missing",
-                error_code="provider_unavailable",
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-
-        gemini_image_size = size.replace("*", "x") if size else None
-        if provider_id in {"google", "google-vertex"} or runtime_provider in {"gemini", "vertex"}:
-            from .gemini_image_tool import GeminiImageGenerator
-
-            backend = (
-                "vertex"
-                if runtime_provider == "vertex" or provider_id == "google-vertex"
-                else "ai_studio"
-            )
-            gemini = GeminiImageGenerator(
-                api_key=str(api_key),
-                model=model_id or None,
-                base_url=str(base_url) if base_url else None,
-                backend=backend,
-            )
-            gemini_res = await gemini.generate(
-                prompt=prompt,
-                n=n,
-                aspect_ratio=aspect_ratio,
-                image_size=gemini_image_size,
-            )
-            return SmartImageGenerationResult(
-                success=gemini_res.success,
-                provider="google",
-                images=gemini_res.images if gemini_res.success else [],
-                text=gemini_res.text,
-                error=gemini_res.error,
-                error_code=gemini_res.error_code,
-                blocked=gemini_res.blocked,
-                block_reason=gemini_res.block_reason,
-                duration_ms=gemini_res.duration_ms,
-            )
-
-        if provider_id == "dashscope" or runtime_provider == "dashscope":
-            from .image_generator_tool import DashScopeImageGenerator
-
-            dash = DashScopeImageGenerator(
-                api_key=str(api_key),
-                model=model_id or None,
-                base_url=str(base_url) if base_url else None,
-            )
-            dash_res = await dash.generate(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                size=size,
-                style=style,
-                n=n,
-                model_override=model_id or None,
-            )
-            return SmartImageGenerationResult(
-                success=dash_res.success,
-                provider="dashscope",
-                images=dash_res.images if dash_res.success else [],
-                error=dash_res.error,
-                duration_ms=dash_res.duration_ms,
-            )
-
-        return SmartImageGenerationResult(
-            success=False,
-            provider=provider_id or runtime_provider or "unknown",
-            images=[],
-            error=f"Unsupported image provider override: {provider_id or runtime_provider}",
-            error_code="provider_unsupported",
-            duration_ms=(time.time() - start_time) * 1000,
         )
 
 

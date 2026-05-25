@@ -7,10 +7,7 @@
 
 import { api } from "@/lib/api";
 import { sseFetch } from "@/lib/sse";
-import {
-  SSEEventType,
-  type SSEEventTypeValue,
-} from "@/pages/assistant/sse-events";
+import { SSEEventType, type SSEEventTypeValue } from "@/pages/assistant/sse-events";
 
 export { SSEEventType };
 export type { SSEEventTypeValue };
@@ -228,7 +225,7 @@ export interface WorkingMemoryUpdateEvent {
   tasks: Array<{
     id: string;
     description: string;
-    status: "pending" | "in_progress" | "completed" | "failed" | "blocked";
+    status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked';
     result?: string;
     error?: string;
   }>;
@@ -317,16 +314,7 @@ export interface AGUIStepStartedEvent {
   step_id: string;
   title: string;
   description?: string;
-  icon?:
-    | "search"
-    | "web"
-    | "kb"
-    | "code"
-    | "image"
-    | "doc"
-    | "file"
-    | "brain"
-    | "ppt";
+  icon?: 'search' | 'web' | 'kb' | 'code' | 'image' | 'doc' | 'file' | 'brain' | 'ppt';
   parent_step_id?: string;
   timestamp: number;
 }
@@ -336,7 +324,7 @@ export interface AGUIStepStartedEvent {
  */
 export interface AGUIStepFinishedEvent {
   step_id: string;
-  status: "completed" | "failed" | "skipped";
+  status: 'completed' | 'failed' | 'skipped';
   result?: string;
   error?: string;
   duration_ms?: number;
@@ -349,7 +337,7 @@ export interface AGUIStepFinishedEvent {
 export interface AGUIToolCallStartEvent {
   tool_call_id: string;
   tool_name: string;
-  step_id?: string; // Link to parent step
+  step_id?: string;  // Link to parent step
   timestamp: number;
 }
 
@@ -358,7 +346,7 @@ export interface AGUIToolCallStartEvent {
  */
 export interface AGUIToolCallArgsEvent {
   tool_call_id: string;
-  args_delta: string; // Incremental JSON string
+  args_delta: string;  // Incremental JSON string
   timestamp: number;
 }
 
@@ -394,7 +382,7 @@ export interface AGUIStateSnapshotEvent {
  */
 export interface AGUIStateDeltaEvent {
   delta: Array<{
-    op: "add" | "remove" | "replace" | "move" | "copy" | "test";
+    op: 'add' | 'remove' | 'replace' | 'move' | 'copy' | 'test';
     path: string;
     value?: unknown;
     from?: string;
@@ -408,7 +396,7 @@ export interface AGUIStateDeltaEvent {
 export interface FileCreatingEvent {
   step_id?: string;
   filename: string;
-  type: string; // pptx, docx, pdf, etc.
+  type: string;  // pptx, docx, pdf, etc.
   timestamp: number;
 }
 
@@ -432,7 +420,7 @@ export interface SearchStartedEvent {
   step_id?: string;
   search_id: string;
   query: string;
-  source: "kb" | "web" | "file";
+  source: 'kb' | 'web' | 'file';
   timestamp: number;
 }
 
@@ -441,7 +429,7 @@ export interface SearchStartedEvent {
  */
 export interface SearchProgressEvent {
   search_id: string;
-  progress: number; // 0-100
+  progress: number;  // 0-100
   results_found?: number;
   timestamp: number;
 }
@@ -463,7 +451,7 @@ export interface OutputWarningsEvent {
   warnings: Array<{
     type: string;
     message: string;
-    severity: "low" | "medium" | "high";
+    severity: 'low' | 'medium' | 'high';
   }>;
 }
 
@@ -474,30 +462,30 @@ export interface OutputWarningsEvent {
 /**
  * Error severity levels for structured error handling.
  */
-export type ErrorSeverity = "info" | "warning" | "error" | "fatal";
+export type ErrorSeverity = 'info' | 'warning' | 'error' | 'fatal';
 
 /**
  * Agent Loop phase names.
  */
 export type AgentLoopPhase =
-  | "memory_loading"
-  | "scenario_analysis"
-  | "task_planning"
-  | "rag_retrieval"
-  | "context_building"
-  | "execution"
-  | "context_compression"
-  | "generation_storage";
+  | 'memory_loading'
+  | 'scenario_analysis'
+  | 'task_planning'
+  | 'rag_retrieval'
+  | 'context_building'
+  | 'execution'
+  | 'context_compression'
+  | 'generation_storage';
 
 /**
  * Phase started event - emitted when an AgentLoop phase begins.
  */
 export interface PhaseStartedEvent {
-  phase_index: number; // 1-8
-  total_phases: number; // 8
+  phase_index: number;      // 1-8
+  total_phases: number;     // 8
   phase_name: AgentLoopPhase;
-  display_name: string; // Chinese display name
-  status: "started";
+  display_name: string;     // Chinese display name
+  status: 'started';
   timestamp?: number;
 }
 
@@ -509,7 +497,7 @@ export interface PhaseCompletedEvent {
   total_phases: number;
   phase_name: AgentLoopPhase;
   display_name: string;
-  status: "completed";
+  status: 'completed';
   duration_ms: number;
   timestamp?: number;
 }
@@ -519,7 +507,7 @@ export interface PhaseCompletedEvent {
  */
 export interface RunStartedWithTaskEvent {
   session_id: string;
-  task_id: string | null; // Used for cancellation
+  task_id: string | null;   // Used for cancellation
   request_id: string;
   timestamp?: number;
 }
@@ -582,9 +570,7 @@ export interface SessionHistoryResponse {
  * List available LLM models.
  */
 export async function listModels(): Promise<ModelInfo[]> {
-  const { data } = await api.get<{ models: ModelInfo[] }>(
-    "/api/v1/assistant/models",
-  );
+  const { data } = await api.get<{ models: ModelInfo[] }>("/api/v1/assistant/models");
   return data.models;
 }
 
@@ -592,9 +578,7 @@ export async function listModels(): Promise<ModelInfo[]> {
  * List available knowledge base datasets.
  */
 export async function listDatasets(): Promise<DatasetInfo[]> {
-  const { data } = await api.get<{ datasets: DatasetInfo[] }>(
-    "/api/v1/assistant/datasets",
-  );
+  const { data } = await api.get<{ datasets: DatasetInfo[] }>("/api/v1/assistant/datasets");
   return data.datasets;
 }
 
@@ -610,10 +594,7 @@ export async function getConfig(): Promise<AssistantConfig> {
  * Non-streaming chat completion.
  */
 export async function chat(request: ChatRequest): Promise<ChatResponse> {
-  const { data } = await api.post<ChatResponse>(
-    "/api/v1/assistant/chat",
-    request,
-  );
+  const { data } = await api.post<ChatResponse>("/api/v1/assistant/chat", request);
   return data;
 }
 
@@ -650,7 +631,7 @@ function getAuthToken(): string | null {
 
 export async function* chatStream(
   request: ChatRequest,
-  signal?: AbortSignal,
+  signal?: AbortSignal
 ): AsyncGenerator<StreamEvent, void, void> {
   // Debug: Log request including file_paths
   console.log("[chatStream] Request file_paths:", request.file_paths);
@@ -678,9 +659,7 @@ export async function* chatStream(
 /**
  * Group models by provider.
  */
-export function groupModelsByProvider(
-  models: ModelInfo[],
-): Record<string, ModelInfo[]> {
+export function groupModelsByProvider(models: ModelInfo[]): Record<string, ModelInfo[]> {
   const grouped: Record<string, ModelInfo[]> = {};
   for (const model of models) {
     if (!grouped[model.provider]) {
@@ -709,6 +688,7 @@ export function getProviderDisplayName(provider: string): string {
   return names[provider] || provider;
 }
 
+
 // =========================================================================
 // Session Management APIs
 // =========================================================================
@@ -716,15 +696,10 @@ export function getProviderDisplayName(provider: string): string {
 /**
  * Create a new assistant session.
  */
-export async function createSession(metadata?: {
-  title?: string;
-}): Promise<AssistantSession> {
-  const { data } = await api.post<AssistantSession>(
-    "/api/v1/assistant/sessions",
-    {
-      metadata,
-    },
-  );
+export async function createSession(metadata?: { title?: string }): Promise<AssistantSession> {
+  const { data } = await api.post<AssistantSession>("/api/v1/assistant/sessions", {
+    metadata,
+  });
   return data;
 }
 
@@ -732,10 +707,9 @@ export async function createSession(metadata?: {
  * List user's assistant sessions.
  */
 export async function listSessions(limit = 50): Promise<AssistantSession[]> {
-  const { data } = await api.get<{
-    sessions: AssistantSession[];
-    total: number;
-  }>(`/api/v1/assistant/sessions?limit=${limit}`);
+  const { data } = await api.get<{ sessions: AssistantSession[]; total: number }>(
+    `/api/v1/assistant/sessions?limit=${limit}`
+  );
   return data.sessions;
 }
 
@@ -743,9 +717,7 @@ export async function listSessions(limit = 50): Promise<AssistantSession[]> {
  * Get session details.
  */
 export async function getSession(sessionId: string): Promise<AssistantSession> {
-  const { data } = await api.get<AssistantSession>(
-    `/api/v1/assistant/sessions/${sessionId}`,
-  );
+  const { data } = await api.get<AssistantSession>(`/api/v1/assistant/sessions/${sessionId}`);
   return data;
 }
 
@@ -761,10 +733,10 @@ export async function deleteSession(sessionId: string): Promise<void> {
  */
 export async function getSessionHistory(
   sessionId: string,
-  limit = 100,
+  limit = 100
 ): Promise<SessionHistoryResponse> {
   const { data } = await api.get<SessionHistoryResponse>(
-    `/api/v1/assistant/sessions/${sessionId}/history?limit=${limit}`,
+    `/api/v1/assistant/sessions/${sessionId}/history?limit=${limit}`
   );
   return data;
 }
@@ -772,9 +744,7 @@ export async function getSessionHistory(
 /**
  * Group sessions by date for display.
  */
-export function groupSessionsByDate(
-  sessions: AssistantSession[],
-): Record<string, AssistantSession[]> {
+export function groupSessionsByDate(sessions: AssistantSession[]): Record<string, AssistantSession[]> {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
@@ -788,9 +758,7 @@ export function groupSessionsByDate(
   };
 
   for (const session of sessions) {
-    const date = session.created_at
-      ? new Date(session.created_at)
-      : new Date(session.updated_at || 0);
+    const date = session.created_at ? new Date(session.created_at) : new Date(session.updated_at || 0);
 
     if (date >= today) {
       groups.today.push(session);
@@ -805,6 +773,7 @@ export function groupSessionsByDate(
 
   return groups;
 }
+
 
 // =========================================================================
 // Artifacts API
@@ -823,12 +792,7 @@ export interface ArtifactInfo {
   storage_key: string;
   size_bytes: number;
   mime_type?: string;
-  source:
-    | "ai"
-    | "user"
-    | "code_execution"
-    | "image_generation"
-    | "document_generation";
+  source: "ai" | "user" | "code_execution" | "image_generation" | "document_generation";
   metadata?: Record<string, unknown>;
   download_url?: string;
   created_at: string;
@@ -838,11 +802,9 @@ export interface ArtifactInfo {
 /**
  * Get artifacts for a session.
  */
-export async function getSessionArtifacts(
-  sessionId: string,
-): Promise<ArtifactInfo[]> {
+export async function getSessionArtifacts(sessionId: string): Promise<ArtifactInfo[]> {
   const { data } = await api.get<{ artifacts: ArtifactInfo[]; total: number }>(
-    `/api/v1/assistant/sessions/${sessionId}/artifacts`,
+    `/api/v1/assistant/sessions/${sessionId}/artifacts`
   );
   return data.artifacts;
 }
@@ -852,7 +814,7 @@ export async function getSessionArtifacts(
  */
 export async function getArtifact(artifactId: string): Promise<ArtifactInfo> {
   const { data } = await api.get<ArtifactInfo>(
-    `/api/v1/assistant/artifacts/${artifactId}`,
+    `/api/v1/assistant/artifacts/${artifactId}`
   );
   return data;
 }
@@ -870,23 +832,18 @@ export async function deleteArtifact(artifactId: string): Promise<void> {
  */
 export interface CreateArtifactRequest {
   session_id: string;
-  type: string; // image, document, chart, code, file
-  format: string; // png, jpg, pdf, json, etc.
+  type: string;  // image, document, chart, code, file
+  format: string;  // png, jpg, pdf, json, etc.
   title: string;
   filename: string;
   content_base64: string;
-  source?: string; // ai | user | code_execution | image_generation
+  source?: string;  // ai | user | code_execution | image_generation
   message_id?: string;
   metadata?: Record<string, unknown>;
 }
 
-export async function createArtifact(
-  request: CreateArtifactRequest,
-): Promise<ArtifactInfo> {
-  const { data } = await api.post<ArtifactInfo>(
-    "/api/v1/assistant/artifacts",
-    request,
-  );
+export async function createArtifact(request: CreateArtifactRequest): Promise<ArtifactInfo> {
+  const { data } = await api.post<ArtifactInfo>("/api/v1/assistant/artifacts", request);
   return data;
 }
 
@@ -897,6 +854,7 @@ export function getArtifactDownloadUrl(artifactId: string): string {
   // This URL will redirect to the actual presigned URL
   return `/api/v1/assistant/artifacts/${artifactId}/download`;
 }
+
 
 // =========================================================================
 // Conversation Sharing API
@@ -914,14 +872,11 @@ export interface ShareInfo {
 
 export async function createConversationShare(
   sessionId: string,
-  options?: { expires_days?: number; include_artifacts?: boolean },
+  options?: { expires_days?: number; include_artifacts?: boolean }
 ): Promise<ShareInfo> {
   const { data } = await api.post<ShareInfo>(
     `/api/v1/assistant/sessions/${sessionId}/share`,
-    {
-      expires_days: options?.expires_days,
-      include_artifacts: options?.include_artifacts ?? true,
-    },
+    { expires_days: options?.expires_days, include_artifacts: options?.include_artifacts ?? true }
   );
   return data;
 }
@@ -930,21 +885,8 @@ export async function getConversationShare(shareCode: string): Promise<{
   share_code: string;
   title: string;
   snapshot: {
-    messages: Array<{
-      role: string;
-      content: string;
-      timestamp?: string;
-      metadata?: Record<string, unknown>;
-    }>;
-    artifacts: Array<{
-      artifact_id: string;
-      type: string;
-      format: string;
-      title: string;
-      filename: string;
-      size_bytes: number;
-      mime_type?: string;
-    }>;
+    messages: Array<{ role: string; content: string; timestamp?: string; metadata?: Record<string, unknown> }>;
+    artifacts: Array<{ artifact_id: string; type: string; format: string; title: string; filename: string; size_bytes: number; mime_type?: string }>;
     model_id?: string;
     shared_at?: string;
   };
@@ -958,16 +900,11 @@ export async function getConversationShare(shareCode: string): Promise<{
   return data;
 }
 
-export function getSharedArtifactUrl(
-  shareCode: string,
-  artifactId: string,
-): string {
+export function getSharedArtifactUrl(shareCode: string, artifactId: string): string {
   return `/api/v1/assistant/shares/${shareCode}/artifact/${artifactId}`;
 }
 
-export async function listMyShares(
-  limit = 50,
-): Promise<{ shares: Array<Record<string, unknown>> }> {
+export async function listMyShares(limit = 50): Promise<{ shares: Array<Record<string, unknown>> }> {
   const { data } = await api.get(`/api/v1/assistant/shares?limit=${limit}`);
   return data;
 }
@@ -986,7 +923,6 @@ export interface ImageGenerationRequest {
   style?: string;
   size?: string;
   n?: number;
-  image_model_override?: ImageModelOverrideConfig;
 }
 
 export interface GeneratedImage {
@@ -1003,16 +939,6 @@ export interface ImageGenerationResponse {
   error?: string;
 }
 
-export interface ImageModelOverrideConfig {
-  enabled: boolean;
-  provider_id?: string;
-  model_id?: string;
-}
-
-export interface AssistantImageConfig {
-  image_model_override: ImageModelOverrideConfig;
-}
-
 /**
  * Generate images with smart routing based on current model provider.
  *
@@ -1021,32 +947,11 @@ export interface AssistantImageConfig {
  * - Gemini Native Image for Google models
  * - Fallback to DashScope for other providers
  */
-export async function generateImage(
-  request: ImageGenerationRequest,
-): Promise<ImageGenerationResponse> {
-  const { data } = await api.post<ImageGenerationResponse>(
-    "/api/v1/assistant/generate-image",
-    request,
-  );
+export async function generateImage(request: ImageGenerationRequest): Promise<ImageGenerationResponse> {
+  const { data } = await api.post<ImageGenerationResponse>("/api/v1/assistant/generate-image", request);
   return data;
 }
 
-export async function getImageConfig(): Promise<AssistantImageConfig> {
-  const { data } = await api.get<AssistantImageConfig>(
-    "/api/v1/assistant/image-config",
-  );
-  return data;
-}
-
-export async function updateImageConfig(
-  config: AssistantImageConfig,
-): Promise<AssistantImageConfig> {
-  const { data } = await api.put<AssistantImageConfig>(
-    "/api/v1/assistant/image-config",
-    config,
-  );
-  return data;
-}
 
 // =========================================================================
 // Task Cancellation API (Phase 1 Optimization)
@@ -1070,14 +975,11 @@ export interface TaskCancelResponse {
  * @param reason - Optional cancellation reason
  * @returns TaskCancelResponse with cancellation status
  */
-export async function cancelTask(
-  taskId: string,
-  reason?: string,
-): Promise<TaskCancelResponse> {
+export async function cancelTask(taskId: string, reason?: string): Promise<TaskCancelResponse> {
   const body: TaskCancelRequest = reason ? { reason } : {};
   const { data } = await api.post<TaskCancelResponse>(
     `/api/v1/assistant/tasks/${taskId}/cancel`,
-    body,
+    body
   );
   return data;
 }

@@ -20,7 +20,6 @@ Endpoints:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import uuid
@@ -55,9 +54,6 @@ from ..schemas.assistant import (
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
-
-_IMAGE_OVERRIDE_SECRET_FIELDS = {"_api_key", "api_key"}
-_IMAGE_CAPABLE_MODEL_TYPES = {"image", "multimodal"}
 
 
 # =========================================================================
@@ -108,238 +104,6 @@ class SessionHistoryResponse(BaseModel):
     total: int
 
 
-def _image_override_error(code: str, status_code: int = 422) -> HTTPException:
-    return HTTPException(status_code=status_code, detail=code)
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def _contains_secret_field(value: Any) -> bool:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if str(key).lower() in _IMAGE_OVERRIDE_SECRET_FIELDS:
-                return True
-            if _contains_secret_field(item):
-                return True
-    elif isinstance(value, list):
-        return any(_contains_secret_field(item) for item in value)
-    return False
-
-
-def _public_image_override(raw_override: Any) -> dict[str, Any]:
-    if not isinstance(raw_override, dict):
-        return {"enabled": False}
-    enabled = _as_bool(raw_override.get("enabled"), default=False)
-    if not enabled:
-        return {"enabled": False}
-    return {
-        "enabled": True,
-        "provider_id": str(raw_override.get("provider_id") or "").strip(),
-        "model_id": str(raw_override.get("model_id") or "").strip(),
-    }
-
-
-def _assistant_image_config_db(request: Request):
-    db = getattr(request.app.state, "database", None)
-    if db is not None and getattr(db, "enabled", False):
-        return db
-    return None
-
-
-async def _load_assistant_image_model_override(
-    request: Request,
-    tenant_id: str,
-) -> dict[str, Any]:
-    db = _assistant_image_config_db(request)
-    if db is not None:
-        row = await db.fetchrow(
-            """
-            SELECT image_model_override
-            FROM assistant_service_configs
-            WHERE tenant_id = $1
-            """,
-            tenant_id,
-        )
-        if row:
-            value = row["image_model_override"]
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except json.JSONDecodeError:
-                    value = None
-            if isinstance(value, dict):
-                return _public_image_override(value)
-
-    fallback = getattr(request.app.state, "assistant_image_model_override", None)
-    if isinstance(fallback, dict):
-        return _public_image_override(fallback)
-    return {"enabled": False}
-
-
-async def _store_assistant_image_model_override(
-    request: Request,
-    tenant_id: str,
-    image_model_override: dict[str, Any],
-) -> None:
-    db = _assistant_image_config_db(request)
-    if db is None:
-        request.app.state.assistant_image_model_override = image_model_override
-        return
-
-    await db.execute(
-        """
-        INSERT INTO assistant_service_configs (tenant_id, image_model_override)
-        VALUES ($1, $2::jsonb)
-        ON CONFLICT (tenant_id)
-        DO UPDATE SET
-            image_model_override = EXCLUDED.image_model_override,
-            updated_at = NOW()
-        """,
-        tenant_id,
-        json.dumps(image_model_override),
-    )
-
-
-async def _validate_image_model_override(
-    request: Request,
-    *,
-    tenant_id: str,
-    raw_override: Any,
-    include_runtime: bool = False,
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    if raw_override is None:
-        return {"enabled": False}, None
-    if not isinstance(raw_override, dict):
-        raise _image_override_error("IMAGE_MODEL_OVERRIDE_INVALID")
-    if _contains_secret_field(raw_override):
-        raise _image_override_error("IMAGE_MODEL_API_KEY_FORBIDDEN")
-
-    public_override = _public_image_override(raw_override)
-    if not public_override["enabled"]:
-        return public_override, None
-
-    provider_id = str(public_override.get("provider_id") or "").strip()
-    model_id = str(public_override.get("model_id") or "").strip()
-    if not provider_id:
-        raise _image_override_error("IMAGE_MODEL_PROVIDER_REQUIRED")
-    if not model_id:
-        raise _image_override_error("IMAGE_MODEL_MODEL_REQUIRED")
-
-    provider_service = getattr(request.app.state, "provider_service", None)
-    model_service = getattr(request.app.state, "model_service", None)
-    if provider_service is None or model_service is None:
-        raise _image_override_error("IMAGE_MODEL_CONTROL_PLANE_UNAVAILABLE", status_code=503)
-
-    try:
-        provider = await provider_service.get_runtime_provider_config(tenant_id, provider_id)
-    except ValueError as exc:
-        raise _image_override_error("IMAGE_MODEL_PROVIDER_NOT_FOUND") from exc
-
-    if not bool(provider.get("is_enabled")):
-        raise _image_override_error("IMAGE_MODEL_PROVIDER_DISABLED")
-
-    get_provider_model = getattr(model_service, "get_provider_model", None)
-    if callable(get_provider_model):
-        model = await get_provider_model(tenant_id, provider_id, model_id)
-    else:
-        model = await model_service.get_model(tenant_id, model_id, provider_id=provider_id)
-    if not model:
-        raise _image_override_error("IMAGE_MODEL_MODEL_NOT_FOUND")
-    if not bool(model.get("is_enabled")):
-        raise _image_override_error("IMAGE_MODEL_MODEL_DISABLED")
-
-    model_type = str(model.get("model_type") or "llm").strip().lower()
-    if model_type not in _IMAGE_CAPABLE_MODEL_TYPES:
-        raise _image_override_error("IMAGE_MODEL_NOT_IMAGE_CAPABLE")
-
-    api_key = provider.get("api_key")
-    allow_environment = bool(provider.get("allow_environment_credentials"))
-    if not api_key and not allow_environment:
-        raise _image_override_error("IMAGE_MODEL_API_KEY_MISSING")
-
-    public_override["provider_id"] = provider_id
-    public_override["model_id"] = model_id
-    if not include_runtime:
-        return public_override, None
-
-    api_key_fingerprint = (
-        hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16] if api_key else None
-    )
-    runtime_config = {
-        "enabled": True,
-        "tenant_id": tenant_id,
-        "provider_id": provider_id,
-        "provider": provider.get("runtime_provider"),
-        "model_id": model_id,
-        "model": model_id,
-        "base_url": provider.get("runtime_base_url"),
-        "api_key_fingerprint": api_key_fingerprint,
-    }
-    if api_key:
-        runtime_config["_api_key"] = api_key
-
-    return public_override, runtime_config
-
-
-async def _build_image_generation_proxy_body(
-    request: Request,
-    user: UserContext,
-    body: ImageGenerationRequest | AsyncImageGenerationRequest,
-) -> bytes:
-    try:
-        raw_payload = await request.json()
-    except Exception:
-        raw_payload = body.model_dump(mode="json", exclude_none=True)
-    if not isinstance(raw_payload, dict):
-        raw_payload = body.model_dump(mode="json", exclude_none=True)
-
-    payload = dict(raw_payload)
-    raw_override = payload.get("image_model_override")
-    if raw_override is None:
-        raw_override = await _load_assistant_image_model_override(
-            request,
-            user.tenant_id or "default",
-        )
-
-    public_override, runtime_config = await _validate_image_model_override(
-        request,
-        tenant_id=user.tenant_id or "default",
-        raw_override=raw_override,
-        include_runtime=True,
-    )
-
-    payload.pop("hejaz_image_model", None)
-    payload.pop("image_model_override", None)
-
-    if runtime_config:
-        payload["model_id"] = runtime_config["model_id"]
-        payload["hejaz_image_model"] = runtime_config
-        logger.info(
-            "Injected assistant image model override provider_id=%s model_id=%s "
-            "api_key_fingerprint=%s",
-            runtime_config["provider_id"],
-            runtime_config["model_id"],
-            runtime_config.get("api_key_fingerprint"),
-        )
-    elif public_override.get("enabled"):
-        raise _image_override_error("IMAGE_MODEL_OVERRIDE_INVALID")
-
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
-
-
-def _require_assistant_config_admin(user: UserContext) -> None:
-    if "admin" not in user.roles and user.tier != "admin":
-        raise HTTPException(status_code=403, detail="Admin permission required")
-
-
 def get_model_meta(request: Request):
     """Get the DB-backed GatewayModelMeta (built in main.py lifespan)."""
     meta = getattr(request.app.state, "model_meta", None)
@@ -383,7 +147,6 @@ async def list_models(
 ) -> ModelsListResponse:
     """Thin proxy — assistant-service owns the model catalogue."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(request, user, path="models")
 
 
@@ -394,7 +157,6 @@ async def list_datasets(
 ) -> DatasetsListResponse:
     """Thin proxy — assistant-service resolves KB datasets via knowledge-service."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(request, user, path="datasets")
 
 
@@ -405,48 +167,7 @@ async def get_config(
 ) -> AssistantConfigResponse:
     """Thin proxy — assistant-service owns provider configuration."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(request, user, path="config")
-
-
-@router.get("/image-config")
-async def get_image_config(
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> dict[str, Any]:
-    """Return the tenant-level AI Assistant image model selector without secrets."""
-    image_model_override = await _load_assistant_image_model_override(
-        request,
-        user.tenant_id or "default",
-    )
-    return {"image_model_override": image_model_override}
-
-
-@router.put("/image-config")
-async def update_image_config(
-    body: dict[str, Any],
-    request: Request,
-    user: UserContext = Depends(get_user_context),
-) -> dict[str, Any]:
-    """Update AI Assistant image provider/model selection.
-
-    Browser clients may only submit provider_id/model_id/enabled. Gateway
-    resolves the API key internally when generation starts.
-    """
-    _require_assistant_config_admin(user)
-    raw_override = body.get("image_model_override")
-    public_override, _ = await _validate_image_model_override(
-        request,
-        tenant_id=user.tenant_id or "default",
-        raw_override=raw_override,
-        include_runtime=False,
-    )
-    await _store_assistant_image_model_override(
-        request,
-        user.tenant_id or "default",
-        public_override,
-    )
-    return {"image_model_override": public_override}
 
 
 # =========================================================================
@@ -503,7 +224,6 @@ async def list_tools(
 ) -> ToolsListResponse:
     """Thin proxy — assistant-service owns the tool registry."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(request, user, path="tools")
 
 
@@ -514,7 +234,6 @@ async def get_policies(
 ) -> AssistantPoliciesResponse:
     """Thin proxy — policy snapshot comes from assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(request, user, path="policies")
 
 
@@ -528,7 +247,6 @@ async def approve_tool_call(
     """Thin proxy — approval state lives in ``assistant_tool_approvals``
     (ADR-004). Gateway forwards the request body to assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
         request, user, path=f"approvals/{approval_id}", body=body_bytes
@@ -543,11 +261,14 @@ async def get_run_status(
 ) -> RunStatusResponse:
     """Thin proxy — run state lives in ``assistant_runs`` (ADR-004)."""
     from ._assistant_proxy import proxy_to_assistant_service
+    return await proxy_to_assistant_service(
+        request, user, path=f"runs/{run_id}"
+    )
 
-    return await proxy_to_assistant_service(request, user, path=f"runs/{run_id}")
 
-
-async def _check_model_permission(user: UserContext, model_id: str, model_meta: Any) -> None:
+async def _check_model_permission(
+    user: UserContext, model_id: str, model_meta: Any
+) -> None:
     """Check if the user has permission to invoke ``model_id``.
 
     DB-backed via ``GatewayModelMeta``. Unknown model → 400; caller's
@@ -605,7 +326,6 @@ async def chat(
     inside the assistant-service container.
     """
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
     # Model-permission authz. assistant-service enforces tenant-scoped
@@ -620,9 +340,10 @@ async def chat(
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
     from ._assistant_proxy import proxy_to_assistant_service
-
     body_bytes = await request.body()
-    return await proxy_to_assistant_service(request, user, path="chat", body=body_bytes)
+    return await proxy_to_assistant_service(
+        request, user, path="chat", body=body_bytes
+    )
 
 
 @router.post("/chat/stream")
@@ -670,9 +391,13 @@ async def chat_stream(
     # its own session manager, but defence-in-depth belongs at the edge.
     session_id = body_json.get("session_id")
     if session_id:
-        await _validate_chat_session_access(request=request, user=user, session_id=session_id)
+        await _validate_chat_session_access(
+            request=request, user=user, session_id=session_id
+        )
 
-    return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)
+    return await proxy_to_assistant_service(
+        request, user, path="chat/stream", body=body_bytes
+    )
 
 
 # =========================================================================
@@ -1308,17 +1033,12 @@ async def generate_image(
     """Thin proxy — assistant-service owns image generation routing
     (Gemini / Doubao / DashScope) and multi-turn session history."""
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await _build_image_generation_proxy_body(request, user, body)
+    body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path="generate-image",
-        body=body_bytes,
+        request, user, path="generate-image", body=body_bytes,
     )
 
 
@@ -1330,17 +1050,12 @@ async def submit_image_generation(
 ) -> AsyncImageTaskSubmitResponse:
     """Thin proxy — background task lives in assistant-service's in-memory store."""
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
-
-    body_bytes = await _build_image_generation_proxy_body(request, user, body)
+    body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path="generate-image-async",
-        body=body_bytes,
+        request, user, path="generate-image-async", body=body_bytes,
     )
 
 
@@ -1352,11 +1067,8 @@ async def get_image_task_status(
 ) -> AsyncImageTaskStatusResponse:
     """Thin proxy — polls the task store in assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"image-task/{task_id}",
+        request, user, path=f"image-task/{task_id}",
     )
 
 
@@ -1367,17 +1079,12 @@ async def create_image_blob_upload_url(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobUploadUrlResponse:
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
-
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/upload-url",
-        body=body_bytes,
+        request, user, path="image-blobs/upload-url", body=body_bytes,
     )
 
 
@@ -1388,17 +1095,12 @@ async def complete_image_blob_upload(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobResponse:
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
-
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/complete",
-        body=body_bytes,
+        request, user, path="image-blobs/complete", body=body_bytes,
     )
 
 
@@ -1409,17 +1111,12 @@ async def fetch_image_blob_from_url(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobResponse:
     from ..deps import enforce_rate_limit
-
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
-
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path="image-blobs/fetch-url",
-        body=body_bytes,
+        request, user, path="image-blobs/fetch-url", body=body_bytes,
     )
 
 
@@ -1436,11 +1133,8 @@ async def get_artifact_download_url(
     cross-owner access. See assistant-service for the full contract."""
     # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"artifacts/{artifact_id}/download-url",
+        request, user, path=f"artifacts/{artifact_id}/download-url",
     )
 
 
@@ -1456,12 +1150,10 @@ async def get_image_session_view(
     ``include_urls`` (bool, default false). Owner-scoped."""
     # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
-
     return await proxy_to_assistant_service(
-        request,
-        user,
-        path=f"image-sessions/{session_id}",
+        request, user, path=f"image-sessions/{session_id}",
     )
+
 
 
 # =========================================================================

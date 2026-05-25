@@ -12,19 +12,12 @@ import i18n from "@/i18n";
 // =============================================================================
 
 export type ModelAccessLevel = "public" | "premium" | "admin";
-export type ModelType =
-  | "llm"
-  | "image"
-  | "multimodal"
-  | "embedding"
-  | "reranker";
 
 export interface LLMModel {
   model_id: string;
   tenant_id: string;
   provider_id: string;
   display_name: string;
-  model_type: ModelType;
   context_window: number;
   max_output_tokens: number;
   supports_vision: boolean;
@@ -42,7 +35,6 @@ export interface ModelCreate {
   model_id: string;
   provider_id: string;
   display_name: string;
-  model_type?: ModelType;
   context_window?: number;
   max_output_tokens?: number;
   supports_vision?: boolean;
@@ -60,7 +52,6 @@ export interface ModelUpdate {
   // is a no-op.
   model_id?: string;
   display_name?: string;
-  model_type?: ModelType;
   context_window?: number;
   max_output_tokens?: number;
   supports_vision?: boolean;
@@ -74,13 +65,8 @@ export interface ModelUpdate {
 
 export const modelQueryKeys = {
   all: ["models"] as const,
-  byProvider: (
-    providerId: string,
-    includeDisabled = false,
-    modelType?: ModelType,
-  ) => ["models", { providerId, includeDisabled, modelType }] as const,
-  byType: (modelType: ModelType, includeDisabled = false) =>
-    ["models", { modelType, includeDisabled }] as const,
+  byProvider: (providerId: string, includeDisabled = false) =>
+    ["models", { providerId, includeDisabled }] as const,
 };
 
 // =============================================================================
@@ -92,19 +78,12 @@ export const modelQueryKeys = {
  */
 export async function listModels(
   providerId?: string,
-  includeDisabled = false,
-  options: { model_type?: ModelType } = {},
+  includeDisabled = false
 ): Promise<LLMModel[]> {
-  const params = new URLSearchParams({
-    include_disabled: String(includeDisabled),
-  });
+  let url = `/api/v1/models?include_disabled=${includeDisabled}`;
   if (providerId) {
-    params.set("provider_id", providerId);
+    url += `&provider_id=${providerId}`;
   }
-  if (options.model_type) {
-    params.set("model_type", options.model_type);
-  }
-  const url = `/api/v1/models?${params.toString()}`;
   const { data } = await api.get<LLMModel[]>(url);
   return data;
 }
@@ -130,12 +109,9 @@ export async function createModel(model: ModelCreate): Promise<LLMModel> {
  */
 export async function updateModel(
   modelId: string,
-  updates: ModelUpdate,
+  updates: ModelUpdate
 ): Promise<LLMModel> {
-  const { data } = await api.put<LLMModel>(
-    `/api/v1/models/${modelId}`,
-    updates,
-  );
+  const { data } = await api.put<LLMModel>(`/api/v1/models/${modelId}`, updates);
   return data;
 }
 
@@ -151,10 +127,10 @@ export async function deleteModel(modelId: string): Promise<void> {
  */
 export async function toggleModel(
   modelId: string,
-  isEnabled: boolean,
+  isEnabled: boolean
 ): Promise<LLMModel> {
   const { data } = await api.patch<LLMModel>(
-    `/api/v1/models/${modelId}/toggle?is_enabled=${isEnabled}`,
+    `/api/v1/models/${modelId}/toggle?is_enabled=${isEnabled}`
   );
   return data;
 }
@@ -211,9 +187,7 @@ export function formatPrice(price: number | string | null | undefined): string {
  * Format context window for display.
  * Handles string, number, null, and undefined inputs safely.
  */
-export function formatContextWindow(
-  tokens: number | string | null | undefined,
-): string {
+export function formatContextWindow(tokens: number | string | null | undefined): string {
   // Handle null/undefined
   if (tokens === null || tokens === undefined) return "-";
 
@@ -231,9 +205,7 @@ export function formatContextWindow(
 /**
  * Group models by provider.
  */
-export function groupModelsByProvider(
-  models: LLMModel[],
-): Record<string, LLMModel[]> {
+export function groupModelsByProvider(models: LLMModel[]): Record<string, LLMModel[]> {
   const grouped: Record<string, LLMModel[]> = {};
   for (const model of models) {
     if (!grouped[model.provider_id]) {

@@ -55,21 +55,13 @@ class GeminiImageGenerator:
 
     DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str | None = None,
-        backend: str | None = None,
-    ):
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         # Resolve via helper when no explicit key is passed — picks up
         # GOOGLE_IMAGE_BACKEND / VERTEX_IMAGE_API_KEY / shared fallbacks.
         if api_key:
             self.api_key = api_key
-            self.base_url = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-            self.backend = backend or (
-                "vertex" if "aiplatform.googleapis.com" in self.base_url else "ai_studio"
-            )
+            self.base_url = "https://generativelanguage.googleapis.com"
+            self.backend = "ai_studio"
         else:
             resolved_key, resolved_base_url, resolved_backend = resolve_google("image")
             self.api_key = resolved_key
@@ -177,9 +169,7 @@ class GeminiImageGenerator:
 
             turns = len(contents)
             logger.info(
-                "Gemini image API: %d turns, model=%s",
-                turns,
-                self.model,
+                "Gemini image API: %d turns, model=%s", turns, self.model,
             )
 
             # Vertex Express embeds the key in the URL (?key=) and must
@@ -198,16 +188,13 @@ class GeminiImageGenerator:
 
             if response.status_code != 200:
                 error_text = response.text
-                logger.error(
-                    "Gemini image API error: %s - %s", response.status_code, error_text[:500]
-                )
+                logger.error("Gemini image API error: %s - %s", response.status_code, error_text[:500])
                 try:
                     error_msg = response.json().get("error", {}).get("message", error_text[:200])
                 except Exception:
                     error_msg = error_text[:200]
                 return GeminiImageResult(
-                    success=False,
-                    error=f"API error: {response.status_code} - {error_msg}",
+                    success=False, error=f"API error: {response.status_code} - {error_msg}",
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
@@ -218,11 +205,8 @@ class GeminiImageGenerator:
             block = pf.get("blockReason") or pf.get("block_reason")
             if block:
                 return GeminiImageResult(
-                    success=False,
-                    error="Image generation blocked by safety filters",
-                    error_code="GEMINI_IMAGE_BLOCKED",
-                    blocked=True,
-                    block_reason=str(block),
+                    success=False, error="Image generation blocked by safety filters",
+                    error_code="GEMINI_IMAGE_BLOCKED", blocked=True, block_reason=str(block),
                     duration_ms=(time.time() - start_time) * 1000,
                 )
 
@@ -232,30 +216,22 @@ class GeminiImageGenerator:
             if not images:
                 logger.warning("Gemini returned no images. Text: %s", (text_response or "")[:200])
                 return GeminiImageResult(
-                    success=False,
-                    text=text_response,
+                    success=False, text=text_response,
                     error=text_response or "Model did not generate images.",
-                    error_code="GEMINI_NO_IMAGE",
-                    duration_ms=duration_ms,
+                    error_code="GEMINI_NO_IMAGE", duration_ms=duration_ms,
                 )
 
             logger.info("Gemini generated %d image(s) in %.0fms", len(images), duration_ms)
-            return GeminiImageResult(
-                success=True, images=images, text=text_response, duration_ms=duration_ms
-            )
+            return GeminiImageResult(success=True, images=images, text=text_response, duration_ms=duration_ms)
 
         except Exception as e:
             logger.error("Gemini image generation failed: %s", e)
             return GeminiImageResult(
-                success=False,
-                error=str(e),
-                error_code="GEMINI_IMAGE_ERROR",
+                success=False, error=str(e), error_code="GEMINI_IMAGE_ERROR",
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
-    def _extract_response(
-        self, response: dict[str, Any]
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    def _extract_response(self, response: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
         """Extract images and optional text from Gemini response."""
         images, text_parts = [], []
         for candidate in response.get("candidates", []):
@@ -264,9 +240,7 @@ class GeminiImageGenerator:
                     text_parts.append(part["text"])
                 inline_data = part.get("inlineData") or part.get("inline_data")
                 if inline_data:
-                    mime = (
-                        inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
-                    )
+                    mime = inline_data.get("mimeType") or inline_data.get("mime_type") or "image/png"
                     data = inline_data.get("data", "")
                     if data:
                         try:
@@ -293,7 +267,7 @@ class GeminiImageGenerator:
             comma = data_url.index(",")
             header = data_url[:comma]
             mime = header.split(";")[0].split(":")[1] if "image/" in header else default_mime
-            return data_url[comma + 1 :], mime
+            return data_url[comma + 1:], mime
         return data_url, default_mime
 
     async def close(self):

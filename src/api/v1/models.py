@@ -39,7 +39,6 @@ def get_model_service(request: Request) -> ModelService:
 @router.get("/models", response_model=list[ModelResponse])
 async def list_models(
     provider_id: str | None = Query(None, description="Filter by provider"),
-    model_type: str | None = Query(None, description="Filter by model type"),
     include_disabled: bool = Query(False, description="Include disabled models"),
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
@@ -58,7 +57,6 @@ async def list_models(
     models = await model_service.list_models(
         tenant_id=user.tenant_id or "default",
         provider_id=provider_id,
-        model_type=model_type,
         include_disabled=include_disabled,
         access_level=access_level if not include_disabled else None,
     )
@@ -81,7 +79,6 @@ async def create_model(
             model_id=body.model_id,
             provider_id=body.provider_id,
             display_name=body.display_name,
-            model_type=body.model_type,
             context_window=body.context_window,
             max_output_tokens=body.max_output_tokens,
             supports_vision=body.supports_vision,
@@ -148,7 +145,6 @@ async def update_model(
         model_id=model_id,
         new_model_id=new_mid,
         display_name=body.display_name,
-        model_type=body.model_type,
         context_window=body.context_window,
         max_output_tokens=body.max_output_tokens,
         supports_vision=body.supports_vision,
