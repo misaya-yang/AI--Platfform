@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
-from src.api.v1.proxy import _inject_langgraph_model_override_config
+from src.api.v1.proxy import (
+    _inject_langgraph_model_override_config,
+    _safe_model_override_debug,
+)
 from src.proxy.config_loader import ProxyServiceConfig
 
 
@@ -56,6 +59,32 @@ def _config(model_override: dict[str, Any]) -> ProxyServiceConfig:
         metadata={"adapter_type": "langgraph"},
         model_override=model_override,
     )
+
+
+def test_safe_model_override_debug_exposes_no_secret_fields() -> None:
+    debug = _safe_model_override_debug(
+        {
+            "enabled": True,
+            "provider_id": "dashscope-intl",
+            "model_id": "qwen3.6-plus",
+            "temperature": 0.2,
+            "cache_epoch": 9,
+            "_api_key": "gateway-runtime-secret",
+            "api_key": "also-secret",
+            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode",
+        }
+    )
+
+    assert debug == {
+        "enabled": True,
+        "provider_id": "dashscope-intl",
+        "model_id": "qwen3.6-plus",
+        "temperature": 0.2,
+        "cache_epoch": 9,
+    }
+    assert "secret" not in json.dumps(debug)
+    assert "api_key" not in debug
+    assert "_api_key" not in debug
 
 
 @pytest.mark.asyncio

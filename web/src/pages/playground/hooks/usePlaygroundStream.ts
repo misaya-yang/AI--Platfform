@@ -12,7 +12,12 @@ import { useAgentTimeline } from "@/hooks/useAgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
 import { buildHttpFailureError, getPlaygroundErrorMessage } from "@/lib/utils";
 import type { ChatMessage, ToolCallWithResult } from "@/components/ChatWindow";
-import type { ContentItem, StreamChunk, ServiceUiPreferences } from "@/types/gateway";
+import type {
+  ContentItem,
+  ServiceDetail,
+  StreamChunk,
+  ServiceUiPreferences,
+} from "@/types/gateway";
 import { useAuthStore } from "@/store/useAuthStore";
 import {
   applyUsageToTurnState,
@@ -78,6 +83,10 @@ export interface UsePlaygroundStreamOptions {
     name?: string;
     display_name?: string;
     service_type?: string;
+    upstream_url?: string | null;
+    graph_id?: string | null;
+    assistant_id?: string | null;
+    connector_config?: Record<string, unknown>;
     metadata?: Record<string, unknown>;
   };
   /** Whether session persistence is enabled */
@@ -133,6 +142,7 @@ export interface UsePlaygroundStreamOptions {
 }
 
 const MODEL_DEBUG_LABEL = "[Hejaz Model Debug]";
+const serviceDebugDetailCache = new Map<string, Promise<ServiceDetail>>();
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object"
@@ -198,6 +208,76 @@ function formatModelDebugLine(data: Record<string, unknown>): string {
   return `${MODEL_DEBUG_LABEL} ${parts.join(" ")}`;
 }
 
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function hasControlPlaneDebugSnapshot(
+  activeService?: UsePlaygroundStreamOptions["activeService"]
+): boolean {
+  if (!activeService) return false;
+  const connectorConfig = asRecord(activeService.connector_config);
+  if (connectorConfig) return true;
+
+  const metadata = asRecord(activeService.metadata);
+  return Boolean(metadata && hasOwn(metadata, "model_override"));
+}
+
+function getCachedServiceDetail(serviceId: string): Promise<ServiceDetail> {
+  const cached = serviceDebugDetailCache.get(serviceId);
+  if (cached) return cached;
+
+  const pending = getService(serviceId).catch((error) => {
+    serviceDebugDetailCache.delete(serviceId);
+    throw error;
+  });
+  serviceDebugDetailCache.set(serviceId, pending);
+  return pending;
+}
+
+function buildControlPlaneModelDebug({
+  base,
+  service,
+  stage,
+}: {
+  base: Record<string, unknown>;
+  service: UsePlaygroundStreamOptions["activeService"] | ServiceDetail;
+  stage: string;
+}): Record<string, unknown> {
+  const serviceRecord = asRecord(service) ?? {};
+  const connectorConfig = asRecord(serviceRecord.connector_config) ?? {};
+  const metadata = asRecord(serviceRecord.metadata) ?? {};
+
+  return {
+    ...base,
+    stage: `${stage}:control-plane`,
+    service_name:
+      asSafeString(serviceRecord.name) ||
+      asSafeString(serviceRecord.display_name) ||
+      asSafeString(base.service_name) ||
+      asSafeString(serviceRecord.service_id),
+    service_type: asSafeString(serviceRecord.service_type) ?? base.service_type,
+    adapter_type: asSafeString(
+      connectorConfig.adapter_type ?? metadata.adapter_type
+    ),
+    proxy_mode: asSafeString(
+      connectorConfig.proxy_mode ?? metadata.proxy_mode
+    ),
+    upstream_base_url: asSafeString(
+      connectorConfig.upstream_url ??
+        connectorConfig.base_url ??
+        serviceRecord.upstream_url
+    ),
+    graph_id: asSafeString(connectorConfig.graph_id ?? serviceRecord.graph_id),
+    assistant_id: asSafeString(
+      connectorConfig.assistant_id ?? serviceRecord.assistant_id
+    ),
+    model_override: summarizeModelOverride(
+      connectorConfig.model_override ?? metadata.model_override
+    ),
+  };
+}
+
 async function logPlaygroundModelDebug({
   stage,
   serviceId,
@@ -228,31 +308,23 @@ async function logPlaygroundModelDebug({
 
   console.info(formatModelDebugLine(base), base);
 
-  try {
-    const serviceDetail = await getService(serviceId);
-    const connectorConfig = asRecord(serviceDetail.connector_config) ?? {};
-    const metadata = asRecord(serviceDetail.metadata) ?? {};
+  if (hasControlPlaneDebugSnapshot(activeService)) {
+    const controlPlaneDebug = buildControlPlaneModelDebug({
+      base,
+      service: activeService,
+      stage,
+    });
+    console.info(formatModelDebugLine(controlPlaneDebug), controlPlaneDebug);
+    return;
+  }
 
-    const controlPlaneDebug = {
-      ...base,
-      stage: `${stage}:control-plane`,
-      service_name:
-        serviceDetail.name ||
-        serviceDetail.display_name ||
-        activeService?.name ||
-        activeService?.service_id,
-      service_type: serviceDetail.service_type,
-      adapter_type: asSafeString(metadata.adapter_type),
-      proxy_mode: asSafeString(
-        connectorConfig.proxy_mode ?? metadata.proxy_mode
-      ),
-      upstream_base_url: asSafeString(
-        connectorConfig.upstream_url ?? connectorConfig.base_url
-      ),
-      graph_id: asSafeString(connectorConfig.graph_id),
-      assistant_id: asSafeString(connectorConfig.assistant_id),
-      model_override: summarizeModelOverride(connectorConfig.model_override),
-    };
+  try {
+    const serviceDetail = await getCachedServiceDetail(serviceId);
+    const controlPlaneDebug = buildControlPlaneModelDebug({
+      base,
+      service: serviceDetail,
+      stage,
+    });
 
     console.info(formatModelDebugLine(controlPlaneDebug), controlPlaneDebug);
   } catch (error) {

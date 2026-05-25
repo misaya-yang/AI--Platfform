@@ -3,6 +3,7 @@ import type {
   HealthStatus,
   ServiceDefinition,
   ServiceDetail,
+  ServiceModelOverride,
   ServiceUiPreferences,
   Task,
   UnifiedRequest,
@@ -19,10 +20,14 @@ export interface ProxyServiceSummary {
   name: string;
   enabled: boolean;
   service_type?: string;
+  upstream_url?: string | null;
+  graph_id?: string | null;
+  assistant_id?: string | null;
   metadata?: {
     ui_preferences?: ServiceUiPreferences;
     adapter_type?: string;
     proxy_mode?: string;
+    model_override?: ServiceModelOverride;
   };
 }
 
@@ -33,10 +38,14 @@ export async function listProxyServices(): Promise<ProxyServiceSummary[]> {
       service_name: string;
       enabled: boolean;
       service_type?: string;
+      upstream_url?: string | null;
+      graph_id?: string | null;
+      assistant_id?: string | null;
       metadata?: {
         ui_preferences?: ServiceUiPreferences;
         adapter_type?: string;
         proxy_mode?: string;
+        model_override?: ServiceModelOverride;
       };
     }>;
   }>("/api/v1/proxy");
@@ -46,6 +55,9 @@ export async function listProxyServices(): Promise<ProxyServiceSummary[]> {
     name: service.service_name || service.service_id,
     enabled: Boolean(service.enabled),
     service_type: service.service_type || "proxy",
+    upstream_url: service.upstream_url ?? null,
+    graph_id: service.graph_id ?? null,
+    assistant_id: service.assistant_id ?? null,
     metadata: service.metadata || {},
   }));
 }

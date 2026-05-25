@@ -1281,6 +1281,27 @@ async def transparent_proxy_root_handler(
 # ============ 服务发现端点 ============
 
 
+def _safe_model_override_debug(model_override: Any) -> dict[str, Any]:
+    """Expose only non-secret model override fields for frontend diagnostics."""
+    source = model_override if isinstance(model_override, dict) else {}
+    provider_id = str(source.get("provider_id") or "").strip() or None
+    model_id = str(source.get("model_id") or "").strip() or None
+    cache_epoch = source.get("cache_epoch")
+    if not isinstance(cache_epoch, (int, str)):
+        cache_epoch = None
+    temperature = source.get("temperature")
+    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
+        temperature = None
+
+    return {
+        "enabled": bool(source.get("enabled")),
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "cache_epoch": cache_epoch,
+        "temperature": temperature,
+    }
+
+
 @router.get(
     "",
     summary="列出代理服务",
@@ -1364,6 +1385,7 @@ async def list_proxy_services(
         ui_preferences = raw_metadata.get("ui_preferences")
         if isinstance(ui_preferences, dict):
             safe_metadata["ui_preferences"] = dict(ui_preferences)
+        safe_metadata["model_override"] = _safe_model_override_debug(svc.model_override)
         availability = await proxy.get_service_availability(svc)
 
         visible_services.append(
@@ -1374,6 +1396,7 @@ async def list_proxy_services(
                 "metadata": safe_metadata,
                 # 仅管理员可见完整 URL
                 "upstream_url": svc.upstream_url if is_admin else None,
+                "graph_id": svc.graph_id if is_admin else None,
                 "assistant_id": svc.assistant_id if is_admin else None,
                 "enabled": svc.enabled,
                 "availability_status": availability.get("availability_status", "unknown"),
