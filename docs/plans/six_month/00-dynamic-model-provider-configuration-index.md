@@ -13,6 +13,7 @@
 ## Source Documents
 
 - Overview moved here: `docs/plans/six_month/2026-05-25-dynamic-model-provider-configuration-plan-v4.1-overview.md`
+- Acceptance record: `docs/plans/six_month/acceptance-dynamic-model-provider-rollout.md`
 - Original superseded location: `docs/plans/2026-05-25-dynamic-model-provider-configuration-plan-v3-official.md`
 - Official LangChain dynamic model selection: https://docs.langchain.com/oss/python/migrate/langchain-v1#dynamic-model-selection
 - Official DeepAgents runtime model selection: https://docs.langchain.com/oss/python/deepagents/models#select-a-model-at-runtime
