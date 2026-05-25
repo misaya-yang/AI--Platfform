@@ -377,7 +377,7 @@ services:
     expose:
       - "8093"
     environment:
-      ASSISTANT_CORS__ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:80,http://localhost:3000}"
+      ASSISTANT_CORS__ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-[\"http://localhost:80\",\"http://localhost:3000\",\"http://localhost:8081\"]}"
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/gateway
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
       KB_SERVICE_URL: http://knowledge-service:8092
