@@ -38,7 +38,7 @@
 | P3 | `03-phase-frontend-service-model-config.md` | Service Configuration UI exposes Agent Model override using existing Providers/Models |
 | P4 | `04-phase-e2e-validation-and-prod-rollout.md` | Local, container, and production rollout gates prove no-restart switching |
 | P5 | `05-phase-customer-agent-conditional-compatibility.md` | Customer Agent plan if it is reintroduced to production |
-| P6 | `06-phase-image-generation-model-override.md` | Image model selection remains explicitly decoupled from chat model switching |
+| P6 | `06-phase-image-generation-model-override.md` | Paused for this rollout; image generation remains unchanged and decoupled from chat model switching |
 | P7 | `07-phase-dify-style-provider-model-onboarding.md` | Provider/model onboarding becomes template-driven with provider discovery/catalog sync |
 
 ## Non-Negotiable Decisions
@@ -49,6 +49,7 @@
 - Do not manually upgrade Python packages on production. Align dependencies through project files, lock files, LangGraph build, or controlled volume deployment.
 - Current P0 production rollout is Imam Agent only. Customer/deepagents is conditional.
 - Chat model switching and image-generation model selection are separate product controls.
+- P6 image-generation override is paused for the current rollout by later user instruction; do not modify image-generation services or UI unless that product direction is reopened.
 - Provider/model onboarding should become template/catalog driven after P4, so admins do not hand-enter provider ids, base URLs, model ids, context windows, or capability flags for mainstream providers.
 
 ## Completion Definition
