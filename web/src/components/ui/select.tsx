@@ -43,11 +43,16 @@ const SelectTrigger = React.forwardRef<
 ));
 SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
 
+interface SelectContentProps
+  extends React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content> {
+  disablePortal?: boolean;
+}
+
 const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = "popper", ...props }, ref) => (
-  <SelectPrimitive.Portal>
+  SelectContentProps
+>(({ className, children, position = "popper", disablePortal = false, ...props }, ref) => {
+  const content = (
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
@@ -92,8 +97,14 @@ const SelectContent = React.forwardRef<
         <ChevronDown className="h-4 w-4" />
       </SelectPrimitive.ScrollDownButton>
     </SelectPrimitive.Content>
-  </SelectPrimitive.Portal>
-));
+  );
+
+  if (disablePortal) {
+    return content;
+  }
+
+  return <SelectPrimitive.Portal>{content}</SelectPrimitive.Portal>;
+});
 SelectContent.displayName = SelectPrimitive.Content.displayName;
 
 const SelectItem = React.forwardRef<
@@ -136,4 +147,3 @@ export {
   SelectContent,
   SelectItem,
 };
-

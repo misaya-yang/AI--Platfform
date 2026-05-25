@@ -451,7 +451,7 @@ export function ServiceConfigDialog({
                       <SelectTrigger>
                         <SelectValue />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent disablePortal>
                         <SelectItem value="active">{t("common.active")}</SelectItem>
                         <SelectItem value="inactive">{t("services.configDialog.status.inactive")}</SelectItem>
                         <SelectItem value="disabled">{t("common.disabled")}</SelectItem>
@@ -526,7 +526,7 @@ export function ServiceConfigDialog({
                                 placeholder={t("services.configDialog.model.providerPlaceholder")}
                               />
                             </SelectTrigger>
-                            <SelectContent>
+                            <SelectContent disablePortal>
                               {selectableProviders.map((provider) => (
                                 <SelectItem key={provider.provider_id} value={provider.provider_id}>
                                   <div className="flex min-w-0 items-center gap-2">
@@ -569,7 +569,7 @@ export function ServiceConfigDialog({
                                 placeholder={t("services.configDialog.model.modelPlaceholder")}
                               />
                             </SelectTrigger>
-                            <SelectContent>
+                            <SelectContent disablePortal>
                               {selectableModels.map((model) => (
                                 <SelectItem key={model.model_id} value={model.model_id}>
                                   {model.display_name || model.model_id}
@@ -734,7 +734,7 @@ export function ServiceConfigDialog({
                           <SelectTrigger>
                             <SelectValue />
                           </SelectTrigger>
-                          <SelectContent>
+                          <SelectContent disablePortal>
                             <SelectItem value="sliding_window">{t("services.configDialog.rateLimit.strategySliding")}</SelectItem>
                             <SelectItem value="fixed_window">{t("services.configDialog.rateLimit.strategyFixed")}</SelectItem>
                             <SelectItem value="token_bucket">{t("services.configDialog.rateLimit.strategyToken")}</SelectItem>
