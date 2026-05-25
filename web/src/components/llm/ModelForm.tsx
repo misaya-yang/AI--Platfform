@@ -26,6 +26,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { ChevronDown } from "lucide-react";
 import type { LLMModel, ModelCreate, ModelUpdate, ModelAccessLevel } from "@/api/models";
 import type { Provider, ProviderTemplate } from "@/api/providers";
 
@@ -117,6 +123,7 @@ export function ModelForm({
   const { t } = useTranslation();
   const isEdit = !!model;
   const [advancedCatalogOverride, setAdvancedCatalogOverride] = useState(false);
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
 
   const ACCESS_LEVELS: { value: ModelAccessLevel; label: string }[] = [
     { value: "public", label: t("llm.model.accessLevels.public") },
@@ -207,6 +214,7 @@ export function ModelForm({
     (option) => option.value === providerId
   );
   const catalogModels = selectedProviderOption?.template?.default_models ?? [];
+  const hasCatalogModels = !isEdit && catalogModels.length > 0;
   const knownModelProviders = useMemo(() => {
     const normalized = (modelId || "").trim().toLowerCase();
     if (!normalized) return [];
@@ -238,6 +246,7 @@ export function ModelForm({
   useEffect(() => {
     if (model) {
       setAdvancedCatalogOverride(false);
+      setShowAdvancedSettings(true);
       reset({
         model_id: model.model_id,
         provider_id: model.provider_id,
@@ -255,6 +264,7 @@ export function ModelForm({
       });
     } else {
       setAdvancedCatalogOverride(false);
+      setShowAdvancedSettings(false);
       reset({
         model_id: "",
         provider_id: providerOptions[0]?.value || "",
@@ -338,18 +348,24 @@ export function ModelForm({
     const firstCatalogModel = option?.template?.default_models[0];
     if (firstCatalogModel) {
       applyCatalogModel(firstCatalogModel, setValue);
+      setShowAdvancedSettings(false);
     } else {
       setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
+      setShowAdvancedSettings(true);
     }
   };
 
   const handleCatalogModelChange = (value: string) => {
     setValue("catalog_model_id", value);
-    if (value === CUSTOM_MODEL_VALUE) return;
+    if (value === CUSTOM_MODEL_VALUE) {
+      setShowAdvancedSettings(true);
+      return;
+    }
 
     const catalogModel = catalogModels.find((item) => item.model_id === value);
     if (catalogModel) {
       applyCatalogModel(catalogModel, setValue);
+      setShowAdvancedSettings(false);
     }
   };
 
@@ -364,20 +380,8 @@ export function ModelForm({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-6 py-4">
-            {/* =========================================================
-                SECTION: Identity
-                Primary keys + human-facing name. ``model_id`` drives the
-                provider API call; ``provider_id`` is immutable post-create
-                to avoid re-keying usage records.
-                ========================================================= */}
+          <div className="grid gap-5 py-4">
             <section className="grid gap-4">
-              <h3 className="text-sm font-semibold text-foreground">
-                {t("llm.model.sections.identity", "Identity")}
-              </h3>
-
-              {/* Provider (create only — moving a model between providers
-                  is a much bigger operation and out of scope for this form). */}
               {!isEdit && (
                 <div className="grid gap-2">
                   <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
@@ -392,36 +396,25 @@ export function ModelForm({
                       {providerOptions.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
-                          {option.template?.default_models.length
-                            ? ` · ${t(
-                                "llm.model.catalogModelCount",
-                                "{{count}} catalog models",
-                                { count: option.template.default_models.length }
-                              )}`
-                            : ""}
-                          {!option.registered
-                            ? ` · ${t("llm.model.templateOnly", "template")}`
-                            : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {selectedProviderOption?.registered
-                      ? selectedProviderOption.description ||
-                        t("llm.model.registeredProviderHint", "Registered provider")
-                      : t(
-                          "llm.model.templateProviderHint",
-                          "Template entry. Save the provider credentials before using it in runtime."
-                        )}
-                  </p>
+                  {selectedProviderOption && !selectedProviderOption.registered && (
+                    <p className="text-xs text-amber-600 dark:text-amber-300">
+                      {t(
+                        "llm.model.templateProviderHint",
+                        "Template entry. Save the provider credentials before using it in runtime."
+                      )}
+                    </p>
+                  )}
                 </div>
               )}
 
-              {!isEdit && catalogModels.length > 0 && (
+              {hasCatalogModels && (
                 <div className="grid gap-2">
                   <Label htmlFor="catalog_model_id">
-                    {t("llm.model.catalogModel", "Catalog model")}
+                    {t("llm.model.catalogModel", "Model")}
                   </Label>
                   <Select
                     value={catalogModelId}
@@ -431,7 +424,7 @@ export function ModelForm({
                       <SelectValue
                         placeholder={t(
                           "llm.model.catalogModelPlaceholder",
-                          "Select a supported model"
+                          "Select model"
                         )}
                       />
                     </SelectTrigger>
@@ -449,265 +442,255 @@ export function ModelForm({
                       </SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {t(
-                      "llm.model.catalogModelHint",
-                      "Choosing a catalog model fills capability, context, and pricing defaults."
+                </div>
+              )}
+            </section>
+
+            <Collapsible
+              open={showAdvancedSettings}
+              onOpenChange={setShowAdvancedSettings}
+              className="rounded-lg border border-border/70"
+            >
+              <CollapsibleTrigger className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium text-foreground">
+                <span>{t("llm.model.advancedSettings", "Advanced settings")}</span>
+                <ChevronDown
+                  className={`h-4 w-4 text-muted-foreground transition-transform ${
+                    showAdvancedSettings ? "rotate-180" : ""
+                  }`}
+                />
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="grid gap-6 border-t border-border/70 p-4">
+                  <section className="grid gap-4">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {t("llm.model.sections.identity", "Identity")}
+                    </h3>
+
+                    {/* Model ID is the provider API identifier. It stays in
+                        advanced settings for catalog-backed models, but is
+                        still editable for custom models and rename flows. */}
+                    <div className="grid gap-2">
+                      <Label htmlFor="model_id">{t("llm.model.modelId")}</Label>
+                      <Input
+                        id="model_id"
+                        placeholder={t("llm.model.modelIdPlaceholder")}
+                        {...register("model_id", {
+                          required: t("llm.model.modelIdRequired"),
+                          onChange: () => {
+                            if (!isEdit) {
+                              setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
+                              setShowAdvancedSettings(true);
+                            }
+                          },
+                        })}
+                      />
+                      {errors.model_id && (
+                        <p className="text-sm text-destructive">{errors.model_id.message}</p>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        {isEdit
+                          ? t(
+                              "llm.model.modelIdEditHint",
+                              "This is the identifier sent to the provider's API. Renaming it updates the primary key; prior usage records keep their original id for audit.",
+                            )
+                          : t("llm.model.modelIdHint")}
+                      </p>
+                    </div>
+
+                    {catalogMismatch && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                        {t(
+                          "llm.model.catalogMismatch",
+                          "This model belongs to a known provider catalog. Switch to the matching provider or enable advanced override."
+                        )}{" "}
+                        <button
+                          type="button"
+                          className="font-semibold underline"
+                          onClick={() => setAdvancedCatalogOverride(true)}
+                        >
+                          {t("llm.model.enableAdvancedOverride", "Enable advanced override")}
+                        </button>
+                      </div>
                     )}
-                  </p>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="display_name">{t("llm.model.displayName")}</Label>
+                      <Input
+                        id="display_name"
+                        placeholder={t("llm.model.displayNamePlaceholder")}
+                        {...register("display_name", { required: t("llm.model.displayNameRequired") })}
+                      />
+                      {errors.display_name && (
+                        <p className="text-sm text-destructive">{errors.display_name.message}</p>
+                      )}
+                    </div>
+                  </section>
+
+                  {/* ``supports_native_search`` and ``native_search_config``
+                      are intentionally not exposed here. They are derived
+                      from the provider/model pair in model_registry.py. */}
+                  <section className="grid gap-4">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {t("llm.model.sections.capabilities", "Capabilities")}
+                    </h3>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="context_window">
+                          {t("llm.model.contextWindow")} <span className="text-destructive">*</span>
+                        </Label>
+                        <Input
+                          id="context_window"
+                          type="number"
+                          {...register("context_window", {
+                            valueAsNumber: true,
+                            required: t("llm.model.validation.contextWindowRequired"),
+                            min: { value: 1, message: t("llm.model.validation.contextWindowMin") },
+                            max: { value: 10000000, message: t("llm.model.validation.contextWindowMax") },
+                          })}
+                        />
+                        {errors.context_window && (
+                          <p className="text-sm text-destructive">{errors.context_window.message}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="max_output_tokens">{t("llm.model.maxOutputTokens")}</Label>
+                        <Input
+                          id="max_output_tokens"
+                          type="number"
+                          {...register("max_output_tokens", {
+                            valueAsNumber: true,
+                            min: { value: 1, message: t("llm.model.validation.maxOutputTokensMin") },
+                          })}
+                        />
+                        {errors.max_output_tokens && (
+                          <p className="text-sm text-destructive">{errors.max_output_tokens.message}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label htmlFor="supports_vision">{t("llm.model.supportsVision")}</Label>
+                        <p className="text-xs text-muted-foreground">
+                          {t("llm.model.supportsVisionHint")}
+                        </p>
+                      </div>
+                      <Switch
+                        id="supports_vision"
+                        checked={watch("supports_vision")}
+                        onCheckedChange={(checked) => setValue("supports_vision", checked)}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label htmlFor="supports_tools">{t("llm.model.supportsTools")}</Label>
+                        <p className="text-xs text-muted-foreground">
+                          {t("llm.model.supportsToolsHint")}
+                        </p>
+                      </div>
+                      <Switch
+                        id="supports_tools"
+                        checked={watch("supports_tools")}
+                        onCheckedChange={(checked) => setValue("supports_tools", checked)}
+                      />
+                    </div>
+                  </section>
+
+                  <section className="grid gap-4">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {t("llm.model.sections.pricing", "Pricing")}
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="grid gap-2">
+                        <Label htmlFor="input_price_per_1k">{t("llm.model.inputPrice")}</Label>
+                        <Input
+                          id="input_price_per_1k"
+                          type="number"
+                          step="0.000001"
+                          {...register("input_price_per_1k", {
+                            valueAsNumber: true,
+                            min: { value: 0, message: t("llm.model.validation.priceMin") },
+                          })}
+                        />
+                        {errors.input_price_per_1k && (
+                          <p className="text-sm text-destructive">{errors.input_price_per_1k.message}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="output_price_per_1k">{t("llm.model.outputPrice")}</Label>
+                        <Input
+                          id="output_price_per_1k"
+                          type="number"
+                          step="0.000001"
+                          {...register("output_price_per_1k", {
+                            valueAsNumber: true,
+                            min: { value: 0, message: t("llm.model.validation.priceMin") },
+                          })}
+                        />
+                        {errors.output_price_per_1k && (
+                          <p className="text-sm text-destructive">{errors.output_price_per_1k.message}</p>
+                        )}
+                        <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="grid gap-4">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {t("llm.model.sections.accessDisplay", "Access & Display")}
+                    </h3>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="access_level">{t("llm.model.accessLevel")}</Label>
+                      <Select
+                        value={accessLevel}
+                        onValueChange={(value) => setValue("access_level", value as ModelAccessLevel)}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder={t("llm.model.accessLevelPlaceholder")} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {ACCESS_LEVELS.map((level) => (
+                            <SelectItem key={level.value} value={level.value}>
+                              {level.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="sort_order">{t("llm.model.sortOrder")}</Label>
+                      <Input
+                        id="sort_order"
+                        type="number"
+                        {...register("sort_order", { valueAsNumber: true })}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("llm.model.sortOrderHint")}</p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label htmlFor="is_enabled">{t("llm.model.enableModel")}</Label>
+                        <p className="text-xs text-muted-foreground">
+                          {t("llm.model.enableModelHint")}
+                        </p>
+                      </div>
+                      <Switch
+                        id="is_enabled"
+                        checked={watch("is_enabled")}
+                        onCheckedChange={(checked) => setValue("is_enabled", checked)}
+                      />
+                    </div>
+                  </section>
                 </div>
-              )}
-
-              {/* Model ID — editable in both create and edit modes. Renaming
-                  (e.g. ``gemini-3-flash-preview`` → ``gemini-3.1-flash``) is
-                  supported server-side via PK UPDATE so operators don't
-                  have to delete+recreate when the provider renames a model. */}
-              <div className="grid gap-2">
-                <Label htmlFor="model_id">{t("llm.model.modelId")}</Label>
-                <Input
-                  id="model_id"
-                  placeholder={t("llm.model.modelIdPlaceholder")}
-                  {...register("model_id", {
-                    required: t("llm.model.modelIdRequired"),
-                    onChange: () => {
-                      if (!isEdit) {
-                        setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
-                      }
-                    },
-                  })}
-                />
-                {errors.model_id && (
-                  <p className="text-sm text-destructive">{errors.model_id.message}</p>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  {isEdit
-                    ? t(
-                        "llm.model.modelIdEditHint",
-                        "This is the identifier sent to the provider's API. Renaming it updates the primary key; prior usage records keep their original id for audit.",
-                      )
-                    : t("llm.model.modelIdHint")}
-                </p>
-              </div>
-
-              {catalogMismatch && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-                  {t(
-                    "llm.model.catalogMismatch",
-                    "This model belongs to a known provider catalog. Switch to the matching provider or enable advanced override."
-                  )}{" "}
-                  <button
-                    type="button"
-                    className="font-semibold underline"
-                    onClick={() => setAdvancedCatalogOverride(true)}
-                  >
-                    {t("llm.model.enableAdvancedOverride", "Enable advanced override")}
-                  </button>
-                </div>
-              )}
-
-              {/* Display Name */}
-              <div className="grid gap-2">
-                <Label htmlFor="display_name">{t("llm.model.displayName")}</Label>
-                <Input
-                  id="display_name"
-                  placeholder={t("llm.model.displayNamePlaceholder")}
-                  {...register("display_name", { required: t("llm.model.displayNameRequired") })}
-                />
-                {errors.display_name && (
-                  <p className="text-sm text-destructive">{errors.display_name.message}</p>
-                )}
-              </div>
-            </section>
-
-            {/* =========================================================
-                SECTION: Capabilities
-                Context budget + feature switches. Note: ``supports_native_search``
-                and ``native_search_config`` are intentionally NOT exposed
-                here — they are DERIVED (populated at runtime from the
-                ``NATIVE_SEARCH_CAPABLE`` map in ``model_registry.py`` based
-                on the (provider, model_id) pair). Flipping a DB boolean
-                without corresponding provider-body wiring in ``_build_*_body``
-                would produce 400 errors, so the map is the single source
-                of truth. To enable native search for a new model, a code
-                change is required — add the (provider, model_id) entry to
-                ``NATIVE_SEARCH_CAPABLE`` and the matching request-body
-                merge in the provider-specific ``_build_*_body`` function.
-                ========================================================= */}
-            <section className="grid gap-4">
-              <h3 className="text-sm font-semibold text-foreground">
-                {t("llm.model.sections.capabilities", "Capabilities")}
-              </h3>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="context_window">
-                    {t("llm.model.contextWindow")} <span className="text-destructive">*</span>
-                  </Label>
-                  <Input
-                    id="context_window"
-                    type="number"
-                    {...register("context_window", {
-                      valueAsNumber: true,
-                      required: t("llm.model.validation.contextWindowRequired"),
-                      min: { value: 1, message: t("llm.model.validation.contextWindowMin") },
-                      max: { value: 10000000, message: t("llm.model.validation.contextWindowMax") },
-                    })}
-                  />
-                  {errors.context_window && (
-                    <p className="text-sm text-destructive">{errors.context_window.message}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="max_output_tokens">{t("llm.model.maxOutputTokens")}</Label>
-                  <Input
-                    id="max_output_tokens"
-                    type="number"
-                    {...register("max_output_tokens", {
-                      valueAsNumber: true,
-                      min: { value: 1, message: t("llm.model.validation.maxOutputTokensMin") },
-                    })}
-                  />
-                  {errors.max_output_tokens && (
-                    <p className="text-sm text-destructive">{errors.max_output_tokens.message}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">{t("llm.model.tokenCount")}</p>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label htmlFor="supports_vision">{t("llm.model.supportsVision")}</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {t("llm.model.supportsVisionHint")}
-                  </p>
-                </div>
-                <Switch
-                  id="supports_vision"
-                  checked={watch("supports_vision")}
-                  onCheckedChange={(checked) => setValue("supports_vision", checked)}
-                />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label htmlFor="supports_tools">{t("llm.model.supportsTools")}</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {t("llm.model.supportsToolsHint")}
-                  </p>
-                </div>
-                <Switch
-                  id="supports_tools"
-                  checked={watch("supports_tools")}
-                  onCheckedChange={(checked) => setValue("supports_tools", checked)}
-                />
-              </div>
-
-              <p className="text-xs text-muted-foreground italic">
-                {t(
-                  "llm.model.nativeSearchNote",
-                  "Native web search support is derived from the (provider, model_id) pair in code (see NATIVE_SEARCH_CAPABLE). Adding support for a new model requires a code change, not a UI toggle.",
-                )}
-              </p>
-            </section>
-
-            {/* =========================================================
-                SECTION: Pricing
-                USD per 1K tokens. Values are synced to ``model_pricing``
-                on save so UsageRecorder's cost calculations pick them up.
-                ========================================================= */}
-            <section className="grid gap-4">
-              <h3 className="text-sm font-semibold text-foreground">
-                {t("llm.model.sections.pricing", "Pricing")}
-              </h3>
-              <div className="grid grid-cols-2 gap-4">
-                <div className="grid gap-2">
-                  <Label htmlFor="input_price_per_1k">{t("llm.model.inputPrice")}</Label>
-                  <Input
-                    id="input_price_per_1k"
-                    type="number"
-                    step="0.000001"
-                    {...register("input_price_per_1k", {
-                      valueAsNumber: true,
-                      min: { value: 0, message: t("llm.model.validation.priceMin") },
-                    })}
-                  />
-                  {errors.input_price_per_1k && (
-                    <p className="text-sm text-destructive">{errors.input_price_per_1k.message}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="output_price_per_1k">{t("llm.model.outputPrice")}</Label>
-                  <Input
-                    id="output_price_per_1k"
-                    type="number"
-                    step="0.000001"
-                    {...register("output_price_per_1k", {
-                      valueAsNumber: true,
-                      min: { value: 0, message: t("llm.model.validation.priceMin") },
-                    })}
-                  />
-                  {errors.output_price_per_1k && (
-                    <p className="text-sm text-destructive">{errors.output_price_per_1k.message}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">{t("llm.model.priceUnit")}</p>
-                </div>
-              </div>
-            </section>
-
-            {/* =========================================================
-                SECTION: Access & Display
-                Who can see/use the model + UI sort order + enabled flag.
-                ========================================================= */}
-            <section className="grid gap-4">
-              <h3 className="text-sm font-semibold text-foreground">
-                {t("llm.model.sections.accessDisplay", "Access & Display")}
-              </h3>
-
-              <div className="grid gap-2">
-                <Label htmlFor="access_level">{t("llm.model.accessLevel")}</Label>
-                <Select
-                  value={accessLevel}
-                  onValueChange={(value) => setValue("access_level", value as ModelAccessLevel)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder={t("llm.model.accessLevelPlaceholder")} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ACCESS_LEVELS.map((level) => (
-                      <SelectItem key={level.value} value={level.value}>
-                        {level.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="grid gap-2">
-                <Label htmlFor="sort_order">{t("llm.model.sortOrder")}</Label>
-                <Input
-                  id="sort_order"
-                  type="number"
-                  {...register("sort_order", { valueAsNumber: true })}
-                />
-                <p className="text-xs text-muted-foreground">{t("llm.model.sortOrderHint")}</p>
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label htmlFor="is_enabled">{t("llm.model.enableModel")}</Label>
-                  <p className="text-xs text-muted-foreground">
-                    {t("llm.model.enableModelHint")}
-                  </p>
-                </div>
-                <Switch
-                  id="is_enabled"
-                  checked={watch("is_enabled")}
-                  onCheckedChange={(checked) => setValue("is_enabled", checked)}
-                />
-              </div>
-            </section>
+              </CollapsibleContent>
+            </Collapsible>
           </div>
 
           <DialogFooter>
