@@ -5,9 +5,9 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
+from src.api.schemas.providers import ProviderFromTemplateCreate
 from src.api.v1.providers import create_provider_from_template, list_templates
 from src.core.auth.user_resolver import UserContext
-from src.api.schemas.providers import ProviderFromTemplateCreate
 
 
 def _admin() -> UserContext:
