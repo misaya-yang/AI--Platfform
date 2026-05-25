@@ -42,6 +42,7 @@ interface ModelFormProps {
 interface FormData {
   model_id: string;
   provider_id: string;
+  catalog_model_id: string;
   display_name: string;
   context_window: number;
   max_output_tokens: number;
@@ -52,6 +53,56 @@ interface FormData {
   access_level: ModelAccessLevel;
   is_enabled: boolean;
   sort_order: number;
+}
+
+interface CatalogProviderOption {
+  value: string;
+  label: string;
+  description?: string;
+  provider?: Provider;
+  template?: ProviderTemplate;
+  registered: boolean;
+  hasApiKey: boolean;
+}
+
+const CUSTOM_MODEL_VALUE = "__custom_model__";
+
+function normalizeUrl(value?: string | null) {
+  return (value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function matchProviderTemplate(
+  provider: Provider,
+  templates: ProviderTemplate[]
+): ProviderTemplate | undefined {
+  const providerId = provider.provider_id.toLowerCase();
+  const baseUrl = normalizeUrl(provider.base_url);
+
+  return (
+    templates.find((template) => template.default_provider_id === providerId) ||
+    templates.find(
+      (template) =>
+        normalizeUrl(template.default_base_url) !== "" &&
+        normalizeUrl(template.default_base_url) === baseUrl
+    )
+  );
+}
+
+function applyCatalogModel(
+  catalogModel: ProviderTemplate["default_models"][number],
+  setValue: ReturnType<typeof useForm<FormData>>["setValue"]
+) {
+  setValue("model_id", catalogModel.model_id);
+  setValue("catalog_model_id", catalogModel.model_id);
+  setValue("display_name", catalogModel.display_name);
+  setValue("context_window", catalogModel.context_window);
+  setValue("max_output_tokens", catalogModel.max_output_tokens);
+  setValue("supports_vision", catalogModel.supports_vision);
+  setValue("supports_tools", catalogModel.supports_tools);
+  setValue("input_price_per_1k", catalogModel.input_price_per_1k);
+  setValue("output_price_per_1k", catalogModel.output_price_per_1k);
+  setValue("access_level", catalogModel.access_level as ModelAccessLevel);
+  setValue("sort_order", catalogModel.sort_order);
 }
 
 export function ModelForm({
@@ -84,6 +135,7 @@ export function ModelForm({
     defaultValues: {
       model_id: "",
       provider_id: "",
+      catalog_model_id: CUSTOM_MODEL_VALUE,
       display_name: "",
       context_window: 128000,
       max_output_tokens: 4096,
@@ -100,7 +152,61 @@ export function ModelForm({
 
   const providerId = watch("provider_id");
   const modelId = watch("model_id");
+  const catalogModelId = watch("catalog_model_id");
   const accessLevel = watch("access_level");
+  const providerOptions = useMemo<CatalogProviderOption[]>(() => {
+    const registeredOptions = providers.map((provider) => {
+      const template = matchProviderTemplate(provider, providerTemplates);
+      return {
+        value: provider.provider_id,
+        label: provider.display_name,
+        description: provider.base_url || undefined,
+        provider,
+        template,
+        registered: true,
+        hasApiKey: provider.has_api_key,
+      };
+    });
+    const coveredTemplateIds = new Set(
+      registeredOptions
+        .map((option) => option.template?.template_id)
+        .filter(Boolean) as string[]
+    );
+    const registeredProviderIds = new Set(
+      registeredOptions.map((option) => option.value)
+    );
+    const templateOptions = providerTemplates
+      .filter((template) => {
+        if (!template.default_provider_id) return false;
+        if (template.advanced) return false;
+        if (coveredTemplateIds.has(template.template_id)) return false;
+        if (registeredProviderIds.has(template.default_provider_id)) return false;
+        return template.default_models.length > 0;
+      })
+      .map((template) => ({
+        value: template.default_provider_id,
+        label: template.display_name,
+        description: template.default_base_url,
+        template,
+        registered: false,
+        hasApiKey: false,
+      }));
+
+    return [...registeredOptions, ...templateOptions].sort((a, b) => {
+      const aCatalog = a.template?.default_models.length ? 1 : 0;
+      const bCatalog = b.template?.default_models.length ? 1 : 0;
+      const aConfigured = a.registered && a.hasApiKey ? 1 : 0;
+      const bConfigured = b.registered && b.hasApiKey ? 1 : 0;
+      if (aConfigured !== bConfigured) return bConfigured - aConfigured;
+      if (aCatalog !== bCatalog) return bCatalog - aCatalog;
+      if (a.registered !== b.registered) return a.registered ? -1 : 1;
+      return a.label.localeCompare(b.label);
+    });
+  }, [providers, providerTemplates]);
+  const selectedProviderOption = providerOptions.find(
+    (option) => option.value === providerId
+  );
+  const catalogModels = selectedProviderOption?.template?.default_models ?? [];
   const knownModelProviders = useMemo(() => {
     const normalized = (modelId || "").trim().toLowerCase();
     if (!normalized) return [];
@@ -112,11 +218,22 @@ export function ModelForm({
       )
       .map((template) => template.default_provider_id);
   }, [modelId, providerTemplates]);
+  const selectedProviderCatalogMatchesModel = useMemo(() => {
+    const normalized = (modelId || "").trim().toLowerCase();
+    if (!normalized) return false;
+
+    return Boolean(
+      selectedProviderOption?.template?.default_models.some(
+        (catalogModel) => catalogModel.model_id.toLowerCase() === normalized
+      )
+    );
+  }, [modelId, selectedProviderOption]);
   const catalogMismatch =
     !isEdit &&
     !advancedCatalogOverride &&
     knownModelProviders.length > 0 &&
-    !knownModelProviders.includes(providerId);
+    !knownModelProviders.includes(providerId) &&
+    !selectedProviderCatalogMatchesModel;
 
   useEffect(() => {
     if (model) {
@@ -124,6 +241,7 @@ export function ModelForm({
       reset({
         model_id: model.model_id,
         provider_id: model.provider_id,
+        catalog_model_id: CUSTOM_MODEL_VALUE,
         display_name: model.display_name,
         context_window: model.context_window,
         max_output_tokens: model.max_output_tokens,
@@ -139,7 +257,10 @@ export function ModelForm({
       setAdvancedCatalogOverride(false);
       reset({
         model_id: "",
-        provider_id: providers[0]?.provider_id || "",
+        provider_id: providerOptions[0]?.value || "",
+        catalog_model_id:
+          providerOptions[0]?.template?.default_models[0]?.model_id ||
+          CUSTOM_MODEL_VALUE,
         display_name: "",
         context_window: 128000,
         max_output_tokens: 4096,
@@ -152,29 +273,29 @@ export function ModelForm({
         sort_order: 0,
       });
     }
-  }, [model, providers, reset]);
+  }, [model, providerOptions, reset]);
 
   useEffect(() => {
     if (isEdit || !modelId || !providerId) return;
 
-    const template = providerTemplates.find(
-      (item) => item.default_provider_id === providerId
-    );
+    const template = selectedProviderOption?.template;
     const catalogModel = template?.default_models.find(
       (item) => item.model_id.toLowerCase() === modelId.trim().toLowerCase()
     );
     if (!catalogModel) return;
 
-    setValue("display_name", catalogModel.display_name);
-    setValue("context_window", catalogModel.context_window);
-    setValue("max_output_tokens", catalogModel.max_output_tokens);
-    setValue("supports_vision", catalogModel.supports_vision);
-    setValue("supports_tools", catalogModel.supports_tools);
-    setValue("input_price_per_1k", catalogModel.input_price_per_1k);
-    setValue("output_price_per_1k", catalogModel.output_price_per_1k);
-    setValue("access_level", catalogModel.access_level as ModelAccessLevel);
-    setValue("sort_order", catalogModel.sort_order);
-  }, [isEdit, modelId, providerId, providerTemplates, setValue]);
+    applyCatalogModel(catalogModel, setValue);
+  }, [isEdit, modelId, providerId, selectedProviderOption, setValue]);
+
+  useEffect(() => {
+    if (isEdit || !providerId || catalogModelId === CUSTOM_MODEL_VALUE) return;
+    const catalogModel = catalogModels.find(
+      (item) => item.model_id === catalogModelId
+    );
+    if (!catalogModel) return;
+
+    applyCatalogModel(catalogModel, setValue);
+  }, [catalogModelId, catalogModels, isEdit, providerId, setValue]);
 
   const onFormSubmit = async (data: FormData) => {
     const submitData: ModelCreate | ModelUpdate = isEdit
@@ -211,6 +332,27 @@ export function ModelForm({
     await onSubmit(submitData);
   };
 
+  const handleProviderChange = (value: string) => {
+    setValue("provider_id", value);
+    const option = providerOptions.find((item) => item.value === value);
+    const firstCatalogModel = option?.template?.default_models[0];
+    if (firstCatalogModel) {
+      applyCatalogModel(firstCatalogModel, setValue);
+    } else {
+      setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
+    }
+  };
+
+  const handleCatalogModelChange = (value: string) => {
+    setValue("catalog_model_id", value);
+    if (value === CUSTOM_MODEL_VALUE) return;
+
+    const catalogModel = catalogModels.find((item) => item.model_id === value);
+    if (catalogModel) {
+      applyCatalogModel(catalogModel, setValue);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
@@ -234,6 +376,88 @@ export function ModelForm({
                 {t("llm.model.sections.identity", "Identity")}
               </h3>
 
+              {/* Provider (create only — moving a model between providers
+                  is a much bigger operation and out of scope for this form). */}
+              {!isEdit && (
+                <div className="grid gap-2">
+                  <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
+                  <Select
+                    value={providerId}
+                    onValueChange={handleProviderChange}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providerOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                          {option.template?.default_models.length
+                            ? ` · ${t(
+                                "llm.model.catalogModelCount",
+                                "{{count}} catalog models",
+                                { count: option.template.default_models.length }
+                              )}`
+                            : ""}
+                          {!option.registered
+                            ? ` · ${t("llm.model.templateOnly", "template")}`
+                            : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {selectedProviderOption?.registered
+                      ? selectedProviderOption.description ||
+                        t("llm.model.registeredProviderHint", "Registered provider")
+                      : t(
+                          "llm.model.templateProviderHint",
+                          "Template entry. Save the provider credentials before using it in runtime."
+                        )}
+                  </p>
+                </div>
+              )}
+
+              {!isEdit && catalogModels.length > 0 && (
+                <div className="grid gap-2">
+                  <Label htmlFor="catalog_model_id">
+                    {t("llm.model.catalogModel", "Catalog model")}
+                  </Label>
+                  <Select
+                    value={catalogModelId}
+                    onValueChange={handleCatalogModelChange}
+                  >
+                    <SelectTrigger>
+                      <SelectValue
+                        placeholder={t(
+                          "llm.model.catalogModelPlaceholder",
+                          "Select a supported model"
+                        )}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {catalogModels.map((catalogModel) => (
+                        <SelectItem
+                          key={catalogModel.model_id}
+                          value={catalogModel.model_id}
+                        >
+                          {catalogModel.display_name}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value={CUSTOM_MODEL_VALUE}>
+                        {t("llm.model.customModel", "Custom model ID")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "llm.model.catalogModelHint",
+                      "Choosing a catalog model fills capability, context, and pricing defaults."
+                    )}
+                  </p>
+                </div>
+              )}
+
               {/* Model ID — editable in both create and edit modes. Renaming
                   (e.g. ``gemini-3-flash-preview`` → ``gemini-3.1-flash``) is
                   supported server-side via PK UPDATE so operators don't
@@ -245,6 +469,11 @@ export function ModelForm({
                   placeholder={t("llm.model.modelIdPlaceholder")}
                   {...register("model_id", {
                     required: t("llm.model.modelIdRequired"),
+                    onChange: () => {
+                      if (!isEdit) {
+                        setValue("catalog_model_id", CUSTOM_MODEL_VALUE);
+                      }
+                    },
                   })}
                 />
                 {errors.model_id && (
@@ -259,29 +488,6 @@ export function ModelForm({
                     : t("llm.model.modelIdHint")}
                 </p>
               </div>
-
-              {/* Provider (create only — moving a model between providers
-                  is a much bigger operation and out of scope for this form). */}
-              {!isEdit && (
-                <div className="grid gap-2">
-                  <Label htmlFor="provider_id">{t("llm.model.provider")}</Label>
-                  <Select
-                    value={providerId}
-                    onValueChange={(value) => setValue("provider_id", value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={t("llm.model.providerPlaceholder")} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map((p) => (
-                        <SelectItem key={p.provider_id} value={p.provider_id}>
-                          {p.display_name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
 
               {catalogMismatch && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
