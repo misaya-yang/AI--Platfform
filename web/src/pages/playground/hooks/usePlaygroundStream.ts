@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, startTransition } from "react";
 
-import { invokeService } from "@/api/gateway";
+import { getService, invokeService } from "@/api/gateway";
 import { createSession, getSession, updateSession, addSessionMessage } from "@/api/sessions";
 import {
   sseFetch,
@@ -75,6 +75,8 @@ export interface UsePlaygroundStreamOptions {
   serviceId?: string;
   activeService?: {
     service_id: string;
+    name?: string;
+    display_name?: string;
     service_type?: string;
     metadata?: Record<string, unknown>;
   };
@@ -128,6 +130,99 @@ export interface UsePlaygroundStreamOptions {
   t: TFunction;
   /** Current loading state (for uiStreamingActive derivation) */
   loading: boolean;
+}
+
+const MODEL_DEBUG_LABEL = "[Hejaz Model Debug]";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function asSafeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function summarizeModelOverride(value: unknown) {
+  const override = asRecord(value);
+
+  return {
+    enabled: Boolean(override?.enabled),
+    provider_id: asSafeString(override?.provider_id),
+    model_id: asSafeString(override?.model_id),
+    cache_epoch:
+      typeof override?.cache_epoch === "number" ||
+      typeof override?.cache_epoch === "string"
+        ? override.cache_epoch
+        : null,
+    temperature:
+      typeof override?.temperature === "number" ? override.temperature : null,
+  };
+}
+
+async function logPlaygroundModelDebug({
+  stage,
+  serviceId,
+  activeService,
+  transparentProxy,
+  threadId,
+  path,
+}: {
+  stage: string;
+  serviceId: string;
+  activeService?: UsePlaygroundStreamOptions["activeService"];
+  transparentProxy: boolean;
+  threadId?: string | null;
+  path?: string | null;
+}) {
+  const base = {
+    stage,
+    service_id: serviceId,
+    service_name:
+      activeService?.name || activeService?.display_name || activeService?.service_id,
+    service_type: activeService?.service_type ?? null,
+    adapter_type: asSafeString(activeService?.metadata?.adapter_type),
+    proxy_mode: asSafeString(activeService?.metadata?.proxy_mode),
+    transparent_proxy: transparentProxy,
+    gateway_request_path: path ?? null,
+    langgraph_thread_id: threadId ?? null,
+  };
+
+  console.info(MODEL_DEBUG_LABEL, base);
+
+  try {
+    const serviceDetail = await getService(serviceId);
+    const connectorConfig = asRecord(serviceDetail.connector_config) ?? {};
+    const metadata = asRecord(serviceDetail.metadata) ?? {};
+
+    console.info(MODEL_DEBUG_LABEL, {
+      ...base,
+      stage: `${stage}:control-plane`,
+      service_name:
+        serviceDetail.name ||
+        serviceDetail.display_name ||
+        activeService?.name ||
+        activeService?.service_id,
+      service_type: serviceDetail.service_type,
+      adapter_type: asSafeString(metadata.adapter_type),
+      proxy_mode: asSafeString(
+        connectorConfig.proxy_mode ?? metadata.proxy_mode
+      ),
+      upstream_base_url: asSafeString(
+        connectorConfig.upstream_url ?? connectorConfig.base_url
+      ),
+      graph_id: asSafeString(connectorConfig.graph_id),
+      assistant_id: asSafeString(connectorConfig.assistant_id),
+      model_override: summarizeModelOverride(connectorConfig.model_override),
+    });
+  } catch (error) {
+    console.warn(MODEL_DEBUG_LABEL, {
+      ...base,
+      stage: `${stage}:control-plane-fetch-failed`,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +843,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             const streamPath = threadId
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
               : `/api/v1/proxy/${serviceId}/runs/stream`;
+            void logPlaygroundModelDebug({
+              stage: "transparent-proxy-stream-submit",
+              serviceId,
+              activeService,
+              transparentProxy: useTransparentProxy,
+              threadId,
+              path: streamPath,
+            });
             let lastCumulativeContent = "";
             // Tracks the last content we applied for each message id, so
             // we can tell post-middleware mutations apart from cross-turn
@@ -1657,6 +1760,12 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 const waitPath = threadId
                   ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/wait`
                   : `/api/v1/proxy/${serviceId}/runs/wait`;
+                console.info(MODEL_DEBUG_LABEL, {
+                  stage: "transparent-proxy-wait-fallback",
+                  service_id: serviceId,
+                  gateway_request_path: waitPath,
+                  langgraph_thread_id: threadId ?? null,
+                });
                 const waitPayload = {
                   input: {
                     messages: [
@@ -1702,6 +1811,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 );
               }
             } else {
+              void logPlaygroundModelDebug({
+                stage: "invoke-service-submit",
+                serviceId,
+                activeService,
+                transparentProxy: useTransparentProxy,
+                threadId,
+                path: "/api/v1/invoke",
+              });
               const resp = await invokeService(req);
               streamState = setStreamTurnContent(
                 streamState,

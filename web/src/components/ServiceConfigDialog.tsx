@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -407,6 +408,12 @@ export function ServiceConfigDialog({
             <span>{t("services.configDialog.title")}</span>
             <Badge variant="outline">{serviceName}</Badge>
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            {t(
+              "services.configDialog.description",
+              "Configure service connection, model override, rate limits, authentication, cache, priority, and danger-zone settings."
+            )}
+          </DialogDescription>
         </DialogHeader>
 
         {(configQuery.isLoading || serviceQuery.isLoading) ? (
