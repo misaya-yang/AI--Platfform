@@ -26,6 +26,7 @@ class ModelService:
         self,
         tenant_id: str,
         provider_id: str | None = None,
+        model_type: str | None = None,
         include_disabled: bool = False,
         access_level: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -47,6 +48,11 @@ class ModelService:
             params.append(provider_id)
             param_idx += 1
 
+        if model_type:
+            conditions.append(f"model_type = ${param_idx}")
+            params.append(model_type)
+            param_idx += 1
+
         if not include_disabled:
             conditions.append("is_enabled = true")
 
@@ -62,6 +68,7 @@ class ModelService:
 
         query = f"""
             SELECT model_id, tenant_id, provider_id, display_name,
+                   model_type,
                    context_window, max_output_tokens, supports_vision, supports_tools,
                    input_price_per_1k, output_price_per_1k, access_level,
                    is_enabled, sort_order, created_at, updated_at
@@ -90,6 +97,7 @@ class ModelService:
         if provider_id is not None:
             query = """
                 SELECT model_id, tenant_id, provider_id, display_name,
+                       model_type,
                        context_window, max_output_tokens, supports_vision, supports_tools,
                        input_price_per_1k, output_price_per_1k, access_level,
                        is_enabled, sort_order, created_at, updated_at
@@ -100,6 +108,7 @@ class ModelService:
         else:
             query = """
                 SELECT model_id, tenant_id, provider_id, display_name,
+                       model_type,
                        context_window, max_output_tokens, supports_vision, supports_tools,
                        input_price_per_1k, output_price_per_1k, access_level,
                        is_enabled, sort_order, created_at, updated_at
@@ -130,6 +139,7 @@ class ModelService:
         model_id: str,
         provider_id: str,
         display_name: str,
+        model_type: str = "llm",
         context_window: int = 128000,
         max_output_tokens: int = 4096,
         supports_vision: bool = False,
@@ -143,12 +153,13 @@ class ModelService:
         """Create a new model."""
         query = """
             INSERT INTO llm_models (
-                model_id, tenant_id, provider_id, display_name,
+                model_id, tenant_id, provider_id, display_name, model_type,
                 context_window, max_output_tokens, supports_vision, supports_tools,
                 input_price_per_1k, output_price_per_1k, access_level,
                 is_enabled, sort_order
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING model_id, tenant_id, provider_id, display_name,
+                      model_type,
                       context_window, max_output_tokens, supports_vision, supports_tools,
                       input_price_per_1k, output_price_per_1k, access_level,
                       is_enabled, sort_order, created_at, updated_at
@@ -159,6 +170,7 @@ class ModelService:
             tenant_id,
             provider_id,
             display_name,
+            model_type,
             context_window,
             max_output_tokens,
             supports_vision,
@@ -192,6 +204,7 @@ class ModelService:
         model_id: str,
         new_model_id: str | None = None,
         display_name: str | None = None,
+        model_type: str | None = None,
         context_window: int | None = None,
         max_output_tokens: int | None = None,
         supports_vision: bool | None = None,
@@ -222,6 +235,11 @@ class ModelService:
         if display_name is not None:
             updates.append(f"display_name = ${param_idx}")
             params.append(display_name)
+            param_idx += 1
+
+        if model_type is not None:
+            updates.append(f"model_type = ${param_idx}")
+            params.append(model_type)
             param_idx += 1
 
         if context_window is not None:
@@ -292,15 +310,14 @@ class ModelService:
             )
         else:
             params.extend([tenant_id, model_id])
-            where_clause = (
-                f"WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}"
-            )
+            where_clause = f"WHERE tenant_id = ${param_idx} AND model_id = ${param_idx + 1}"
 
         query = f"""
             UPDATE llm_models
             SET {", ".join(updates)}
             {where_clause}
             RETURNING model_id, tenant_id, provider_id, display_name,
+                      model_type,
                       context_window, max_output_tokens, supports_vision, supports_tools,
                       input_price_per_1k, output_price_per_1k, access_level,
                       is_enabled, sort_order, created_at, updated_at
@@ -393,6 +410,7 @@ class ModelService:
 
         query = f"""
             SELECT m.model_id, m.tenant_id, m.provider_id, m.display_name,
+                   m.model_type,
                    m.context_window, m.max_output_tokens, m.supports_vision, m.supports_tools,
                    m.input_price_per_1k, m.output_price_per_1k, m.access_level,
                    m.is_enabled, m.sort_order, m.created_at, m.updated_at
@@ -401,6 +419,7 @@ class ModelService:
             WHERE m.tenant_id = $1
               AND m.is_enabled = true
               AND p.is_enabled = true
+              AND m.model_type IN ('llm', 'multimodal')
               {access_filter}
             ORDER BY p.display_name, m.sort_order, m.display_name
         """

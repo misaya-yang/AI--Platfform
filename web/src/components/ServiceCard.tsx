@@ -1,10 +1,15 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { HealthStatus, ServiceDefinition, ServiceType } from "@/types/gateway";
+import type {
+  HealthStatus,
+  ServiceDefinition,
+  ServiceType,
+} from "@/types/gateway";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ServiceConfigDialog } from "@/components/ServiceConfigDialog";
+import { AssistantImageConfigDialog } from "@/components/AssistantImageConfigDialog";
 import { cn } from "@/lib/utils";
 import {
   MessageSquare,
@@ -63,6 +68,7 @@ export function ServiceCard({
   const [configOpen, setConfigOpen] = useState(false);
   const isHealthy = health?.status === "healthy";
   const isVirtual = service.metadata?.is_virtual === true;
+  const isAssistantVirtual = isVirtual && service.service_type === "assistant";
   const serviceTypeLabels: Record<string, string> = {
     assistant: t("services.types.assistant"),
     langgraph: t("services.types.langgraph"),
@@ -74,14 +80,16 @@ export function ServiceCard({
     classification: t("services.types.classification"),
     custom: t("services.types.custom"),
   };
-  const serviceTypeLabel = serviceTypeLabels[service.service_type] || service.service_type;
+  const serviceTypeLabel =
+    serviceTypeLabels[service.service_type] || service.service_type;
 
   return (
     <>
       <Card
         className={cn(
           "relative overflow-hidden cursor-pointer group transition-all duration-200 border bg-card hover:shadow-md hover:border-primary/30",
-          selected && "ring-1 ring-primary/50 border-primary/40 shadow-sm bg-primary/[0.02] dark:bg-primary/[0.04]"
+          selected &&
+            "ring-1 ring-primary/50 border-primary/40 shadow-sm bg-primary/[0.02] dark:bg-primary/[0.04]",
         )}
         onClick={onSelect}
       >
@@ -99,27 +107,46 @@ export function ServiceCard({
                   {service.name}
                 </h3>
                 {/* Status Indicator */}
-                <div className="flex-shrink-0" title={isHealthy ? t("services.status.active", "Active") : t("services.status.inactive", "Inactive")}>
-                  <span className={cn(
-                    "inline-flex rounded-full h-2 w-2",
-                    isHealthy ? "bg-green-500" : "bg-red-500"
-                  )}></span>
+                <div
+                  className="flex-shrink-0"
+                  title={
+                    isHealthy
+                      ? t("services.status.active", "Active")
+                      : t("services.status.inactive", "Inactive")
+                  }
+                >
+                  <span
+                    className={cn(
+                      "inline-flex rounded-full h-2 w-2",
+                      isHealthy ? "bg-green-500" : "bg-red-500",
+                    )}
+                  ></span>
                 </div>
               </div>
               <p className="font-mono text-xs text-muted-foreground truncate mb-1.5">
                 {service.service_id}
               </p>
               <div className="flex flex-wrap items-center gap-1.5">
-                <Badge variant="secondary" className="bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 text-[10px] font-semibold border border-slate-200 dark:border-slate-700 px-1.5 py-0">
+                <Badge
+                  variant="secondary"
+                  className="bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 text-[10px] font-semibold border border-slate-200 dark:border-slate-700 px-1.5 py-0"
+                >
                   {serviceTypeLabel}
                 </Badge>
                 {isVirtual && (
-                  <Badge variant="outline" className="text-[10px] font-semibold border-blue-200 text-blue-700 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 px-1.5 py-0">
+                  <Badge
+                    variant="outline"
+                    className="text-[10px] font-semibold border-blue-200 text-blue-700 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 px-1.5 py-0"
+                  >
                     {t("services.badge.core", "Core")}
                   </Badge>
                 )}
                 {service.supported_modes?.slice(0, 2).map((m) => (
-                  <Badge key={m} variant="outline" className="text-[10px] text-muted-foreground font-medium border-border bg-background px-1.5 py-0">
+                  <Badge
+                    key={m}
+                    variant="outline"
+                    className="text-[10px] text-muted-foreground font-medium border-border bg-background px-1.5 py-0"
+                  >
                     {m}
                   </Badge>
                 ))}
@@ -128,7 +155,7 @@ export function ServiceCard({
 
             {/* Actions */}
             <div className="flex-shrink-0 flex items-center gap-1">
-              {!isVirtual && (
+              {(!isVirtual || isAssistantVirtual) && (
                 <Button
                   variant="ghost"
                   size="icon"
@@ -154,14 +181,19 @@ export function ServiceCard({
         </CardContent>
       </Card>
 
-      {!isVirtual && (
+      {isAssistantVirtual ? (
+        <AssistantImageConfigDialog
+          open={configOpen}
+          onOpenChange={setConfigOpen}
+        />
+      ) : !isVirtual ? (
         <ServiceConfigDialog
           serviceId={service.service_id}
           serviceName={service.name}
           open={configOpen}
           onOpenChange={setConfigOpen}
         />
-      )}
+      ) : null}
     </>
   );
 }

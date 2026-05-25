@@ -152,18 +152,39 @@ class DashScopeImageGenerator:
     _SUBMIT_PATH = "/api/v1/services/aigc/text2image/image-synthesis"
     _TASK_PATH_TPL = "/api/v1/tasks/{task_id}"
 
-    def __init__(self, api_key: str | None = None, model: str | None = None):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ):
         from ai_gateway_core.config import resolve_dashscope
 
         if api_key:
             self.api_key = api_key
-            self.base_url = "https://dashscope.aliyuncs.com"
+            self.base_url = self._normalize_direct_http_base(
+                base_url or "https://dashscope.aliyuncs.com"
+            )
         else:
             resolved_key, resolved_base = resolve_dashscope("image")
             self.api_key = resolved_key or None
             self.base_url = resolved_base.rstrip("/")
         self.model = model or os.getenv("DASHSCOPE_IMAGE_MODEL", "wanx-v1")
         self._client: httpx.AsyncClient | None = None
+
+    @staticmethod
+    def _normalize_direct_http_base(base_url: str) -> str:
+        """Use a host-style base because this direct client appends /api/v1 paths."""
+        cleaned = base_url.strip().rstrip("/")
+        for suffix in (
+            "/compatible-mode/v1",
+            "/compatible-mode",
+            "/api/v1",
+            "/v1",
+        ):
+            if cleaned.endswith(suffix):
+                return cleaned[: -len(suffix)]
+        return cleaned
 
     @property
     def SUBMIT_URL(self) -> str:  # noqa: N802 — kept for backwards-compat
@@ -436,7 +457,8 @@ class ImageGeneratorExecutor(ToolExecutor):
                 selected_provider = None
 
         prefer_gemini, prefer_doubao, dashscope_model = resolve_image_routing(
-            model_id, selected_provider,
+            model_id,
+            selected_provider,
         )
 
         router = get_smart_image_generator()

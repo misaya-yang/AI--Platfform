@@ -3,13 +3,15 @@ import { useTranslation } from "react-i18next";
 import {
   generateImage,
   getArtifactDownloadUrl,
-  createArtifact
+  createArtifact,
 } from "@/api/assistant";
 import { addSessionMessage } from "@/api/sessions";
 import type { SessionConfig, SessionSummary } from "@/api/sessions";
 import { generateUUID } from "@/lib/utils";
 import type { ChatMessage } from "../types";
 import type { Artifact } from "@/components/artifacts";
+
+const DEFAULT_IMAGE_MODEL_ID = "qwen-image-2.0";
 
 export function useImageGeneration(
   activeSessionId: string | null,
@@ -22,9 +24,12 @@ export function useImageGeneration(
     metadata?: Record<string, unknown>;
     config?: SessionConfig;
   }) => Promise<{ session_id: string }>,
-  listSessions: (params?: { service_id?: string; limit?: number }) => Promise<SessionSummary[]>,
+  listSessions: (params?: {
+    service_id?: string;
+    limit?: number;
+  }) => Promise<SessionSummary[]>,
   setSessions: (sessions: SessionSummary[]) => void,
-  config: SessionConfig
+  config: SessionConfig,
 ) {
   const { t } = useTranslation();
   const [isImageMode, setIsImageMode] = useState(false);
@@ -38,162 +43,232 @@ export function useImageGeneration(
     setIsImageMode(false);
   }, []);
 
-  const sendImageGeneration = useCallback(async (prompt: string, style: string) => {
-    if (!prompt.trim() || isGeneratingImage || !selectedModel) return;
+  const sendImageGeneration = useCallback(
+    async (prompt: string, style: string) => {
+      if (!prompt.trim() || isGeneratingImage) return;
 
-    setIsGeneratingImage(true);
-    setIsImageMode(false);
+      setIsGeneratingImage(true);
+      setIsImageMode(false);
+      const imageModelId = DEFAULT_IMAGE_MODEL_ID;
 
-    // Create session if needed (Reuse logic from chat session ideally, but duplicated here for decoupling)
-    let sessionId = activeSessionId;
-    if (!sessionId) {
-      try {
-        const { session_id } = await createSession({
-          service_id: "__builtin_assistant__",  // 保留的 service_id
-          metadata: { title: `🎨 ${prompt.slice(0, 40)}...` },
-          config: {
-            selected_model: selectedModel,
-            selected_style: style,
-            ...config
-          },
-        });
-        sessionId = session_id;
-        if (sessionId) setActiveSessionId(sessionId);
-        const updatedSessions = await listSessions({ service_id: "__builtin_assistant__", limit: 100 });
-        setSessions(updatedSessions);
-      } catch (error) {
-        console.error("Failed to create session:", error);
+      let sessionId = activeSessionId;
+      if (!sessionId) {
+        try {
+          const { session_id } = await createSession({
+            service_id: "__builtin_assistant__", // 保留的 service_id
+            metadata: { title: `🎨 ${prompt.slice(0, 40)}...` },
+            config: {
+              selected_model: selectedModel,
+              selected_image_model: imageModelId,
+              selected_style: style,
+              ...config,
+            },
+          });
+          sessionId = session_id;
+          if (sessionId) setActiveSessionId(sessionId);
+          const updatedSessions = await listSessions({
+            service_id: "__builtin_assistant__",
+            limit: 100,
+          });
+          setSessions(updatedSessions);
+        } catch (error) {
+          console.error("Failed to create session:", error);
+        }
       }
-    }
 
-    const userMessage: ChatMessage = {
-      id: generateUUID(),
-      role: "user",
-      content: `🎨 ${t("assistant.generateImagePrompt", "Generate image")}: ${prompt}`,
-    };
+      const userMessage: ChatMessage = {
+        id: generateUUID(),
+        role: "user",
+        content: `🎨 ${t("assistant.generateImagePrompt", "Generate image")}: ${prompt}`,
+      };
 
-    const assistantMessage: ChatMessage = {
-      id: generateUUID(),
-      role: "assistant",
-      content: "",
-      isGeneratingImage: true,
-      imageGenerationPrompt: prompt,
-    };
+      const assistantMessage: ChatMessage = {
+        id: generateUUID(),
+        role: "assistant",
+        content: "",
+        isGeneratingImage: true,
+        imageGenerationPrompt: prompt,
+      };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
-    // Save user message
-    if (sessionId) {
-      addSessionMessage(sessionId, { role: "user", content: userMessage.content }).catch(console.error);
-    }
+      // Save user message
+      if (sessionId) {
+        addSessionMessage(sessionId, {
+          role: "user",
+          content: userMessage.content,
+        }).catch(console.error);
+      }
 
-    try {
-      const result = await generateImage({
-        prompt,
-        model_id: selectedModel,
-        n: 1,
-        style: style === "default" ? undefined : style
-      });
+      try {
+        const result = await generateImage({
+          prompt,
+          model_id: imageModelId,
+          n: 1,
+          style: style === "default" ? undefined : style,
+        });
 
-      if (result.success && result.images.length > 0) {
-        const providerName = result.provider === "google" ? "Gemini" : "DashScope Wanx";
-        const artifactUrls: string[] = [];
-        const artifactIds: string[] = [];
-        const generatedArtifacts: Array<{ id: string; type: "image"; format: string; title: string; url: string }> = [];
+        if (result.success && result.images.length > 0) {
+          const providerName =
+            result.provider === "google" ? "Gemini" : "DashScope Wanx";
+          const artifactUrls: string[] = [];
+          const artifactIds: string[] = [];
+          const generatedArtifacts: Array<{
+            id: string;
+            type: "image";
+            format: string;
+            title: string;
+            url: string;
+          }> = [];
 
-        for (let i = 0; i < result.images.length; i++) {
-          const img = result.images[i];
-          if (img.url.startsWith("data:") && sessionId) {
-            try {
-              const match = img.url.match(/^data:image\/(\w+);base64,(.+)$/);
-              if (match) {
-                const format = match[1];
-                const base64Data = match[2];
-                const imgTitle = `${t("assistant.generatedImage", "Generated Image")} ${i + 1}: ${prompt.slice(0, 30)}...`;
-                const artifact = await createArtifact({
-                  session_id: sessionId,
-                  type: "image",
-                  format: format,
-                  title: imgTitle,
-                  filename: `generated_image_${Date.now()}_${i + 1}.${format}`,
-                  content_base64: base64Data,
-                  source: "image_generation",
-                  metadata: { prompt, provider: result.provider, duration_ms: result.duration_ms },
-                });
-                // Always use proxy URL (never expires) instead of presigned S3 URL
-                const url = getArtifactDownloadUrl(artifact.artifact_id);
-                artifactUrls.push(url);
-                artifactIds.push(artifact.artifact_id);
-                generatedArtifacts.push({ id: artifact.artifact_id, type: "image", format, title: imgTitle, url });
+          for (let i = 0; i < result.images.length; i++) {
+            const img = result.images[i];
+            if (img.url.startsWith("data:") && sessionId) {
+              try {
+                const match = img.url.match(/^data:image\/(\w+);base64,(.+)$/);
+                if (match) {
+                  const format = match[1];
+                  const base64Data = match[2];
+                  const imgTitle = `${t("assistant.generatedImage", "Generated Image")} ${i + 1}: ${prompt.slice(0, 30)}...`;
+                  const artifact = await createArtifact({
+                    session_id: sessionId,
+                    type: "image",
+                    format: format,
+                    title: imgTitle,
+                    filename: `generated_image_${Date.now()}_${i + 1}.${format}`,
+                    content_base64: base64Data,
+                    source: "image_generation",
+                    metadata: {
+                      prompt,
+                      provider: result.provider,
+                      duration_ms: result.duration_ms,
+                    },
+                  });
+                  // Always use proxy URL (never expires) instead of presigned S3 URL
+                  const url = getArtifactDownloadUrl(artifact.artifact_id);
+                  artifactUrls.push(url);
+                  artifactIds.push(artifact.artifact_id);
+                  generatedArtifacts.push({
+                    id: artifact.artifact_id,
+                    type: "image",
+                    format,
+                    title: imgTitle,
+                    url,
+                  });
 
-                setArtifacts((prev) => [...prev, {
-                  id: artifact.artifact_id,
-                  type: "image",
-                  format: artifact.format,
-                  title: artifact.title,
-                  url: url,
-                  filename: artifact.filename,
-                  mimeType: artifact.mime_type,
-                  sizeBytes: artifact.size_bytes,
-                  source: "ai",
-                  createdAt: new Date(),
-                }]);
+                  setArtifacts((prev) => [
+                    ...prev,
+                    {
+                      id: artifact.artifact_id,
+                      type: "image",
+                      format: artifact.format,
+                      title: artifact.title,
+                      url: url,
+                      filename: artifact.filename,
+                      mimeType: artifact.mime_type,
+                      sizeBytes: artifact.size_bytes,
+                      source: "ai",
+                      createdAt: new Date(),
+                    },
+                  ]);
+                }
+              } catch (error) {
+                console.error("Failed to save artifact:", error);
+                artifactUrls.push(img.url);
               }
-            } catch (error) {
-              console.error("Failed to save artifact:", error);
+            } else {
               artifactUrls.push(img.url);
             }
-          } else {
-            artifactUrls.push(img.url);
           }
+
+          const responseContent =
+            artifactUrls
+              .map(
+                (url, i) =>
+                  `![${t("assistant.generatedImage", "Generated Image")} ${i + 1}](${url})`,
+              )
+              .join("\n\n") +
+            `\n\n*${t("assistant.generatedWith", "Generated with")} ${providerName} (${(result.duration_ms / 1000).toFixed(1)}s)*`;
+
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessage.id
+                ? {
+                    ...m,
+                    content: responseContent,
+                    isGeneratingImage: false,
+                    imageGenerationPrompt: undefined,
+                    generatedArtifacts:
+                      generatedArtifacts.length > 0
+                        ? generatedArtifacts
+                        : undefined,
+                  }
+                : m,
+            ),
+          );
+
+          if (sessionId) {
+            addSessionMessage(sessionId, {
+              role: "assistant",
+              content: responseContent,
+              metadata: {
+                model_id: imageModelId,
+                chat_model_id: selectedModel,
+                stats: { duration_ms: result.duration_ms },
+                artifact_ids: artifactIds.length > 0 ? artifactIds : undefined,
+              },
+            }).catch(console.error);
+          }
+        } else {
+          throw new Error(result.error || "Unknown error");
         }
-
-        const responseContent = artifactUrls.map((url, i) => `![${t("assistant.generatedImage", "Generated Image")} ${i + 1}](${url})`).join("\n\n") +
-          `\n\n*${t("assistant.generatedWith", "Generated with")} ${providerName} (${(result.duration_ms / 1000).toFixed(1)}s)*`;
-
-        setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? {
-          ...m,
-          content: responseContent,
-          isGeneratingImage: false,
-          imageGenerationPrompt: undefined,
-          generatedArtifacts: generatedArtifacts.length > 0 ? generatedArtifacts : undefined,
-        } : m));
+      } catch (error: unknown) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const errorContent = `**${t("assistant.error", "Error")}:** ${errorMessage}`;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessage.id
+              ? {
+                  ...m,
+                  content: errorContent,
+                  isGeneratingImage: false,
+                  imageGenerationPrompt: undefined,
+                }
+              : m,
+          ),
+        );
 
         if (sessionId) {
           addSessionMessage(sessionId, {
             role: "assistant",
-            content: responseContent,
-            metadata: {
-              model_id: selectedModel,
-              stats: { duration_ms: result.duration_ms },
-              artifact_ids: artifactIds.length > 0 ? artifactIds : undefined,
-            }
+            content: errorContent,
           }).catch(console.error);
         }
-
-      } else {
-        throw new Error(result.error || "Unknown error");
+      } finally {
+        setIsGeneratingImage(false);
       }
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorContent = `**${t("assistant.error", "Error")}:** ${errorMessage}`;
-      setMessages((prev) => prev.map((m) => m.id === assistantMessage.id ? { 
-        ...m, content: errorContent, isGeneratingImage: false, imageGenerationPrompt: undefined 
-      } : m));
-      
-      if (sessionId) {
-        addSessionMessage(sessionId, { role: "assistant", content: errorContent }).catch(console.error);
-      }
-    } finally {
-      setIsGeneratingImage(false);
-    }
-  }, [isGeneratingImage, selectedModel, activeSessionId, config, t, setMessages, setArtifacts, setActiveSessionId, setSessions, createSession, listSessions]);
+    },
+    [
+      isGeneratingImage,
+      selectedModel,
+      activeSessionId,
+      config,
+      t,
+      setMessages,
+      setArtifacts,
+      setActiveSessionId,
+      setSessions,
+      createSession,
+      listSessions,
+    ],
+  );
 
   return {
     isImageMode,
     isGeneratingImage,
     handleImageGenerate,
     cancelImageMode,
-    sendImageGeneration
+    sendImageGeneration,
   };
 }
