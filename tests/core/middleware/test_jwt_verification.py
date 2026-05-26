@@ -240,3 +240,34 @@ class TestJWTLogging:
 
         # Should have logged about expiration
         assert any("expir" in record.message.lower() for record in caplog.records)
+
+
+class TestStreamingSessionIdValidation:
+    def test_session_uuid_must_be_canonical_v4(self):
+        from src.core.middleware.streaming import StreamingAuthMiddleware
+
+        assert StreamingAuthMiddleware._is_valid_session_id(
+            "550e8400-e29b-41d4-a716-446655440000"
+        )
+        assert not StreamingAuthMiddleware._is_valid_session_id(
+            "550e8400e29b41d4a716446655440000"
+        )
+        assert not StreamingAuthMiddleware._is_valid_session_id(
+            "550e8400-e29b-11d4-a716-446655440000"
+        )
+
+    def test_guest_session_allows_uppercase_hex_suffix_only(self):
+        from src.core.middleware.streaming import StreamingAuthMiddleware
+
+        assert StreamingAuthMiddleware._is_valid_session_id(
+            "guest_550E8400E29B41D4A716446655440000"
+        )
+        assert not StreamingAuthMiddleware._is_valid_session_id("guest_admin<script>")
+
+    def test_anonymous_id_sanitizer_keeps_header_safe_subset(self):
+        from src.core.middleware.streaming import StreamingAuthMiddleware
+
+        assert (
+            StreamingAuthMiddleware._sanitize_anon_id("abc'\"\\<>:._-\n")
+            == "abc:._-"
+        )

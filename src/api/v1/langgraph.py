@@ -11,14 +11,17 @@ LangGraph API 路由
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
+from ai_gateway_core.proxy.sse_heartbeat import (
+    DEFAULT_HEARTBEAT_INTERVAL_S,
+    with_sse_heartbeat,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
-
-from ai_gateway_core.proxy.sse_heartbeat import with_sse_heartbeat
 
 from ...adapters.langgraph_proxy import (
     AssistantAccessDeniedError,
@@ -35,9 +38,61 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitContext,
     RateLimitHeaders,
 )
+from ...proxy.context_injector import ContextInjector, RequestContext
 from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
 
 router = APIRouter(prefix="/langgraph", tags=["LangGraph"])
+
+_PASSTHROUGH_BLOCKED_HEADERS = (
+    ContextInjector.BLOCKED_HEADERS
+    | ContextInjector.SENSITIVE_HEADERS
+    | {
+        "authorization",
+        "cookie",
+        "x-api-key",
+    }
+)
+
+
+def _build_langgraph_passthrough_headers(
+    request: Request,
+    user: UserContext,
+    proxy: LangGraphProxy,
+) -> dict[str, str]:
+    original_headers = {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() not in _PASSTHROUGH_BLOCKED_HEADERS
+    }
+    context = RequestContext(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        user_tier=user.tier,
+        is_authenticated=user.is_authenticated,
+        roles=user.roles or [],
+        request_id=getattr(request.state, "request_id", "") or "",
+        trace_id=getattr(request.state, "trace_id", "") or "",
+        traceparent=request.headers.get("traceparent", ""),
+        client_ip=user.ip or getattr(getattr(request, "client", None), "host", "") or "",
+        user_agent=request.headers.get("user-agent", ""),
+        original_headers=original_headers,
+    )
+
+    token = proxy.auth_token or os.environ.get("LANGGRAPH_AUTH_TOKEN", "")
+    injector = ContextInjector(
+        inject_user_info=True,
+        inject_request_info=True,
+        forward_auth=False,
+        forward_all_headers=True,
+    )
+    headers = injector.build_headers(
+        context,
+        service_auth_token=token or None,
+        forward_all_headers=True,
+    )
+    if token:
+        headers["Authorization"] = token if token.startswith("Bearer ") else f"Bearer {token}"
+    return headers
 
 
 # ============ Pydantic 模型 ============
@@ -106,10 +161,10 @@ async def check_rate_limit(
     rate_limiter: MultiDimensionRateLimiter,
     assistant_id: str | None = None,
     operation: str | None = None,
-):
+) -> dict[str, str]:
     """检查限流"""
     if not rate_limiter:
-        return
+        return {}
 
     context = RateLimitContext.from_user_context(
         user=user,
@@ -124,6 +179,7 @@ async def check_rate_limit(
             detail=RateLimitHeaders.build_exceeded_response(result),
             headers=RateLimitHeaders.build(result),
         )
+    return RateLimitHeaders.build(result)
 
 
 # ============ Assistants API ============
@@ -384,7 +440,7 @@ async def stream_run(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """流式执行 Run"""
-    await check_rate_limit(
+    rate_limit_headers = await check_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -412,7 +468,11 @@ async def stream_run(
                 "data": json.dumps({"error": str(e)}),
             }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers=rate_limit_headers,
+        ping=int(DEFAULT_HEARTBEAT_INTERVAL_S),
+    )
 
 
 @router.get("/threads/{thread_id}/runs")
@@ -476,7 +536,7 @@ async def stream_stateless_run(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """无 Thread 的流式 Run（一次性对话）"""
-    await check_rate_limit(
+    rate_limit_headers = await check_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -504,7 +564,11 @@ async def stream_stateless_run(
                 "data": json.dumps({"error": str(e)}),
             }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        event_generator(),
+        headers=rate_limit_headers,
+        ping=int(DEFAULT_HEARTBEAT_INTERVAL_S),
+    )
 
 
 @router.post("/runs/wait")
@@ -644,14 +708,13 @@ async def passthrough(
     except (ThreadNotFoundError, AssistantNotFoundError):
         # Resource absent — return 404 rather than forwarding.
         raise HTTPException(status_code=404, detail="resource not found")
-    except Exception:
-        # Transient / non-applicable check failures: let upstream decide.
-        pass
+    except Exception as exc:
+        # Ownership checks are part of the gateway trust boundary. If the
+        # check cannot be completed, fail closed instead of forwarding blindly.
+        raise HTTPException(status_code=502, detail="ownership check failed") from exc
 
     params = list(request.query_params.multi_items())
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    headers = _build_langgraph_passthrough_headers(request, user, proxy)
 
     body = await request.body()
     wants_stream = (

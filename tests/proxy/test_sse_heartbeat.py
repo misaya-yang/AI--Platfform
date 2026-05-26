@@ -5,12 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from ai_gateway_core.proxy.sse_heartbeat import (
     DEFAULT_HEARTBEAT_INTERVAL_S,
     with_sse_heartbeat,
 )
-
 
 # ----- Helpers --------------------------------------------------------------
 
@@ -49,6 +47,28 @@ async def test_idle_producer_emits_heartbeat_lines():
     payload = [c for c in out if c == b"data: ok\n\n"]
     assert len(heartbeats) >= 2
     assert len(payload) == 1
+
+
+async def test_heartbeat_waits_for_sse_frame_boundary():
+    async def partial_gen():
+        yield b"event: update\n"
+        await asyncio.sleep(0.14)
+        yield b'data: {"ok": true}\n\n'
+
+    out = await _drain(with_sse_heartbeat(partial_gen(), interval_seconds=0.04))
+    assert out == [b"event: update\n", b'data: {"ok": true}\n\n']
+
+
+async def test_heartbeat_resumes_after_complete_sse_frame():
+    async def boundary_gen():
+        yield b"data: first\n\n"
+        await asyncio.sleep(0.12)
+        yield b"data: second\n\n"
+
+    out = await _drain(with_sse_heartbeat(boundary_gen(), interval_seconds=0.04))
+    assert out[0] == b"data: first\n\n"
+    assert b": heartbeat\n\n" in out[1:-1]
+    assert out[-1] == b"data: second\n\n"
 
 
 async def test_heartbeat_payload_matches_upstream_string_type_when_opted_in():

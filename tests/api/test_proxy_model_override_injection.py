@@ -150,6 +150,37 @@ async def test_proxy_run_injects_gateway_resolved_hejaz_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_run_injects_hejaz_model_when_config_is_absent() -> None:
+    body = json.dumps(
+        {
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+        }
+    ).encode("utf-8")
+
+    updated = await _inject_langgraph_model_override_config(
+        request=_request(),
+        body=body,
+        method="POST",
+        path="threads/t1/runs/stream",
+        service_config=_config(
+            {
+                "enabled": True,
+                "provider_id": "dashscope",
+                "model_id": "qwen3.6-plus",
+                "temperature": 0.2,
+            }
+        ),
+        tenant_id="tenant-a",
+    )
+
+    payload = json.loads((updated or b"{}").decode("utf-8"))
+    hejaz_model = payload["config"]["configurable"]["hejaz_model"]
+    assert hejaz_model["provider_id"] == "dashscope"
+    assert hejaz_model["model_id"] == "qwen3.6-plus"
+    assert hejaz_model["_api_key"] == "gateway-runtime-secret"
+
+
+@pytest.mark.asyncio
 async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key() -> None:
     body = json.dumps(
         {

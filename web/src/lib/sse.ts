@@ -299,11 +299,21 @@ export async function* sseFetchEvents<T>(
   const startTime = performance.now();
 
   if (debug) console.log(`[SSE-Events] Starting fetch to ${url}`);
+  const { signal, cleanup: cleanupTimeout } = createTimeoutSignal(
+    init.signal,
+    init.timeoutMs
+  );
 
-  const resp = await fetch(url, {
-    ...init,
-    signal: init.signal,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      ...init,
+      signal,
+    });
+  } catch (error) {
+    cleanupTimeout();
+    throw error;
+  }
 
   if (debug) {
     console.log(`[SSE-Events] Response: status=${resp.status}, content-type=${resp.headers.get("content-type")}`);
@@ -312,6 +322,7 @@ export async function* sseFetchEvents<T>(
   if (!resp.ok || !resp.body) {
     const errorDetail = await readResponseErrorDetail(resp);
     const suffix = errorDetail ? ` ${errorDetail}` : "";
+    cleanupTimeout();
     throw new Error(`SSE request failed: ${resp.status}${suffix}`);
   }
 
@@ -325,7 +336,7 @@ export async function* sseFetchEvents<T>(
     aborted = true;
     void reader.cancel().catch(() => {});
   };
-  init.signal?.addEventListener("abort", abortReader, { once: true });
+  signal.addEventListener("abort", abortReader, { once: true });
 
   const parsePart = (part: string): SSEEvent<T> | null => {
     const lines = part.split("\n");
@@ -353,7 +364,7 @@ export async function* sseFetchEvents<T>(
 
   try {
     while (true) {
-      if (aborted || init.signal?.aborted) {
+      if (aborted || signal.aborted) {
         break;
       }
       const { done, value } = await reader.read();
@@ -399,8 +410,9 @@ export async function* sseFetchEvents<T>(
       }
     }
   } finally {
-    init.signal?.removeEventListener("abort", abortReader);
+    signal.removeEventListener("abort", abortReader);
     reader.releaseLock();
+    cleanupTimeout();
   }
 }
 

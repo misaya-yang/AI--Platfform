@@ -319,24 +319,35 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
         # Try guest session
         guest_session = headers.get(self.config.guest_session_header.lower().encode(), b"").decode()
-        if guest_session:
-            return {
-                "user_id": guest_session,
-                "user_type": "guest",
-                "tenant_id": "public",
-                "tier": "anonymous",
-                "is_authenticated": False,
-                "session_id": guest_session,
-                "ip": client_ip,
-                "roles": ["guest"],
-            }
+        if guest_session and self.config.guest_session_enabled:
+            # Validate session ID format: must be UUID v4 (what GuestSessionManager generates).
+            # Blocks arbitrary strings like "admin", "../../etc", SQL injection attempts.
+            if not self._is_valid_session_id(guest_session):
+                logger.warning(
+                    "Rejected malformed guest session ID from %s: %s",
+                    client_ip, guest_session[:32],
+                )
+                # Fall through to anonymous — do NOT trust the malformed ID
+            else:
+                return {
+                    "user_id": guest_session,
+                    "user_type": "guest",
+                    "tenant_id": "public",
+                    "tier": "anonymous",
+                    "is_authenticated": False,
+                    "session_id": guest_session,
+                    "ip": client_ip,
+                    "roles": ["guest"],
+                }
 
         # Fallback to anonymous
-        anon_id = (
+        anon_id_raw = (
             headers.get(b"x-ag-anonymous-id", b"").decode()
             or self._extract_cookie(headers, self.config.anonymous_cookie)
-            or client_ip
         )
+        # Sanitize anonymous ID: strip control chars, limit length,
+        # reject values that look like header injection attempts.
+        anon_id = self._sanitize_anon_id(anon_id_raw) or client_ip
 
         return {
             "user_id": f"anon:{anon_id}",
@@ -361,6 +372,43 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
     def _is_configured_api_key(self, api_key: str) -> bool:
         return any(secrets.compare_digest(api_key, configured) for configured in self.config.api_keys)
+
+    @staticmethod
+    def _is_valid_session_id(value: str) -> bool:
+        """Validate guest session ID format (defense against identity spoofing).
+
+        Accepts:
+        - UUID format: standard uuid.UUID strings
+        - Guest prefix: ``guest_{hex}`` (what GuestSessionManager.create_session generates)
+
+        Rejects arbitrary strings to prevent identity spoofing ("admin"),
+        header injection, and path traversal via session IDs.
+        """
+        if not value or len(value) > 128:
+            return False
+        # Block control characters and whitespace (header injection / path traversal)
+        if not value.isprintable() or " " in value:
+            return False
+        # guest_{uuid_hex} format
+        if value.startswith("guest_"):
+            suffix = value[6:].lower()
+            return len(suffix) >= 16 and all(ch in "0123456789abcdef-" for ch in suffix)
+        # Standard UUID format
+        try:
+            parsed = uuid.UUID(value)
+            return parsed.version == 4 and str(parsed) == value.lower()
+        except (ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def _sanitize_anon_id(value: str) -> str:
+        """Sanitize anonymous ID: strip control chars, limit length, block injection."""
+        if not value:
+            return ""
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+        cleaned = "".join(ch for ch in value if ch in allowed)
+        # Limit length — anonymous IDs should be short client-generated tokens
+        return cleaned[:64]
 
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""

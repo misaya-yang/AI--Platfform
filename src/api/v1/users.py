@@ -358,12 +358,29 @@ async def update_user(
         exclude={"extra_permissions", "service_access_mode", "allowed_services", "denied_services"},
     )
 
+    # === Mass-Assignment Protection ===
+    # roles, tier, status are privileged fields — only admin can change them.
+    # Without this gate, any user with user:edit could self-promote to admin.
+    ADMIN_ONLY_FIELDS = {"roles", "tier", "status"}
+    admin_field_changes = ADMIN_ONLY_FIELDS & update_data.keys()
+    if admin_field_changes and "admin" not in auth.roles:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only admins can modify: {', '.join(sorted(admin_field_changes))}",
+        )
+
     service_policy_updated = (
         body.service_access_mode is not None
         or body.allowed_services is not None
         or body.denied_services is not None
     )
     if service_policy_updated:
+        if "admin" not in auth.roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Only admins can modify service access policy",
+            )
+
         metadata = user.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         service_access = metadata.get("service_access")

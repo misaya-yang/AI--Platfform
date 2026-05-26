@@ -36,6 +36,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -73,9 +74,26 @@ async def with_sse_heartbeat(
     """
     queue: asyncio.Queue[Any] = asyncio.Queue()
     sentinel_done = object()
-    heartbeat_payload: Any = (
-        _HEARTBEAT_FRAME_STR if as_str else _HEARTBEAT_FRAME_BYTES
-    )
+    heartbeat_payload: Any = _HEARTBEAT_FRAME_STR if as_str else _HEARTBEAT_FRAME_BYTES
+    at_sse_frame_boundary = True
+    trailing_bytes = b""
+    trailing_str = ""
+
+    def _update_frame_boundary(chunk: Any) -> None:
+        nonlocal at_sse_frame_boundary, trailing_bytes, trailing_str
+
+        if isinstance(chunk, bytes):
+            trailing_bytes = (trailing_bytes + chunk)[-4:]
+            at_sse_frame_boundary = trailing_bytes.endswith(b"\n\n") or trailing_bytes.endswith(
+                b"\r\n\r\n"
+            )
+            return
+
+        if isinstance(chunk, str):
+            trailing_str = (trailing_str + chunk)[-4:]
+            at_sse_frame_boundary = trailing_str.endswith("\n\n") or trailing_str.endswith(
+                "\r\n\r\n"
+            )
 
     async def _producer() -> None:
         try:
@@ -93,7 +111,8 @@ async def with_sse_heartbeat(
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=interval_seconds)
             except asyncio.TimeoutError:
-                yield heartbeat_payload
+                if at_sse_frame_boundary:
+                    yield heartbeat_payload
                 continue
 
             if item is sentinel_done:
@@ -101,14 +120,13 @@ async def with_sse_heartbeat(
             if isinstance(item, BaseException):
                 raise item
 
+            _update_frame_boundary(item)
             yield item
     finally:
         if not task.done():
             task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError, BaseException):
                 await task
-            except (asyncio.CancelledError, BaseException):  # noqa: BLE001
-                pass
 
 
 __all__ = [

@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.proxy.sse_heartbeat import with_sse_heartbeat
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -1499,7 +1500,7 @@ async def transparent_proxy_handler(
     if response.is_streaming and response.stream:
         headers = {**response.headers, **rate_limit_headers}
         return StreamingResponse(
-            response.stream,
+            with_sse_heartbeat(response.stream),
             status_code=response.status_code,
             headers=headers,
             media_type="text/event-stream",

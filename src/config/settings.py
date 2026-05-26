@@ -95,6 +95,7 @@ class AuthAPIKeySettings(BaseModel):
 class AuthenticationSettings(BaseModel):
     jwt: AuthJWTSettings = Field(default_factory=AuthJWTSettings)
     api_key: AuthAPIKeySettings = Field(default_factory=AuthAPIKeySettings)
+    guest_session_enabled: bool = True
 
 
 class RBACSettings(BaseModel):

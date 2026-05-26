@@ -190,7 +190,9 @@ def create_app() -> FastAPI:
         api_keys=settings.authentication.api_key.keys
         if hasattr(settings, "authentication")
         else [],
-        guest_session_enabled=True,
+        guest_session_enabled=settings.authentication.guest_session_enabled
+        if hasattr(settings, "authentication")
+        else True,
         anonymous_enabled=True,
         whitelist_paths=[
             "/health",
