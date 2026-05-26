@@ -45,6 +45,7 @@ import {
   type ExamReport,
 } from "@/api/exams";
 import { StreamOutput } from "@/components/StreamOutput";
+import { useAuthStore } from "@/store/useAuthStore";
 
 type Tab = "participants" | "questions" | "analysis";
 type BadgeVariant = ComponentProps<typeof Badge>["variant"];
@@ -66,6 +67,7 @@ export function ExamDetailPage() {
   const { t } = useTranslation();
   const { examId } = useParams<{ examId: string }>();
   const navigate = useNavigate();
+  const token = useAuthStore((state) => state.token);
 
   const [exam, setExam] = useState<Exam | null>(null);
   const [attempts, setAttempts] = useState<ExamAttempt[]>([]);
@@ -150,16 +152,19 @@ export function ExamDetailPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!examId) return;
-    const token = (() => {
-      try {
-        const raw = localStorage.getItem("agent-gateway-auth") || sessionStorage.getItem("agent-gateway-auth");
-        const obj = raw ? JSON.parse(raw) : null;
-        return obj?.state?.token || obj?.token || "";
-      } catch { return ""; }
-    })();
-    window.open(`${getExamExportUrl(examId)}?token=${token}`, "_blank");
+    const resp = await fetch(getExamExportUrl(examId), {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `exam-${examId}-attempts.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   if (loading) {

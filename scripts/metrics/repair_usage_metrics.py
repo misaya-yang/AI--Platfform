@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import asyncpg
 
-DEFAULT_DSN = os.getenv("GATEWAY_DATABASE__DSN", "postgresql://postgres:111111@127.0.0.1:5433/gateway")
+DEFAULT_DSN = os.getenv("GATEWAY_DATABASE__DSN", "")
 
 
 @dataclass

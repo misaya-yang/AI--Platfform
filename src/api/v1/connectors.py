@@ -16,19 +16,20 @@ from __future__ import annotations
 
 import secrets
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
-from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+OAUTH_STATE_TTL_SECONDS = 600
 
 
 # ─── Models ───────────────────────────────────────────────────────────
@@ -52,6 +53,47 @@ class ConnectorSearchRequest(BaseModel):
 
 def _get_db(request: Request):
     return getattr(request.app.state, "database", None)
+
+
+def _oauth_state_cache(request: Request) -> dict[str, dict[str, Any]]:
+    cache = getattr(request.app.state, "oauth_states", None)
+    if cache is None:
+        cache = {}
+        request.app.state.oauth_states = cache
+    now = datetime.now(timezone.utc)
+    expired = [key for key, value in cache.items() if value["expires_at"] <= now]
+    for key in expired:
+        cache.pop(key, None)
+    return cache
+
+
+def _store_oauth_state(
+    request: Request,
+    *,
+    state: str,
+    tenant_id: str,
+    user_id: str,
+    provider: str,
+    nonce: str,
+) -> None:
+    _oauth_state_cache(request)[state] = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "provider": provider,
+        "nonce": nonce,
+        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=OAUTH_STATE_TTL_SECONDS),
+    }
+
+
+def _consume_oauth_state(request: Request | None, state: str) -> dict[str, Any]:
+    if request is None:
+        raise HTTPException(400, "Invalid state parameter")
+    entry = _oauth_state_cache(request).pop(state, None)
+    if not entry:
+        raise HTTPException(400, "Invalid or expired state parameter")
+    if entry["expires_at"] <= datetime.now(timezone.utc):
+        raise HTTPException(400, "Invalid or expired state parameter")
+    return entry
 
 
 async def _get_connector_config(db, provider: str, tenant_id: str = "") -> dict | None:
@@ -191,7 +233,16 @@ async def initiate_oauth(
     if not config.get("client_id"):
         raise HTTPException(400, f"OAuth not configured for {provider}. Admin must set client_id.")
 
-    state = f"{user.tenant_id}:{user.user_id}:{provider}:{secrets.token_urlsafe(16)}"
+    nonce = secrets.token_urlsafe(16)
+    state = f"{user.tenant_id}:{user.user_id}:{provider}:{nonce}"
+    _store_oauth_state(
+        request,
+        state=state,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        provider=provider,
+        nonce=nonce,
+    )
 
     # Build redirect URI
     base_url = str(request.base_url).rstrip("/")
@@ -235,6 +286,14 @@ async def oauth_callback(
         raise HTTPException(400, "State provider mismatch")
     if not tenant_id or not user_id or not nonce:
         raise HTTPException(400, "Incomplete state parameter")
+    issued_state = _consume_oauth_state(request, state)
+    if (
+        issued_state["tenant_id"] != tenant_id
+        or issued_state["user_id"] != user_id
+        or issued_state["provider"] != provider
+        or issued_state["nonce"] != nonce
+    ):
+        raise HTTPException(400, "Invalid state parameter")
 
     db = _get_db(request)
     if not db:
@@ -420,7 +479,6 @@ async def search_connector(
 
     access_token = await _refresh_token_if_needed(db, connector, config)
     metadata = connector.get("provider_metadata") or {}
-    extra = config.get("extra_config") or {}
 
     # Provider-specific search
     if provider == "confluence":

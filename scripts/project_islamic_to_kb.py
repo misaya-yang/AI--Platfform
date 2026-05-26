@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -576,9 +577,12 @@ def main():
     p.add_argument("--source", default="all")
     p.add_argument("--hadith-collections", default=",".join(DEFAULT_HADITH_COLLECTIONS))
     p.add_argument("--gateway-url", default="http://127.0.0.1:8080")
-    p.add_argument("--api-key", default="gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs")
+    p.add_argument("--api-key", default=os.getenv("GATEWAY_API_KEY"))
     p.add_argument("--dry-run", action="store_true")
-    raise SystemExit(asyncio.run(run(p.parse_args())))
+    args = p.parse_args()
+    if not args.api_key:
+        p.error("--api-key or GATEWAY_API_KEY is required")
+    raise SystemExit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

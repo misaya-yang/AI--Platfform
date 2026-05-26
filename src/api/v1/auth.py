@@ -16,9 +16,7 @@ from ...config.settings import Settings
 from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ...core.auth.password import (
     ALLOWED_EMAIL_DOMAIN,
-    DEFAULT_PASSWORD,
     create_access_token,
-    extract_username_from_email,
     get_token_id,
     hash_password,
     is_account_locked,
@@ -28,6 +26,7 @@ from ...core.auth.password import (
     verify_password,
 )
 from ...core.auth.user_resolver import UserContext
+from ...core.client_ip import get_client_ip_from_request
 from ..deps import get_settings, get_user_context
 
 # Token expiration time (3 hours)
@@ -117,15 +116,7 @@ class CurrentUserResponse(BaseModel):
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP from request headers."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
-    if request.client:
-        return request.client.host
-    return "unknown"
+    return get_client_ip_from_request(request)
 
 
 def _compute_effective_permissions(
@@ -194,37 +185,6 @@ async def login(
         user = await db.get_user(login_prefix)
 
     auto_created = False
-    if not user:
-        # JIT auto-create on first login with default password
-        if body.password == DEFAULT_PASSWORD and login_email:
-            user_id = extract_username_from_email(login_email)
-            existing_id = await db.get_user(user_id)
-            if existing_id:
-                import uuid
-
-                user_id = f"{user_id}_{uuid.uuid4().hex[:6]}"
-
-            password_hash = hash_password(DEFAULT_PASSWORD)
-            user_data = {
-                "user_id": user_id,
-                "email": login_email,
-                "display_name": login_prefix or user_id,
-                "username": user_id,
-                "roles": ["user"],
-                "password_hash": password_hash,
-                "force_password_change": True,
-                "status": "active",
-                "tier": "normal",
-                "tenant_id": "default",
-                "created_by": "system",
-            }
-            try:
-                await db.save_user_with_password(user_data)
-                await db.assign_user_role(user_id, "user", "system")
-                user = await db.get_user(user_id)
-                auto_created = True
-            except Exception:
-                user = await db.get_user_by_email(login_email)
 
     if not user:
         # Log failed attempt

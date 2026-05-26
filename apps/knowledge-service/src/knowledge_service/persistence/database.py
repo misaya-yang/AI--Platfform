@@ -4246,7 +4246,7 @@ class DatabaseStorage:
         set_clauses.append("updated_at = NOW()")
         params.append(connection_id)
 
-        query = f"UPDATE confluence_connections SET {', '.join(set_clauses)} WHERE connection_id = ${param_idx}"
+        query = f"UPDATE confluence_connections SET {_build_safe_set_clause(set_clauses)} WHERE connection_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -4493,7 +4493,7 @@ class DatabaseStorage:
         set_clauses.append("updated_at = NOW()")
         params.append(binding_id)
 
-        query = f"UPDATE confluence_space_bindings SET {', '.join(set_clauses)} WHERE binding_id = ${param_idx}"
+        query = f"UPDATE confluence_space_bindings SET {_build_safe_set_clause(set_clauses)} WHERE binding_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -5315,7 +5315,7 @@ class DatabaseStorage:
         set_clauses.append("updated_at = NOW()")
         params.append(task_id)
 
-        query = f"UPDATE confluence_sync_tasks SET {', '.join(set_clauses)} WHERE task_id = ${param_idx}"
+        query = f"UPDATE confluence_sync_tasks SET {_build_safe_set_clause(set_clauses)} WHERE task_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)
@@ -5509,15 +5509,22 @@ class DatabaseStorage:
         """锁定用户账户"""
         if not self._pool:
             return
+        try:
+            lock_minutes = int(minutes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("minutes must be an integer") from exc
+        if lock_minutes < 1 or lock_minutes > 24 * 60:
+            raise ValueError("minutes must be between 1 and 1440")
         async with self._pool.acquire() as conn:
             await conn.execute(
-                f"""
+                """
                 UPDATE users SET
-                    locked_until = NOW() + INTERVAL '{minutes} minutes',
+                    locked_until = NOW() + ($2::int * INTERVAL '1 minute'),
                     updated_at = NOW()
                 WHERE user_id = $1
             """,
                 user_id,
+                lock_minutes,
             )
 
     async def update_last_login(self, user_id: str, ip_address: str) -> None:
@@ -5730,7 +5737,7 @@ class DatabaseStorage:
             param_idx += 1
 
         params.append(user_id)
-        query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = ${param_idx}"
+        query = f"UPDATE users SET {_build_safe_set_clause(set_clauses)} WHERE user_id = ${param_idx}"
 
         async with self._pool.acquire() as conn:
             await conn.execute(query, *params)

@@ -8,11 +8,13 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 from ai_assistant import AssistantClient
 
-API_KEY = "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
+API_KEY = os.environ.get("GATEWAY_API_KEY", "")
 BASE_URL = "https://yang.misaya.online"
 
 
 async def main():
+    if not API_KEY:
+        raise RuntimeError("GATEWAY_API_KEY must be set")
     async with AssistantClient(api_key=API_KEY, base_url=BASE_URL) as client:
 
         # 1. 普通对话

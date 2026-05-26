@@ -220,10 +220,6 @@ export const useAuthStore = create<AuthState>()(
       name: STORAGE_KEY,
       storage: createJSONStorage(() => createDynamicStorage()),
       partialize: (state) => ({
-        token: state.token,
-        user: state.user,
-        isAuthenticated: state.isAuthenticated,
-        forcePasswordChange: state.forcePasswordChange,
         rememberMe: state.rememberMe,
       }),
       // Normalize data when loading from storage to handle old/corrupted data
@@ -233,15 +229,14 @@ export const useAuthStore = create<AuthState>()(
 
         return {
           ...currentState,
-          ...persisted,
-          user: normalizeUser(persisted.user),
+          rememberMe: Boolean(persisted.rememberMe),
           hydrated: true,
-          sessionValidation: persisted.token ? "idle" : "validated",
+          sessionValidation: "validated",
         };
       },
       onRehydrateStorage: () => (state) => {
         state?.setHydrated(true);
-        state?.setSessionValidation(state.token ? "idle" : "validated");
+        state?.setSessionValidation("validated");
       },
     }
   )

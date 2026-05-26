@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -344,10 +345,13 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
     parser = argparse.ArgumentParser(description="Project Hadith to KB")
     parser.add_argument("--gateway-url", default="http://127.0.0.1:8080")
-    parser.add_argument("--api-key", default="gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs")
+    parser.add_argument("--api-key", default=os.getenv("GATEWAY_API_KEY"))
     parser.add_argument("--collections", default=",".join(DEFAULT_COLLECTIONS))
     parser.add_argument("--dry-run", action="store_true")
-    raise SystemExit(asyncio.run(run(parser.parse_args())))
+    args = parser.parse_args()
+    if not args.api_key:
+        parser.error("--api-key or GATEWAY_API_KEY is required")
+    raise SystemExit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

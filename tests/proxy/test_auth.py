@@ -338,7 +338,7 @@ class TestAuthMiddleware:
         assert middleware._is_whitelisted("/proxy/langgraph") is False
 
     def test_get_client_ip_from_forwarded(self, mock_request):
-        """测试从 X-Forwarded-For 获取 IP"""
+        """只有可信代理直连时才信任 X-Forwarded-For。"""
         mock_request.headers = {"X-Forwarded-For": "10.0.0.1, 10.0.0.2"}
 
         config = AuthConfig()
@@ -348,7 +348,7 @@ class TestAuthMiddleware:
         )
 
         ip = middleware._get_client_ip(mock_request)
-        assert ip == "10.0.0.1"
+        assert ip == "192.168.1.1"
 
     def test_get_client_ip_from_real_ip(self, mock_request):
         """测试从 X-Real-IP 获取 IP"""

@@ -53,6 +53,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from assistant_service.api.routes import images as images_module
 from assistant_service.api.routes.images import (
@@ -990,19 +991,17 @@ async def test_10_download_url_missing_returns_404():
 # ---- 11. Cross-owner artifact returns 404 (IDOR-safe) --------------------
 
 @pytest.mark.asyncio
-async def test_11_download_url_cross_owner_succeeds():
-    # NOTE: owner_scope checks removed — any user with the artifact_id
-    # can access (UUID is unguessable, defense-in-depth via obscurity).
+async def test_11_download_url_cross_owner_returns_404():
     with _Harness() as h:
         raw_id = await _seed_artifact_family(
             h, with_display=True, with_thumb=False, owner_scope="other_user",
         )
-        resp = await get_artifact_download_url(
-            artifact_id=raw_id, request=_make_request(),
-            variant="display", expires_in=600, user=_user("u1", "t1"),
-        )
-    assert resp.artifact_id == raw_id
-    assert resp.url is not None
+        with pytest.raises(HTTPException) as exc:
+            await get_artifact_download_url(
+                artifact_id=raw_id, request=_make_request(),
+                variant="display", expires_in=600, user=_user("u1", "t1"),
+            )
+    assert exc.value.status_code == 404
 
 
 # ---- 12. /image-sessions — happy path -----------------------------------
@@ -1259,9 +1258,7 @@ async def test_19_concurrent_submits_one_wins_cas():
 # ---- 20. Owner isolation by app_user_id --------------------------------
 
 @pytest.mark.asyncio
-async def test_20_cross_app_user_can_read_session():
-    # NOTE: owner_scope checks removed — any user with the session_id
-    # can access (UUID is unguessable, defense-in-depth via obscurity).
+async def test_20_cross_app_user_cannot_read_session():
     user_a = _user("u1", "t1", app_user_id="end-A", app_tenant_id="appT")
     user_b = _user("u1", "t1", app_user_id="end-B", app_tenant_id="appT")
     sid = "sess-20"
@@ -1276,20 +1273,18 @@ async def test_20_cross_app_user_can_read_session():
             request=_make_request(), user=user_a,
             model_registry=_registry_stub("google"),
         )
-        # User B (different app_user_id) CAN read it
-        resp = await get_image_session_view(
-            session_id=sid, request=_make_request(),
-            limit=50, cursor=None, include_urls=False, user=user_b,
-        )
-        assert resp.session_id == sid
+        with pytest.raises(HTTPException) as exc:
+            await get_image_session_view(
+                session_id=sid, request=_make_request(),
+                limit=50, cursor=None, include_urls=False, user=user_b,
+            )
+        assert exc.value.status_code == 404
 
 
 # ---- 21. Owner isolation by app_tenant_id ------------------------------
 
 @pytest.mark.asyncio
-async def test_21_cross_app_tenant_can_read_session():
-    # NOTE: owner_scope checks removed — any user with the session_id
-    # can access (UUID is unguessable, defense-in-depth via obscurity).
+async def test_21_cross_app_tenant_cannot_read_session():
     user_a = _user("u1", "t1", app_user_id="endU", app_tenant_id="tenantA")
     user_b = _user("u1", "t1", app_user_id="endU", app_tenant_id="tenantB")
     sid = "sess-21"
@@ -1303,11 +1298,12 @@ async def test_21_cross_app_tenant_can_read_session():
             request=_make_request(), user=user_a,
             model_registry=_registry_stub("google"),
         )
-        resp = await get_image_session_view(
-            session_id=sid, request=_make_request(),
-            limit=50, cursor=None, include_urls=False, user=user_b,
-        )
-        assert resp.session_id == sid
+        with pytest.raises(HTTPException) as exc:
+            await get_image_session_view(
+                session_id=sid, request=_make_request(),
+                limit=50, cursor=None, include_urls=False, user=user_b,
+            )
+        assert exc.value.status_code == 404
 
 
 # ---- 22. Legacy client (no X-App-* headers) still works ----------------

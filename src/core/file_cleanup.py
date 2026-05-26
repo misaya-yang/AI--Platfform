@@ -258,7 +258,7 @@ class FileCleanupService:
 
         Returns cleanup statistics.
         """
-        user_dir = self.config.uploads_path / user_id
+        user_dir = self._resolve_user_dir(user_id)
         if not user_dir.exists():
             return {"files_deleted": 0, "bytes_freed": 0, "message": "User directory not found"}
 
@@ -268,6 +268,17 @@ class FileCleanupService:
             "bytes_freed_formatted": self._format_size(stats["bytes_freed"]),
             "message": f"Cleaned up {stats['files_deleted']} files for user {user_id}",
         }
+
+    def _resolve_user_dir(self, user_id: str) -> Path:
+        uploads_root = self.config.uploads_path.resolve()
+        user_dir = (uploads_root / user_id).resolve()
+        if not user_id or user_dir == uploads_root:
+            raise ValueError("Invalid user_id for cleanup")
+        try:
+            user_dir.relative_to(uploads_root)
+        except ValueError as exc:
+            raise ValueError("Invalid user_id for cleanup") from exc
+        return user_dir
 
     async def get_storage_stats(self) -> dict:
         """Get storage statistics."""

@@ -30,7 +30,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency
     raise SystemExit("bcrypt is required. Install with: pip install bcrypt") from exc
 
 
-DEFAULT_DSN = "postgresql://postgres:111111@127.0.0.1:5433/gateway"
+DEFAULT_DSN = os.getenv("GATEWAY_DATABASE__DSN", "")
 
 
 async def main() -> None:

@@ -23,8 +23,8 @@ docker compose -f docker-compose.islamic-content.yml exec islamic-content \
 Docker 部署时，`.env` 中的 DSN 和 Redis 地址需要指向容器名：
 
 ```env
-ISLAMIC_CONTENT_DATABASE__DSN=postgresql://postgres:111111@postgres:5432/gateway
-ISLAMIC_CONTENT_CACHE__REDIS_URL=redis://:111111@redis:6379/1
+ISLAMIC_CONTENT_DATABASE__DSN=postgresql://user:password@postgres:5432/gateway
+ISLAMIC_CONTENT_CACHE__REDIS_URL=redis://:password@redis:6379/1
 ISLAMIC_CONTENT_DATABASE__AUTO_MIGRATE=true
 ```
 

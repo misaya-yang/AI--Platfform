@@ -7,7 +7,7 @@ then upserts into hadith_localizations with language='ar'.
 
 Usage:
     python scripts/sync_hadith_arabic.py
-    python scripts/sync_hadith_arabic.py --dsn postgresql://postgres:111111@127.0.0.1:5432/gateway
+    python scripts/sync_hadith_arabic.py --dsn postgresql://user:password@host:5432/gateway
 """
 
 import argparse
@@ -73,7 +73,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Sync Arabic Hadith from CDN")
     parser.add_argument("--dsn", default=os.environ.get(
         "DATABASE_DSN",
-        os.environ.get("GATEWAY_DATABASE__DSN", "postgresql://postgres:111111@127.0.0.1:5432/gateway")
+        os.environ.get("GATEWAY_DATABASE__DSN", "")
     ))
     args = parser.parse_args()
 

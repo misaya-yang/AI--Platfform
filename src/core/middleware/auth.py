@@ -22,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 from ..auth.user_resolver import UserContext
+from ..client_ip import get_client_ip_from_request
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -350,18 +351,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """获取真实客户端 IP（考虑代理）"""
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-
-        if request.client:
-            return request.client.host
-
-        return "unknown"
+        return get_client_ip_from_request(request)
 
 
 # ============ JWT 解码辅助函数 ============

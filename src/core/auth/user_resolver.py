@@ -21,6 +21,7 @@ import jwt
 from fastapi import Request
 
 from ai_gateway_core.auth import UserContext  # noqa: F401 — re-export
+from ..client_ip import get_client_ip_from_request
 
 
 @dataclass
@@ -171,19 +172,7 @@ class UserResolver:
 
     def _get_client_ip(self, request: Request) -> str:
         """获取真实客户端 IP（考虑代理）"""
-        # X-Forwarded-For > X-Real-IP > request.client.host
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-
-        if request.client:
-            return request.client.host
-
-        return "unknown"
+        return get_client_ip_from_request(request)
 
 
 # ============ 匿名用户记忆策略 ============

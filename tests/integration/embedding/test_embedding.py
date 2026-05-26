@@ -19,7 +19,10 @@ async def test_dashscope():
         from dashscope import TextEmbedding
 
         # 从环境变量获取API key
-        api_key = os.getenv("DASHSCOPE_API_KEY", "sk-f09fc842a3a74e6a9110c4ea77be536c")
+        api_key = os.getenv("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            print("DASHSCOPE_API_KEY not set")
+            return False
 
         print(f"API Key: {api_key[:20]}...")
 

@@ -18,7 +18,7 @@ import sys
 import httpx
 
 DEFAULT_BASE_URL = os.getenv("GATEWAY_BASE_URL", "http://localhost:8080")
-DEFAULT_API_KEY = os.getenv("GATEWAY_API_KEY", "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs")
+DEFAULT_API_KEY = os.getenv("GATEWAY_API_KEY", "")
 
 
 class KBTester:

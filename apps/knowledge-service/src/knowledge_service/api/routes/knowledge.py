@@ -48,6 +48,15 @@ from ..schemas.knowledge import (
 router = APIRouter()
 
 
+async def require_admin_user(
+    user: UserContext = Depends(get_user_context),
+) -> UserContext:
+    roles = set(user.roles or [])
+    if user.tier != "admin" and "admin" not in roles:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return user
+
+
 @router.get("/knowledge/datasets")
 async def list_datasets(
     svc: KnowledgeService = Depends(get_knowledge_service),
@@ -2367,8 +2376,10 @@ async def restore_document_version(
 @router.get("/knowledge/worker/status")
 async def get_worker_status(
     worker: KnowledgeWorker = Depends(get_knowledge_worker),
+    user: UserContext = Depends(require_admin_user),
 ):
     """Diagnostic endpoint to check worker status."""
+    _ = user
     return {
         "running": worker._running,
         "queue_size": worker.queue.qsize(),
@@ -2382,8 +2393,10 @@ async def force_complete_document(
     dataset_id: str,
     document_id: str,
     svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(require_admin_user),
 ):
     """Force complete a stuck document (admin/debug only)."""
+    _ = dataset_id, user
     try:
         await svc.db.update_document_status(document_id, status="completed", progress=100)
         return {"status": "completed", "document_id": document_id}

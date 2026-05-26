@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import base64
 
-import httpx
-
-from ai_gateway_core.exceptions import ValidationFailedError
 from ai_gateway_core.enums import ContentType
+from ai_gateway_core.exceptions import ValidationFailedError
+from ai_gateway_core.security import SafeFetchError, safe_fetch
+
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import UnifiedResponse
 from .base import ProtocolAdapter
+
+MAX_AUDIO_FETCH_BYTES = 50 * 1024 * 1024
 
 
 class WhisperAdapter(ProtocolAdapter):
@@ -49,14 +51,8 @@ class WhisperAdapter(ProtocolAdapter):
             except Exception:
                 return item.data.encode("utf-8")
         if item.url:
-            # Reuse the adapter's connector client if available, otherwise create temp client
-            client = getattr(getattr(self, 'connector', None), '_client', None)
-            if client:
-                resp = await client.get(item.url)
-                resp.raise_for_status()
-                return resp.content
-            async with httpx.AsyncClient(timeout=30.0) as tmp:
-                resp = await tmp.get(item.url)
-                resp.raise_for_status()
-                return resp.content
+            try:
+                return await safe_fetch(item.url, max_bytes=MAX_AUDIO_FETCH_BYTES, timeout=30.0)
+            except SafeFetchError as exc:
+                raise ValidationFailedError(f"failed to fetch audio url: {exc}") from exc
         raise ValidationFailedError("audio data or url is required")

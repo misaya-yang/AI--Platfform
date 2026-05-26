@@ -404,9 +404,7 @@ async def test_F1_failed_task_is_not_replayed_with_new_attempt():
 
 
 @pytest.mark.asyncio
-async def test_G1_cross_owner_download_url_succeeds():
-    # NOTE: owner_scope checks removed — UUID is unguessable,
-    # defense-in-depth via obscurity.
+async def test_G1_cross_owner_download_url_returns_404():
     user_a = _user(user_id="alice", tenant_id="acme",
                    app_user_id="alice", app_tenant_id="acme")
     user_b = _user(user_id="bob", tenant_id="acme",
@@ -423,27 +421,24 @@ async def test_G1_cross_owner_download_url_succeeds():
         )
         a_artifact = ra.output_artifact_id
 
-        # User B CAN download A's artifact (owner_scope checks removed)
         for variant in ("display", "raw"):
-            resp = await get_artifact_download_url(
-                artifact_id=a_artifact, request=_make_request(),
-                user=user_b, variant=variant, expires_in=3600,
-            )
-            assert resp.artifact_id == a_artifact
-            assert resp.url is not None
+            with pytest.raises(HTTPException) as exc:
+                await get_artifact_download_url(
+                    artifact_id=a_artifact, request=_make_request(),
+                    user=user_b, variant=variant, expires_in=3600,
+                )
+            assert exc.value.status_code == 404
 
-        # Thumbnail falls through to display (seeded without thumb)
-        resp_thumb = await get_artifact_download_url(
-            artifact_id=a_artifact, request=_make_request(),
-            user=user_b, variant="thumbnail", expires_in=3600,
-        )
-        assert resp_thumb.artifact_id == a_artifact
+        with pytest.raises(HTTPException) as exc:
+            await get_artifact_download_url(
+                artifact_id=a_artifact, request=_make_request(),
+                user=user_b, variant="thumbnail", expires_in=3600,
+            )
+        assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_G2_image_sessions_view_cross_user_succeeds():
-    # NOTE: owner_scope checks removed — any user with the session_id
-    # can access (UUID is unguessable, defense-in-depth via obscurity).
+async def test_G2_image_sessions_view_cross_user_returns_404():
     sid = "legacy-G2"
     user_a = _user(user_id="alice", tenant_id="t1")
     user_b = _user(user_id="bob", tenant_id="t1")
@@ -458,9 +453,9 @@ async def test_G2_image_sessions_view_cross_user_succeeds():
             model_registry=_registry_stub("google"),
         )
 
-        # User B CAN read (owner_scope checks removed)
-        resp = await get_image_session_view(
-            session_id=sid, request=_make_request(), user=user_b,
-            limit=10, cursor=None, include_urls=False,
-        )
-        assert resp.session_id == sid
+        with pytest.raises(HTTPException) as exc:
+            await get_image_session_view(
+                session_id=sid, request=_make_request(), user=user_b,
+                limit=10, cursor=None, include_urls=False,
+            )
+        assert exc.value.status_code == 404

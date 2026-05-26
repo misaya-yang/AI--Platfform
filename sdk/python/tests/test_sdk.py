@@ -13,11 +13,12 @@ from ai_assistant.models.events import EventType
 
 
 SERVER = os.environ.get("SDK_TEST_SERVER", "http://52.65.136.42:8080")
-API_KEY = os.environ.get("SDK_TEST_API_KEY", "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs")
+API_KEY = os.environ.get("SDK_TEST_API_KEY", "")
 
 
 async def test_non_streaming_chat():
     """Test basic non-streaming chat."""
+    assert API_KEY, "SDK_TEST_API_KEY must be set"
     async with AssistantClient(api_key=API_KEY, base_url=SERVER) as client:
         resp = await client.chat.send("Say just OK", session_id="sdk-test-chat")
         assert resp.content, "Expected non-empty content"

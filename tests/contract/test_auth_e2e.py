@@ -92,7 +92,7 @@ def _build_fake_assistant_service_app(shared_replay_store: InMemoryReplayStore) 
         # headers so the gateway-side test can assert the full
         # wire-level header set. Includes both ``x-user-*`` and
         # the lone ``x-tenant-id``.
-        identity_prefixes = ("x-user-", "x-tenant-")
+        identity_prefixes = ("x-user-", "x-tenant-", "x-app-")
         raw_headers = {
             k.lower(): v
             for k, v in request.headers.items()
@@ -268,6 +268,32 @@ async def test_user_type_header_smuggling_stripped(monkeypatch) -> None:
         assert body["user_type"] == "user", (
             f"smuggle via {variant!r} bypassed strip — got {body['user_type']!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_app_identity_headers_from_client_are_not_forwarded(monkeypatch) -> None:
+    """Public clients must not be able to forge assistant-service app identity."""
+    replay_store = InMemoryReplayStore()
+    fake_as = _build_fake_assistant_service_app(replay_store)
+    gateway = _build_gateway_app(monkeypatch, fake_as)
+
+    token = _make_jwt(roles=["user"], sub="regular-user", tier="normal")
+
+    with TestClient(gateway) as client:
+        r = client.post(
+            "/gw/echo-auth",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-App-User-Id": "victim-user",
+                "X-App-Tenant-Id": "victim-tenant",
+            },
+            json={},
+        )
+
+    assert r.status_code == 200, r.text
+    raw_headers = r.json()["raw_x_user_headers"]
+    assert "x-app-user-id" not in raw_headers
+    assert "x-app-tenant-id" not in raw_headers
 
 
 @pytest.mark.asyncio

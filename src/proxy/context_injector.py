@@ -17,6 +17,8 @@ from typing import Any
 
 from ai_gateway_core.logging import get_logger
 
+from ..core.client_ip import get_client_ip, get_client_ip_from_request
+
 logger = get_logger(__name__)
 
 
@@ -133,6 +135,8 @@ class ContextInjector:
         "x-gw-user-permissions",
         "x-user-name",
         "x-gw-user-name",
+        "x-forwarded-for",
+        "x-real-ip",
     }
 
     def __init__(
@@ -326,15 +330,10 @@ class ContextInjector:
 
         # 5. 服务内部认证 token
         if service_auth_token:
-            # 支持多种认证方式：
-            # - Bearer token: Authorization: Bearer xxx
-            # - API Key: X-Api-Key: xxx (LangGraph 使用此方式)
             if service_auth_token.startswith("Bearer "):
                 headers["Authorization"] = service_auth_token
             elif ":" in service_auth_token:
-                # 格式: "Header-Name:value"
-                header_name, header_value = service_auth_token.split(":", 1)
-                headers[header_name.strip()] = header_value.strip()
+                raise ValueError("service_auth_token must be a Bearer token or opaque API key")
             else:
                 # 默认作为 X-Api-Key（LangGraph 兼容）
                 headers["X-Api-Key"] = service_auth_token
@@ -391,13 +390,8 @@ class ContextInjector:
         }
 
         # 客户端 IP
-        client_ip = ""
-        if xff := original_headers.get("x-forwarded-for"):
-            client_ip = xff.split(",")[0].strip()
-        elif real_ip := original_headers.get("x-real-ip"):
-            client_ip = real_ip
-        elif client := scope.get("client"):
-            client_ip = client[0]
+        client_host = scope.get("client", (None,))[0] if scope.get("client") else None
+        client_ip = get_client_ip(original_headers, client_host)
 
         return RequestContext(
             user_id=user_info.get("user_id", ""),
@@ -437,13 +431,7 @@ class ContextInjector:
         original_headers = dict(request.headers)
 
         # 客户端 IP
-        client_ip = ""
-        if xff := request.headers.get("x-forwarded-for"):
-            client_ip = xff.split(",")[0].strip()
-        elif real_ip := request.headers.get("x-real-ip"):
-            client_ip = real_ip
-        elif request.client:
-            client_ip = request.client.host
+        client_ip = get_client_ip_from_request(request)
 
         return RequestContext(
             user_id=user_info.get("user_id", "")

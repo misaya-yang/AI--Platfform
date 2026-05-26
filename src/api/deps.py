@@ -19,6 +19,7 @@ from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ..core.auth.permissions import Capability, build_permission_denied_detail, check_capability
 from ..core.auth.rbac import RBAC
 from ..core.auth.user_resolver import UserContext
+from ..core.client_ip import get_client_ip_from_request
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -163,15 +164,7 @@ def get_guest_session_manager(request: Request):
 
 def _get_client_ip(request: Request) -> str:
     """Best-effort client IP (proxy-aware)."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
-    if request.client:
-        return request.client.host
-    return "unknown"
+    return get_client_ip_from_request(request)
 
 
 def _request_trace_id(request: Request) -> str:

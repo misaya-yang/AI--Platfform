@@ -1003,7 +1003,7 @@ def main():
     p = argparse.ArgumentParser(description="Rebuild Islamic KB v2")
     p.add_argument("--dsn", default=os.environ.get(
         "DATABASE_DSN",
-        os.environ.get("GATEWAY_DATABASE__DSN", "postgresql://postgres:111111@127.0.0.1:5432/gateway"),
+        os.environ.get("GATEWAY_DATABASE__DSN", ""),
     ))
     p.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://127.0.0.1:6333"))
     p.add_argument("--google-api-key", default=os.environ.get("GOOGLE_API_KEY", ""))

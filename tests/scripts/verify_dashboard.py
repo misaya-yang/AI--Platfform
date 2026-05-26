@@ -1,13 +1,16 @@
 import asyncio
 import json
+import os
 
 import httpx
 
 BASE_URL = "http://localhost:8080"
-ADMIN_API_KEY = "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
+ADMIN_API_KEY = os.getenv("GATEWAY_ADMIN_API_KEY", "")
 
 
 async def main():
+    if not ADMIN_API_KEY:
+        raise RuntimeError("GATEWAY_ADMIN_API_KEY must be set")
     # Disable SSL verification to avoid permission errors in sandbox
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0, verify=False) as client:
         # 0. Login as Admin

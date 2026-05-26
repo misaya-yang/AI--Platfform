@@ -4,7 +4,8 @@ from src.core.auth.password import hash_password
 from src.persistence.database import db
 
 async def main():
-    os.environ["DATABASE_URL"] = "postgresql://postgres:111111@127.0.0.1:5432/gateway"
+    if not os.getenv("DATABASE_URL"):
+        raise RuntimeError("DATABASE_URL must be set")
     await db.connect()
     pwd_hash = hash_password("123456.dc")
     await db.execute(

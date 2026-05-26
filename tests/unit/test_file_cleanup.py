@@ -165,6 +165,19 @@ class TestFileCleanupService:
         assert "not found" in result["message"].lower()
 
     @pytest.mark.asyncio
+    async def test_cleanup_user_rejects_path_traversal(self, cleanup_service, temp_storage):
+        """Manual cleanup must not resolve outside the uploads root."""
+        outside_dir = temp_storage / "outside"
+        outside_dir.mkdir()
+        protected_file = outside_dir / "protected.txt"
+        protected_file.write_text("do not delete")
+
+        with pytest.raises(ValueError):
+            await cleanup_service.cleanup_user("../outside")
+
+        assert protected_file.exists()
+
+    @pytest.mark.asyncio
     async def test_empty_directory_cleanup(self, cleanup_service, temp_storage):
         """Test that empty user directories are removed."""
         uploads_dir = temp_storage / "uploads"

@@ -24,6 +24,8 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
+from ..client_ip import get_client_ip_from_request
+
 logger = get_logger(__name__)
 
 
@@ -182,18 +184,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """获取客户端 IP"""
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-
-        if request.client:
-            return request.client.host
-
-        return "unknown"
+        return get_client_ip_from_request(request)
 
     def _mask_user_id(self, user_id: str) -> str:
         """脱敏用户 ID"""

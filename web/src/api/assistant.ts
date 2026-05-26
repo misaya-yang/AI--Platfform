@@ -8,6 +8,7 @@
 import { api } from "@/lib/api";
 import { sseFetch } from "@/lib/sse";
 import { SSEEventType, type SSEEventTypeValue } from "@/pages/assistant/sse-events";
+import { useAuthStore } from "@/store/useAuthStore";
 
 export { SSEEventType };
 export type { SSEEventTypeValue };
@@ -612,21 +613,7 @@ export async function chat(request: ChatRequest): Promise<ChatResponse> {
  */
 // Helper to get auth token from storage (same as lib/api.ts)
 function getAuthToken(): string | null {
-  const AUTH_STORAGE_KEY = "agent-gateway-auth";
-  // Check localStorage first (rememberMe=true), then sessionStorage (rememberMe=false)
-  let authStorage = localStorage.getItem(AUTH_STORAGE_KEY);
-  if (!authStorage) {
-    authStorage = sessionStorage.getItem(AUTH_STORAGE_KEY);
-  }
-  if (authStorage) {
-    try {
-      const authState = JSON.parse(authStorage);
-      return authState?.state?.token || null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  return useAuthStore.getState().token;
 }
 
 export async function* chatStream(

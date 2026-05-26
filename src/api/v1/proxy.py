@@ -33,6 +33,7 @@ from ...core.auth.service_access import (
     service_scope_matches,
 )
 from ...core.auth.user_resolver import UserContext
+from ...core.client_ip import get_client_ip_from_request
 from ...core.gateway.multi_dimension_rate_limiter import (
     MultiDimensionRateLimiter,
     RateLimitContext,
@@ -1881,13 +1882,7 @@ def _build_request_context(request: Request, user: UserContext) -> RequestContex
     original_headers = dict(request.headers)
 
     # 提取客户端 IP
-    client_ip = ""
-    if xff := request.headers.get("x-forwarded-for"):
-        client_ip = xff.split(",")[0].strip()
-    elif real_ip := request.headers.get("x-real-ip"):
-        client_ip = real_ip
-    elif request.client:
-        client_ip = request.client.host
+    client_ip = get_client_ip_from_request(request)
 
     # 从 request.state 获取追踪信息
     request_id = getattr(request.state, "request_id", "")

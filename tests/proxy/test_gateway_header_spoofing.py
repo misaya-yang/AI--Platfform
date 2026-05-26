@@ -113,3 +113,37 @@ def test_langgraph_and_gateway_identity_headers_are_both_authoritative():
     assert headers["X-User-Tier"] == "premium"
     assert headers["X-GW-User-Tier"] == "premium"
     assert headers["X-GW-Authenticated"] == "true"
+
+
+def test_service_auth_token_rejects_arbitrary_header_injection():
+    injector = ContextInjector(inject_user_info=False, inject_request_info=False)
+    context = RequestContext()
+
+    try:
+        injector.build_headers(context, service_auth_token="X-Evil: injected")
+    except ValueError as exc:
+        assert "service_auth_token" in str(exc)
+    else:
+        raise AssertionError("arbitrary service_auth_token header injection was accepted")
+
+
+def test_client_forwarded_ip_headers_are_rebuilt_from_context():
+    injector = ContextInjector(
+        inject_user_info=False,
+        inject_request_info=False,
+        forward_all_headers=True,
+    )
+    context = RequestContext(
+        client_ip="203.0.113.9",
+        original_headers={
+            "X-Forwarded-For": "198.51.100.1",
+            "X-Real-IP": "198.51.100.2",
+            "X-Custom-Trace": "kept",
+        },
+    )
+
+    headers = injector.build_headers(context)
+
+    assert headers["X-Forwarded-For"] == "203.0.113.9"
+    assert "X-Real-IP" not in headers
+    assert headers["X-Custom-Trace"] == "kept"

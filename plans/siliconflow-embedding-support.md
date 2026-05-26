@@ -16,7 +16,7 @@
 ## API 配置
 
 - **API Endpoint**: `https://api.siliconflow.cn/v1/embeddings`
-- **API Key**: `sk-hxsjpvoecynrsfxvewczzpsptepcvhnpauzrlnprvpqrnsbp`
+- **API Key**: configure via environment variable, do not store secrets in the repository
 
 ## 修改文件清单
 
@@ -26,7 +26,7 @@
 添加 SiliconFlow API key 配置：
 ```env
 # SiliconFlow 嵌入服务配置
-GATEWAY_KNOWLEDGE__SILICONFLOW__API_KEY=sk-hxsjpvoecynrsfxvewczzpsptepcvhnpauzrlnprvpqrnsbp
+GATEWAY_KNOWLEDGE__SILICONFLOW__API_KEY=${SILICONFLOW_API_KEY}
 GATEWAY_KNOWLEDGE__SILICONFLOW__BASE_URL=https://api.siliconflow.cn/v1
 ```
 

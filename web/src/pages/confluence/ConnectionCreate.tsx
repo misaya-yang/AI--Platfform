@@ -39,6 +39,7 @@ import {
 import { createConnection } from "@/api/confluence";
 import type { ConfluenceConnectionCreateRequest } from "@/types/confluence";
 import { getErrorMessage } from "@/lib/utils";
+import { useAuthStore } from "@/store/useAuthStore";
 
 // ============================================================
 // Form Field Component
@@ -174,7 +175,9 @@ export default function ConnectionCreatePage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
+          ...(useAuthStore.getState().token
+            ? { Authorization: `Bearer ${useAuthStore.getState().token}` }
+            : {}),
         },
         body: JSON.stringify({
           domain: formData.domain,

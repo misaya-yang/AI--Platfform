@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ...services.metrics import get_metrics_recorder
+from ..client_ip import get_client_ip_from_scope
 from .rate_limit_http import RateLimitInfo, SlidingWindowRateLimiter
 
 logger = get_logger(__name__)
@@ -169,6 +171,7 @@ class StreamingAuthConfig:
     jwt_algorithms: list[str] = field(default_factory=lambda: ["HS256"])
     api_key_enabled: bool = False
     api_key_header: str = "X-API-Key"
+    api_keys: list[str] = field(default_factory=list)
     guest_session_enabled: bool = True
     guest_session_header: str = "X-Guest-Session"
     anonymous_enabled: bool = True
@@ -295,9 +298,10 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                     logger.error(f"Unexpected JWT error from {client_ip}: {e}")
                 # Fall through to other auth methods or anonymous
 
-        # Try API key
+        # Try configured static API keys. Unknown client-supplied keys must not
+        # become authenticated identities before endpoint-level API key checks.
         api_key = headers.get(self.config.api_key_header.lower().encode(), b"").decode()
-        if api_key:
+        if api_key and self.config.api_key_enabled and self._is_configured_api_key(api_key):
             import hashlib
 
             key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
@@ -310,6 +314,8 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                 "ip": client_ip,
                 "roles": ["user"],
             }
+        if api_key:
+            logger.warning("Unverified streaming API key ignored from %s", client_ip)
 
         # Try guest session
         guest_session = headers.get(self.config.guest_session_header.lower().encode(), b"").decode()
@@ -353,27 +359,16 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
                         return value
         return ""
 
+    def _is_configured_api_key(self, api_key: str) -> bool:
+        return any(secrets.compare_digest(api_key, configured) for configured in self.config.api_keys)
+
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""
         return any(path == wp or path.startswith(wp + "/") for wp in self.config.whitelist_paths)
 
     def _get_client_ip(self, scope: Scope) -> str:
         """获取客户端 IP"""
-        headers = dict(scope.get("headers", []))
-
-        forwarded = headers.get(b"x-forwarded-for", b"").decode()
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = headers.get(b"x-real-ip", b"").decode()
-        if real_ip:
-            return real_ip
-
-        client = scope.get("client")
-        if client:
-            return client[0]
-
-        return "unknown"
+        return get_client_ip_from_scope(scope)
 
 
 # ============ 流式友好的限流中间件 ============
@@ -425,11 +420,6 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
             await self.app(scope, receive, send)
             return
 
-        # Skip rate limiting for streaming endpoints to avoid blocking streams.
-        if is_streaming_path(path):
-            await self.app(scope, receive, send)
-            return
-
         # Bind redis client if available.
         self._bind_redis_client(scope)
 
@@ -453,10 +443,11 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
                     )
                 )
             elif user_type in ("guest", "anonymous"):
+                guest_key = user_id if user_type == "guest" else client_ip
                 checks.append(
                     (
                         "guest",
-                        f"ratelimit:guest:{user_id}",
+                        f"ratelimit:guest:{guest_key}",
                         self.config.guest_limit,
                         self.config.guest_window,
                     )
@@ -515,21 +506,7 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
         return getattr(user_info, field, default)
 
     def _get_client_ip(self, scope: Scope) -> str:
-        headers = dict(scope.get("headers", []))
-
-        forwarded = headers.get(b"x-forwarded-for", b"").decode()
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = headers.get(b"x-real-ip", b"").decode()
-        if real_ip:
-            return real_ip
-
-        client = scope.get("client")
-        if client:
-            return client[0]
-
-        return "unknown"
+        return get_client_ip_from_scope(scope)
 
     def _bind_redis_client(self, scope: Scope) -> None:
         if getattr(self.limiter, "redis", None) is not None:

@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 from ai_gateway_core.logging import get_logger
+from ..client_ip import get_client_ip_from_request
 
 logger = get_logger(__name__)
 
@@ -294,18 +295,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _get_client_ip(self, request: Request) -> str:
         """获取客户端 IP"""
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            return real_ip
-
-        if request.client:
-            return request.client.host
-
-        return "unknown"
+        return get_client_ip_from_request(request)
 
     def _build_rate_limit_response(self, info: RateLimitInfo) -> Response:
         """构建限流响应"""

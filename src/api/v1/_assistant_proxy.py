@@ -39,6 +39,7 @@ _INJECTED_IDENTITY_HEADERS: Final = frozenset(
         "x-user-name",
     }
 )
+_CLIENT_SUPPLIED_APP_IDENTITY_HEADERS: Final = frozenset({"x-app-user-id", "x-app-tenant-id"})
 
 
 def _build_signer() -> GatewaySecret | None:
@@ -69,6 +70,11 @@ _proxy = ServiceProxy(
         # (docgen + long generations). 600s covers the idle gap between
         # chunks — httpx tracks inter-chunk read time, not total.
         timeout=httpx.Timeout(connect=5.0, read=600.0, write=120.0, pool=30.0),
+        strip_req=ServiceProxyConfig(
+            name="Assistant Service",
+            base_url=ASSISTANT_SERVICE_URL,
+        ).strip_req
+        | _CLIENT_SUPPLIED_APP_IDENTITY_HEADERS,
     ),
     signer=_sign_request,
 )
@@ -102,12 +108,12 @@ async def proxy_to_assistant_service(
     name = getattr(user, "name", None) or getattr(user, "display_name", None)
     if name:
         user_headers["X-User-Name"] = name
-    # Forward image-redesign owner-scope headers so AS can isolate per
-    # end-user when the API caller is itself a multi-tenant app.
-    app_user_id = request.headers.get("X-App-User-Id")
+    # Only trusted gateway-derived user context may populate app identity.
+    # Public client-supplied X-App-* headers are stripped at the proxy boundary.
+    app_user_id = getattr(user, "app_user_id", None)
     if app_user_id:
         user_headers["X-App-User-Id"] = app_user_id
-    app_tenant_id = request.headers.get("X-App-Tenant-Id")
+    app_tenant_id = getattr(user, "app_tenant_id", None)
     if app_tenant_id:
         user_headers["X-App-Tenant-Id"] = app_tenant_id
 

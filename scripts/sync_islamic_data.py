@@ -7,7 +7,7 @@ Data sources (no API key required):
   - Hadith: cdn.jsdelivr.net/gh/fawazahmed0/hadith-api (public, free CDN)
 
 Usage:
-  python scripts/sync_islamic_data.py                           # use DATABASE_DSN or default
+  python scripts/sync_islamic_data.py                           # use DATABASE_DSN/GATEWAY_DATABASE__DSN
   python scripts/sync_islamic_data.py --dsn postgresql://...    # explicit DSN
   python scripts/sync_islamic_data.py --quran-only              # sync Quran only
   python scripts/sync_islamic_data.py --hadith-only             # sync Hadith only
@@ -490,7 +490,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Sync Islamic Content from free public APIs")
     parser.add_argument("--dsn", default=os.environ.get(
         "DATABASE_DSN",
-        os.environ.get("GATEWAY_DATABASE__DSN", "postgresql://postgres:111111@127.0.0.1:5432/gateway")
+        os.environ.get("GATEWAY_DATABASE__DSN", "")
     ), help="PostgreSQL connection string")
     parser.add_argument("--quran-only", action="store_true", help="Sync Quran only")
     parser.add_argument("--hadith-only", action="store_true", help="Sync Hadith only")

@@ -1423,6 +1423,15 @@ def _resolve_owner_scope(user: UserContext, body: ImageGenerationRequest) -> str
     )
 
 
+def _resolve_owner_scope_from_user(user: UserContext) -> str:
+    """Compute owner_scope for read-only routes that do not carry a body."""
+    return _compute_owner_scope(
+        user.user_id,
+        app_tenant_id=user.app_tenant_id,
+        app_user_id=user.app_user_id,
+    )
+
+
 async def _check_idempotency(
     pool,
     *,
@@ -1470,7 +1479,12 @@ async def _ensure_image_session(
     if pool is None:
         return None
     existing = await get_image_session(pool, session_id)
-    # NOTE: owner_scope check removed — session_id is a UUID (unguessable).
+    if existing and existing.get("owner_scope") and existing.get("owner_scope") != owner_scope:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "not_found",
+                    "message": f"image session {session_id!r} not found"},
+        )
     await upsert_image_session(
         pool,
         session_id=session_id,
@@ -3099,8 +3113,9 @@ async def get_artifact_download_url(
                     "message": "ArtifactStorage not configured"},
         )
 
+    owner_scope = _resolve_owner_scope_from_user(user)
     url, actual_variant = await artifact_storage.get_presigned_download_url_for_variant(
-        artifact_id, variant, expiry_seconds=expires_in, owner_scope=None,
+        artifact_id, variant, expiry_seconds=expires_in, owner_scope=owner_scope,
     )
     if url is None or actual_variant is None:
         raise HTTPException(
@@ -3191,9 +3206,16 @@ async def get_image_session_view(
                     "message": f"image session {session_id!r} not found"},
         )
 
+    requested_owner_scope = _resolve_owner_scope_from_user(user)
     session_owner_scope = sess.get("owner_scope")
+    if session_owner_scope and session_owner_scope != requested_owner_scope:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "not_found",
+                    "message": f"image session {session_id!r} not found"},
+        )
     rows, next_cursor = await list_turns(
-        pool, session_id=session_id, owner_scope=session_owner_scope,
+        pool, session_id=session_id, owner_scope=requested_owner_scope,
         limit=limit, cursor=cursor,
     )
 
@@ -3205,7 +3227,7 @@ async def get_image_session_view(
         if include_urls and artifact_storage and oid:
             try:
                 url, _ = await artifact_storage.get_presigned_download_url_for_variant(
-                    oid, "display", owner_scope=None,
+                    oid, "display", owner_scope=requested_owner_scope,
                 )
                 output_url = url
             except Exception as exc:

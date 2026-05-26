@@ -4,6 +4,7 @@
 
 import { api } from "@/lib/api";
 import type { QuizData, QuizAttemptResult } from "@/pages/assistant/types";
+import { useAuthStore } from "@/store/useAuthStore";
 
 export interface GenerateQuizRequest {
   dataset_ids: string[];
@@ -79,9 +80,7 @@ export async function generateQuizStream(
   onError: (message: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const token = localStorage.getItem("agent-gateway-auth") || sessionStorage.getItem("agent-gateway-auth");
-  const authObj = token ? JSON.parse(token) : null;
-  const bearerToken = authObj?.state?.token || authObj?.token || "";
+  const bearerToken = useAuthStore.getState().token || "";
 
   const resp = await fetch("/api/v1/assistant/quiz/generate/stream", {
     method: "POST",

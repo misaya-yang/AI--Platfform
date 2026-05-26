@@ -31,6 +31,7 @@ from ai_gateway_core.quiz import (
 )
 
 from ...core.auth.user_resolver import UserContext
+from ...core.client_ip import get_client_ip_from_request
 from ..deps import get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
@@ -450,7 +451,7 @@ async def submit_shared_quiz(
 
     mgr = _get_share_manager(request)
     # P2: Track client IP
-    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or request.client.host if request.client else None
+    client_ip = get_client_ip_from_request(request)
     try:
         result = await mgr.submit_public_attempt(
             share_code=share_code,

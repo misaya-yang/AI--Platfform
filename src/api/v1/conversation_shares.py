@@ -17,6 +17,7 @@ from ai_gateway_core.logging import get_logger
 from ai_gateway_core.quiz import QuizGrader
 
 from ...core.auth.user_resolver import UserContext
+from ...core.client_ip import get_client_ip_from_request
 from ..deps import enforce_rate_limit, get_user_context
 
 logger = get_logger(__name__)
@@ -353,12 +354,7 @@ def _resolve_anon_id(request: Request) -> str:
     header = request.headers.get("x-anon-id")
     if header:
         return header[:128]
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()[:128]
-    if request.client and request.client.host:
-        return request.client.host[:128]
-    return "anonymous"
+    return get_client_ip_from_request(request)[:128] or "anonymous"
 
 
 @router.post("/shares/{share_code}/quiz/{quiz_id}/submit")

@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -15,13 +16,15 @@ import httpx
 
 # Configuration
 BASE_URL = "http://localhost:8080"
-API_KEY = "gw_gEtIPdAxdXI4D-WyWxvgFNPkdd7CU2VPdeFg9XdqFhs"
+API_KEY = os.getenv("GATEWAY_API_KEY", "")
 DATASET_ID = "imam"
 TEST_FILE = "/Users/misaya.yanghejazfs.com.au/Downloads/Fiqh of Marriage.pdf"
 
 
 class KnowledgeBaseTester:
     def __init__(self):
+        if not API_KEY:
+            raise RuntimeError("GATEWAY_API_KEY must be set")
         self.client = httpx.AsyncClient(
             base_url=BASE_URL,
             headers={
