@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+from ai_gateway_core.exceptions import AdapterNotFoundError, ValidationFailedError
 
 from ...adapters.base import ProtocolAdapter
-from ai_gateway_core.exceptions import AdapterNotFoundError, ValidationFailedError
-from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from ...models.service import (
     ServiceAuthConfig,
     ServiceCacheConfig,
+    ServiceCapacityConfig,
     ServiceConfig,
     ServiceDefinition,
     ServicePriorityConfig,
@@ -191,6 +192,13 @@ class ServiceRegistry:
                     priority=sc.get("priority", {}).get("priority", 5),
                     weight=sc.get("priority", {}).get("weight", 1),
                     max_queue_size=sc.get("priority", {}).get("max_queue_size", 100),
+                ),
+                capacity=ServiceCapacityConfig(
+                    upstream_group=sc.get("capacity", {}).get("upstream_group"),
+                    concurrency_limit=sc.get("capacity", {}).get("concurrency_limit"),
+                    queue_max=sc.get("capacity", {}).get("queue_max", 16),
+                    queue_timeout_ms=sc.get("capacity", {}).get("queue_timeout_ms", 3000),
+                    enforced=sc.get("capacity", {}).get("enforced", True),
                 ),
             )
 

@@ -11,9 +11,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
+
 from ...models.service import (
     ServiceAuthConfig,
     ServiceCacheConfig,
+    ServiceCapacityConfig,
     ServiceConfig,
     ServiceDefinition,
     ServicePriorityConfig,
@@ -138,6 +140,13 @@ class DatabaseRegistryStorage(RegistryStorage):
                     "weight": sc.priority.weight if sc.priority else 1,
                     "max_queue_size": sc.priority.max_queue_size if sc.priority else 100,
                 },
+                "capacity": {
+                    "upstream_group": sc.capacity.upstream_group if sc.capacity else None,
+                    "concurrency_limit": sc.capacity.concurrency_limit if sc.capacity else None,
+                    "queue_max": sc.capacity.queue_max if sc.capacity else 16,
+                    "queue_timeout_ms": sc.capacity.queue_timeout_ms if sc.capacity else 3000,
+                    "enforced": sc.capacity.enforced if sc.capacity else True,
+                },
             }
 
         return result
@@ -216,6 +225,13 @@ class DatabaseRegistryStorage(RegistryStorage):
                         priority=sc_data.get("priority", {}).get("priority", 5),
                         weight=sc_data.get("priority", {}).get("weight", 1),
                         max_queue_size=sc_data.get("priority", {}).get("max_queue_size", 100),
+                    ),
+                    capacity=ServiceCapacityConfig(
+                        upstream_group=sc_data.get("capacity", {}).get("upstream_group"),
+                        concurrency_limit=sc_data.get("capacity", {}).get("concurrency_limit"),
+                        queue_max=sc_data.get("capacity", {}).get("queue_max", 16),
+                        queue_timeout_ms=sc_data.get("capacity", {}).get("queue_timeout_ms", 3000),
+                        enforced=sc_data.get("capacity", {}).get("enforced", True),
                     ),
                 )
 

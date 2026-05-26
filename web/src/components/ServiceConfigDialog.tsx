@@ -60,6 +60,14 @@ interface ServiceConfig {
     enforced?: boolean;
     scheduler?: string;
   };
+  capacity: {
+    upstream_group?: string | null;
+    concurrency_limit?: number | null;
+    queue_max: number;
+    queue_timeout_ms: number;
+    enforced?: boolean;
+    source_status?: string;
+  };
 }
 
 interface ServiceConfigResponse {
@@ -198,6 +206,7 @@ export function ServiceConfigDialog({
 
   const config = configQuery.data?.config;
   const priorityEnforced = config?.priority?.enforced === true;
+  const capacityEnforced = config?.capacity?.enforced !== false;
   const serviceDetail: ServiceDetail | undefined = serviceQuery.data;
   const isLangGraphService = detectLangGraphService(serviceDetail);
 
@@ -227,6 +236,12 @@ export function ServiceConfigDialog({
     priority: 5,
     weight: 1,
     max_queue_size: 100,
+  });
+  const [capacityForm, setCapacityForm] = useState({
+    upstream_group: "",
+    concurrency_limit: "",
+    queue_max: 16,
+    queue_timeout_ms: 3000,
   });
 
   const [basicForm, setBasicForm] = useState({
@@ -419,6 +434,15 @@ export function ServiceConfigDialog({
       });
       setCacheForm(config.cache);
       setPriorityForm(config.priority);
+      setCapacityForm({
+        upstream_group: config.capacity?.upstream_group || "",
+        concurrency_limit:
+          config.capacity?.concurrency_limit == null
+            ? ""
+            : String(config.capacity.concurrency_limit),
+        queue_max: config.capacity?.queue_max ?? 16,
+        queue_timeout_ms: config.capacity?.queue_timeout_ms ?? 3000,
+      });
     }
   }, [config]);
 
@@ -520,6 +544,20 @@ export function ServiceConfigDialog({
   const handleSavePriority = () => {
     if (!priorityEnforced) return;
     updateMutation.mutate({ priority: priorityForm });
+  };
+
+  const handleSaveCapacity = () => {
+    if (!capacityEnforced) return;
+    updateMutation.mutate({
+      capacity: {
+        upstream_group: capacityForm.upstream_group || null,
+        concurrency_limit: capacityForm.concurrency_limit
+          ? Number(capacityForm.concurrency_limit)
+          : null,
+        queue_max: capacityForm.queue_max,
+        queue_timeout_ms: capacityForm.queue_timeout_ms,
+      },
+    });
   };
 
   const handleProviderChange = (providerId: string) => {
@@ -1362,6 +1400,18 @@ export function ServiceConfigDialog({
                   </div>
                 )}
 
+                <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/30 p-3">
+                  <div>
+                    <Label>{t("services.configDialog.priority.capacityStatus", "Capacity Status")}</Label>
+                    <p className="text-xs text-muted-foreground">
+                      {t("services.configDialog.priority.capacityHint", "Gateway admission applies this service's concurrency and queue budget before upstream calls.")}
+                    </p>
+                  </div>
+                  <Badge variant={capacityEnforced ? "default" : "secondary"}>
+                    {capacityEnforced ? (config?.capacity?.source_status || "real") : "not enforced"}
+                  </Badge>
+                </div>
+
                 <div className="space-y-2">
                   <Label>{t("services.configDialog.priority.level")}</Label>
                   <div className="flex items-center gap-4">
@@ -1384,6 +1434,50 @@ export function ServiceConfigDialog({
                   <p className="text-xs text-muted-foreground">
                     {t("services.configDialog.priority.levelHint")}
                   </p>
+                </div>
+
+                <Separator />
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.priority.upstreamGroup", "Upstream Group")}</Label>
+                    <Input
+                      value={capacityForm.upstream_group}
+                      disabled={!capacityEnforced}
+                      placeholder="imam_agent"
+                      onChange={(e) =>
+                        setCapacityForm({ ...capacityForm, upstream_group: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.priority.concurrencyLimit", "Concurrency")}</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={capacityForm.concurrency_limit}
+                      disabled={!capacityEnforced}
+                      placeholder="default"
+                      onChange={(e) =>
+                        setCapacityForm({ ...capacityForm, concurrency_limit: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.priority.queueTimeout", "Queue Timeout")}</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={capacityForm.queue_timeout_ms}
+                      disabled={!capacityEnforced}
+                      onChange={(e) =>
+                        setCapacityForm({
+                          ...capacityForm,
+                          queue_timeout_ms: parseInt(e.target.value) || 3000,
+                        })
+                      }
+                    />
+                  </div>
                 </div>
 
                 <Separator />
@@ -1431,6 +1525,15 @@ export function ServiceConfigDialog({
                   disabled={!priorityEnforced || updateMutation.isPending}
                 >
                   {updateMutation.isPending ? t("common.saving") : t("services.configDialog.priority.save")}
+                </Button>
+                <Button
+                  onClick={handleSaveCapacity}
+                  disabled={!capacityEnforced || updateMutation.isPending}
+                  variant="outline"
+                >
+                  {updateMutation.isPending
+                    ? t("common.saving")
+                    : t("services.configDialog.priority.saveCapacity", "Save Capacity")}
                 </Button>
               </div>
             </TabsContent>

@@ -24,6 +24,8 @@ from typing import Any
 import httpx
 from ai_gateway_core.logging import get_logger
 
+from ..core.gateway.admission import CapacityAdmissionController, CapacityRejected
+from ..core.gateway.capacity import CapacityResolver, service_upstream_group
 from ..services.metrics.observability import (
     classify_error_type,
     ensure_duration_breakdown,
@@ -173,6 +175,8 @@ class TransparentProxy:
         client_max_connections: int = 100,
         client_max_keepalive_connections: int = 20,
         client_keepalive_expiry: float = 30.0,
+        capacity_resolver: CapacityResolver | None = None,
+        admission_controller: CapacityAdmissionController | None = None,
     ):
         """
         初始化透明代理
@@ -197,6 +201,10 @@ class TransparentProxy:
         self.client_max_connections = client_max_connections
         self.client_max_keepalive_connections = client_max_keepalive_connections
         self.client_keepalive_expiry = client_keepalive_expiry
+        self.capacity_resolver = capacity_resolver or CapacityResolver()
+        self.admission_controller = admission_controller or CapacityAdmissionController(
+            redis_client=getattr(config_loader, "redis", None),
+        )
 
         # HTTP 客户端池（按服务维护）
         self._clients: dict[str, httpx.AsyncClient] = {}
@@ -291,6 +299,67 @@ class TransparentProxy:
             semaphore = asyncio.Semaphore(limit)
             self._service_semaphores[service_key] = semaphore
         return semaphore
+
+    @staticmethod
+    def _request_class_for_capacity(request: ProxyRequest, slot_kind: str) -> str:
+        path = (request.path or "").lower()
+        if slot_kind == "stream" or "runs/stream" in path:
+            return "stream"
+        if "image" in path:
+            return "image"
+        if "retrieve" in path or "knowledge" in path:
+            return "rag"
+        if "tool" in path:
+            return "tool"
+        return "sync"
+
+    @staticmethod
+    def _provider_hint_for_capacity(body: bytes | None, config: ProxyServiceConfig) -> str | None:
+        request_data = TransparentProxy._parse_json_body(body)
+        return (
+            extract_provider(request_data)
+            or config.default_provider
+            or (config.model_override or {}).get("provider_id")
+        )
+
+    @staticmethod
+    def _capacity_config_for_proxy(config: ProxyServiceConfig) -> dict[str, Any]:
+        capacity = dict(getattr(config, "capacity_config", None) or {})
+        metadata = getattr(config, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata_capacity = metadata.get("capacity")
+            if isinstance(metadata_capacity, dict):
+                capacity = {**metadata_capacity, **capacity}
+        return {"capacity": capacity} if capacity else {}
+
+    async def _acquire_capacity_lease(
+        self,
+        *,
+        request: ProxyRequest,
+        config: ProxyServiceConfig,
+        slot_kind: str,
+        body: bytes | None,
+    ):
+        context = request.context or RequestContext()
+        request_class = self._request_class_for_capacity(request, slot_kind)
+        capacity_config = self._capacity_config_for_proxy(config)
+        configured_group = (capacity_config.get("capacity") or {}).get("upstream_group")
+        budgets = await self.capacity_resolver.resolve(
+            tenant_id=context.tenant_id or "public",
+            service_id=config.service_id or request.service_name,
+            request_class=request_class,
+            upstream_group=service_upstream_group(config.service_id or request.service_name, configured_group),
+            provider_id=self._provider_hint_for_capacity(body, config),
+            service_config=capacity_config,
+        )
+        return await self.admission_controller.acquire(
+            budgets=budgets,
+            tenant_id=context.tenant_id or "public",
+            user_id=context.user_id or "anonymous",
+            service_id=config.service_id or request.service_name,
+            request_class=request_class,
+            request_id=context.request_id or f"{config.service_id}:{time.time_ns()}",
+        )
 
     async def _acquire_request_slot(
         self,
@@ -557,13 +626,22 @@ class TransparentProxy:
         client = await self._get_client(config)
         t_client_done = time.perf_counter()
         slot_kind = self._resolve_slot_kind(request)
+        capacity_lease = None
         try:
+            capacity_lease = await self._acquire_capacity_lease(
+                request=request,
+                config=config,
+                slot_kind=slot_kind,
+                body=request.body,
+            )
             release_slot, queue_wait_ms = await self._acquire_request_slot(
                 config,
                 upstream_base,
                 slot_kind,
             )
         except ProxyQueueTimeoutError as e:
+            if capacity_lease is not None:
+                await capacity_lease.release()
             duration = (time.time() - start_time) * 1000
             logger.warning(
                 "[Proxy] Queue timeout after %.2fms service=%s slot=%s error=%s",
@@ -577,6 +655,32 @@ class TransparentProxy:
                 headers={},
                 error=str(e),
             )
+        except CapacityRejected as e:
+            logger.warning(
+                "gateway_capacity_decision result=rejected budget_key=%s service_id=%s "
+                "request_id=%s code=%s",
+                e.budget_key,
+                config.service_id,
+                getattr(request.context, "request_id", "") if request.context else "",
+                e.code,
+            )
+            return ProxyResponse(
+                status_code=e.status_code,
+                headers={
+                    **e.headers,
+                    "content-type": "application/json",
+                },
+                body=json.dumps(
+                    {
+                        "detail": {
+                            "code": e.code,
+                            "message": e.message,
+                            "budget_key": e.budget_key,
+                        }
+                    }
+                ).encode("utf-8"),
+                is_streaming=False,
+            )
 
         # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
@@ -586,6 +690,12 @@ class TransparentProxy:
             # 为流式请求设置默认参数
             body = self._ensure_stream_defaults(body, request.path)
         t_body_done = time.perf_counter()
+        capacity_headers = capacity_lease.headers if capacity_lease is not None else {}
+
+        async def release_all() -> None:
+            await release_slot()
+            if capacity_lease is not None:
+                await capacity_lease.release()
 
         # Performance logging
         logger.info(
@@ -606,7 +716,7 @@ class TransparentProxy:
 
         try:
             if request.stream or self._is_streaming_path(request.path):
-                return await self._proxy_streaming(
+                response = await self._proxy_streaming(
                     client=client,
                     method=request.method,
                     url=upstream_url,
@@ -616,11 +726,13 @@ class TransparentProxy:
                     config=config,
                     context=context,
                     path=request.path,
-                    release_slot=release_slot,
+                    release_slot=release_all,
                 )
+                response.headers.update(capacity_headers)
+                return response
             else:
                 try:
-                    return await self._proxy_normal(
+                    response = await self._proxy_normal(
                         client=client,
                         method=request.method,
                         url=upstream_url,
@@ -632,12 +744,14 @@ class TransparentProxy:
                         config=config,
                         context=context,
                     )
+                    response.headers.update(capacity_headers)
+                    return response
                 finally:
-                    await release_slot()
+                    await release_all()
         except httpx.TimeoutException as e:
             duration = (time.time() - start_time) * 1000
             logger.error(f"[Proxy] Timeout after {duration:.2f}ms: {e}")
-            await release_slot()
+            await release_all()
             return ProxyResponse(
                 status_code=504,
                 headers={},
@@ -646,14 +760,14 @@ class TransparentProxy:
         except httpx.RequestError as e:
             duration = (time.time() - start_time) * 1000
             logger.error(f"[Proxy] Request error after {duration:.2f}ms: {e}")
-            await release_slot()
+            await release_all()
             return ProxyResponse(
                 status_code=502,
                 headers={},
                 error=f"Upstream error: {e}",
             )
         except Exception:
-            await release_slot()
+            await release_all()
             raise
 
     def _inject_assistant_id(

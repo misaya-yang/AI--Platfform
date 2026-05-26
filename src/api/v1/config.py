@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ...core.auth.permissions import (
     Capability,
 )
+from ...core.gateway.capacity import CapacityResolver
 from ...core.gateway.rate_policy import RatePolicyResolver
 from ...services.metrics.audit_event_writer import record_config_change
 from ..deps import AuthContext, get_auth_context, require_gateway_capability
@@ -98,6 +99,14 @@ def _get_rate_policy_resolver(request: Request) -> RatePolicyResolver:
     if resolver is None:
         resolver = RatePolicyResolver()
         request.app.state.rate_policy_resolver = resolver
+    return resolver
+
+
+def _get_capacity_resolver(request: Request) -> CapacityResolver:
+    resolver = getattr(request.app.state, "capacity_resolver", None)
+    if resolver is None:
+        resolver = CapacityResolver()
+        request.app.state.capacity_resolver = resolver
     return resolver
 
 
@@ -576,6 +585,15 @@ class ServicePriorityConfigUpdate(BaseModel):
     max_queue_size: int = 100
 
 
+class ServiceCapacityConfigUpdate(BaseModel):
+    """服务级别容量配置"""
+
+    upstream_group: str | None = None
+    concurrency_limit: int | None = None
+    queue_max: int = 16
+    queue_timeout_ms: int = 3000
+
+
 class ServiceConfigUpdate(BaseModel):
     """服务级别综合配置更新"""
 
@@ -583,6 +601,7 @@ class ServiceConfigUpdate(BaseModel):
     auth: ServiceAuthConfigUpdate | None = None
     cache: ServiceCacheConfigUpdate | None = None
     priority: ServicePriorityConfigUpdate | None = None
+    capacity: ServiceCapacityConfigUpdate | None = None
 
 
 @router.get("/services/{service_id}/config")
@@ -632,6 +651,14 @@ async def get_service_config(
                 "enforced": False,
                 "scheduler": "not_configured",
             },
+            "capacity": {
+                "upstream_group": config.capacity.upstream_group,
+                "concurrency_limit": config.capacity.concurrency_limit,
+                "queue_max": config.capacity.queue_max,
+                "queue_timeout_ms": config.capacity.queue_timeout_ms,
+                "enforced": config.capacity.enforced,
+                "source_status": "real" if config.capacity.enforced else "disabled",
+            },
         },
         # 兼容旧格式
         "legacy": {
@@ -659,6 +686,7 @@ async def update_service_config(
     from ...models.service import (
         ServiceAuthConfig,
         ServiceCacheConfig,
+        ServiceCapacityConfig,
         ServicePriorityConfig,
         ServiceRateLimitConfig,
     )
@@ -678,6 +706,9 @@ async def update_service_config(
         "cache": getattr(config, "cache", None).__dict__ if getattr(config, "cache", None) else None,
         "priority": getattr(config, "priority", None).__dict__
         if getattr(config, "priority", None)
+        else None,
+        "capacity": getattr(config, "capacity", None).__dict__
+        if getattr(config, "capacity", None)
         else None,
     }
 
@@ -725,6 +756,15 @@ async def update_service_config(
             priority=body.priority.priority,
             weight=body.priority.weight,
             max_queue_size=body.priority.max_queue_size,
+        )
+
+    if body.capacity:
+        config.capacity = ServiceCapacityConfig(
+            upstream_group=body.capacity.upstream_group,
+            concurrency_limit=body.capacity.concurrency_limit,
+            queue_max=body.capacity.queue_max,
+            queue_timeout_ms=body.capacity.queue_timeout_ms,
+            enforced=True,
         )
 
     # 保存更新
@@ -811,6 +851,23 @@ async def get_system_status(
 
     db = getattr(request.app.state, "database", None)
     redis = getattr(request.app.state, "redis", None)
+    runtime_rules = _runtime_config.setdefault("rate_limits", [])
+    configured_rules_count = len(runtime_rules)
+    if db and getattr(db, "enabled", False) and hasattr(db, "get_rate_limits"):
+        try:
+            configured_rules_count = len(await db.get_rate_limits() or [])
+        except Exception:
+            configured_rules_count = len(runtime_rules)
+    runtime_enabled = bool(settings.rate_limits.enabled or configured_rules_count > 0)
+    enforcement_source = (
+        "runtime"
+        if configured_rules_count > 0
+        else ("settings" if settings.rate_limits.enabled else "disabled")
+    )
+    transparent_proxy = getattr(request.app.state, "transparent_proxy", None)
+    admission = getattr(transparent_proxy, "admission_controller", None)
+    snapshot = admission.snapshot() if admission is not None else {}
+    capacity_resolver = _get_capacity_resolver(request)
 
     return {
         "database": {
@@ -827,8 +884,22 @@ async def get_system_status(
         },
         "rate_limiting": {
             "enabled": settings.rate_limits.enabled,
+            "configured_rules_count": configured_rules_count,
+            "runtime_enabled": runtime_enabled,
+            "enforcement_source": enforcement_source,
         },
         "load_balancer": {
             "strategy": _load_balancer_config["strategy"],
+        },
+        "capacity": {
+            "gateway_instance_id": getattr(admission, "gateway_instance_id", "gateway-1"),
+            "cluster_epoch": capacity_resolver.cluster_epoch,
+            "mode": capacity_resolver.mode,
+            "budgets": capacity_resolver.status_budgets(snapshot),
+            "control_plane": {
+                "health_polling_class": "control_plane_health",
+                "service_budget_exempt": True,
+                "process_budget_enforced": True,
+            },
         },
     }

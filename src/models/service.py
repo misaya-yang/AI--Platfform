@@ -47,6 +47,17 @@ class ServicePriorityConfig:
 
 
 @dataclass
+class ServiceCapacityConfig:
+    """服务容量与并发预算配置"""
+
+    upstream_group: str | None = None
+    concurrency_limit: int | None = None
+    queue_max: int = 16
+    queue_timeout_ms: int = 3000
+    enforced: bool = True
+
+
+@dataclass
 class ServiceConfig:
     """服务级别综合配置"""
 
@@ -54,6 +65,7 @@ class ServiceConfig:
     auth: ServiceAuthConfig = field(default_factory=ServiceAuthConfig)
     cache: ServiceCacheConfig = field(default_factory=ServiceCacheConfig)
     priority: ServicePriorityConfig = field(default_factory=ServicePriorityConfig)
+    capacity: ServiceCapacityConfig = field(default_factory=ServiceCapacityConfig)
 
 
 @dataclass

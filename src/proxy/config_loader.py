@@ -75,6 +75,7 @@ class ProxyServiceConfig:
     streaming_concurrency_limit: int | None = None
     non_streaming_concurrency_limit: int | None = None
     concurrency_queue_timeout: float | None = None
+    capacity_config: dict[str, Any] = field(default_factory=dict)
     max_connections: int | None = None
     max_keepalive_connections: int | None = None
     keepalive_expiry: float | None = None
@@ -251,6 +252,9 @@ class ProxyConfigLoader:
         rate_limit = service_config.get("rate_limit") or {}
         cache_config = service_config.get("cache") or {}
         proxy_runtime = service_config.get("proxy_runtime") or {}
+        capacity_config = service_config.get("capacity") or metadata.get("capacity") or {}
+        if not isinstance(capacity_config, dict):
+            capacity_config = {}
 
         def _pick_numeric(default: Any, *values: Any) -> Any:
             for value in values:
@@ -324,6 +328,7 @@ class ProxyConfigLoader:
                 proxy_runtime.get("concurrency_queue_timeout"),
                 connector_config.get("concurrency_queue_timeout"),
             ),
+            capacity_config=capacity_config,
             max_connections=proxy_runtime.get("max_connections", connector_config.get("max_connections")),
             max_keepalive_connections=proxy_runtime.get(
                 "max_keepalive_connections",

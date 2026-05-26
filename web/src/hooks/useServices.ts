@@ -27,7 +27,9 @@ export function useHealth() {
     queryKey: ["health"],
     queryFn: getHealth,
     staleTime: 15000, // 15秒内使用缓存，配合30秒自动刷新
-    refetchInterval: 30000,
+    refetchInterval: () =>
+      typeof document === "undefined" || !document.hidden ? 30000 : false,
+    refetchIntervalInBackground: false,
   });
 }
 

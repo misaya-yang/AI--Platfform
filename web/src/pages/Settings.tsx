@@ -61,6 +61,15 @@ interface LoadBalancerConfig {
   [key: string]: unknown;
 }
 
+interface CapacityBudgetStatus {
+  key: string;
+  limit: number;
+  inflight: number;
+  queue_depth: number;
+  enforced: boolean;
+  source_status: string;
+}
+
 interface LbStrategy {
   value: string;
   label: string;
@@ -143,6 +152,8 @@ export function SettingsPage() {
   const apiKeys = apiKeysQuery.data?.keys || [];
   const lbConfig = lbQuery.data || {};
   const lbStrategies = lbConfig.available_strategies || [];
+  const capacity = status.capacity || {};
+  const capacityBudgets: CapacityBudgetStatus[] = capacity.budgets || [];
 
   // 鉴权配置表单
   const [authForm, setAuthForm] = useState({
@@ -305,6 +316,12 @@ export function SettingsPage() {
                 {status.load_balancer?.strategy || "round_robin"}
               </Badge>
             </div>
+            <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors">
+              <span className="text-sm font-medium">Gateway Capacity</span>
+              <Badge variant="outline" className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30">
+                {capacity.mode || "single-node"}
+              </Badge>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -313,6 +330,7 @@ export function SettingsPage() {
         <TabsList>
           <TabsTrigger value="auth">{t("settings.tabs.auth")}</TabsTrigger>
           <TabsTrigger value="rate-limit">{t("settings.tabs.rateLimit")}</TabsTrigger>
+          <TabsTrigger value="capacity">Capacity</TabsTrigger>
           <TabsTrigger value="load-balancer">{t("settings.tabs.loadBalancer")}</TabsTrigger>
           <TabsTrigger value="api-keys">{t("settings.tabs.apiKeys")}</TabsTrigger>
         </TabsList>
@@ -539,6 +557,47 @@ export function SettingsPage() {
                   </Table>
                 </div>
               )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="capacity" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Gateway Capacity</CardTitle>
+              <CardDescription>
+                {capacity.gateway_instance_id || "gateway-1"} · {capacity.cluster_epoch || "uat-2026-05"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Budget</TableHead>
+                      <TableHead>Limit</TableHead>
+                      <TableHead>In Flight</TableHead>
+                      <TableHead>Queue</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {capacityBudgets.map((budget) => (
+                      <TableRow key={budget.key}>
+                        <TableCell className="font-mono text-xs">{budget.key}</TableCell>
+                        <TableCell>{budget.limit}</TableCell>
+                        <TableCell>{budget.inflight}</TableCell>
+                        <TableCell>{budget.queue_depth}</TableCell>
+                        <TableCell>
+                          <Badge variant={budget.enforced ? "default" : "secondary"}>
+                            {budget.enforced ? budget.source_status : "not enforced"}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
