@@ -197,22 +197,25 @@ export function extractToolCallUpdates(message: Record<string, unknown>): ToolCa
   const toolCallChunks = message.tool_call_chunks as unknown;
   const toolCalls = message.tool_calls as unknown;
 
+  const normalizeIndex = (value: unknown): number | undefined => {
+    const index =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim()
+          ? Number(value)
+          : undefined;
+    return index != null && Number.isFinite(index) ? index : undefined;
+  };
+
   if (Array.isArray(toolCallChunks) && toolCallChunks.length > 0) {
     for (const chunk of toolCallChunks) {
       if (!chunk || typeof chunk !== "object") continue;
       const record = chunk as Record<string, unknown>;
-      const rawIndex = record.index;
-      const index =
-        typeof rawIndex === "number"
-          ? rawIndex
-          : typeof rawIndex === "string" && rawIndex.trim()
-            ? Number(rawIndex)
-            : undefined;
       updates.push({
         id: (record.id as string) || (record.tool_call_id as string) || "",
         name: (record.name as string) || "",
         args: normalizeToolArgs(record.args ?? record.arguments),
-        index: index != null && Number.isFinite(index) ? index : undefined,
+        index: normalizeIndex(record.index),
       });
     }
     return updates.filter((u) => u.id || u.name || u.args);
@@ -222,18 +225,11 @@ export function extractToolCallUpdates(message: Record<string, unknown>): ToolCa
     for (const call of toolCalls) {
       if (!call || typeof call !== "object") continue;
       const record = call as Record<string, unknown>;
-      const rawIndex = record.index;
-      const index =
-        typeof rawIndex === "number"
-          ? rawIndex
-          : typeof rawIndex === "string" && rawIndex.trim()
-            ? Number(rawIndex)
-            : undefined;
       updates.push({
         id: (record.id as string) || (record.tool_call_id as string) || "",
         name: (record.name as string) || "",
         args: normalizeToolArgs(record.args ?? record.arguments),
-        index: index != null && Number.isFinite(index) ? index : undefined,
+        index: normalizeIndex(record.index),
       });
     }
   }

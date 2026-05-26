@@ -1707,13 +1707,19 @@ class AgentLoop:
                 dataset_name_map=dataset_name_map,
                 os_agent_enabled=ctx.config.os_agent_enabled,
             )
-            extra_prompt = (ctx.config.system_prompt or "").strip()
-            if extra_prompt:
-                system_prompt = (
-                    f"{base_prompt}\n\n## Additional System Instructions\n{extra_prompt}"
-                )
-            else:
-                system_prompt = base_prompt
+            # === system_prompt Injection Protection ===
+            # Client-supplied system_prompt must NOT be concatenated into the system
+            # message — that enables prompt injection ("ignore all instructions...").
+            # Instead, trim and move it to user-turn context where it has lower
+            # privilege. Cap length to prevent context window abuse.
+            _MAX_EXTRA_PROMPT_LEN = 500
+            extra_prompt_raw = (ctx.config.system_prompt or "").strip()
+            extra_prompt = (
+                extra_prompt_raw[:_MAX_EXTRA_PROMPT_LEN]
+                if extra_prompt_raw
+                else ""
+            )
+            system_prompt = base_prompt
             messages.append({"role": "system", "content": system_prompt})
 
             # Middleware chain populates ctx.openclaw_memory_snippets and friends
@@ -1723,9 +1729,18 @@ class AgentLoop:
                 yield _mw_event
 
             # Collect all dynamic context sections into a single `<context>` block
-            # that rides on the user turn. Order: skills → user memory → retrieved
-            # memory snippets. All query-dependent — intentionally NOT in system.
+            # that rides on the user turn. Order: client prompt → skills →
+            # user memory → retrieved memory snippets. All query-dependent —
+            # intentionally NOT in system.
             dynamic_sections: list[str] = []
+
+            # Client-supplied extra prompt rides on the user turn (NOT system message)
+            # so it cannot override system-level instructions via prompt injection.
+            if extra_prompt:
+                dynamic_sections.append(
+                    "## User Custom Instructions (client-supplied, lower priority than system)\n"
+                    + extra_prompt
+                )
             if ctx.openclaw_skills_metadata:
                 skill_lines = []
                 for skill in ctx.openclaw_skills_metadata[:5]:
@@ -3348,5 +3363,4 @@ def create_agent_loop(
         memory_service=memory_service,
         system_prompt=system_prompt,
     )
-
 

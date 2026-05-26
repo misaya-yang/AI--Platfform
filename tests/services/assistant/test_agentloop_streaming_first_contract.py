@@ -50,10 +50,10 @@ class FakeModelRegistry:
         self._call_index = 0
         self.last_messages: list[dict[str, Any]] | None = None
 
-    def get_model(self, model_id: str) -> Any:
+    def get_model(self, _model_id: str) -> Any:
         return FakeModelInfo()
 
-    async def chat_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+    async def chat_stream(self, *_args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         from assistant_service.core.models.model_registry import StreamDelta
 
         # Capture the prompt/messages passed by AgentLoop for assertions.
@@ -94,6 +94,7 @@ class FakeToolInvoker:
         self.invocations: list[tuple[str, dict[str, Any]]] = []
 
     def get_tool_definitions(self, context: Any, tool_names: list[str] | None = None) -> list[Any]:
+        del context
         names = list(self._results.keys())
         if tool_names:
             names = [n for n in names if n in tool_names]
@@ -109,6 +110,7 @@ class FakeToolInvoker:
     ) -> Any:
         from assistant_service.core.tools.tool_registry import ToolCallResult
 
+        del context, cancel_event
         self.invocation_count += 1
         self.invocations.append((tool_name, arguments))
         payload = self._results.get(tool_name) or {}
@@ -130,10 +132,11 @@ class FakeArtifact:
 
 
 class FakeArtifactStorage:
-    async def create_artifact(self, **kwargs: Any) -> Any:
+    async def create_artifact(self, **_kwargs: Any) -> Any:
         return FakeArtifact("art_123")
 
     async def get_presigned_download_url(self, artifact: Any, expiry_seconds: int = 3600) -> str:
+        del expiry_seconds
         return f"https://example.invalid/download/{artifact.artifact_id}"
 
 
@@ -169,10 +172,11 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
+async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system() -> None:
     """
     Regression: frontend may send a style-only system_prompt.
-    Streaming-first must keep the base tool/KR instructions and append extra.
+    Streaming-first must keep the base tool/KB instructions in the system prompt,
+    but client-supplied prompt text must ride on the user turn with lower priority.
     """
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -205,8 +209,12 @@ async def test_streaming_first_system_prompt_keeps_base_prompt() -> None:
     assert model.last_messages[0]["role"] == "system"
     sys_content = str(model.last_messages[0].get("content") or "")
     assert "search_knowledge_base" in sys_content
-    assert "Additional System Instructions" in sys_content
-    assert "STYLE_ONLY_PROMPT" in sys_content
+    assert "STYLE_ONLY_PROMPT" not in sys_content
+    assert "Additional System Instructions" not in sys_content
+
+    user_content = str(model.last_messages[-1].get("content") or "")
+    assert "User Custom Instructions" in user_content
+    assert "STYLE_ONLY_PROMPT" in user_content
 
 
 @pytest.mark.asyncio

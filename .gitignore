@@ -102,6 +102,8 @@ logs/*.log.*
 tmp/
 temp/
 claude/
+outputs/
+node_modules/
 
 # ======================== OS Generated ========================
 .DS_Store
