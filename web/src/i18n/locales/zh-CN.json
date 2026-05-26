@@ -2808,6 +2808,13 @@
         "graphId": "Graph ID",
         "graphIdPlaceholder": "agent",
         "graphIdRequired": "LangGraph 服务必须配置 Graph ID",
+        "upstreamUrls": "Agent 实例",
+        "upstreamUrlsHint": "可选多实例 upstream，每行一个 URL。主 LangGraph 地址仍作为首选路由。",
+        "loadBalanceStrategy": "负载均衡",
+        "loadBalanceStrategyHint": "配置多个 Agent 实例时生效。",
+        "strategyRoundRobin": "轮询",
+        "strategyLeastConnections": "最少连接",
+        "strategyRandom": "随机",
         "sessionEnabled": "启用会话",
         "sessionHint": "在服务端保持会话上下文",
         "save": "保存基础配置"

@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -114,6 +115,7 @@ const DEFAULT_MODEL_FAILOVER_PROVIDER_PRIORITY = [
   "dashscope-cn",
 ];
 const DEFAULT_MODEL_FAILOVER_MAX_CANDIDATES = 2;
+const LOAD_BALANCE_STRATEGIES = ["round_robin", "least_connections", "random"] as const;
 
 function providerHasRuntimeCredentials(provider?: providersApi.Provider): boolean {
   return Boolean(provider?.has_api_key || provider?.allow_environment_credentials);
@@ -126,6 +128,41 @@ function normalizeUrl(value: string): string {
     return trimmed;
   }
   return trimmed.replace(/\/+$/, "");
+}
+
+function normalizeUrlList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map(normalizeUrl)
+    .filter(Boolean);
+}
+
+function readUpstreamUrls(connectorConfig: Record<string, unknown>): string[] {
+  const rawUrls = connectorConfig.upstream_urls;
+  if (Array.isArray(rawUrls)) {
+    return rawUrls.map((url) => normalizeUrl(String(url || ""))).filter(Boolean);
+  }
+
+  const instanceUrls = connectorConfig.instance_urls;
+  if (typeof instanceUrls === "string") {
+    return normalizeUrlList(instanceUrls);
+  }
+
+  return [];
+}
+
+function readLoadBalanceStrategy(connectorConfig: Record<string, unknown>): string {
+  const strategy = String(connectorConfig.load_balance_strategy || "round_robin");
+  return LOAD_BALANCE_STRATEGIES.includes(
+    strategy as (typeof LOAD_BALANCE_STRATEGIES)[number]
+  )
+    ? strategy
+    : "round_robin";
+}
+
+function upstreamGroupFromBudget(budget?: CapacityBudgetStatus): string {
+  const key = String(budget?.key || "");
+  return key.startsWith("upstream.") ? key.slice("upstream.".length) : "";
 }
 
 function detectLangGraphService(serviceDetail?: ServiceDetail): boolean {
@@ -275,6 +312,8 @@ export function ServiceConfigDialog({
     description: "",
     status: "active",
     deployment_url: "",
+    upstream_urls_text: "",
+    load_balance_strategy: "round_robin",
     graph_id: "",
     session_enabled: true,
   });
@@ -483,6 +522,7 @@ export function ServiceConfigDialog({
   /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from props */
   useEffect(() => {
     if (config) {
+      const effectiveUpstreamGroup = upstreamGroupFromBudget(upstreamBudget);
       setRateLimitForm(config.rate_limit);
       setAuthForm({
         enabled: config.auth.enabled,
@@ -493,7 +533,7 @@ export function ServiceConfigDialog({
       setCacheForm(config.cache);
       setPriorityForm(config.priority);
       setCapacityForm({
-        upstream_group: config.capacity?.upstream_group || "",
+        upstream_group: config.capacity?.upstream_group || effectiveUpstreamGroup,
         concurrency_limit:
           config.capacity?.concurrency_limit == null
             ? ""
@@ -502,13 +542,14 @@ export function ServiceConfigDialog({
         queue_timeout_ms: config.capacity?.queue_timeout_ms ?? 3000,
       });
     }
-  }, [config]);
+  }, [config, upstreamBudget]);
 
   useEffect(() => {
     if (!serviceDetail) return;
     const cc = (serviceDetail.connector_config || {}) as Record<string, unknown>;
     const baseUrl = normalizeUrl(String(cc.base_url || ""));
     const upstreamUrl = normalizeUrl(String(cc.upstream_url || ""));
+    const upstreamUrls = readUpstreamUrls(cc);
     const proxyMode = String(cc.proxy_mode || serviceDetail.metadata?.proxy_mode || "");
     const deploymentUrl =
       baseUrl && upstreamUrl && baseUrl !== upstreamUrl && proxyMode === "transparent"
@@ -519,6 +560,8 @@ export function ServiceConfigDialog({
       description: serviceDetail.description || "",
       status: serviceDetail.status || "active",
       deployment_url: deploymentUrl,
+      upstream_urls_text: upstreamUrls.join("\n"),
+      load_balance_strategy: readLoadBalanceStrategy(cc),
       graph_id: String(cc.graph_id || cc.assistant_id || ""),
       session_enabled: Boolean(serviceDetail.session_enabled ?? true),
     });
@@ -734,6 +777,8 @@ export function ServiceConfigDialog({
   const handleSaveBasic = () => {
     setBasicError(null);
     const deploymentUrl = normalizeUrl(basicForm.deployment_url);
+    const upstreamUrls = normalizeUrlList(basicForm.upstream_urls_text);
+    const primaryUrl = deploymentUrl || upstreamUrls[0] || "";
 
     const patch: Record<string, unknown> = {
       name: basicForm.name,
@@ -766,8 +811,10 @@ export function ServiceConfigDialog({
 
       patch.connector_config = {
         ...(serviceDetail.connector_config || {}),
-        base_url: deploymentUrl,
-        upstream_url: deploymentUrl,
+        base_url: primaryUrl,
+        upstream_url: primaryUrl,
+        upstream_urls: upstreamUrls,
+        load_balance_strategy: basicForm.load_balance_strategy,
         graph_id: graphId,
         assistant_id: graphId,
         model_override: {
@@ -881,6 +928,50 @@ export function ServiceConfigDialog({
                           value={basicForm.graph_id}
                           onChange={(e) => setBasicForm({ ...basicForm, graph_id: e.target.value })}
                         />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-[1fr_220px]">
+                      <div className="space-y-2">
+                        <Label>{t("services.configDialog.basic.upstreamUrls")}</Label>
+                        <Textarea
+                          value={basicForm.upstream_urls_text}
+                          placeholder={"http://imam-agent-1:8000\nhttp://imam-agent-2:8000"}
+                          rows={3}
+                          onChange={(e) =>
+                            setBasicForm({ ...basicForm, upstream_urls_text: e.target.value })
+                          }
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          {t("services.configDialog.basic.upstreamUrlsHint")}
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t("services.configDialog.basic.loadBalanceStrategy")}</Label>
+                        <Select
+                          value={basicForm.load_balance_strategy}
+                          onValueChange={(value) =>
+                            setBasicForm({ ...basicForm, load_balance_strategy: value })
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent disablePortal>
+                            <SelectItem value="round_robin">
+                              {t("services.configDialog.basic.strategyRoundRobin")}
+                            </SelectItem>
+                            <SelectItem value="least_connections">
+                              {t("services.configDialog.basic.strategyLeastConnections")}
+                            </SelectItem>
+                            <SelectItem value="random">
+                              {t("services.configDialog.basic.strategyRandom")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {t("services.configDialog.basic.loadBalanceStrategyHint")}
+                        </p>
                       </div>
                     </div>
 

@@ -2808,6 +2808,13 @@
         "graphId": "Graph ID",
         "graphIdPlaceholder": "agent",
         "graphIdRequired": "Graph ID is required for LangGraph services",
+        "upstreamUrls": "Agent Instances",
+        "upstreamUrlsHint": "Optional multi-instance upstreams, one URL per line. The main LangGraph URL remains the primary route.",
+        "loadBalanceStrategy": "Load Balancing",
+        "loadBalanceStrategyHint": "Applied when multiple agent instances are configured.",
+        "strategyRoundRobin": "Round robin",
+        "strategyLeastConnections": "Least connections",
+        "strategyRandom": "Random",
         "sessionEnabled": "Enable Sessions",
         "sessionHint": "Maintain session context on the server",
         "save": "Save Basic Settings"

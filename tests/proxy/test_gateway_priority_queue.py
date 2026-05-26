@@ -64,3 +64,12 @@ def test_priority_controls_are_disabled_when_backend_is_not_enforcing() -> None:
     assert "priorityEnforced" in source
     assert "disabled={!priorityEnforced" in source
     assert "services.configDialog.priority.notEnforced" in source
+
+
+def test_agent_capacity_and_load_balancing_are_frontend_configurable() -> None:
+    source = Path("web/src/components/ServiceConfigDialog.tsx").read_text()
+
+    assert "upstreamGroupFromBudget" in source
+    assert "upstream_urls_text" in source
+    assert "load_balance_strategy" in source
+    assert "least_connections" in source
