@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -204,6 +204,7 @@ async def test_service_capacity_config_update_uses_registry_persistence_without_
         storage=SimpleNamespace(save=AsyncMock()),
         _cache={},
     )
+    request.app.state.proxy_config_loader = SimpleNamespace(invalidate=Mock())
     request.app.state.database = SimpleNamespace(
         enabled=True,
         record_audit_event=AsyncMock(),
@@ -225,6 +226,7 @@ async def test_service_capacity_config_update_uses_registry_persistence_without_
 
     assert result["status"] == "success"
     request.app.state.registry.storage.save.assert_awaited_once_with(service)
+    request.app.state.proxy_config_loader.invalidate.assert_any_call("svc-1")
     assert service.get_service_config().capacity.upstream_group == "imam_agent"
     assert service.get_service_config().capacity.concurrency_limit == 3
 

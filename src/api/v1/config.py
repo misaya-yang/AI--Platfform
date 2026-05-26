@@ -779,6 +779,11 @@ async def update_service_config(
     if db and getattr(db, "enabled", False) and update_service_config_fn:
         await update_service_config_fn(service_id, config)
 
+    proxy_config_loader = getattr(request.app.state, "proxy_config_loader", None)
+    invalidate_proxy_config = getattr(proxy_config_loader, "invalidate", None)
+    if callable(invalidate_proxy_config):
+        invalidate_proxy_config(service_id)
+
     after_config = body.model_dump(exclude_none=True)
     await record_config_change(
         request=request,
