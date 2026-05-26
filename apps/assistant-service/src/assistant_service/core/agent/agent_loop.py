@@ -1709,7 +1709,7 @@ class AgentLoop:
             )
             # === system_prompt Injection Protection ===
             # Client-supplied system_prompt must NOT be concatenated into the system
-            # message — that enables prompt injection ("ignore all instructions...").
+            # message; that enables prompt injection ("ignore all instructions...").
             # Instead, trim and move it to user-turn context where it has lower
             # privilege. Cap length to prevent context window abuse.
             _MAX_EXTRA_PROMPT_LEN = 500
@@ -1729,9 +1729,9 @@ class AgentLoop:
                 yield _mw_event
 
             # Collect all dynamic context sections into a single `<context>` block
-            # that rides on the user turn. Order: client prompt → skills →
-            # user memory → retrieved memory snippets. All query-dependent —
-            # intentionally NOT in system.
+            # that rides on the user turn. Order: client prompt -> skills ->
+            # user memory -> retrieved memory snippets. Query-dependent context
+            # intentionally stays out of system.
             dynamic_sections: list[str] = []
 
             # Client-supplied extra prompt rides on the user turn (NOT system message)
@@ -3363,4 +3363,3 @@ def create_agent_loop(
         memory_service=memory_service,
         system_prompt=system_prompt,
     )
-
