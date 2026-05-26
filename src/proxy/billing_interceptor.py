@@ -45,6 +45,31 @@ _BILLING_DLQ_CAP = 10_000
 logger = get_logger(__name__)
 
 
+def _get_explicit_attr(obj: Any, name: str) -> Any:
+    if obj is None:
+        return None
+    if name in getattr(obj, "__dict__", {}):
+        return getattr(obj, name)
+    if getattr(type(obj), name, None) is not None:
+        return getattr(obj, name)
+    return None
+
+
+def _resolve_redis_client(redis_client: Any) -> Any:
+    native_getter = _get_explicit_attr(redis_client, "get_native_client")
+    if callable(native_getter):
+        with contextlib.suppress(Exception):
+            native = native_getter()
+            if native is not None:
+                return native
+
+    client = _get_explicit_attr(redis_client, "_client")
+    if client is not None:
+        return client
+
+    return redis_client
+
+
 @dataclass
 class UsageData:
     """Token 使用量数据"""
@@ -124,7 +149,7 @@ class BillingInterceptor:
             flush_interval: 刷新间隔（秒）
         """
         self.callback = callback
-        self.redis = redis_client
+        self.redis = _resolve_redis_client(redis_client)
         self._realtime_metrics = realtime_metrics  # 可能为 None，使用延迟获取
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval

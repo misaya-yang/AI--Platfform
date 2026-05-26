@@ -767,7 +767,10 @@ class QuotaService:
                         warning_threshold, overage_strategy, downgraded_model,
                         temporary_extra_tokens, temporary_extra_cost_cents, temporary_expires_at,
                         daily_reset_at, monthly_reset_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13::timestamptz, $14::timestamptz, $15::timestamptz
+                    )
                     ON CONFLICT (tenant_id, user_id) DO UPDATE SET
                         daily_token_limit = COALESCE($3, user_quotas.daily_token_limit),
                         monthly_token_limit = COALESCE($4, user_quotas.monthly_token_limit),
@@ -779,7 +782,7 @@ class QuotaService:
                         downgraded_model = COALESCE($10, user_quotas.downgraded_model),
                         temporary_extra_tokens = COALESCE($11, user_quotas.temporary_extra_tokens),
                         temporary_extra_cost_cents = COALESCE($12, user_quotas.temporary_extra_cost_cents),
-                        temporary_expires_at = COALESCE($13, user_quotas.temporary_expires_at),
+                        temporary_expires_at = COALESCE($13::timestamptz, user_quotas.temporary_expires_at),
                         updated_at = CURRENT_TIMESTAMP
                     """,
                     tenant_id,
@@ -822,9 +825,9 @@ class QuotaService:
                     SET
                         current_daily_tokens = 0,
                         current_daily_requests = 0,
-                        daily_reset_at = $1,
+                        daily_reset_at = $1::timestamptz,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE daily_reset_at IS NULL OR daily_reset_at <= $2
+                    WHERE daily_reset_at IS NULL OR daily_reset_at <= $2::timestamptz
                     """,
                     tomorrow,
                     now,
@@ -856,9 +859,9 @@ class QuotaService:
                     SET
                         current_monthly_tokens = 0,
                         current_monthly_cost_cents = 0,
-                        monthly_reset_at = $1,
+                        monthly_reset_at = $1::timestamptz,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE monthly_reset_at IS NULL OR monthly_reset_at <= $2
+                    WHERE monthly_reset_at IS NULL OR monthly_reset_at <= $2::timestamptz
                     """,
                     next_month,
                     now,
@@ -1050,7 +1053,7 @@ class QuotaService:
                         """
                         INSERT INTO user_quotas (
                             tenant_id, user_id, daily_reset_at, monthly_reset_at
-                        ) VALUES ($1, $2, $3, $4)
+                        ) VALUES ($1, $2, $3::timestamptz, $4::timestamptz)
                         ON CONFLICT (tenant_id, user_id) DO NOTHING
                         """,
                         tenant_id,

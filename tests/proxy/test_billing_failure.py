@@ -139,6 +139,29 @@ class TestDatabaseRetryAndDLQ:
 @pytest.mark.usefixtures("fast_backoffs")
 class TestRedisStageClassification:
     @pytest.mark.asyncio
+    async def test_redis_storage_wrapper_uses_native_client(self):
+        native = AsyncMock()
+        native.publish = AsyncMock(return_value=None)
+        native.lpush = AsyncMock()
+        native.ltrim = AsyncMock()
+
+        storage = MagicMock()
+        storage.get_native_client = MagicMock(return_value=native)
+
+        interceptor = BillingInterceptor(redis_client=storage)
+
+        fake_recorder = MagicMock()
+        fake_recorder.record_usage = AsyncMock(return_value=None)
+
+        with patch(
+            "src.services.metrics.get_usage_recorder", return_value=fake_recorder
+        ):
+            await interceptor._push_usage(_make_usage())
+
+        native.publish.assert_awaited_once()
+        assert native.lpush.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_redis_publish_failure_classified_and_dlq(self):
         redis = AsyncMock()
         redis.publish = AsyncMock(side_effect=RuntimeError("publish boom"))

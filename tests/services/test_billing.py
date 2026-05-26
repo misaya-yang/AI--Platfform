@@ -187,6 +187,66 @@ class TestQuotaService:
         assert result.can_proceed is False
 
     @pytest.mark.asyncio
+    async def test_get_or_create_quota_casts_reset_boundaries(self, quota_service, mock_db):
+        """Reset boundary parameters must bind as timestamptz for legacy schemas."""
+        now = datetime.now(timezone.utc)
+        quota_row = {
+            "tenant_id": "test_tenant",
+            "user_id": "new_user",
+            "daily_token_limit": None,
+            "monthly_token_limit": None,
+            "monthly_cost_limit_cents": None,
+            "requests_per_minute": None,
+            "requests_per_day": None,
+            "current_daily_tokens": 0,
+            "current_monthly_tokens": 0,
+            "current_monthly_cost_cents": 0,
+            "current_daily_requests": 0,
+            "daily_reset_at": now,
+            "monthly_reset_at": now,
+            "is_blocked": False,
+            "blocked_reason": None,
+            "warning_threshold": 80,
+            "overage_strategy": "allow_but_alert",
+            "downgraded_model": None,
+            "temporary_extra_tokens": 0,
+            "temporary_extra_cost_cents": 0,
+            "temporary_expires_at": None,
+        }
+        mock_conn = AsyncMock()
+        mock_conn.fetchrow = AsyncMock(side_effect=[None, quota_row])
+        mock_conn.execute = AsyncMock(return_value="INSERT 0 1")
+        mock_db.pool.acquire = AsyncMock()
+        mock_db.pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_db.pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        quota = await quota_service._get_or_create_quota("test_tenant", "new_user")
+
+        assert quota is not None
+        insert_sql = mock_conn.execute.await_args.args[0]
+        assert "$3::timestamptz" in insert_sql
+        assert "$4::timestamptz" in insert_sql
+
+    @pytest.mark.asyncio
+    async def test_quota_resets_cast_boundary_parameters(self, quota_service, mock_db):
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(return_value="UPDATE 1")
+        mock_db.pool.acquire = AsyncMock()
+        mock_db.pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_db.pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+
+        await quota_service.reset_daily_quotas()
+        daily_sql = mock_conn.execute.await_args.args[0]
+
+        await quota_service.reset_monthly_quotas()
+        monthly_sql = mock_conn.execute.await_args.args[0]
+
+        assert "$1::timestamptz" in daily_sql
+        assert "$2::timestamptz" in daily_sql
+        assert "$1::timestamptz" in monthly_sql
+        assert "$2::timestamptz" in monthly_sql
+
+    @pytest.mark.asyncio
     async def test_get_quota_forecast(self, quota_service, mock_db):
         """Forecast should project month-end usage from recent trend."""
         now = datetime.now(timezone.utc)
