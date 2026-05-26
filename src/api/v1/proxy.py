@@ -460,6 +460,124 @@ def _scrub_caller_hejaz_model(body: bytes | None, method: str, path: str) -> tup
     return body, updated_payload
 
 
+LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST = {
+    "user_id",
+    "tenant_id",
+    "checkpoint_ns",
+    "hejaz_model",
+    "_api_key",
+    "api_key",
+    "apikey",
+    "api-key",
+    "provider_api_key",
+    "provider_credentials",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "token",
+    "auth_token",
+    "access_token",
+    "authorization",
+    "service_id",
+    "assistant_id",
+}
+
+
+def _normalize_configurable_key(key: Any) -> str:
+    return str(key or "").strip().lower().replace("-", "_")
+
+
+def _sanitize_langgraph_caller_configurable(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, child in value.items():
+        normalized = _normalize_configurable_key(key)
+        if (
+            normalized in LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST
+            or normalized.endswith("_api_key")
+            or normalized.endswith("_token")
+            or normalized.endswith("_secret")
+            or normalized.endswith("_credentials")
+        ):
+            continue
+        sanitized[key] = child
+    return sanitized
+
+
+def _extract_langgraph_thread_id(path: str) -> str | None:
+    segments = [segment for segment in str(path or "").strip("/").split("/") if segment]
+    for index, segment in enumerate(segments):
+        if segment.lower() != "threads":
+            continue
+        if index + 2 < len(segments) and segments[index + 2].lower() == "runs":
+            return segments[index + 1]
+    return None
+
+
+def _inject_langgraph_gateway_configurable(
+    *,
+    request: Request,
+    body: bytes | None,
+    method: str,
+    path: str,
+    user: UserContext,
+    auth: AuthContext,
+) -> bytes | None:
+    """Inject Gateway-authored LangGraph run config fields for transparent proxy calls."""
+    if not body or not _is_langgraph_run_path(method, path):
+        return body
+
+    payload = _decode_json_body(body)
+    if not isinstance(payload, dict):
+        return body
+
+    updated_payload = dict(payload)
+    run_config = updated_payload.get("config")
+    updated_config = dict(run_config) if isinstance(run_config, dict) else {}
+    configurable = _sanitize_langgraph_caller_configurable(
+        updated_config.get("configurable")
+    )
+
+    gateway_user_id = str(
+        getattr(auth, "user_id", "") or getattr(user, "user_id", "") or "anonymous"
+    )
+    gateway_tenant_id = str(
+        getattr(auth, "tenant_id", "") or getattr(user, "tenant_id", "") or "default"
+    )
+    configurable["user_id"] = gateway_user_id
+    configurable["tenant_id"] = gateway_tenant_id
+    configurable["checkpoint_ns"] = gateway_tenant_id
+
+    thread_id = _extract_langgraph_thread_id(path)
+    if thread_id:
+        configurable["thread_id"] = thread_id
+    elif not configurable.get("thread_id"):
+        fallback_thread_id = str(
+            payload.get("thread_id")
+            or getattr(request.state, "thread_id", "")
+            or getattr(request.state, "request_id", "")
+            or getattr(request.state, "trace_id", "")
+        ).strip()
+        if fallback_thread_id:
+            configurable["thread_id"] = fallback_thread_id
+
+    metadata = updated_config.get("metadata")
+    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    request_id = str(getattr(request.state, "request_id", "") or _current_trace_id(request))
+    trace_id = str(getattr(request.state, "trace_id", "") or _current_trace_id(request))
+    if request_id:
+        metadata["gateway_request_id"] = request_id
+    if trace_id:
+        metadata["gateway_trace_id"] = trace_id
+
+    updated_config["configurable"] = configurable
+    updated_config["metadata"] = metadata
+    updated_payload["config"] = updated_config
+    return _encode_json_body(updated_payload)
+
+
 async def _inject_langgraph_model_override_config(
     *,
     request: Request,
@@ -1271,6 +1389,14 @@ async def transparent_proxy_handler(
         path=path,
         service_config=service_config,
     )
+    body = _inject_langgraph_gateway_configurable(
+        request=request,
+        body=body,
+        method=request.method,
+        path=path,
+        user=user,
+        auth=auth,
+    )
     body = await _inject_langgraph_model_override_config(
         request=request,
         body=body,
@@ -1310,19 +1436,6 @@ async def transparent_proxy_handler(
     if effective_model:
         request.state.effective_model = effective_model
     t_policy = time.perf_counter()
-
-    # 10. Inject user identity into LangGraph run config for memory isolation
-    if user.user_id and body and path in ("runs/stream", "runs", "runs/wait"):
-        try:
-            payload = json.loads(body) if isinstance(body, bytes) else body
-            if isinstance(payload, dict):
-                cfg = payload.setdefault("config", {})
-                cfgable = cfg.setdefault("configurable", {})
-                cfgable.setdefault("user_id", user.user_id)
-                cfgable.setdefault("tenant_id", user.tenant_id)
-                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        except Exception:
-            pass
 
     # 10b. 检查是否期望流式响应
     wants_stream = _wants_streaming(request, path)
