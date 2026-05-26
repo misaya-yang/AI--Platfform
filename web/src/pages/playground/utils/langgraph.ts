@@ -19,6 +19,7 @@ export type ToolCallUpdate = {
   id: string;
   name: string;
   args: string;
+  index?: number;
 };
 
 export type ToolResultUpdate = {
@@ -200,10 +201,18 @@ export function extractToolCallUpdates(message: Record<string, unknown>): ToolCa
     for (const chunk of toolCallChunks) {
       if (!chunk || typeof chunk !== "object") continue;
       const record = chunk as Record<string, unknown>;
+      const rawIndex = record.index;
+      const index =
+        typeof rawIndex === "number"
+          ? rawIndex
+          : typeof rawIndex === "string" && rawIndex.trim()
+            ? Number(rawIndex)
+            : undefined;
       updates.push({
         id: (record.id as string) || (record.tool_call_id as string) || "",
         name: (record.name as string) || "",
         args: normalizeToolArgs(record.args ?? record.arguments),
+        index: index != null && Number.isFinite(index) ? index : undefined,
       });
     }
     return updates.filter((u) => u.id || u.name || u.args);
@@ -213,10 +222,18 @@ export function extractToolCallUpdates(message: Record<string, unknown>): ToolCa
     for (const call of toolCalls) {
       if (!call || typeof call !== "object") continue;
       const record = call as Record<string, unknown>;
+      const rawIndex = record.index;
+      const index =
+        typeof rawIndex === "number"
+          ? rawIndex
+          : typeof rawIndex === "string" && rawIndex.trim()
+            ? Number(rawIndex)
+            : undefined;
       updates.push({
         id: (record.id as string) || (record.tool_call_id as string) || "",
         name: (record.name as string) || "",
         args: normalizeToolArgs(record.args ?? record.arguments),
+        index: index != null && Number.isFinite(index) ? index : undefined,
       });
     }
   }

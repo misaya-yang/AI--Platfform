@@ -48,6 +48,7 @@ import {
   normalizeContentDelta,
   normalizeLangGraphEvent,
   type LangGraphStreamEvent,
+  type ToolCallUpdate,
 } from "../utils/langgraph";
 
 // ---------------------------------------------------------------------------
@@ -507,6 +508,8 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
         const streamReducerContext = createStreamReducerContext();
         let streamed = false;
+        const toolChunkIdByIndex = new Map<number, string>();
+        const toolChunkNameByIndex = new Map<number, string>();
 
         const scheduleFlush = () => {
           if (rafId !== null) return;
@@ -627,6 +630,38 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         const nextSyntheticChunkIndex = () => {
           syntheticChunkIndex += 1;
           return syntheticChunkIndex;
+        };
+
+        const resolveToolCallUpdate = (
+          update: ToolCallUpdate
+        ): ToolCallUpdate | null => {
+          let id = update.id;
+          let name = update.name;
+
+          if (update.index != null) {
+            if (id) {
+              toolChunkIdByIndex.set(update.index, id);
+            } else {
+              id = toolChunkIdByIndex.get(update.index) || "";
+            }
+
+            if (name) {
+              toolChunkNameByIndex.set(update.index, name);
+            } else {
+              name = toolChunkNameByIndex.get(update.index) || "";
+            }
+
+            if (!id && name) {
+              id = `tool-${update.index}-${name}`;
+              toolChunkIdByIndex.set(update.index, id);
+            }
+          }
+
+          if (!id && !name) {
+            return null;
+          }
+
+          return { ...update, id, name };
         };
 
         try {
@@ -856,8 +891,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                         const toolUpdates =
                           extractToolCallUpdates(message);
                         for (const update of toolUpdates) {
+                          const resolvedUpdate =
+                            resolveToolCallUpdate(update);
+                          if (!resolvedUpdate) continue;
                           const tcId =
-                            update.id ||
+                            resolvedUpdate.id ||
                             `tc-${Date.now()}`;
                           // Skip tool calls already seen
                           // from messages/* events
@@ -883,9 +921,9 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                             tool_call: {
                               tool_call_id: tcId,
                               name:
-                                update.name || "",
+                                resolvedUpdate.name || "",
                               arguments:
-                                update.args || "",
+                                resolvedUpdate.args || "",
                               status: "running",
                             },
                             content: {
@@ -1253,8 +1291,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 const toolUpdates =
                   extractToolCallUpdates(message);
                 for (const update of toolUpdates) {
+                  const resolvedUpdate =
+                    resolveToolCallUpdate(update);
+                  if (!resolvedUpdate) continue;
                   const tcId =
-                    update.id ||
+                    resolvedUpdate.id ||
                     `auto-${++toolCallIdCounter}`;
                   // Track for cross-event dedup
                   if (tcId) seenToolCallIds.add(tcId);
@@ -1272,8 +1313,8 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     event_type: eventType,
                     tool_call: {
                       tool_call_id: tcId,
-                      name: update.name || "",
-                      arguments: update.args || "",
+                      name: resolvedUpdate.name || "",
+                      arguments: resolvedUpdate.args || "",
                       status: "running",
                     },
                     content: {
@@ -1319,12 +1360,35 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     cumulativeContent &&
                     cumulativeContent.length > 0
                   ) {
+                    const isMessageChunk =
+                      eventName === "messages" ||
+                      msgType.includes("chunk");
                     // Track per-id content so a later 'updates' event with
                     // the same id + same content can skip, while one with
                     // modified content (post-middleware mutation) falls
                     // through to the AIMessage accumulator.
                     if (msgId) {
-                      lastContentById.set(msgId, cumulativeContent);
+                      lastContentById.set(
+                        msgId,
+                        isMessageChunk
+                          ? `${lastContentById.get(msgId) || ""}${cumulativeContent}`
+                          : cumulativeContent
+                      );
+                    }
+                    if (isMessageChunk) {
+                      lastCumulativeContent = `${lastCumulativeContent}${cumulativeContent}`;
+                      processNativeLangGraphChunk({
+                        request_id: "",
+                        chunk_index:
+                          nextSyntheticChunkIndex(),
+                        is_final: false,
+                        event_type: "text_delta",
+                        content: {
+                          type: "text",
+                          data: cumulativeContent,
+                        },
+                      });
+                      continue;
                     }
                     if (
                       cumulativeContent ===
