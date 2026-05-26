@@ -16,7 +16,8 @@ from ...services.llm.provider_templates import (
     get_provider_template,
     list_provider_templates,
 )
-from ..deps import get_user_context
+from ...services.metrics.audit_event_writer import record_config_change
+from ..deps import AuthContext, get_user_context
 from ..schemas.providers import (
     ProviderCreate,
     ProviderFromTemplateCreate,
@@ -28,6 +29,16 @@ from ..schemas.providers import (
 
 router = APIRouter()
 _USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
+
+
+def _auth_from_user(user: UserContext) -> AuthContext:
+    return AuthContext(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        roles=list(user.roles),
+        permissions=[],
+        is_authenticated=user.is_authenticated,
+    )
 
 
 def _require_user_gateway_capability(user: UserContext, capability: Capability) -> None:
@@ -97,6 +108,7 @@ async def list_providers(
 @router.post("/providers", response_model=ProviderResponse)
 async def create_provider(
     body: ProviderCreate,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -113,6 +125,16 @@ async def create_provider(
             api_key=body.api_key,
             is_enabled=body.is_enabled,
         )
+        if request is not None:
+            await record_config_change(
+                request=request,
+                auth=_auth_from_user(user),
+                resource_type="provider",
+                resource_id=body.provider_id,
+                action="create",
+                before=None,
+                after=body.model_dump(),
+            )
         return provider
     except Exception as e:
         if "duplicate key" in str(e).lower():
@@ -123,6 +145,7 @@ async def create_provider(
 @router.post("/providers/from-template", response_model=ProviderResponse)
 async def create_provider_from_template(
     body: ProviderFromTemplateCreate,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -163,10 +186,20 @@ async def create_provider_from_template(
         )
         if not provider:
             raise HTTPException(status_code=404, detail="Provider not found")
+        if request is not None:
+            await record_config_change(
+                request=request,
+                auth=_auth_from_user(user),
+                resource_type="provider",
+                resource_id=provider_id,
+                action="update_from_template",
+                before={"template_id": body.template_id},
+                after=body.model_dump(),
+            )
         return provider
 
     try:
-        return await provider_service.create_provider(
+        provider = await provider_service.create_provider(
             tenant_id=tenant_id,
             provider_id=provider_id,
             display_name=display_name,
@@ -175,6 +208,17 @@ async def create_provider_from_template(
             api_key=body.api_key,
             is_enabled=body.is_enabled,
         )
+        if request is not None:
+            await record_config_change(
+                request=request,
+                auth=_auth_from_user(user),
+                resource_type="provider",
+                resource_id=provider_id,
+                action="create_from_template",
+                before={"template_id": body.template_id},
+                after=body.model_dump(),
+            )
+        return provider
     except Exception as e:
         if "duplicate key" in str(e).lower():
             raise HTTPException(status_code=409, detail="Provider already exists")
@@ -201,6 +245,7 @@ async def get_provider(
 async def update_provider(
     provider_id: str,
     body: ProviderUpdate,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -218,12 +263,23 @@ async def update_provider(
     )
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
+    if request is not None:
+        await record_config_change(
+            request=request,
+            auth=_auth_from_user(user),
+            resource_type="provider",
+            resource_id=provider_id,
+            action="update",
+            before=None,
+            after=body.model_dump(exclude_none=True),
+        )
     return provider
 
 
 @router.delete("/providers/{provider_id}")
 async def delete_provider(
     provider_id: str,
+    request: Request = None,
     provider_service: ProviderService = Depends(get_provider_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -236,6 +292,16 @@ async def delete_provider(
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="Provider not found")
+    if request is not None:
+        await record_config_change(
+            request=request,
+            auth=_auth_from_user(user),
+            resource_type="provider",
+            resource_id=provider_id,
+            action="delete",
+            before={"provider_id": provider_id},
+            after=None,
+        )
     return {"provider_id": provider_id, "status": "deleted"}
 
 

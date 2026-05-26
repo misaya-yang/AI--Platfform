@@ -12,6 +12,7 @@ from ...core.auth.permissions import (
     Capability,
 )
 from ...core.gateway.rate_policy import RatePolicyResolver
+from ...services.metrics.audit_event_writer import record_config_change
 from ..deps import AuthContext, get_auth_context, require_gateway_capability
 
 logger = get_logger(__name__)
@@ -168,6 +169,16 @@ async def create_langgraph_service(
         if db and db.enabled:
             await db.save_service(service_def)
 
+        await record_config_change(
+            request=request,
+            auth=auth,
+            resource_type="service",
+            resource_id=body.service_id,
+            action="create_langgraph",
+            before=None,
+            after=service_def,
+        )
+
         # 返回代理路由信息
         proxy_route = (
             f"/api/v1/proxy/{body.service_id}" if body.proxy_mode == "transparent" else None
@@ -246,6 +257,16 @@ async def update_auth_config(
     redis = getattr(request.app.state, "redis", None)
     if redis and redis.enabled:
         await redis.cache_config("auth", _runtime_config["auth"])
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="auth",
+        resource_id="gateway-auth",
+        action="update",
+        before=None,
+        after=_runtime_config["auth"],
+    )
 
     return {"status": "success", "message": "鉴权配置已更新"}
 
@@ -329,6 +350,23 @@ async def create_api_key(
         )
         _runtime_config["auth"]["api_keys"].append(api_key)
 
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="api_key",
+        resource_id=body.name,
+        action="create",
+        before=None,
+        after={
+            "name": body.name,
+            "tenant_id": body.tenant_id or "default",
+            "user_id": body.user_id,
+            "roles": body.roles,
+            "permissions": body.permissions,
+            "api_key": api_key,
+        },
+    )
+
     return {
         "status": "success",
         "api_key": api_key,  # 只返回一次，不存储明文
@@ -379,6 +417,16 @@ async def create_rate_limit(
 
     _sync_runtime_rate_limit_rules(request)
 
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="rate_limit",
+        resource_id=f"{body.scope}:{body.scope_id or ''}",
+        action="create",
+        before=None,
+        after=rule,
+    )
+
     return {"status": "success", "message": "限流规则已创建"}
 
 
@@ -407,6 +455,15 @@ async def delete_rate_limit(
         ]
 
     _sync_runtime_rate_limit_rules(request)
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="rate_limit",
+        resource_id=f"{scope}:{scope_id}",
+        action="delete",
+        before={"scope": scope, "scope_id": scope_id},
+        after=None,
+    )
     return {"status": "success", "message": "限流规则已删除"}
 
 
@@ -466,6 +523,16 @@ async def update_load_balancer_config(
     load_balancer = getattr(request.app.state, "load_balancer", None)
     if load_balancer:
         load_balancer.strategy_name = body.strategy
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="load_balancer",
+        resource_id="gateway",
+        action="update",
+        before=None,
+        after={"strategy": body.strategy},
+    )
 
     return {"status": "success", "message": "负载均衡配置已更新"}
 
@@ -603,6 +670,16 @@ async def update_service_config(
 
     # 获取或创建服务配置
     config = service.get_service_config()
+    before_config = {
+        "rate_limit": getattr(config, "rate_limit", None).__dict__
+        if getattr(config, "rate_limit", None)
+        else None,
+        "auth": getattr(config, "auth", None).__dict__ if getattr(config, "auth", None) else None,
+        "cache": getattr(config, "cache", None).__dict__ if getattr(config, "cache", None) else None,
+        "priority": getattr(config, "priority", None).__dict__
+        if getattr(config, "priority", None)
+        else None,
+    }
 
     # 更新限流配置
     if body.rate_limit:
@@ -660,6 +737,17 @@ async def update_service_config(
     if db and db.enabled:
         await db.update_service_config(service_id, config)
 
+    after_config = body.model_dump(exclude_none=True)
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="service",
+        resource_id=service_id,
+        action="update_config",
+        before=before_config,
+        after=after_config,
+    )
+
     return {
         "status": "success",
         "message": f"服务 {service_id} 配置已更新",
@@ -693,6 +781,16 @@ async def delete_service(
     registry._cache.pop(service_id, None)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"服务 {service_id} 不存在")
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="service",
+        resource_id=service_id,
+        action="delete",
+        before={"service_id": service_id, "name": getattr(service, "name", "")},
+        after=None,
+    )
 
     return {"status": "success", "message": f"服务 {service_id} 已删除"}
 

@@ -36,6 +36,7 @@ class RequestContext:
     request_id: str = ""
     trace_id: str = ""
     span_id: str = ""
+    traceparent: str = ""
 
     # 客户端信息
     client_ip: str = ""
@@ -49,6 +50,10 @@ class RequestContext:
             self.request_id = str(uuid.uuid4())
         if not self.trace_id:
             self.trace_id = uuid.uuid4().hex
+        if not self.span_id:
+            self.span_id = uuid.uuid4().hex[:16]
+        if not self.traceparent and self.trace_id and self.span_id:
+            self.traceparent = f"00-{self.trace_id}-{self.span_id}-01"
 
 
 class ContextInjector:
@@ -93,6 +98,7 @@ class ContextInjector:
         "user-agent",
         "x-request-id",
         "x-trace-id",
+        "traceparent",
         "x-correlation-id",
     }
 
@@ -307,6 +313,8 @@ class ContextInjector:
                 _set_if_missing(self.HEADER_MAPPINGS["trace_id"], context.trace_id)
             if context.span_id:
                 _set_if_missing(self.HEADER_MAPPINGS["span_id"], context.span_id)
+            if context.traceparent:
+                _set_if_missing("traceparent", context.traceparent)
 
         # 4. 客户端 IP（X-Forwarded-For）
         if context.client_ip:
@@ -400,6 +408,7 @@ class ContextInjector:
             request_id=state.get("request_id", str(uuid.uuid4())),
             trace_id=state.get("trace_id", ""),
             span_id=state.get("span_id", ""),
+            traceparent=state.get("traceparent", ""),
             client_ip=client_ip,
             user_agent=original_headers.get("user-agent", ""),
             original_headers=original_headers,
@@ -455,6 +464,7 @@ class ContextInjector:
             request_id=getattr(request.state, "request_id", str(uuid.uuid4())),
             trace_id=getattr(request.state, "trace_id", ""),
             span_id=getattr(request.state, "span_id", ""),
+            traceparent=getattr(request.state, "traceparent", ""),
             client_ip=client_ip,
             user_agent=request.headers.get("user-agent", ""),
             original_headers=original_headers,

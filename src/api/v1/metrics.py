@@ -60,6 +60,10 @@ class MetricsSummary(BaseModel):
     # 元数据
     last_updated: str
     is_simulated: bool = False
+    data_status: str = "empty"
+    data_freshness_minutes: int = 9999
+    last_ingested_at: str | None = None
+    data_source: str = "none"
 
 
 class TimeSeriesPoint(BaseModel):
@@ -220,6 +224,10 @@ async def get_metrics_summary(
         avg_run_duration_ms=summary.get("avg_run_duration_ms", 0),
         last_updated=datetime.now().isoformat(),
         is_simulated=is_simulated,
+        data_status=summary.get("data_status", "empty"),
+        data_freshness_minutes=summary.get("data_freshness_minutes", 9999),
+        last_ingested_at=summary.get("last_ingested_at"),
+        data_source=summary.get("data_source", "none"),
     )
 
 

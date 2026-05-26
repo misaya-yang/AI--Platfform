@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ...persistence.redis import RedisStorage
 
 from ..billing.pricing_catalog import microcents_to_usd, resolve_pricing, usd_to_microcents
+from .data_status import compute_data_status
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ _metrics_recorder: MetricsRecorder | None = None
 TTL_24H = 86400  # 24 hours
 TTL_48H = 172800  # 48 hours
 TTL_7D = 604800  # 7 days
+LAST_INGESTED_KEY = "metrics:last_ingested_at"
 
 
 class MetricsRecorder:
@@ -90,12 +92,15 @@ class MetricsRecorder:
             return
 
         try:
+            _ = method, path, user_id
             today = self._get_date_str()
             hour = self._get_hour_str()
             is_success = 200 <= status_code < 400
 
             # Use pipeline for atomic operations
             pipe = self.redis._client.pipeline()
+            now = datetime.now(timezone.utc)
+            self._queue_last_ingested(pipe, now)
 
             # Increment total requests
             total_key = f"metrics:requests:total:{today}"
@@ -178,6 +183,7 @@ class MetricsRecorder:
 
         try:
             today = self._get_date_str()
+            now = datetime.now(timezone.utc)
 
             # Calculate cost
             pricing = resolve_pricing(model)
@@ -189,6 +195,7 @@ class MetricsRecorder:
             cost_cents = int(round(cost_microcents / 10000))
 
             pipe = self.redis._client.pipeline()
+            self._queue_last_ingested(pipe, now)
 
             # Global token counters
             input_key = f"metrics:tokens:input:{today}"
@@ -254,8 +261,10 @@ class MetricsRecorder:
         try:
             today = self._get_date_str()
             is_success = status == "success"
+            now = datetime.now(timezone.utc)
 
             pipe = self.redis._client.pipeline()
+            self._queue_last_ingested(pipe, now)
 
             # Total run count
             runs_total_key = f"metrics:runs:total:{today}"
@@ -379,6 +388,7 @@ class MetricsRecorder:
             pipe.get(f"metrics:runs:success:{today}")
             pipe.get(f"metrics:runs:duration:sum:{today}")
             pipe.get(f"metrics:runs:duration:count:{today}")
+            pipe.get(LAST_INGESTED_KEY)
 
             # Hourly data
             for hour in range(24):
@@ -399,11 +409,12 @@ class MetricsRecorder:
             runs_success = int(results[9] or 0)
             runs_duration_sum = int(results[10] or 0)
             runs_duration_count = int(results[11] or 0)
+            last_ingested_raw = results[12]
 
-            # Parse hourly data (indices 12-35)
+            # Parse hourly data (indices 13-36)
             hourly_data = []
             for i in range(24):
-                count = int(results[12 + i] or 0)
+                count = int(results[13 + i] or 0)
                 hourly_data.append({"hour": f"{i:02d}:00", "count": count})
 
             # Calculate derived metrics
@@ -426,6 +437,14 @@ class MetricsRecorder:
 
             # Get percentiles
             percentiles = await self.get_latency_percentiles()
+            last_ingested_at = self._parse_last_ingested_at(last_ingested_raw)
+            if last_ingested_at is None and total_requests == 0:
+                data_status, freshness_minutes = "empty", 9999
+            else:
+                data_status, freshness_minutes = compute_data_status(
+                    last_ingested_at,
+                    total_requests=total_requests,
+                )
 
             return {
                 "total_requests": total_requests,
@@ -442,6 +461,10 @@ class MetricsRecorder:
                 "run_success_rate": run_success_rate,
                 "avg_run_duration_ms": avg_run_duration,
                 "requests_by_hour": hourly_data,
+                "last_ingested_at": last_ingested_at.isoformat() if last_ingested_at else None,
+                "data_status": data_status,
+                "data_freshness_minutes": freshness_minutes,
+                "data_source": "redis",
             }
 
         except Exception as e:
@@ -465,7 +488,35 @@ class MetricsRecorder:
             "run_success_rate": 100.0,
             "avg_run_duration_ms": 0,
             "requests_by_hour": [{"hour": f"{i:02d}:00", "count": 0} for i in range(24)],
+            "last_ingested_at": None,
+            "data_status": "empty",
+            "data_freshness_minutes": 9999,
+            "data_source": "none",
         }
+
+    @staticmethod
+    def _parse_last_ingested_at(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
+    def _queue_last_ingested(pipe: Any, now: datetime) -> None:
+        setter = getattr(pipe, "set", None)
+        if setter is None:
+            return
+        try:
+            setter(LAST_INGESTED_KEY, now.isoformat(), ex=TTL_7D)
+        except TypeError:
+            setter(LAST_INGESTED_KEY, now.isoformat())
 
 
 def get_metrics_recorder() -> MetricsRecorder:

@@ -29,6 +29,7 @@ from ..services.metrics.observability import (
     ensure_duration_breakdown,
     extract_duration_breakdown,
 )
+from ..services.metrics.redaction import redact_sensitive_text
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
@@ -960,10 +961,12 @@ class TransparentProxy:
             error_type = str(
                 error_payload.get("error") or error_payload.get("type") or "upstream_error"
             )
-            error_message = str(error_payload.get("message") or error_payload.get("detail") or "")
+            error_message = redact_sensitive_text(
+                str(error_payload.get("message") or error_payload.get("detail") or "")
+            )
         else:
             error_type = "upstream_error"
-            error_message = str(error_payload)
+            error_message = redact_sensitive_text(str(error_payload))
 
         metadata: dict[str, str] = {"upstream_error_type": error_type[:128]}
         if error_message:

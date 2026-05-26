@@ -1780,6 +1780,7 @@ def _build_request_context(request: Request, user: UserContext) -> RequestContex
     request_id = getattr(request.state, "request_id", "")
     trace_id = getattr(request.state, "trace_id", "")
     span_id = getattr(request.state, "span_id", "")
+    traceparent = getattr(request.state, "traceparent", "")
     api_key_id = str(getattr(request.state, "api_key_hash", "") or "")
 
     return RequestContext(
@@ -1792,6 +1793,7 @@ def _build_request_context(request: Request, user: UserContext) -> RequestContex
         request_id=request_id,
         trace_id=trace_id,
         span_id=span_id,
+        traceparent=traceparent,
         client_ip=client_ip,
         user_agent=request.headers.get("user-agent", ""),
         original_headers=original_headers,

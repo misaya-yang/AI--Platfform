@@ -18,6 +18,7 @@ from ..services.llm.model_failover import (
     ModelOverrideRuntimeError,
     build_runtime_model_override_config,
 )
+from ..services.metrics.redaction import redact_sensitive_text
 from .base import ProtocolAdapter
 
 
@@ -38,9 +39,7 @@ _SECRET_JSON_VALUE_RE = re.compile(
 
 def _scrub_sensitive_text(value: str) -> str:
     """Scrub provider credentials from upstream errors before logging/returning."""
-    if not value:
-        return ""
-    return _SECRET_JSON_VALUE_RE.sub(r'\1"***"', value)
+    return redact_sensitive_text(value)
 
 
 def _extract_langgraph_error(result: Any) -> str | None:

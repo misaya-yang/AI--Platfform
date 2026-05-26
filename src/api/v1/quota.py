@@ -20,6 +20,7 @@ from ...api.deps import AuthContext, get_auth_context, require_gateway_capabilit
 from ...core.auth.permissions import Capability
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy
+from ...services.metrics.audit_event_writer import record_config_change
 
 logger = logging.getLogger(__name__)
 
@@ -670,6 +671,16 @@ async def set_user_quota(
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
 
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="quota",
+        resource_id=user_id,
+        action="set",
+        before=None,
+        after=quota_request.model_dump(exclude_none=True),
+    )
+
     # Return updated quota
     return await get_user_quota(user_id, request, auth)
 
@@ -776,6 +787,16 @@ async def reset_user_quota(
             status_code=400, detail="Invalid reset_type. Must be 'daily' or 'monthly'"
         )
 
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="quota",
+        resource_id=user_id,
+        action=f"reset_{reset_type}",
+        before={"user_id": user_id, "reset_type": reset_type},
+        after={"reset_type": reset_type},
+    )
+
     return await get_user_quota(user_id, request, auth)
 
 
@@ -803,6 +824,16 @@ async def block_user(
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to block user")
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="quota",
+        resource_id=user_id,
+        action="block",
+        before={"user_id": user_id},
+        after={"reason": block_request.reason, "is_blocked": True},
+    )
 
     return {
         "success": True,
@@ -834,6 +865,16 @@ async def unblock_user(
 
     if not success:
         raise HTTPException(status_code=500, detail="Failed to unblock user")
+
+    await record_config_change(
+        request=request,
+        auth=auth,
+        resource_type="quota",
+        resource_id=user_id,
+        action="unblock",
+        before={"user_id": user_id, "is_blocked": True},
+        after={"is_blocked": False},
+    )
 
     return {
         "success": True,

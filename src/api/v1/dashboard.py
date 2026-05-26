@@ -21,7 +21,7 @@ from ...api.deps import AuthContext, get_auth_context
 from ...core.auth.jwt import decode_jwt_token
 from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ...services.billing.pricing_catalog import microcents_to_usd
-from ...services.metrics import get_metrics_recorder
+from ...services.metrics import compute_data_status, get_metrics_recorder
 from ...services.metrics.realtime_metrics import RealtimeSnapshot, get_realtime_metrics
 from ...services.metrics.usage_recorder import get_usage_recorder
 
@@ -786,6 +786,26 @@ async def get_dashboard_summary(
                 "estimated_cost_usd": summary.get("total_cost_usd", 0),
                 "total_runs": 0,  # UsageRecorder doesn't track runs fully separate yet
             }
+            last_ingested_at = await usage_recorder.get_last_ingested_at(
+                tenant_id=auth.tenant_id or "public",
+                start_date=start_date,
+                end_date=date.today(),
+                granularity="day",
+            )
+            data_status, data_freshness_minutes = compute_data_status(
+                last_ingested_at,
+                total_requests=summary_data["total_requests"],
+            )
+            summary_data.update(
+                {
+                    "data_status": data_status,
+                    "data_freshness_minutes": data_freshness_minutes,
+                    "last_ingested_at": last_ingested_at.isoformat()
+                    if last_ingested_at
+                    else None,
+                    "data_source": "usage_aggregates",
+                }
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch summary from UsageRecorder: {e}")
 
@@ -799,6 +819,10 @@ async def get_dashboard_summary(
             "total_tokens": today_summary.get("total_tokens", 0),
             "estimated_cost_usd": today_summary.get("estimated_cost_usd", 0),
             "total_runs": today_summary.get("total_runs", 0),
+            "data_status": today_summary.get("data_status", "empty"),
+            "data_freshness_minutes": today_summary.get("data_freshness_minutes", 9999),
+            "last_ingested_at": today_summary.get("last_ingested_at"),
+            "data_source": today_summary.get("data_source", "none"),
         }
 
     # If still empty, use defaults
@@ -810,6 +834,10 @@ async def get_dashboard_summary(
             "total_tokens": 0,
             "estimated_cost_usd": 0,
             "total_runs": 0,
+            "data_status": "empty",
+            "data_freshness_minutes": 9999,
+            "last_ingested_at": None,
+            "data_source": "none",
         }
 
     # Get real-time snapshot for non-historical data
@@ -847,6 +875,10 @@ async def get_dashboard_summary(
         },
         "hourly_trend": requests_by_hour,
         "timestamp": datetime.now().isoformat(),
+        "data_status": summary_data.get("data_status", "ok"),
+        "data_freshness_minutes": summary_data.get("data_freshness_minutes", 0),
+        "last_ingested_at": summary_data.get("last_ingested_at"),
+        "data_source": summary_data.get("data_source", "usage_aggregates"),
     }
 
 

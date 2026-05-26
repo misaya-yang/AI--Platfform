@@ -17,7 +17,8 @@ from ...core.auth.permissions import Capability, build_permission_denied_detail,
 from ...core.auth.rbac import RBAC
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_service import ModelService
-from ..deps import get_user_context
+from ...services.metrics.audit_event_writer import record_config_change
+from ..deps import AuthContext, get_user_context
 from ..schemas.providers import (
     ModelCreate,
     ModelResponse,
@@ -26,6 +27,16 @@ from ..schemas.providers import (
 
 router = APIRouter()
 _USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
+
+
+def _auth_from_user(user: UserContext) -> AuthContext:
+    return AuthContext(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        roles=list(user.roles),
+        permissions=[],
+        is_authenticated=user.is_authenticated,
+    )
 
 
 def _require_user_gateway_capability(user: UserContext, capability: Capability) -> None:
@@ -84,6 +95,7 @@ async def list_models(
 @router.post("/models", response_model=ModelResponse)
 async def create_model(
     body: ModelCreate,
+    request: Request = None,
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
 ):
@@ -106,6 +118,16 @@ async def create_model(
             is_enabled=body.is_enabled,
             sort_order=body.sort_order,
         )
+        if request is not None:
+            await record_config_change(
+                request=request,
+                auth=_auth_from_user(user),
+                resource_type="model",
+                resource_id=body.model_id,
+                action="create",
+                before=None,
+                after=body.model_dump(),
+            )
         return model
     except Exception as e:
         if "duplicate key" in str(e).lower():
@@ -133,6 +155,7 @@ async def get_model(
 async def update_model(
     model_id: str,
     body: ModelUpdate,
+    request: Request = None,
     provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
@@ -174,12 +197,23 @@ async def update_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+    if request is not None:
+        await record_config_change(
+            request=request,
+            auth=_auth_from_user(user),
+            resource_type="model",
+            resource_id=model_id,
+            action="update",
+            before={"model_id": model_id, "provider_id": provider_id},
+            after=body.model_dump(exclude_none=True),
+        )
     return model
 
 
 @router.delete("/models/{model_id}")
 async def delete_model(
     model_id: str,
+    request: Request = None,
     provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
     user: UserContext = Depends(get_user_context),
@@ -195,12 +229,23 @@ async def delete_model(
     if not deleted:
         raise HTTPException(status_code=404, detail="Model not found")
 
+    if request is not None:
+        await record_config_change(
+            request=request,
+            auth=_auth_from_user(user),
+            resource_type="model",
+            resource_id=model_id,
+            action="delete",
+            before={"model_id": model_id, "provider_id": provider_id},
+            after=None,
+        )
     return {"model_id": model_id, "status": "deleted"}
 
 
 @router.patch("/models/{model_id}/toggle")
 async def toggle_model(
     model_id: str,
+    request: Request = None,
     is_enabled: bool = Query(..., description="Enable or disable the model"),
     provider_id: str | None = None,
     model_service: ModelService = Depends(get_model_service),
@@ -217,4 +262,14 @@ async def toggle_model(
     )
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
+    if request is not None:
+        await record_config_change(
+            request=request,
+            auth=_auth_from_user(user),
+            resource_type="model",
+            resource_id=model_id,
+            action="toggle",
+            before={"model_id": model_id, "provider_id": provider_id},
+            after={"is_enabled": is_enabled},
+        )
     return model

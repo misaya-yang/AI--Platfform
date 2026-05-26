@@ -148,10 +148,12 @@ class PureASGIMiddleware:
 
     async def process_request(self, scope: Scope, receive: Receive) -> bool:
         """处理请求，返回 True 继续，False 表示已发送响应"""
+        _ = scope, receive
         return True
 
     async def process_response_start(self, scope: Scope, message: Message) -> Message:
         """处理响应开始，可以修改响应头"""
+        _ = scope
         return message
 
 
@@ -198,6 +200,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
     async def process_streaming_request(self, scope: Scope, receive: Receive) -> None:
         """流式请求仅注入用户信息"""
+        _ = receive
         # 确保 state 存在
         if "state" not in scope:
             scope["state"] = {}
@@ -208,6 +211,7 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
 
     async def process_request(self, scope: Scope, receive: Receive) -> bool:
         """非流式请求执行完整鉴权"""
+        _ = receive
         path = scope.get("path", "")
 
         # 白名单路径跳过
@@ -487,6 +491,7 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
     async def process_request(self, scope: Scope, receive: Receive) -> bool:
         """非流式请求执行限流检查"""
+        _ = receive
         if not self.config.enabled:
             return True
 
@@ -781,6 +786,7 @@ class StreamingTracingMiddleware(PureASGIMiddleware):
 
     TRACE_ID_HEADER = b"x-trace-id"
     SPAN_ID_HEADER = b"x-span-id"
+    TRACEPARENT_HEADER = b"traceparent"
 
     def __init__(self, app: ASGIApp, config: StreamingTracingConfig):
         super().__init__(app)
@@ -798,14 +804,26 @@ class StreamingTracingMiddleware(PureASGIMiddleware):
 
         # 获取或生成 trace_id
         headers = dict(scope.get("headers", []))
-        trace_id = headers.get(self.TRACE_ID_HEADER, b"").decode() or uuid.uuid4().hex
+        incoming_traceparent = headers.get(self.TRACEPARENT_HEADER, b"").decode(
+            "ascii", errors="ignore"
+        )
+        trace_id = self._trace_id_from_traceparent(incoming_traceparent)
+        if not trace_id:
+            incoming_trace_id = headers.get(self.TRACE_ID_HEADER, b"").decode(
+                "ascii", errors="ignore"
+            )
+            trace_id = incoming_trace_id if self._is_safe_trace_id(incoming_trace_id) else ""
+        if not trace_id:
+            trace_id = uuid.uuid4().hex
         span_id = uuid.uuid4().hex[:16]
+        traceparent = f"00-{trace_id}-{span_id}-01"
 
         # 注入到 state
         if "state" not in scope:
             scope["state"] = {}
         scope["state"]["trace_id"] = trace_id
         scope["state"]["span_id"] = span_id
+        scope["state"]["traceparent"] = traceparent
 
         start_time = time.time()
         method = scope.get("method", "")
@@ -822,6 +840,7 @@ class StreamingTracingMiddleware(PureASGIMiddleware):
                 headers = list(message.get("headers", []))
                 headers.append((self.TRACE_ID_HEADER, trace_id.encode()))
                 headers.append((self.SPAN_ID_HEADER, span_id.encode()))
+                headers.append((self.TRACEPARENT_HEADER, traceparent.encode()))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -846,6 +865,26 @@ class StreamingTracingMiddleware(PureASGIMiddleware):
                 exc_info=True,
             )
             raise
+
+    @staticmethod
+    def _is_safe_trace_id(value: str) -> bool:
+        if not value or len(value) != 32:
+            return False
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return value != "0" * 32
+
+    @classmethod
+    def _trace_id_from_traceparent(cls, value: str) -> str:
+        parts = str(value or "").strip().split("-")
+        if len(parts) != 4:
+            return ""
+        version, trace_id, span_id, flags = parts
+        if version != "00" or len(span_id) != 16 or len(flags) != 2:
+            return ""
+        return trace_id if cls._is_safe_trace_id(trace_id) else ""
 
 
 # ============ 流式友好的匿名身份中间件 ============

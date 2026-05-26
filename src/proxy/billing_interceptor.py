@@ -28,6 +28,7 @@ from ..services.metrics.observability import (
     ensure_duration_breakdown,
     extract_duration_breakdown,
 )
+from ..services.metrics.redaction import redact_sensitive_text
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
@@ -652,7 +653,7 @@ class StreamProcessor:
         """从事件数据中抽取上游错误信息，统一元数据字段。"""
         if isinstance(data.get("error"), str) and data.get("error") and "message" in data:
             error_type = str(data.get("error"))
-            error_message = str(data.get("message") or "")
+            error_message = redact_sensitive_text(str(data.get("message") or ""))
             payload: dict[str, str] = {"upstream_error_type": error_type[:128]}
             if error_message:
                 payload["upstream_error_message"] = error_message[:512]
@@ -666,10 +667,12 @@ class StreamProcessor:
             error_type = str(
                 error_payload.get("error") or error_payload.get("type") or "upstream_error"
             )
-            error_message = str(error_payload.get("message") or error_payload.get("detail") or "")
+            error_message = redact_sensitive_text(
+                str(error_payload.get("message") or error_payload.get("detail") or "")
+            )
         else:
             error_type = "upstream_error"
-            error_message = str(error_payload)
+            error_message = redact_sensitive_text(str(error_payload))
 
         payload: dict[str, str] = {"upstream_error_type": error_type[:128]}
         if error_message:
@@ -681,7 +684,9 @@ class StreamProcessor:
         self._status = "error"
         self._error_metadata["upstream_error_type"] = str(error_type)[:128]
         if error_message:
-            self._error_metadata["upstream_error_message"] = str(error_message)[:512]
+            self._error_metadata["upstream_error_message"] = redact_sensitive_text(
+                str(error_message)
+            )[:512]
 
     async def _record_request_complete(self) -> None:
         """记录实时请求完成事件（只记录一次）。"""

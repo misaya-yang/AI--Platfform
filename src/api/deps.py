@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import time
 from typing import Any
 
+from ai_gateway_core.exceptions import AuthError
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -17,8 +19,8 @@ from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
 from ..core.auth.permissions import Capability, build_permission_denied_detail, check_capability
 from ..core.auth.rbac import RBAC
 from ..core.auth.user_resolver import UserContext
-from ai_gateway_core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +120,7 @@ async def enforce_rate_limit(
                    "file_upload", "code_execute", "image_generate")
     """
     from fastapi import HTTPException
+
     from ..core.gateway.multi_dimension_rate_limiter import RateLimitContext
 
     limiter: MultiDimensionRateLimiter | None = getattr(
@@ -206,6 +209,7 @@ def require_gateway_capability(
     )
     if decision.allowed:
         return
+    _schedule_permission_denied_event(request, auth, capability)
     raise HTTPException(
         status_code=403,
         detail=build_permission_denied_detail(
@@ -213,6 +217,36 @@ def require_gateway_capability(
             trace_id=_request_trace_id(request),
         ),
     )
+
+
+def _schedule_permission_denied_event(
+    request: Request,
+    auth: AuthContext,
+    capability: Capability,
+) -> None:
+    try:
+        from ..services.metrics import get_security_event_recorder
+
+        recorder = get_security_event_recorder()
+        service_id = _extract_service_id_from_path(request.url.path) if hasattr(request, "url") else None
+        metadata = {
+            "trace_id": _request_trace_id(request),
+            "request_id": str(getattr(request.state, "request_id", "") or ""),
+            "required_capability": capability.value,
+            "status": "denied",
+        }
+        task = asyncio.create_task(
+            recorder.record_event(
+                tenant_id=auth.tenant_id or "public",
+                user_id=auth.user_id or None,
+                service_id=service_id,
+                event_type="auth_failed",
+                metadata=metadata,
+            )
+        )
+        task.add_done_callback(lambda done: done.exception())
+    except Exception:
+        return
 
 
 def _derive_api_key_user_id(api_key: str) -> str:
