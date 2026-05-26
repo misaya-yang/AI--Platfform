@@ -121,6 +121,19 @@ export interface ServiceModelOverride {
   model_id?: string;
   temperature?: number | null;
   cache_epoch?: number | string;
+  failover?: ServiceModelFailoverConfig;
+}
+
+export interface ServiceModelFailoverCandidate {
+  provider_id?: string;
+  model_id?: string;
+}
+
+export interface ServiceModelFailoverConfig {
+  enabled: boolean;
+  max_attempts?: number;
+  retryable_error_codes?: string[];
+  candidates: ServiceModelFailoverCandidate[];
 }
 
 export interface ServiceDefinition {

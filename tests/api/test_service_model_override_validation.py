@@ -257,6 +257,224 @@ async def test_disabled_override_can_be_saved_without_provider_lookup():
 
 
 @pytest.mark.asyncio
+async def test_update_service_rejects_failover_candidate_secret_fields():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    initial = registry._service_from_dict(
+        _definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "cache_epoch": 1,
+            }
+        )
+    )
+    await registry.register(initial)
+    request = _request(
+        provider_service=FakeProviderService({"dashscope-prod": _provider()}),
+        model_service=FakeModelService({("dashscope-prod", "qwen-max"): _model()}),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await update_service(
+            service_id="imam-agent",
+            request=request,
+            patch={
+                "connector_config": {
+                    "base_url": "http://imam-agent:8000",
+                    "graph_id": "Imam",
+                    "model_override": {
+                        "enabled": True,
+                        "provider_id": "dashscope-prod",
+                        "model_id": "qwen-max",
+                        "failover": {
+                            "enabled": True,
+                            "candidates": [
+                                {
+                                    "provider_id": "dashscope-prod-2",
+                                    "model_id": "qwen-max",
+                                    "_api_key": "browser-secret",
+                                }
+                            ],
+                        },
+                    },
+                }
+            },
+            registry=registry,
+            auth=_auth(),
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "MODEL_OVERRIDE_API_KEY_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_update_service_rejects_unknown_failover_model():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    initial = registry._service_from_dict(
+        _definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "cache_epoch": 1,
+            }
+        )
+    )
+    await registry.register(initial)
+    request = _request(
+        provider_service=FakeProviderService(
+            {
+                "dashscope-prod": _provider(),
+                "dashscope-intl": _provider("dashscope-intl"),
+            }
+        ),
+        model_service=FakeModelService({("dashscope-prod", "qwen-max"): _model()}),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await update_service(
+            service_id="imam-agent",
+            request=request,
+            patch={
+                "connector_config": {
+                    "base_url": "http://imam-agent:8000",
+                    "graph_id": "Imam",
+                    "model_override": {
+                        "enabled": True,
+                        "provider_id": "dashscope-prod",
+                        "model_id": "qwen-max",
+                        "failover": {
+                            "enabled": True,
+                            "candidates": [
+                                {"provider_id": "dashscope-intl", "model_id": "qwen-max"}
+                            ],
+                        },
+                    },
+                }
+            },
+            registry=registry,
+            auth=_auth(),
+        )
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "MODEL_OVERRIDE_FAILOVER_MODEL_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_update_service_increments_cache_epoch_when_failover_order_changes():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    initial = registry._service_from_dict(
+        _definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "cache_epoch": 4,
+                "failover": {
+                    "enabled": True,
+                    "max_attempts": 3,
+                    "retryable_error_codes": ["timeout"],
+                    "candidates": [
+                        {"provider_id": "dashscope-intl", "model_id": "qwen-max"},
+                        {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"},
+                    ],
+                },
+            }
+        )
+    )
+    await registry.register(initial)
+    request = _request(
+        provider_service=FakeProviderService(
+            {
+                "dashscope-prod": _provider(),
+                "dashscope-intl": _provider("dashscope-intl"),
+                "google-ai-studio": _provider("google-ai-studio"),
+            }
+        ),
+        model_service=FakeModelService(
+            {
+                ("dashscope-prod", "qwen-max"): _model(),
+                ("dashscope-intl", "qwen-max"): _model("dashscope-intl", "qwen-max"),
+                ("google-ai-studio", "gemini-3.5-flash"): _model(
+                    "google-ai-studio",
+                    "gemini-3.5-flash",
+                ),
+            }
+        ),
+    )
+
+    await update_service(
+        service_id="imam-agent",
+        request=request,
+        patch={
+            "connector_config": {
+                "base_url": "http://imam-agent:8000",
+                "graph_id": "Imam",
+                "model_override": {
+                    "enabled": True,
+                    "provider_id": "dashscope-prod",
+                    "model_id": "qwen-max",
+                    "failover": {
+                        "enabled": True,
+                        "max_attempts": 3,
+                        "retryable_error_codes": ["timeout"],
+                        "candidates": [
+                            {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"},
+                            {"provider_id": "dashscope-intl", "model_id": "qwen-max"},
+                        ],
+                    },
+                },
+            }
+        },
+        registry=registry,
+        auth=_auth(),
+    )
+    stored = await registry.get("imam-agent")
+    model_override = stored.connector_config["model_override"]
+
+    assert model_override["cache_epoch"] == 5
+    assert model_override["failover"]["candidates"] == [
+        {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"},
+        {"provider_id": "dashscope-intl", "model_id": "qwen-max"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_failover_can_save_primary_only():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    request = _request(
+        provider_service=FakeProviderService({"dashscope-prod": _provider()}),
+        model_service=FakeModelService({("dashscope-prod", "qwen-max"): _model()}),
+    )
+
+    await register_service(
+        request=request,
+        definition=_definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "failover": {
+                    "enabled": False,
+                    "candidates": [
+                        {"provider_id": "missing-provider", "model_id": "missing-model"}
+                    ],
+                },
+            }
+        ),
+        registry=registry,
+        auth=_auth(),
+    )
+    stored = await registry.get("imam-agent")
+    model_override = stored.connector_config["model_override"]
+
+    assert model_override["enabled"] is True
+    assert model_override["failover"]["enabled"] is False
+    assert model_override["failover"]["candidates"] == []
+
+
+@pytest.mark.asyncio
 async def test_update_service_increments_cache_epoch_when_override_changes():
     registry = ServiceRegistry(MemoryRegistryStorage())
     initial = registry._service_from_dict(

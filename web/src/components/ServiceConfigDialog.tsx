@@ -99,10 +99,24 @@ function detectLangGraphService(serviceDetail?: ServiceDetail): boolean {
 
 function readModelOverride(value: unknown): ServiceModelOverride {
   if (!value || typeof value !== "object") {
-    return { enabled: false, temperature: 0.1 };
+    return {
+      enabled: false,
+      temperature: 0.1,
+      failover: { enabled: false, max_attempts: 3, candidates: [] },
+    };
   }
 
   const override = value as Record<string, unknown>;
+  const failover = override.failover as Record<string, unknown> | undefined;
+  const rawCandidates = Array.isArray(failover?.candidates) ? failover.candidates : [];
+  const candidates = rawCandidates
+    .filter((candidate): candidate is Record<string, unknown> =>
+      Boolean(candidate && typeof candidate === "object")
+    )
+    .map((candidate) => ({
+      provider_id: typeof candidate.provider_id === "string" ? candidate.provider_id : undefined,
+      model_id: typeof candidate.model_id === "string" ? candidate.model_id : undefined,
+    }));
   const temperature =
     typeof override.temperature === "number" && Number.isFinite(override.temperature)
       ? override.temperature
@@ -113,6 +127,19 @@ function readModelOverride(value: unknown): ServiceModelOverride {
     provider_id: typeof override.provider_id === "string" ? override.provider_id : undefined,
     model_id: typeof override.model_id === "string" ? override.model_id : undefined,
     temperature,
+    failover: {
+      enabled: Boolean(failover?.enabled),
+      max_attempts:
+        typeof failover?.max_attempts === "number" && Number.isFinite(failover.max_attempts)
+          ? failover.max_attempts
+          : 3,
+      retryable_error_codes: Array.isArray(failover?.retryable_error_codes)
+        ? failover.retryable_error_codes.filter(
+            (code): code is string => typeof code === "string" && Boolean(code.trim())
+          )
+        : undefined,
+      candidates,
+    },
   };
 }
 
@@ -198,6 +225,7 @@ export function ServiceConfigDialog({
   const [modelOverrideForm, setModelOverrideForm] = useState<ServiceModelOverride>({
     enabled: false,
     temperature: 0.1,
+    failover: { enabled: false, max_attempts: 3, candidates: [] },
   });
 
   const selectedProviderId = modelOverrideForm.provider_id || "";
@@ -207,13 +235,17 @@ export function ServiceConfigDialog({
     enabled: open && isLangGraphService,
   });
   const modelsQuery = useQuery({
-    queryKey: modelsApi.modelQueryKeys.byProvider(selectedProviderId, true),
-    queryFn: () => modelsApi.listModels(selectedProviderId, true),
-    enabled: open && isLangGraphService && Boolean(selectedProviderId),
+    queryKey: ["models", "all-enabled-and-disabled"],
+    queryFn: () => modelsApi.listModels(undefined, true),
+    enabled: open && isLangGraphService,
   });
 
   const providers = useMemo(() => providersQuery.data ?? [], [providersQuery.data]);
   const models = useMemo(() => modelsQuery.data ?? [], [modelsQuery.data]);
+  const providerById = useMemo(
+    () => new Map(providers.map((provider) => [provider.provider_id, provider])),
+    [providers]
+  );
   const selectableProviders = useMemo(
     () =>
       providers.filter(
@@ -221,19 +253,63 @@ export function ServiceConfigDialog({
       ),
     [providers]
   );
+  const modelsByProvider = useMemo(() => {
+    const grouped = new Map<string, typeof models>();
+    for (const model of models) {
+      const current = grouped.get(model.provider_id) ?? [];
+      current.push(model);
+      grouped.set(model.provider_id, current);
+    }
+    return grouped;
+  }, [models]);
   const providerModels = useMemo(
-    () => models.filter((model) => model.provider_id === selectedProviderId),
-    [models, selectedProviderId]
+    () => modelsByProvider.get(selectedProviderId) ?? [],
+    [modelsByProvider, selectedProviderId]
   );
   const selectableModels = useMemo(
     () => providerModels.filter((model) => model.is_enabled),
     [providerModels]
   );
-  const selectedProvider = providers.find(
-    (provider) => provider.provider_id === modelOverrideForm.provider_id
-  );
+  const selectedProvider = providerById.get(modelOverrideForm.provider_id || "");
   const selectedModel = providerModels.find(
     (model) => model.model_id === modelOverrideForm.model_id
+  );
+  const failover = modelOverrideForm.failover ?? {
+    enabled: false,
+    max_attempts: 3,
+    candidates: [],
+  };
+  const failoverCandidates = failover.candidates ?? [];
+  const getProviderModels = (providerId?: string) =>
+    providerId ? (modelsByProvider.get(providerId) ?? []).filter((model) => model.is_enabled) : [];
+  const fallbackInvalid = Boolean(
+    modelOverrideForm.enabled &&
+      failover.enabled &&
+      (failoverCandidates.length === 0 ||
+      failoverCandidates.some((candidate, index) => {
+        const provider = providerById.get(candidate.provider_id || "");
+        const candidateModels = getProviderModels(candidate.provider_id);
+        const model = candidateModels.find((item) => item.model_id === candidate.model_id);
+        const key = `${candidate.provider_id || ""}::${candidate.model_id || ""}`;
+        const duplicatePrimary =
+          candidate.provider_id === modelOverrideForm.provider_id &&
+          candidate.model_id === modelOverrideForm.model_id;
+        const duplicateFallback = failoverCandidates.some(
+          (other, otherIndex) =>
+            otherIndex !== index &&
+            `${other.provider_id || ""}::${other.model_id || ""}` === key
+        );
+        return (
+          !candidate.provider_id ||
+          !candidate.model_id ||
+          !provider ||
+          !provider.is_enabled ||
+          !provider.has_api_key ||
+          !model ||
+          duplicatePrimary ||
+          duplicateFallback
+        );
+      }))
   );
   const temperature = modelOverrideForm.temperature;
   const temperatureInvalid =
@@ -247,7 +323,8 @@ export function ServiceConfigDialog({
         !selectedProvider.has_api_key ||
         !selectedModel ||
         !selectedModel.is_enabled ||
-        temperatureInvalid)
+        temperatureInvalid ||
+        fallbackInvalid)
   );
 
   // 当配置加载后更新表单
@@ -355,6 +432,74 @@ export function ServiceConfigDialog({
     }));
   };
 
+  const updateFailover = (
+    updater: (
+      current: NonNullable<ServiceModelOverride["failover"]>
+    ) => NonNullable<ServiceModelOverride["failover"]>
+  ) => {
+    setModelOverrideForm((current) => {
+      const currentFailover = current.failover ?? {
+        enabled: false,
+        max_attempts: 3,
+        candidates: [],
+      };
+      return { ...current, failover: updater(currentFailover) };
+    });
+  };
+
+  const handleFailoverToggle = (enabled: boolean) => {
+    updateFailover((current) => ({
+      ...current,
+      enabled,
+      max_attempts: current.max_attempts ?? 3,
+      candidates: current.candidates ?? [],
+    }));
+  };
+
+  const handleAddFallback = () => {
+    updateFailover((current) => ({
+      ...current,
+      enabled: true,
+      candidates: [...(current.candidates ?? []), {}],
+    }));
+  };
+
+  const handleFallbackCandidateChange = (
+    index: number,
+    patch: { provider_id?: string; model_id?: string }
+  ) => {
+    updateFailover((current) => {
+      const next = [...(current.candidates ?? [])];
+      const previous = next[index] ?? {};
+      next[index] = {
+        ...previous,
+        ...patch,
+        model_id:
+          patch.provider_id && patch.provider_id !== previous.provider_id
+            ? undefined
+            : (patch.model_id ?? previous.model_id),
+      };
+      return { ...current, candidates: next };
+    });
+  };
+
+  const handleRemoveFallback = (index: number) => {
+    updateFailover((current) => ({
+      ...current,
+      candidates: (current.candidates ?? []).filter((_, i) => i !== index),
+    }));
+  };
+
+  const handleMoveFallback = (index: number, direction: -1 | 1) => {
+    updateFailover((current) => {
+      const next = [...(current.candidates ?? [])];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...current, candidates: next };
+    });
+  };
+
   const handleDelete = () => {
     if (confirm(t("services.configDialog.deleteConfirm", { name: serviceName }))) {
       deleteMutation.mutate();
@@ -394,6 +539,12 @@ export function ServiceConfigDialog({
           provider_id: modelOverrideForm.provider_id,
           model_id: modelOverrideForm.model_id,
           temperature: modelOverrideForm.temperature ?? null,
+          failover: {
+            enabled: Boolean(failover.enabled),
+            max_attempts: failover.max_attempts ?? 3,
+            retryable_error_codes: failover.retryable_error_codes,
+            candidates: failover.enabled ? failoverCandidates : [],
+          },
         },
       };
       patch.metadata = {
@@ -596,6 +747,170 @@ export function ServiceConfigDialog({
                         />
                       </div>
 
+                      <div className="rounded-lg border p-3 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <Label>
+                              {t("services.configDialog.model.failover", "Failover")}
+                            </Label>
+                            <p className="text-xs text-muted-foreground">
+                              {t(
+                                "services.configDialog.model.failoverHint",
+                                "Try configured fallback models when the primary provider is unavailable."
+                              )}
+                            </p>
+                          </div>
+                          <Switch
+                            checked={Boolean(failover.enabled)}
+                            disabled={!modelOverrideForm.enabled}
+                            onCheckedChange={handleFailoverToggle}
+                          />
+                        </div>
+
+                        {failover.enabled && (
+                          <>
+                            <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                              <div className="space-y-2">
+                                <Label>
+                                  {t(
+                                    "services.configDialog.model.maxAttempts",
+                                    "Max attempts"
+                                  )}
+                                </Label>
+                                <Input
+                                  type="number"
+                                  min="1"
+                                  max="10"
+                                  value={failover.max_attempts ?? 3}
+                                  onChange={(event) => {
+                                    const parsed = Number(event.target.value);
+                                    updateFailover((current) => ({
+                                      ...current,
+                                      max_attempts: Number.isFinite(parsed) ? parsed : 3,
+                                    }));
+                                  }}
+                                  disabled={!modelOverrideForm.enabled}
+                                />
+                              </div>
+                              <div className="flex items-end">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  className="w-full"
+                                  onClick={handleAddFallback}
+                                  disabled={!modelOverrideForm.enabled}
+                                >
+                                  {t("services.configDialog.model.addFallback", "Add fallback")}
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="space-y-2">
+                              {failoverCandidates.map((candidate, index) => {
+                                const candidateModels = getProviderModels(candidate.provider_id);
+                                return (
+                                  <div
+                                    key={`${index}-${candidate.provider_id || "provider"}`}
+                                    className="grid gap-2 rounded-md border p-2 sm:grid-cols-[1fr_1fr_auto]"
+                                  >
+                                    <Select
+                                      value={candidate.provider_id || ""}
+                                      onValueChange={(providerId) =>
+                                        handleFallbackCandidateChange(index, {
+                                          provider_id: providerId,
+                                        })
+                                      }
+                                      disabled={!modelOverrideForm.enabled}
+                                    >
+                                      <SelectTrigger>
+                                        <SelectValue
+                                          placeholder={t(
+                                            "services.configDialog.model.providerPlaceholder"
+                                          )}
+                                        />
+                                      </SelectTrigger>
+                                      <SelectContent disablePortal>
+                                        {selectableProviders.map((provider) => (
+                                          <SelectItem
+                                            key={provider.provider_id}
+                                            value={provider.provider_id}
+                                          >
+                                            {provider.display_name}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+
+                                    <Select
+                                      value={candidate.model_id || ""}
+                                      onValueChange={(modelId) =>
+                                        handleFallbackCandidateChange(index, {
+                                          model_id: modelId,
+                                        })
+                                      }
+                                      disabled={!modelOverrideForm.enabled || !candidate.provider_id}
+                                    >
+                                      <SelectTrigger>
+                                        <SelectValue
+                                          placeholder={t(
+                                            "services.configDialog.model.modelPlaceholder"
+                                          )}
+                                        />
+                                      </SelectTrigger>
+                                      <SelectContent disablePortal>
+                                        {candidateModels.map((model) => (
+                                          <SelectItem key={model.model_id} value={model.model_id}>
+                                            {model.display_name || model.model_id}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+
+                                    <div className="flex items-center gap-1">
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleMoveFallback(index, -1)}
+                                        disabled={index === 0}
+                                      >
+                                        Up
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleMoveFallback(index, 1)}
+                                        disabled={index === failoverCandidates.length - 1}
+                                      >
+                                        Down
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => handleRemoveFallback(index)}
+                                      >
+                                        {t("common.remove", "Remove")}
+                                      </Button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {failoverCandidates.length === 0 && (
+                                <p className="text-xs text-muted-foreground">
+                                  {t(
+                                    "services.configDialog.model.noFallbacks",
+                                    "Add at least one fallback provider/model."
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         <Badge
                           variant={
@@ -629,6 +944,19 @@ export function ServiceConfigDialog({
                           <span className="min-w-0 truncate text-muted-foreground">
                             {selectedProvider.base_url}
                           </span>
+                        )}
+                        {failover.enabled && (
+                          <Badge variant={fallbackInvalid ? "destructive" : "secondary"}>
+                            {fallbackInvalid
+                              ? t(
+                                  "services.configDialog.model.failoverInvalid",
+                                  "Failover needs valid unique candidates"
+                                )
+                              : t("services.configDialog.model.failoverReady", {
+                                  defaultValue: "{{count}} fallback candidates",
+                                  count: failoverCandidates.length,
+                                })}
+                          </Badge>
                         )}
                       </div>
                     </div>

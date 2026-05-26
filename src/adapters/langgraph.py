@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import re
@@ -15,6 +14,10 @@ from ai_gateway_core.exceptions import ValidationFailedError
 
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, ToolCall, UnifiedResponse
+from ..services.llm.model_failover import (
+    ModelOverrideRuntimeError,
+    build_runtime_model_override_config,
+)
 from .base import ProtocolAdapter
 
 
@@ -195,59 +198,15 @@ class LangGraphAdapter(ProtocolAdapter):
         if provider_service is None or model_service is None:
             raise ValidationFailedError("LangGraph model control plane is not initialized")
 
-        tenant_id = request.tenant_id or "default"
-        provider_id = str(model_override.get("provider_id") or "").strip()
-        model_id = str(model_override.get("model_id") or "").strip()
-        if not provider_id or not model_id:
-            raise ValidationFailedError("LangGraph model_override requires provider_id and model_id")
-
         try:
-            provider = await provider_service.get_runtime_provider_config(tenant_id, provider_id)
-        except ValueError as exc:
-            raise ValidationFailedError("LangGraph model_override provider not found") from exc
-        if not bool(provider.get("is_enabled")):
-            raise ValidationFailedError("LangGraph model_override provider is disabled")
-
-        get_provider_model = getattr(model_service, "get_provider_model", None)
-        if callable(get_provider_model):
-            model = await get_provider_model(tenant_id, provider_id, model_id)
-        else:
-            model = await model_service.get_model(
-                tenant_id,
-                model_id,
-                provider_id=provider_id,
+            return await build_runtime_model_override_config(
+                tenant_id=request.tenant_id or "default",
+                model_override=model_override,
+                provider_service=provider_service,
+                model_service=model_service,
             )
-        if not model:
-            raise ValidationFailedError("LangGraph model_override model not found")
-        if not bool(model.get("is_enabled")):
-            raise ValidationFailedError("LangGraph model_override model is disabled")
-
-        api_key = provider.get("api_key")
-        allow_environment = bool(provider.get("allow_environment_credentials"))
-        if not api_key and not allow_environment:
-            raise ValidationFailedError("LangGraph model_override provider has no API key")
-
-        api_key_fingerprint = (
-            hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16]
-            if api_key
-            else None
-        )
-
-        runtime_config = {
-            "enabled": True,
-            "tenant_id": tenant_id,
-            "provider_id": provider_id,
-            "provider": provider.get("runtime_provider"),
-            "model_id": model_id,
-            "model": model_id,
-            "temperature": model_override.get("temperature"),
-            "base_url": provider.get("runtime_base_url"),
-            "api_key_fingerprint": api_key_fingerprint,
-            "cache_epoch": str(model_override.get("cache_epoch") or "0"),
-        }
-        if api_key:
-            runtime_config["_api_key"] = api_key
-        return runtime_config
+        except ModelOverrideRuntimeError as exc:
+            raise ValidationFailedError(f"LangGraph model_override invalid: {exc.code}") from exc
 
     async def _build_run_config(
         self, request: UnifiedRequest, thread_id: str | None = None

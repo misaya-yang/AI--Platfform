@@ -739,7 +739,7 @@ class TransparentProxy:
         为 LangGraph 流式请求设置默认参数
 
         确保 /runs/stream 请求包含合理的默认值：
-        - stream_mode: ["messages", "updates"] - 启用消息流
+        - stream_mode: ["messages", "updates", "custom"] - 启用消息和自定义事件流
         - stream_subgraphs: true - 启用子图流式输出
         """
         if not body:
@@ -762,9 +762,9 @@ class TransparentProxy:
 
         # 设置默认 stream_mode
         if not data.get("stream_mode"):
-            data["stream_mode"] = ["messages", "updates"]
+            data["stream_mode"] = ["messages", "updates", "custom"]
             changed = True
-            logger.debug("[Proxy] Set default stream_mode=['messages', 'updates']")
+            logger.debug("[Proxy] Set default stream_mode=['messages', 'updates', 'custom']")
 
         # 如果 stream_mode 包含 messages，自动启用 stream_subgraphs
         if "stream_subgraphs" not in data and self._stream_mode_wants_messages(

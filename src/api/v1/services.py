@@ -20,6 +20,12 @@ from ...core.auth.service_access import (
     service_scope_matches,
 )
 from ...core.auth.user_resolver import UserContext
+from ...services.llm.model_failover import (
+    DEFAULT_RETRYABLE_ERROR_CODES,
+    has_secret_field,
+    normalize_max_attempts,
+    normalize_retryable_error_codes,
+)
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 
@@ -70,7 +76,6 @@ _SENSITIVE_CONNECTOR_FIELDS = {
     "headers",
 }
 
-_MODEL_OVERRIDE_SECRET_FIELDS = {"_api_key", "api_key"}
 _MODEL_OVERRIDE_EPOCH_IGNORED_FIELDS = {"cache_epoch"}
 
 
@@ -307,6 +312,106 @@ def _override_allows_environment_credentials(provider_service: Any, provider: di
     )
 
 
+async def _validate_model_override_provider_model(
+    *,
+    tenant_id: str,
+    provider_id: str,
+    model_id: str,
+    provider_service: Any,
+    model_service: Any,
+    error_prefix: str,
+) -> None:
+    provider = await provider_service.get_provider(tenant_id, provider_id)
+    if not provider:
+        raise _model_override_error(f"{error_prefix}_PROVIDER_NOT_FOUND")
+    if not bool(provider.get("is_enabled")):
+        raise _model_override_error(f"{error_prefix}_PROVIDER_DISABLED")
+
+    has_key = bool(provider.get("has_api_key"))
+    if not has_key and not _override_allows_environment_credentials(provider_service, provider):
+        raise _model_override_error(f"{error_prefix}_API_KEY_MISSING")
+
+    get_provider_model = getattr(model_service, "get_provider_model", None)
+    if callable(get_provider_model):
+        model = await get_provider_model(tenant_id, provider_id, model_id)
+    else:
+        model = await model_service.get_model(
+            tenant_id,
+            model_id,
+            provider_id=provider_id,
+        )
+    if not model:
+        raise _model_override_error(f"{error_prefix}_MODEL_NOT_FOUND")
+    if not bool(model.get("is_enabled")):
+        raise _model_override_error(f"{error_prefix}_MODEL_DISABLED")
+
+
+async def _normalize_langgraph_failover(
+    raw_failover: Any,
+    *,
+    tenant_id: str,
+    primary_provider_id: str,
+    primary_model_id: str,
+    provider_service: Any,
+    model_service: Any,
+) -> dict[str, Any] | None:
+    if raw_failover is None:
+        return None
+    if not isinstance(raw_failover, dict):
+        raise _model_override_error("MODEL_OVERRIDE_FAILOVER_INVALID")
+    if has_secret_field(raw_failover):
+        raise _model_override_error("MODEL_OVERRIDE_API_KEY_FORBIDDEN")
+
+    enabled = _as_bool(raw_failover.get("enabled"), default=False)
+    normalized = {
+        "enabled": enabled,
+        "max_attempts": normalize_max_attempts(raw_failover.get("max_attempts"), default=3),
+        "retryable_error_codes": normalize_retryable_error_codes(
+            raw_failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
+        ),
+        "candidates": [],
+    }
+    if not enabled:
+        return normalized
+
+    raw_candidates = raw_failover.get("candidates")
+    if raw_candidates is None:
+        raw_candidates = []
+    if not isinstance(raw_candidates, list):
+        raise _model_override_error("MODEL_OVERRIDE_FAILOVER_CANDIDATE_INVALID")
+
+    seen = {(primary_provider_id, primary_model_id)}
+    candidates: list[dict[str, str]] = []
+    for raw_candidate in raw_candidates:
+        if not isinstance(raw_candidate, dict):
+            raise _model_override_error("MODEL_OVERRIDE_FAILOVER_CANDIDATE_INVALID")
+        if has_secret_field(raw_candidate):
+            raise _model_override_error("MODEL_OVERRIDE_API_KEY_FORBIDDEN")
+
+        provider_id = str(raw_candidate.get("provider_id") or "").strip()
+        model_id = str(raw_candidate.get("model_id") or "").strip()
+        if not provider_id:
+            raise _model_override_error("MODEL_OVERRIDE_FAILOVER_PROVIDER_REQUIRED")
+        if not model_id:
+            raise _model_override_error("MODEL_OVERRIDE_FAILOVER_MODEL_REQUIRED")
+        if (provider_id, model_id) in seen:
+            raise _model_override_error("MODEL_OVERRIDE_FAILOVER_DUPLICATE")
+
+        await _validate_model_override_provider_model(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            provider_service=provider_service,
+            model_service=model_service,
+            error_prefix="MODEL_OVERRIDE_FAILOVER",
+        )
+        candidates.append({"provider_id": provider_id, "model_id": model_id})
+        seen.add((provider_id, model_id))
+
+    normalized["candidates"] = candidates
+    return normalized
+
+
 async def _validate_langgraph_model_override(
     request: Request,
     *,
@@ -328,7 +433,7 @@ async def _validate_langgraph_model_override(
     if not isinstance(raw_override, dict):
         raise _model_override_error("MODEL_OVERRIDE_INVALID")
 
-    if _MODEL_OVERRIDE_SECRET_FIELDS.intersection(str(key).lower() for key in raw_override):
+    if has_secret_field(raw_override):
         raise _model_override_error("MODEL_OVERRIDE_API_KEY_FORBIDDEN")
 
     model_override = dict(raw_override)
@@ -344,6 +449,60 @@ async def _validate_langgraph_model_override(
             raise _model_override_error("MODEL_OVERRIDE_TEMPERATURE_INVALID")
         model_override["temperature"] = temperature
 
+    provider_id = str(model_override.get("provider_id") or "").strip()
+    model_id = str(model_override.get("model_id") or "").strip()
+
+    provider_service = getattr(request.app.state, "provider_service", None)
+    model_service = getattr(request.app.state, "model_service", None)
+    if enabled and (provider_service is None or model_service is None):
+        raise _model_override_error("MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE", status_code=503)
+
+    normalized_failover = None
+    if not enabled:
+        raw_failover = model_override.get("failover")
+        if raw_failover is not None:
+            if not isinstance(raw_failover, dict):
+                raise _model_override_error("MODEL_OVERRIDE_FAILOVER_INVALID")
+            if has_secret_field(raw_failover):
+                raise _model_override_error("MODEL_OVERRIDE_API_KEY_FORBIDDEN")
+            normalized_failover = {
+                "enabled": False,
+                "max_attempts": normalize_max_attempts(raw_failover.get("max_attempts"), default=3),
+                "retryable_error_codes": normalize_retryable_error_codes(
+                    raw_failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
+                ),
+                "candidates": [],
+            }
+    else:
+        if not provider_id:
+            raise _model_override_error("MODEL_OVERRIDE_PROVIDER_REQUIRED")
+        if not model_id:
+            raise _model_override_error("MODEL_OVERRIDE_MODEL_REQUIRED")
+
+        await _validate_model_override_provider_model(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            provider_service=provider_service,
+            model_service=model_service,
+            error_prefix="MODEL_OVERRIDE",
+        )
+        normalized_failover = await _normalize_langgraph_failover(
+            model_override.get("failover"),
+            tenant_id=tenant_id,
+            primary_provider_id=provider_id,
+            primary_model_id=model_id,
+            provider_service=provider_service,
+            model_service=model_service,
+        )
+
+    if provider_id:
+        model_override["provider_id"] = provider_id
+    if model_id:
+        model_override["model_id"] = model_id
+    if normalized_failover is not None:
+        model_override["failover"] = normalized_failover
+
     previous_override = {}
     if isinstance(previous_connector_config, dict):
         previous_raw = previous_connector_config.get("model_override")
@@ -356,48 +515,6 @@ async def _validate_langgraph_model_override(
     else:
         model_override["cache_epoch"] = previous_epoch
 
-    if not enabled:
-        connector_config["model_override"] = model_override
-        return
-
-    provider_id = str(model_override.get("provider_id") or "").strip()
-    model_id = str(model_override.get("model_id") or "").strip()
-    if not provider_id:
-        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_REQUIRED")
-    if not model_id:
-        raise _model_override_error("MODEL_OVERRIDE_MODEL_REQUIRED")
-
-    provider_service = getattr(request.app.state, "provider_service", None)
-    model_service = getattr(request.app.state, "model_service", None)
-    if provider_service is None or model_service is None:
-        raise _model_override_error("MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE", status_code=503)
-
-    provider = await provider_service.get_provider(tenant_id, provider_id)
-    if not provider:
-        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_NOT_FOUND")
-    if not bool(provider.get("is_enabled")):
-        raise _model_override_error("MODEL_OVERRIDE_PROVIDER_DISABLED")
-
-    has_key = bool(provider.get("has_api_key"))
-    if not has_key and not _override_allows_environment_credentials(provider_service, provider):
-        raise _model_override_error("MODEL_OVERRIDE_API_KEY_MISSING")
-
-    get_provider_model = getattr(model_service, "get_provider_model", None)
-    if callable(get_provider_model):
-        model = await get_provider_model(tenant_id, provider_id, model_id)
-    else:
-        model = await model_service.get_model(
-            tenant_id,
-            model_id,
-            provider_id=provider_id,
-        )
-    if not model:
-        raise _model_override_error("MODEL_OVERRIDE_MODEL_NOT_FOUND")
-    if not bool(model.get("is_enabled")):
-        raise _model_override_error("MODEL_OVERRIDE_MODEL_DISABLED")
-
-    model_override["provider_id"] = provider_id
-    model_override["model_id"] = model_id
     connector_config["model_override"] = model_override
 
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import time
 from typing import Any
@@ -50,6 +49,10 @@ from ...proxy import (
 )
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy, QuotaStatus
+from ...services.llm.model_failover import (
+    ModelOverrideRuntimeError,
+    build_runtime_model_override_config,
+)
 from ...services.metrics.usage_parser import extract_model
 from ..deps import (
     AuthContext,
@@ -402,56 +405,15 @@ async def _inject_langgraph_model_override_config(
             detail="MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE",
         )
 
-    effective_tenant = tenant_id or "default"
-    provider_id = str(model_override.get("provider_id") or "").strip()
-    model_id = str(model_override.get("model_id") or "").strip()
-    if not provider_id or not model_id:
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_INVALID")
-
     try:
-        provider = await provider_service.get_runtime_provider_config(effective_tenant, provider_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_PROVIDER_NOT_FOUND") from exc
-
-    if not bool(provider.get("is_enabled")):
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_PROVIDER_DISABLED")
-
-    get_provider_model = getattr(model_service, "get_provider_model", None)
-    if callable(get_provider_model):
-        model = await get_provider_model(effective_tenant, provider_id, model_id)
-    else:
-        model = await model_service.get_model(
-            effective_tenant,
-            model_id,
-            provider_id=provider_id,
+        runtime_config = await build_runtime_model_override_config(
+            tenant_id=tenant_id or "default",
+            model_override=model_override,
+            provider_service=provider_service,
+            model_service=model_service,
         )
-    if not model:
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_MODEL_NOT_FOUND")
-    if not bool(model.get("is_enabled")):
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_MODEL_DISABLED")
-
-    api_key = provider.get("api_key")
-    allow_environment = bool(provider.get("allow_environment_credentials"))
-    if not api_key and not allow_environment:
-        raise HTTPException(status_code=422, detail="MODEL_OVERRIDE_API_KEY_MISSING")
-
-    api_key_fingerprint = (
-        hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16] if api_key else None
-    )
-    runtime_config = {
-        "enabled": True,
-        "tenant_id": effective_tenant,
-        "provider_id": provider_id,
-        "provider": provider.get("runtime_provider"),
-        "model_id": model_id,
-        "model": model_id,
-        "temperature": model_override.get("temperature"),
-        "base_url": provider.get("runtime_base_url"),
-        "api_key_fingerprint": api_key_fingerprint,
-        "cache_epoch": str(model_override.get("cache_epoch") or "0"),
-    }
-    if api_key:
-        runtime_config["_api_key"] = api_key
+    except ModelOverrideRuntimeError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from exc
 
     updated_payload = dict(payload)
     run_config = updated_payload.get("config")
@@ -463,11 +425,13 @@ async def _inject_langgraph_model_override_config(
 
     logger.info(
         "Injected LangGraph model override provider_id=%s model_id=%s cache_epoch=%s "
-        "api_key_fingerprint=%s",
-        provider_id,
-        model_id,
+        "api_key_fingerprint=%s failover_candidates=%s failover_warnings=%s",
+        runtime_config.get("provider_id"),
+        runtime_config.get("model_id"),
         runtime_config["cache_epoch"],
-        api_key_fingerprint,
+        runtime_config.get("api_key_fingerprint"),
+        len((runtime_config.get("failover") or {}).get("candidates") or []),
+        len((runtime_config.get("failover") or {}).get("warnings") or []),
     )
 
     return _encode_json_body(updated_payload)
@@ -1293,13 +1257,41 @@ def _safe_model_override_debug(model_override: Any) -> dict[str, Any]:
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         temperature = None
 
-    return {
+    failover = source.get("failover")
+    safe_failover: dict[str, Any] | None = None
+    if isinstance(failover, dict):
+        raw_candidates = failover.get("candidates")
+        safe_candidates = []
+        if isinstance(raw_candidates, list):
+            for raw_candidate in raw_candidates:
+                if not isinstance(raw_candidate, dict):
+                    continue
+                safe_candidates.append(
+                    {
+                        "provider_id": str(raw_candidate.get("provider_id") or "").strip()
+                        or None,
+                        "model_id": str(raw_candidate.get("model_id") or "").strip() or None,
+                    }
+                )
+        safe_failover = {
+            "enabled": bool(failover.get("enabled")),
+            "max_attempts": failover.get("max_attempts")
+            if isinstance(failover.get("max_attempts"), int)
+            else None,
+            "candidates": safe_candidates,
+            "candidate_count": len(safe_candidates),
+        }
+
+    debug = {
         "enabled": bool(source.get("enabled")),
         "provider_id": provider_id,
         "model_id": model_id,
         "cache_epoch": cache_epoch,
         "temperature": temperature,
     }
+    if safe_failover is not None:
+        debug["failover"] = safe_failover
+    return debug
 
 
 @router.get(

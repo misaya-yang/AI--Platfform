@@ -15,18 +15,35 @@ from src.proxy.config_loader import ProxyServiceConfig
 
 
 class FakeProviderService:
-    async def get_runtime_provider_config(self, tenant_id: str, provider_id: str) -> dict[str, Any]:
-        assert tenant_id == "tenant-a"
-        assert provider_id == "dashscope"
-        return {
+    providers = {
+        "dashscope": {
             "is_enabled": True,
             "runtime_provider": "dashscope",
             "runtime_base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode",
             "api_key": "gateway-runtime-secret",
-        }
+        },
+        "google-ai-studio": {
+            "is_enabled": True,
+            "runtime_provider": "gemini",
+            "runtime_base_url": "https://generativelanguage.googleapis.com",
+            "api_key": "gemini-runtime-secret",
+        },
+    }
+
+    async def get_runtime_provider_config(self, tenant_id: str, provider_id: str) -> dict[str, Any]:
+        assert tenant_id == "tenant-a"
+        provider = self.providers.get(provider_id)
+        if not provider:
+            raise ValueError(provider_id)
+        return provider
 
 
 class FakeModelService:
+    models = {
+        ("dashscope", "qwen3.6-plus"): {"is_enabled": True},
+        ("google-ai-studio", "gemini-3.5-flash"): {"is_enabled": True},
+    }
+
     async def get_provider_model(
         self,
         tenant_id: str,
@@ -34,9 +51,7 @@ class FakeModelService:
         model_id: str,
     ) -> dict[str, Any]:
         assert tenant_id == "tenant-a"
-        assert provider_id == "dashscope"
-        assert model_id == "qwen3.6-plus"
-        return {"is_enabled": True}
+        return self.models.get((provider_id, model_id))
 
 
 def _request() -> SimpleNamespace:
@@ -131,6 +146,55 @@ async def test_proxy_run_injects_gateway_resolved_hejaz_model() -> None:
     assert hejaz_model["api_key_fingerprint"] == hashlib.sha256(
         b"gateway-runtime-secret"
     ).hexdigest()[:16]
+    assert "browser-secret" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key() -> None:
+    body = json.dumps(
+        {
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+            "config": {"configurable": {"hejaz_model": {"api_key": "browser-secret"}}},
+        }
+    ).encode("utf-8")
+
+    updated = await _inject_langgraph_model_override_config(
+        request=_request(),
+        body=body,
+        method="POST",
+        path="threads/t1/runs/stream",
+        service_config=_config(
+            {
+                "enabled": True,
+                "provider_id": "dashscope",
+                "model_id": "qwen3.6-plus",
+                "temperature": 0.2,
+                "cache_epoch": 7,
+                "failover": {
+                    "enabled": True,
+                    "max_attempts": 2,
+                    "candidates": [
+                        {
+                            "provider_id": "google-ai-studio",
+                            "model_id": "gemini-3.5-flash",
+                        }
+                    ],
+                },
+            }
+        ),
+        tenant_id="tenant-a",
+    )
+
+    payload = json.loads((updated or b"{}").decode("utf-8"))
+    hejaz_model = payload["config"]["configurable"]["hejaz_model"]
+    candidates = hejaz_model["failover"]["candidates"]
+
+    assert [(c["provider_id"], c["model_id"]) for c in candidates] == [
+        ("dashscope", "qwen3.6-plus"),
+        ("google-ai-studio", "gemini-3.5-flash"),
+    ]
+    assert candidates[0]["_api_key"] == "gateway-runtime-secret"
+    assert candidates[1]["_api_key"] == "gemini-runtime-secret"
     assert "browser-secret" not in json.dumps(payload)
 
 

@@ -156,6 +156,16 @@ function asSafeString(value: unknown): string | null {
 
 function summarizeModelOverride(value: unknown) {
   const override = asRecord(value);
+  const failover = asRecord(override?.failover);
+  const candidates = Array.isArray(failover?.candidates)
+    ? failover.candidates
+        .map((candidate) => asRecord(candidate))
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
+        .map((candidate) => ({
+          provider_id: asSafeString(candidate.provider_id),
+          model_id: asSafeString(candidate.model_id),
+        }))
+    : [];
 
   return {
     enabled: Boolean(override?.enabled),
@@ -168,6 +178,13 @@ function summarizeModelOverride(value: unknown) {
         : null,
     temperature:
       typeof override?.temperature === "number" ? override.temperature : null,
+    failover: {
+      enabled: Boolean(failover?.enabled),
+      max_attempts:
+        typeof failover?.max_attempts === "number" ? failover.max_attempts : null,
+      candidate_count: candidates.length,
+      candidates,
+    },
   };
 }
 
@@ -203,9 +220,21 @@ function formatModelDebugLine(data: Record<string, unknown>): string {
     push("model_id", override.model_id);
     push("cache_epoch", override.cache_epoch);
     push("temperature", override.temperature);
+    const failover = asRecord(override.failover);
+    if (failover) {
+      push("failover_enabled", failover.enabled);
+      push("failover_candidates", failover.candidate_count);
+      push("failover_max_attempts", failover.max_attempts);
+    }
   }
 
   return `${MODEL_DEBUG_LABEL} ${parts.join(" ")}`;
+}
+
+function readHejazFailoverEvent(value: unknown): Record<string, unknown> | null {
+  const data = asRecord(value);
+  if (!data || data.type !== "hejaz_model_failover") return null;
+  return data;
 }
 
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
@@ -975,6 +1004,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             // messages), so we skip any message whose ID was already seen.
             const seenMessageIds = new Set<string>();
             const seenToolCallIds = new Set<string>();
+            const shownFailoverNotices = new Set<string>();
             for await (const evt of sseFetchEvents<unknown>(
               streamPath,
               {
@@ -1049,6 +1079,54 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                   );
                 }
                 continue;
+              }
+
+              if (eventName === "custom") {
+                const failoverEvent = readHejazFailoverEvent(eventData);
+                if (failoverEvent) {
+                  const status = asSafeString(failoverEvent.status);
+                  const providerId = asSafeString(failoverEvent.provider_id);
+                  const modelId = asSafeString(failoverEvent.model_id);
+                  const reason = asSafeString(failoverEvent.reason);
+                  const noticeKey = `${status || "unknown"}:${providerId || "-"}:${modelId || "-"}`;
+                  console.warn("[Hejaz Model Failover]", {
+                    status,
+                    provider_id: providerId,
+                    model_id: modelId,
+                    reason,
+                    attempt: failoverEvent.attempt,
+                    failover_candidates: failoverEvent.failover_candidates,
+                    cache_epoch: failoverEvent.cache_epoch,
+                  });
+                  if (
+                    (status === "selected" || status === "exhausted") &&
+                    !shownFailoverNotices.has(noticeKey)
+                  ) {
+                    shownFailoverNotices.add(noticeKey);
+                    const content =
+                      status === "selected"
+                        ? `Model fallback active: switched to ${providerId || "fallback provider"} / ${modelId || "fallback model"}.`
+                        : "All configured model fallbacks failed. Please try again later or change the service model configuration.";
+                    setMessages((current) => [
+                      ...current,
+                      {
+                        id: `model-failover-${Date.now()}-${shownFailoverNotices.size}`,
+                        role: "assistant",
+                        content,
+                        createdAt: new Date().toISOString(),
+                        status: status === "selected" ? "completed" : "failed",
+                        meta: {
+                          type: "hejaz_model_failover_notice",
+                          failover_status: status,
+                          provider_id: providerId,
+                          model_id: modelId,
+                          reason,
+                        },
+                      },
+                    ]);
+                  }
+                  continue;
+                }
               }
 
               // Handle 'updates' events

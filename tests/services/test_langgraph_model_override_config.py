@@ -16,24 +16,51 @@ from src.services.registry.service_registry import MemoryRegistryStorage, Servic
 
 
 class FakeProviderService:
+    providers = {
+        "dashscope-prod": {
+            "provider_id": "dashscope-prod",
+            "is_enabled": True,
+            "runtime_provider": "dashscope",
+            "runtime_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "unit-test-runtime-secret",
+            "allow_environment_credentials": False,
+        },
+        "google-ai-studio": {
+            "provider_id": "google-ai-studio",
+            "is_enabled": True,
+            "runtime_provider": "gemini",
+            "runtime_base_url": "https://generativelanguage.googleapis.com",
+            "api_key": "unit-test-gemini-secret",
+            "allow_environment_credentials": False,
+        },
+    }
+
     async def get_runtime_provider_config(
         self,
         tenant_id: str,
         provider_id: str,
     ) -> dict[str, Any]:
         assert tenant_id == "tenant-a"
-        assert provider_id == "dashscope-prod"
-        return {
-            "provider_id": provider_id,
-            "is_enabled": True,
-            "runtime_provider": "dashscope",
-            "runtime_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "api_key": "unit-test-runtime-secret",
-            "allow_environment_credentials": False,
-        }
+        provider = self.providers.get(provider_id)
+        if not provider:
+            raise ValueError(provider_id)
+        return provider
 
 
 class FakeModelService:
+    models = {
+        ("dashscope-prod", "qwen-max"): {
+            "provider_id": "dashscope-prod",
+            "model_id": "qwen-max",
+            "is_enabled": True,
+        },
+        ("google-ai-studio", "gemini-3.5-flash"): {
+            "provider_id": "google-ai-studio",
+            "model_id": "gemini-3.5-flash",
+            "is_enabled": True,
+        },
+    }
+
     async def get_provider_model(
         self,
         tenant_id: str,
@@ -41,12 +68,7 @@ class FakeModelService:
         model_id: str,
     ) -> dict[str, Any]:
         assert tenant_id == "tenant-a"
-        assert provider_id == "dashscope-prod"
-        return {
-            "provider_id": provider_id,
-            "model_id": model_id,
-            "is_enabled": True,
-        }
+        return self.models.get((provider_id, model_id))
 
 
 class DummyAdapter(ProtocolAdapter):
@@ -159,6 +181,44 @@ async def test_run_config_injects_gateway_resolved_hejaz_model():
     assert hejaz_model["cache_epoch"] == "7"
     assert config["configurable"]["locale"] == "en"
     assert "browser-secret" not in str(config)
+
+
+@pytest.mark.asyncio
+async def test_adapter_injects_failover_candidate_shape():
+    LangGraphAdapter.configure_model_control_plane(FakeProviderService(), FakeModelService())
+    adapter = LangGraphAdapter(
+        _service(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "temperature": 0.2,
+                "cache_epoch": 7,
+                "failover": {
+                    "enabled": True,
+                    "max_attempts": 2,
+                    "candidates": [
+                        {
+                            "provider_id": "google-ai-studio",
+                            "model_id": "gemini-3.5-flash",
+                        }
+                    ],
+                },
+            }
+        )
+    )
+
+    config = await adapter._build_run_config(_request())
+    hejaz_model = config["configurable"]["hejaz_model"]
+    candidates = hejaz_model["failover"]["candidates"]
+
+    assert hejaz_model["provider_id"] == "dashscope-prod"
+    assert [(c["provider_id"], c["model_id"]) for c in candidates] == [
+        ("dashscope-prod", "qwen-max"),
+        ("google-ai-studio", "gemini-3.5-flash"),
+    ]
+    assert candidates[0]["_api_key"] == "unit-test-runtime-secret"
+    assert candidates[1]["_api_key"] == "unit-test-gemini-secret"
 
 
 @pytest.mark.asyncio
