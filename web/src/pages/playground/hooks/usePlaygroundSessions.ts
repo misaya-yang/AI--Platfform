@@ -282,7 +282,6 @@ export function usePlaygroundSessions({
         });
       } catch (err) {
         if (loadingHistorySessionRef.current === id) {
-          console.error("Failed to load session history:", err);
           const errorMessage = err instanceof Error ? err.message : String(err);
           setHistoryRestoreState("failed");
           setHistoryRestoreError(errorMessage);
@@ -367,8 +366,7 @@ export function usePlaygroundSessions({
             }
             return null;
           })
-          .catch((err) => {
-            console.warn("[Session] Thread pre-creation failed:", err);
+          .catch(() => {
             return null;
           });
         pendingThreadRef.current = threadPromise;
@@ -495,9 +493,6 @@ export function usePlaygroundSessions({
         if (sessionBelongsToCurrentService) {
           await handleSelectSession(activeSessionId!);
         } else if (activeSessionId) {
-          console.warn(
-            "[Playground] activeSessionId doesn't belong to current service, clearing"
-          );
           setActiveSessionId(undefined);
           setMessages([]);
           setHistoryRestoreState("idle");

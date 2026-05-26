@@ -324,9 +324,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
         sessionThreadIdRef.current[sessionId] = newThreadId;
         updateSession(sessionId, {
           metadata: { langgraph_thread_id: newThreadId },
-        }).catch((err) =>
-          console.error("Failed to save thread ID to session:", err),
-        );
+        }).catch(() => {});
       }
     },
     [activeSessionId, currentRequestSessionRef, sessionThreadIdRef],
@@ -372,15 +370,13 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
                   }
                 : undefined,
             },
-          }).catch((err) =>
-            console.error("Failed to persist assistant message:", err),
-          );
+          }).catch(() => {});
         }
       }
 
       // Refresh sessions sidebar
       if (sessionEnabled && serviceId) {
-        refreshSessions(true).catch(console.error);
+        refreshSessions(true).catch(() => {});
       }
     },
     [
@@ -395,8 +391,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
   );
 
   const handleError = useCallback(
-    (error: unknown) => {
-      console.error("[LangGraphStream] Error:", error);
+    () => {
       setLoading(false);
     },
     [setLoading],
@@ -544,7 +539,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
             currentRequestSessionRef.current = pendingId;
           }
         } catch (err) {
-          console.warn("Pending session init failed:", err);
+          void err;
         }
       }
 
@@ -555,9 +550,9 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
           effectiveSessionId = created.session_id;
           currentRequestSessionRef.current = created.session_id;
           setActiveSessionId(created.session_id);
-          refreshSessions(true).catch(console.error);
+          refreshSessions(true).catch(() => {});
         } catch (err) {
-          console.error("Failed to create session:", err);
+          void err;
         }
       } else if (effectiveSessionId) {
         currentRequestSessionRef.current = effectiveSessionId;
@@ -573,9 +568,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
           }));
           updateSession(effectiveSessionId, {
             metadata: { title: titleText },
-          }).catch((err) =>
-            console.error("Failed to update session title:", err),
-          );
+          }).catch(() => {});
         }
       }
 
@@ -584,9 +577,7 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
         addSessionMessage(effectiveSessionId, {
           role: "user",
           content: inputText,
-        }).catch((err) =>
-          console.error("Failed to persist user message:", err),
-        );
+        }).catch(() => {});
       }
 
       // --- Submit to SDK ---
@@ -597,7 +588,6 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
           { messages: [{ type: "human" as const, content: inputText }] },
         );
       } catch (err) {
-        console.error("[LangGraphStream] Submit failed:", err);
         setLoading(false);
 
         // Show error in messages
@@ -697,9 +687,12 @@ export function useLangGraphStream(opts: UseLangGraphStreamOptions) {
     (uiPreferences.tool_calls_mode as "full" | "collapsed" | "hidden") ??
     "full";
   const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? true;
-  const showTimeline = !uiPreferences.hide_timeline;
+  const showTimeline =
+    uiPreferences.hide_timeline == null
+      ? !isLangGraphService
+      : !uiPreferences.hide_timeline;
   const forceVisibleToolCalls =
-    activeService?.service_type === "langgraph" && !showTimeline;
+    isLangGraphService && !showTimeline;
   const resolvedToolCallsMode: "full" | "collapsed" | "hidden" =
     toolCallsMode === "hidden"
       ? "hidden"

@@ -10,7 +10,7 @@ import {
 } from "@/lib/sse";
 import { useAgentTimeline } from "@/hooks/useAgentTimeline";
 import type { ArtifactData } from "@/components/agent/ArtifactCard";
-import { buildHttpFailureError, getPlaygroundErrorMessage } from "@/lib/utils";
+import { getPlaygroundErrorMessage } from "@/lib/utils";
 import type { ChatMessage, ToolCallWithResult } from "@/components/ChatWindow";
 import type {
   ContentItem,
@@ -38,38 +38,17 @@ import {
 import type { TFunction } from "i18next";
 import {
   buildTextParts,
-  combineAbortSignals,
   estimateTokens,
   extractHistoryAssistantContent,
   extractHistoryToolCalls,
   extractMessagePayload,
-  extractRunWaitContent,
-  extractRunWaitToolCalls,
   extractToolCallUpdates,
   extractToolResult,
   mergeFallbackToolCalls,
   normalizeContentDelta,
   normalizeLangGraphEvent,
-  readPositiveMsEnv,
   type LangGraphStreamEvent,
 } from "../utils/langgraph";
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const TRANSPARENT_PROXY_STREAM_STALL_MS = readPositiveMsEnv(
-  "VITE_PROXY_STREAM_STALL_MS",
-  12000
-);
-const TRANSPARENT_PROXY_STREAM_MAX_MS = readPositiveMsEnv(
-  "VITE_PROXY_STREAM_MAX_MS",
-  45000
-);
-const TRANSPARENT_PROXY_CONTENT_IDLE_MS = readPositiveMsEnv(
-  "VITE_PROXY_CONTENT_IDLE_MS",
-  6000
-);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -212,11 +191,18 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
   // UI preference resolution
   const uiPreferences = (activeService?.metadata?.ui_preferences ||
     {}) as ServiceUiPreferences;
+  const isLangGraphService =
+    activeService?.service_type === "langgraph" ||
+    activeService?.metadata?.adapter_type === "langgraph" ||
+    activeService?.metadata?.proxy_mode === "transparent";
   const toolCallsMode: "full" | "collapsed" | "hidden" = (uiPreferences.tool_calls_mode as "full" | "collapsed" | "hidden") ?? "full";
   const toolCallsDefaultOpen = uiPreferences.tool_calls_default_open ?? true;
-  const showTimeline = !uiPreferences.hide_timeline;
+  const showTimeline =
+    uiPreferences.hide_timeline == null
+      ? !isLangGraphService
+      : !uiPreferences.hide_timeline;
   const forceVisibleToolCalls =
-    activeService?.service_type === "langgraph" && !showTimeline;
+    isLangGraphService && !showTimeline;
   const resolvedToolCallsMode: "full" | "collapsed" | "hidden" =
     toolCallsMode === "hidden"
       ? "hidden"
@@ -252,11 +238,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
       }
 
       const abortController = new AbortController();
-      const streamAbortController = new AbortController();
-      const streamSignal = combineAbortSignals([
-        abortController.signal,
-        streamAbortController.signal,
-      ]);
       abortControllerRef.current = abortController;
       const requestId = currentRequestIdRef.current + 1;
       currentRequestIdRef.current = requestId;
@@ -318,29 +299,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
       // Declare stream-scoped variables before try so they're accessible in catch/finally
       let streamState = createStreamTurnState(startTime);
-      let streamFallbackReason:
-        | "stall_timeout"
-        | "max_stream_duration"
-        | "content_idle_complete"
-        | null = null;
-      let stallTimerId: number | null = null;
-      let maxTimerId: number | null = null;
-      let contentIdleTimerId: number | null = null;
-
-      const clearStreamGuards = () => {
-        if (stallTimerId !== null) {
-          window.clearTimeout(stallTimerId);
-          stallTimerId = null;
-        }
-        if (maxTimerId !== null) {
-          window.clearTimeout(maxTimerId);
-          maxTimerId = null;
-        }
-        if (contentIdleTimerId !== null) {
-          window.clearTimeout(contentIdleTimerId);
-          contentIdleTimerId = null;
-        }
-      };
 
       const mapToolCalls = (
         state: StreamTurnState
@@ -436,7 +394,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               currentRequestSessionRef.current = pendingSessionId;
             }
           } catch (err) {
-            console.warn("Pending session initialization failed:", err);
+            void err;
           }
         }
 
@@ -447,7 +405,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             effectiveSessionId = created.session_id;
             currentRequestSessionRef.current = created.session_id;
             opts.setActiveSessionId(created.session_id);
-            refreshSessions(true).catch(console.error);
+            refreshSessions(true).catch(() => {});
           } else if (!effectiveSessionId) {
             effectiveSessionId = activeSessionId;
             currentRequestSessionRef.current = activeSessionId ?? null;
@@ -463,23 +421,17 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             }));
             updateSession(effectiveSessionId, {
               metadata: { title: titleText },
-            }).catch((err) =>
-              console.error("Failed to update session title:", err)
-            );
+            }).catch(() => {});
           }
         }
 
         const shouldPersistManually =
           useTransparentProxy && Boolean(effectiveSessionId);
         if (shouldPersistManually) {
-          try {
-            await addSessionMessage(effectiveSessionId!, {
-              role: "user",
-              content: inputText,
-            });
-          } catch (err) {
-            console.error("Failed to persist user message:", err);
-          }
+          addSessionMessage(effectiveSessionId!, {
+            role: "user",
+            content: inputText,
+          }).catch(() => {});
         }
 
         let threadId: string | undefined;
@@ -541,9 +493,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                   }
                 }
               })
-              .catch((err) =>
-                console.warn("Background thread create failed:", err)
-              );
+              .catch(() => {});
             // Don't set threadId — streaming will use stateless mode for first message,
             // or the proxy will route to a new thread automatically.
           }
@@ -557,90 +507,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
         const streamReducerContext = createStreamReducerContext();
         let streamed = false;
-
-        const armStreamStallGuard = () => {
-          if (!useTransparentProxy || abortController.signal.aborted) return;
-          if (stallTimerId !== null) {
-            window.clearTimeout(stallTimerId);
-          }
-          stallTimerId = window.setTimeout(() => {
-            if (
-              abortController.signal.aborted ||
-              streamAbortController.signal.aborted
-            ) {
-              return;
-            }
-            // Don't stall-abort if tool calls are active — during tool execution
-            // LangGraph only sends heartbeats (SSE comments, not data events),
-            // so the stall timer fires even though the stream is healthy.
-            if (streamState.toolCalls.length > 0 && !streamState.content.trim()) {
-              stallTimerId = null;
-              armStreamStallGuard();
-              return;
-            }
-            streamFallbackReason = "stall_timeout";
-            streamAbortController.abort();
-          }, TRANSPARENT_PROXY_STREAM_STALL_MS);
-        };
-
-        const armStreamMaxGuard = () => {
-          if (!useTransparentProxy || abortController.signal.aborted) return;
-          if (maxTimerId !== null) {
-            window.clearTimeout(maxTimerId);
-          }
-          maxTimerId = window.setTimeout(() => {
-            if (
-              abortController.signal.aborted ||
-              streamAbortController.signal.aborted
-            ) {
-              return;
-            }
-            // Don't abort if content already arrived
-            if (streamState.content.trim().length > 0) {
-              maxTimerId = null;
-              return;
-            }
-            // Don't abort if tool calls are active — stream is healthy,
-            // just waiting for model to generate text after tool execution
-            if (streamState.toolCalls.length > 0) {
-              // Re-arm for another cycle instead of aborting
-              maxTimerId = null;
-              armStreamMaxGuard();
-              return;
-            }
-            streamFallbackReason = "max_stream_duration";
-            streamAbortController.abort();
-          }, TRANSPARENT_PROXY_STREAM_MAX_MS);
-        };
-
-        const armContentIdleGuard = () => {
-          if (!useTransparentProxy || abortController.signal.aborted) return;
-          if (!streamState.content.trim().length) return;
-          if (contentIdleTimerId !== null) {
-            window.clearTimeout(contentIdleTimerId);
-          }
-          contentIdleTimerId = window.setTimeout(() => {
-            if (
-              abortController.signal.aborted ||
-              streamAbortController.signal.aborted
-            ) {
-              return;
-            }
-            if (!streamState.content.trim().length) {
-              return;
-            }
-            // Don't idle-abort if tool calls are active — model may resume
-            // text generation after tool execution completes (same logic as
-            // stall guard and max guard).
-            if (streamState.toolCalls.length > 0) {
-              contentIdleTimerId = null;
-              armContentIdleGuard();
-              return;
-            }
-            streamFallbackReason = "content_idle_complete";
-            streamAbortController.abort();
-          }, TRANSPARENT_PROXY_CONTENT_IDLE_MS);
-        };
 
         const scheduleFlush = () => {
           if (rafId !== null) return;
@@ -718,9 +584,14 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           }
         };
 
-        const processStreamChunk = (chunk: StreamChunk): boolean => {
-          const aguiEvent = streamChunkToAGUIEvent(chunk);
-          processAGUIEvent(aguiEvent);
+        const processStreamChunk = (
+          chunk: StreamChunk,
+          options?: { updateTimeline?: boolean }
+        ): boolean => {
+          if (options?.updateTimeline !== false) {
+            const aguiEvent = streamChunkToAGUIEvent(chunk);
+            processAGUIEvent(aguiEvent);
+          }
 
           const now = performance.now();
           const reduced = reduceLegacyStreamChunk(
@@ -745,11 +616,12 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           if (reduced.changed) {
             streamed = true;
             scheduleFlush();
-            armContentIdleGuard();
           }
 
           return reduced.terminal;
         };
+        const processNativeLangGraphChunk = (chunk: StreamChunk): boolean =>
+          processStreamChunk(chunk, { updateTimeline: false });
 
         let syntheticChunkIndex = 0;
         const nextSyntheticChunkIndex = () => {
@@ -759,13 +631,15 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
 
         try {
           if (useTransparentProxy) {
-            armStreamMaxGuard();
-            armStreamStallGuard();
             const payload = {
               input: {
                 messages: [{ role: "user", content: inputText }],
               },
-              stream_mode: ["messages", "updates", "custom"],
+              // LangGraph Agent Server names the token stream mode
+              // "messages-tuple"; library-level graph.stream() calls use
+              // "messages". Keep updates/custom for tool state and gateway
+              // failover notices.
+              stream_mode: ["messages-tuple", "updates", "custom"],
               // "exit" = only persist final state, not intermediate checkpoints.
               // Eliminates ~2-3s overhead per graph step (model/tools).
               // Safe because we don't use human-in-the-loop interrupts.
@@ -799,13 +673,12 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     : {}),
                 },
                 body: JSON.stringify(payload),
-                signal: streamSignal,
+                signal: abortController.signal,
               }
             )) {
               if (!isRequestValid()) {
                 break;
               }
-              armStreamStallGuard();
 
               const normalized = normalizeLangGraphEvent(
                 evt as LangGraphStreamEvent
@@ -821,7 +694,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                   (eventData as Record<string, unknown>)
               ) {
                 if (
-                  processStreamChunk(
+                  processNativeLangGraphChunk(
                     eventData as StreamChunk
                   )
                 ) {
@@ -1001,7 +874,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                             )
                               ? "tool_call_delta"
                               : "tool_call_start";
-                          processStreamChunk({
+                          processNativeLangGraphChunk({
                             request_id: "",
                             chunk_index:
                               nextSyntheticChunkIndex(),
@@ -1031,7 +904,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                                 tc.id ===
                                 toolResult.id
                             )?.arguments || "";
-                          processStreamChunk({
+                          processNativeLangGraphChunk({
                             request_id: "",
                             chunk_index:
                               nextSyntheticChunkIndex(),
@@ -1104,7 +977,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                               lastCumulativeContent =
                                 content;
                               if (delta) {
-                                processStreamChunk(
+                                processNativeLangGraphChunk(
                                   {
                                     request_id:
                                       "",
@@ -1138,7 +1011,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                                   streamState,
                                   ""
                                 );
-                              processStreamChunk(
+                              processNativeLangGraphChunk(
                                 {
                                   request_id:
                                     "",
@@ -1222,7 +1095,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                           (tc) =>
                             tc.id === toolResult.id
                         )?.arguments || "";
-                      processStreamChunk({
+                      processNativeLangGraphChunk({
                         request_id: "",
                         chunk_index:
                           nextSyntheticChunkIndex(),
@@ -1278,7 +1151,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                         if (delta) {
                           lastCumulativeContent =
                             content;
-                          processStreamChunk({
+                          processNativeLangGraphChunk({
                             request_id: "",
                             chunk_index:
                               nextSyntheticChunkIndex(),
@@ -1308,7 +1181,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                             streamState,
                             ""
                           );
-                        processStreamChunk({
+                        processNativeLangGraphChunk({
                           request_id: "",
                           chunk_index:
                             nextSyntheticChunkIndex(),
@@ -1324,7 +1197,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                   }
                 }
                 if (sawFinalAssistantContent) {
-                  processStreamChunk({
+                  processNativeLangGraphChunk({
                     request_id: "",
                     chunk_index:
                       nextSyntheticChunkIndex(),
@@ -1391,7 +1264,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     )
                       ? "tool_call_delta"
                       : "tool_call_start";
-                  const shouldStop = processStreamChunk({
+                  const shouldStop = processNativeLangGraphChunk({
                     request_id: "",
                     chunk_index:
                       nextSyntheticChunkIndex(),
@@ -1418,7 +1291,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     streamState.toolCalls.find(
                       (tc) => tc.id === toolResult.id
                     )?.arguments || "";
-                  processStreamChunk({
+                  processNativeLangGraphChunk({
                     request_id: "",
                     chunk_index:
                       nextSyntheticChunkIndex(),
@@ -1471,7 +1344,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                       lastCumulativeContent =
                         cumulativeContent;
                       if (actualDelta) {
-                        processStreamChunk({
+                        processNativeLangGraphChunk({
                           request_id: "",
                           chunk_index:
                             nextSyntheticChunkIndex(),
@@ -1500,7 +1373,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                           streamState,
                           ""
                         );
-                      processStreamChunk({
+                      processNativeLangGraphChunk({
                         request_id: "",
                         chunk_index:
                           nextSyntheticChunkIndex(),
@@ -1542,38 +1415,19 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             streamErr instanceof Error &&
             streamErr.name === "AbortError"
           ) {
-            if (
-              streamFallbackReason &&
-              !abortController.signal.aborted
-            ) {
-              const log =
-                streamFallbackReason ===
-                "content_idle_complete"
-                  ? console.info
-                  : console.warn;
-              log(
-                "[Playground] transparent proxy stream aborted for fallback",
-                {
-                  serviceId,
-                  reason: streamFallbackReason,
-                }
-              );
-            } else {
-              streamState = cancelStreamTurn(
-                streamState,
-                performance.now()
-              );
-              flushAssistant({
-                status: "cancelled",
-                isStreaming: false,
-              }, true);
-              closeStreamTrace("cancelled", {
-                reason: "abort_signal",
-              });
-              cancelFlush();
-              clearStreamGuards();
-              return;
-            }
+            streamState = cancelStreamTurn(
+              streamState,
+              performance.now()
+            );
+            flushAssistant({
+              status: "cancelled",
+              isStreaming: false,
+            }, true);
+            closeStreamTrace("cancelled", {
+              reason: "abort_signal",
+            });
+            cancelFlush();
+            return;
           } else if (
             !streamState.content &&
             streamState.toolCalls.length === 0
@@ -1583,7 +1437,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         }
 
         cancelFlush();
-        clearStreamGuards();
 
         if (!isRequestValid()) {
           // Force-update the message so it doesn't stay stuck in streaming
@@ -1622,18 +1475,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
         const needsFallback =
           !streamState.content &&
           (streamState.toolCalls.length > 0 || !streamed);
-
-        if (streamFallbackReason && streamState.content) {
-          console.info(
-            "[Playground] stream fallback skipped because content already arrived",
-            {
-              serviceId,
-              reason: streamFallbackReason,
-              contentLength: streamState.content.length,
-              toolCalls: streamState.toolCalls.length,
-            }
-          );
-        }
 
         if (needsFallback) {
           try {
@@ -1703,64 +1544,15 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                         historyContent
                       );
                     recoveredFromHistory = true;
-                    console.info(
-                      "[Playground] recovered transparent proxy content from thread history",
-                      {
-                        serviceId,
-                        threadId,
-                        contentLength:
-                          historyContent.length,
-                      }
-                    );
                   }
                 }
               }
               if (!recoveredFromHistory) {
-                const waitPath = threadId
-                  ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/wait`
-                  : `/api/v1/proxy/${serviceId}/runs/wait`;
-                const waitPayload = {
-                  input: {
-                    messages: [
-                      {
-                        role: "user",
-                        content: inputText,
-                      },
-                    ],
-                  },
-                };
-                const resp = await fetch(waitPath, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type":
-                      "application/json",
-                    ...(token
-                      ? {
-                          Authorization: `Bearer ${token}`,
-                        }
-                      : {}),
-                  },
-                  body: JSON.stringify(waitPayload),
-                  signal: abortController.signal,
-                });
-                if (!resp.ok) {
-                  const errorText = await resp
-                    .text()
-                    .catch(() => "");
-                  throw buildHttpFailureError(
-                    "Run wait failed",
-                    resp.status,
-                    errorText
-                  );
-                }
-                const data = await resp.json();
-                streamState = mergeFallbackToolCalls(
-                  streamState,
-                  extractRunWaitToolCalls(data)
-                );
-                streamState = setStreamTurnContent(
-                  streamState,
-                  extractRunWaitContent(data)
+                throw new Error(
+                  t(
+                    "playground.errors.noStreamContent",
+                    "No response was received from the agent. Please retry."
+                  )
                 );
               }
             } else {
@@ -1865,12 +1657,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 total_tokens: totalTokens,
               },
             },
-          }).catch((err) =>
-            console.error(
-              "Failed to persist assistant message:",
-              err
-            )
-          );
+          }).catch(() => {});
         }
         const finalOutcome =
           streamState.status === "failed"
@@ -1883,9 +1670,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           firstTokenMs,
           totalTokens,
           toolCalls: streamState.toolCalls.length,
-          ...(streamFallbackReason
-            ? { fallbackReason: streamFallbackReason }
-            : {}),
           ...(streamState.error
             ? { error: streamState.error }
             : {}),
@@ -1909,7 +1693,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           return;
         }
 
-        console.error("[Playground] request failed:", err);
         const message = getPlaygroundErrorMessage(err, t);
         streamState = failStreamTurn(
           streamState,
@@ -1962,7 +1745,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
           return next;
         });
       } finally {
-        clearStreamGuards();
         if (!streamTraceClosed) {
           closeStreamTrace("cancelled", {
             reason: "finalized_without_outcome",

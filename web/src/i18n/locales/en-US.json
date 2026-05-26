@@ -1914,6 +1914,7 @@
       "modelProviderUnavailable": "The selected model provider is unavailable. The gateway logged the failure; please retry or choose another model.",
       "modelFallbackExhausted": "All configured model fallbacks are unavailable. Please retry later or update the service model policy.",
       "modelQuotaExhausted": "The selected model account has no available quota. Please choose another funded provider or update the service configuration.",
+      "noStreamContent": "No response was received from the agent. Please retry.",
       "invalidAssistant": "Service configuration is invalid (assistant/graph mismatch). Please contact an administrator.",
       "upstreamUnavailable": "Upstream agent service is unavailable. Please check service health and retry.",
       "timeout": "The request timed out. Please try again.",

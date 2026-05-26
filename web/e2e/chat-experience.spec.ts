@@ -597,6 +597,8 @@ test("playground handles mocked stream with tool call lifecycle", async ({ page 
 
 test("playground renders native langgraph tool events without heavy assistant card", async ({ page }) => {
   const harness = await installPlaygroundHarness(page);
+  let requestedStreamMode: unknown;
+  let waitHits = 0;
   await seedClientPrefs(page, {
     locale: "zh-CN",
     themeMode: "dark",
@@ -606,6 +608,7 @@ test("playground renders native langgraph tool events without heavy assistant ca
 
   const nativeLangGraphStream = async (route: Route) => {
     harness.recordStreamHit();
+    requestedStreamMode = route.request().postDataJSON()?.stream_mode;
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
@@ -645,9 +648,11 @@ test("playground renders native langgraph tool events without heavy assistant ca
   await page.route("**/api/v1/proxy/**/runs/stream", nativeLangGraphStream);
   await page.route("**/api/v1/proxy/**/threads/**/runs/stream", nativeLangGraphStream);
   await page.route("**/api/v1/proxy/**/runs/wait", async (route) => {
+    waitHits += 1;
     await route.fulfill(jsonResponse(nativeWaitResponse));
   });
   await page.route("**/api/v1/proxy/**/threads/**/runs/wait", async (route) => {
+    waitHits += 1;
     await route.fulfill(jsonResponse(nativeWaitResponse));
   });
 
@@ -660,6 +665,7 @@ test("playground renders native langgraph tool events without heavy assistant ca
 
   await expect(page.getByText("Imam native response")).toBeVisible();
   await expect(page.getByText("classify_query")).toBeVisible();
+  await expect(page.locator('[data-message-supplemental="timeline"]')).toHaveCount(0);
 
   const assistantSurface = page
     .locator('[data-message-role="assistant"] [data-message-surface="assistant"]')
@@ -674,5 +680,7 @@ test("playground renders native langgraph tool events without heavy assistant ca
 
   expect(surfaceStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
   expect(surfaceStyles.boxShadow).toBe("none");
+  expect(requestedStreamMode).toEqual(["messages-tuple", "updates", "custom"]);
+  expect(waitHits).toBe(0);
   expect(harness.getStreamHits()).toBeGreaterThan(0);
 });
