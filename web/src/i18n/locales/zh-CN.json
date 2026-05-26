@@ -2869,6 +2869,8 @@
         "weightHint": "用于负载均衡的流量权重",
         "maxQueue": "最大队列",
         "maxQueueHint": "最大排队请求数",
+        "notEnforced": "优先级调度尚未强制执行",
+        "notEnforcedHint": "网关调度器启用前，这些字段会保持禁用。",
         "save": "保存优先级"
       },
       "danger": {

@@ -104,3 +104,6 @@ async def test_service_rate_limit_rejects_with_429() -> None:
             service_config=_make_service_config(True),
         )
     assert exc.value.status_code == 429
+    assert exc.value.headers["Retry-After"] == "30"
+    assert exc.value.headers["X-RateLimit-Limit"] == "5"
+    assert exc.value.detail["error"]["code"] == "RATE_LIMIT_EXCEEDED"

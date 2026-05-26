@@ -10,9 +10,12 @@ This service handles:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import math
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -58,6 +61,9 @@ class QuotaCheckResult:
     monthly_cost_limit: int | None = None  # in cents
     daily_requests_used: int = 0
     daily_requests_limit: int | None = None
+    requests_per_minute_used: int = 0
+    requests_per_minute_limit: int | None = None
+    retry_after_seconds: int = 0
     warning_threshold: int = 80
     overage_strategy: OverageStrategy = OverageStrategy.ALLOW_BUT_ALERT
     downgraded_model: str | None = None
@@ -110,6 +116,11 @@ class QuotaCheckResult:
                 "used": self.daily_requests_used,
                 "limit": self.daily_requests_limit,
             },
+            "minute_requests": {
+                "used": self.requests_per_minute_used,
+                "limit": self.requests_per_minute_limit,
+                "retry_after_seconds": self.retry_after_seconds,
+            },
             "policy": {
                 "overage_strategy": self.overage_strategy.value,
                 "downgraded_model": self.downgraded_model,
@@ -157,6 +168,8 @@ class QuotaService:
 
     def __init__(self, database: DatabaseStorage | None = None):
         self.database = database
+        self._rpm_requests: dict[tuple[str, str], deque[float]] = {}
+        self._rpm_lock = asyncio.Lock()
 
     def set_database(self, database: DatabaseStorage) -> None:
         """Set or update the database storage instance."""
@@ -218,6 +231,35 @@ class QuotaService:
         except Exception:
             return OverageStrategy.ALLOW_BUT_ALERT
 
+    async def _check_requests_per_minute(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int | None,
+    ) -> tuple[bool, int, int]:
+        """Single-node RPM pre-check for quota governance."""
+        normalized_limit = self._normalize_limit(limit)
+        if normalized_limit is None:
+            return True, 0, 0
+
+        now = time.monotonic()
+        window_start = now - 60
+        key = (tenant_id, user_id)
+
+        async with self._rpm_lock:
+            timestamps = self._rpm_requests.setdefault(key, deque())
+            while timestamps and timestamps[0] < window_start:
+                timestamps.popleft()
+
+            current_count = len(timestamps)
+            if current_count >= normalized_limit:
+                retry_after = int(max((timestamps[0] + 60) - now, 1)) if timestamps else 60
+                return False, current_count, retry_after
+
+            timestamps.append(now)
+            return True, current_count + 1, 0
+
     async def _record_quota_exceeded_event(
         self,
         tenant_id: str,
@@ -242,6 +284,7 @@ class QuotaService:
         tenant_id: str,
         user_id: str,
         estimated_tokens: int = 0,
+        record_security_event: bool = True,
     ) -> QuotaCheckResult:
         """
         Check if user has sufficient quota for a request.
@@ -262,10 +305,12 @@ class QuotaService:
 
         # Check if blocked
         if quota.is_blocked:
-            await self._record_quota_exceeded_event(tenant_id, user_id)
+            if record_security_event:
+                await self._record_quota_exceeded_event(tenant_id, user_id)
             return QuotaCheckResult(
                 status=QuotaStatus.BLOCKED,
                 message=f"User is blocked: {quota.blocked_reason or 'Unknown reason'}",
+                requests_per_minute_limit=quota.requests_per_minute,
                 overage_strategy=quota.overage_strategy,
                 downgraded_model=quota.downgraded_model,
             )
@@ -291,7 +336,13 @@ class QuotaService:
             else None
         )
 
-        def _result(status: QuotaStatus, message: str) -> QuotaCheckResult:
+        def _result(
+            status: QuotaStatus,
+            message: str,
+            *,
+            rpm_used: int = 0,
+            retry_after_seconds: int = 0,
+        ) -> QuotaCheckResult:
             return QuotaCheckResult(
                 status=status,
                 message=message,
@@ -301,48 +352,92 @@ class QuotaService:
                 monthly_cost_limit=effective_monthly_cost_limit,
                 daily_requests_used=quota.current_daily_requests,
                 daily_requests_limit=quota.requests_per_day,
+                requests_per_minute_used=rpm_used,
+                requests_per_minute_limit=quota.requests_per_minute,
+                retry_after_seconds=retry_after_seconds,
                 warning_threshold=quota.warning_threshold,
                 overage_strategy=quota.overage_strategy,
                 downgraded_model=quota.downgraded_model,
             )
 
-        async def _apply_overage_policy(base_message: str) -> QuotaCheckResult:
+        async def _apply_overage_policy(
+            base_message: str,
+            *,
+            rpm_used: int = 0,
+            retry_after_seconds: int = 0,
+        ) -> QuotaCheckResult:
             strategy = quota.overage_strategy
             # Record quota_exceeded security event
-            await self._record_quota_exceeded_event(tenant_id, user_id)
+            if record_security_event:
+                await self._record_quota_exceeded_event(tenant_id, user_id)
 
             if strategy == OverageStrategy.HARD_BLOCK:
-                return _result(QuotaStatus.BLOCKED, base_message)
+                return _result(
+                    QuotaStatus.BLOCKED,
+                    base_message,
+                    rpm_used=rpm_used,
+                    retry_after_seconds=retry_after_seconds,
+                )
             if strategy == OverageStrategy.RATE_LIMIT:
-                return _result(QuotaStatus.EXCEEDED, f"{base_message}; strategy=rate_limit")
+                return _result(
+                    QuotaStatus.EXCEEDED,
+                    f"{base_message}; strategy=rate_limit",
+                    rpm_used=rpm_used,
+                    retry_after_seconds=retry_after_seconds,
+                )
             if strategy == OverageStrategy.DOWNGRADE_MODEL:
                 model_msg = (
                     f"; downgrade={quota.downgraded_model}" if quota.downgraded_model else ""
                 )
                 return _result(
-                    QuotaStatus.EXCEEDED, f"{base_message}; strategy=downgrade_model{model_msg}"
+                    QuotaStatus.EXCEEDED,
+                    f"{base_message}; strategy=downgrade_model{model_msg}",
+                    rpm_used=rpm_used,
+                    retry_after_seconds=retry_after_seconds,
                 )
-            return _result(QuotaStatus.EXCEEDED, f"{base_message}; strategy=allow_but_alert")
+            return _result(
+                QuotaStatus.EXCEEDED,
+                f"{base_message}; strategy=allow_but_alert",
+                rpm_used=rpm_used,
+                retry_after_seconds=retry_after_seconds,
+            )
 
         # Check daily token limit
-        if effective_daily_token_limit:
-            if quota.current_daily_tokens + estimated_tokens > effective_daily_token_limit:
-                return await _apply_overage_policy("Daily token limit exceeded")
+        if (
+            effective_daily_token_limit
+            and quota.current_daily_tokens + estimated_tokens > effective_daily_token_limit
+        ):
+            return await _apply_overage_policy("Daily token limit exceeded")
 
         # Check monthly token limit
-        if effective_monthly_token_limit:
-            if quota.current_monthly_tokens + estimated_tokens > effective_monthly_token_limit:
-                return await _apply_overage_policy("Monthly token limit exceeded")
+        if (
+            effective_monthly_token_limit
+            and quota.current_monthly_tokens + estimated_tokens > effective_monthly_token_limit
+        ):
+            return await _apply_overage_policy("Monthly token limit exceeded")
 
         # Check monthly cost limit
-        if effective_monthly_cost_limit:
-            if quota.current_monthly_cost_cents >= effective_monthly_cost_limit:
-                return await _apply_overage_policy("Monthly cost limit exceeded")
+        if (
+            effective_monthly_cost_limit
+            and quota.current_monthly_cost_cents >= effective_monthly_cost_limit
+        ):
+            return await _apply_overage_policy("Monthly cost limit exceeded")
 
         # Check daily request limit
-        if quota.requests_per_day:
-            if quota.current_daily_requests >= quota.requests_per_day:
-                return await _apply_overage_policy("Daily request limit exceeded")
+        if quota.requests_per_day and quota.current_daily_requests >= quota.requests_per_day:
+            return await _apply_overage_policy("Daily request limit exceeded")
+
+        rpm_allowed, rpm_used, rpm_retry_after = await self._check_requests_per_minute(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=quota.requests_per_minute,
+        )
+        if not rpm_allowed:
+            return await _apply_overage_policy(
+                "Minute request limit exceeded",
+                rpm_used=rpm_used,
+                retry_after_seconds=rpm_retry_after,
+            )
 
         # Check warning threshold
         warning_messages = []
@@ -358,9 +453,9 @@ class QuotaService:
                 warning_messages.append(f"Monthly cost at {pct:.1f}%")
 
         if warning_messages:
-            return _result(QuotaStatus.WARNING, "; ".join(warning_messages))
+            return _result(QuotaStatus.WARNING, "; ".join(warning_messages), rpm_used=rpm_used)
 
-        return _result(QuotaStatus.OK, "Quota check passed")
+        return _result(QuotaStatus.OK, "Quota check passed", rpm_used=rpm_used)
 
     async def update_usage(
         self,

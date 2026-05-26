@@ -2869,6 +2869,8 @@
         "weightHint": "Traffic weight for load balancing",
         "maxQueue": "Max Queue",
         "maxQueueHint": "Max queued requests",
+        "notEnforced": "Priority scheduling is not enforced",
+        "notEnforcedHint": "These fields are disabled until the gateway scheduler is enabled.",
         "save": "Save Priority"
       },
       "danger": {

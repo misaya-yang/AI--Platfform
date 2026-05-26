@@ -566,6 +566,8 @@ class ProxySettings(BaseModel):
     billing_enabled: bool = True
     billing_buffer_size: int = 100
     billing_flush_interval: float = 5.0
+    quota_check_failure_mode: str = "fail_open"  # fail_open | fail_closed
+    quota_alert_dedupe_ttl_seconds: float = 60.0
 
     # 上下文注入配置
     inject_user_info: bool = True

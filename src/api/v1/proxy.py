@@ -38,6 +38,7 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitContext,
     RateLimitHeaders,
 )
+from ...core.gateway.rate_policy import RatePolicyResolver
 from ...core.observability.metrics import get_metrics
 from ...core.utils import estimate_tokens
 from ...proxy import (
@@ -242,7 +243,7 @@ def _override_model_in_request_payload(payload: Any, model: str) -> Any:
     updated["model"] = model
     if isinstance(updated.get("input"), dict):
         input_payload = dict(updated["input"])
-        input_payload.setdefault("model", model)
+        input_payload["model"] = model
         updated["input"] = input_payload
     if isinstance(updated.get("config"), dict):
         config_payload = dict(updated["config"])
@@ -277,6 +278,97 @@ def _should_apply_quota_policy(method: str, operation: str, path: str) -> bool:
         return True
     normalized_path = path.lower()
     return "/runs" in normalized_path
+
+
+def _quota_check_failure_mode(request: Request) -> str:
+    settings = getattr(request.app.state, "settings", None)
+    configured = getattr(
+        getattr(settings, "proxy", None),
+        "quota_check_failure_mode",
+        "fail_open",
+    )
+    mode = str(configured or "fail_open").strip().lower()
+    return mode if mode in {"fail_open", "fail_closed"} else "fail_open"
+
+
+def _quota_retry_after_seconds(check: Any) -> int:
+    try:
+        retry_after = int(getattr(check, "retry_after_seconds", 0) or 0)
+    except Exception:
+        retry_after = 0
+    return retry_after if retry_after > 0 else 60
+
+
+def _quota_security_metadata(request: Request, check: Any) -> dict[str, Any]:
+    return {
+        "policy": str(getattr(getattr(check, "overage_strategy", None), "value", "") or ""),
+        "status": str(getattr(getattr(check, "status", None), "value", "") or ""),
+        "request_id": _current_trace_id(request),
+        "message": str(getattr(check, "message", "") or ""),
+    }
+
+
+async def _record_quota_exceeded_decision(
+    *,
+    request: Request,
+    auth: AuthContext,
+    user: UserContext,
+    service_name: str,
+    check: Any,
+) -> None:
+    await _record_security_event(
+        event_type="quota_exceeded",
+        tenant_id=auth.tenant_id or user.tenant_id,
+        user_id=user.user_id or auth.user_id,
+        service_id=service_name,
+        metadata=_quota_security_metadata(request, check),
+    )
+
+
+def _should_create_quota_alert(
+    *,
+    request: Request,
+    tenant_id: str,
+    user_id: str,
+    check: Any,
+) -> bool:
+    settings = getattr(request.app.state, "settings", None)
+    ttl = getattr(
+        getattr(settings, "proxy", None),
+        "quota_alert_dedupe_ttl_seconds",
+        60,
+    )
+    try:
+        ttl_seconds = max(float(ttl or 0), 0.0)
+    except Exception:
+        ttl_seconds = 60.0
+    if ttl_seconds <= 0:
+        return True
+
+    cache = getattr(request.app.state, "_quota_alert_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        request.app.state._quota_alert_cache = cache
+
+    now = time.monotonic()
+    expired = [key for key, expires_at in cache.items() if float(expires_at or 0) <= now]
+    for key in expired:
+        cache.pop(key, None)
+
+    key = "|".join(
+        (
+            tenant_id,
+            user_id,
+            str(getattr(getattr(check, "overage_strategy", None), "value", "") or ""),
+            str(getattr(check, "message", "") or ""),
+            str(getattr(check, "daily_tokens_limit", "") or ""),
+            str(getattr(check, "monthly_cost_limit", "") or ""),
+        )
+    )
+    if key in cache:
+        return False
+    cache[key] = now + ttl_seconds
+    return True
 
 
 def _inject_gateway_domain_policy_metadata(
@@ -498,17 +590,44 @@ async def _apply_quota_policy(
             tenant_id=auth.tenant_id or user.tenant_id or "default",
             user_id=user.user_id or auth.user_id or "anonymous",
             estimated_tokens=estimated_tokens,
+            record_security_event=False,
         )
     except Exception as exc:
-        logger.warning(f"[ProxyQuota] quota check failed, skipping enforcement: {exc}")
+        failure_mode = _quota_check_failure_mode(request)
+        logger.warning(
+            "[ProxyQuota] quota check failed, mode=%s: %s",
+            failure_mode,
+            exc,
+        )
+        if failure_mode == "fail_closed":
+            await _record_security_event(
+                event_type="quota_check_failed",
+                tenant_id=auth.tenant_id or user.tenant_id,
+                user_id=user.user_id or auth.user_id,
+                service_id=service_name,
+                metadata={
+                    "request_id": _current_trace_id(request),
+                    "mode": failure_mode,
+                    "error": str(exc)[:256],
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "QUOTA_CHECK_UNAVAILABLE",
+                    "message": "Quota check failed and fail-closed mode is enabled",
+                    "policy": failure_mode,
+                },
+            ) from exc
         return body, model_hint
 
     if check.status == QuotaStatus.BLOCKED:
-        await _record_security_event(
-            event_type="quota_exceeded",
-            tenant_id=auth.tenant_id or user.tenant_id,
-            user_id=user.user_id,
-            service_id=service_name,
+        await _record_quota_exceeded_decision(
+            request=request,
+            auth=auth,
+            user=user,
+            service_name=service_name,
+            check=check,
         )
         raise HTTPException(
             status_code=403,
@@ -521,11 +640,12 @@ async def _apply_quota_policy(
 
     if not check.can_proceed:
         status_code = 429 if check.overage_strategy == OverageStrategy.RATE_LIMIT else 403
-        await _record_security_event(
-            event_type="quota_exceeded",
-            tenant_id=auth.tenant_id or user.tenant_id,
-            user_id=user.user_id,
-            service_id=service_name,
+        await _record_quota_exceeded_decision(
+            request=request,
+            auth=auth,
+            user=user,
+            service_name=service_name,
+            check=check,
         )
         raise HTTPException(
             status_code=status_code,
@@ -534,16 +654,19 @@ async def _apply_quota_policy(
                 "status": check.status.value,
                 "policy": check.overage_strategy.value,
             },
-            headers={"Retry-After": "60"} if status_code == 429 else None,
+            headers={"Retry-After": str(_quota_retry_after_seconds(check))}
+            if status_code == 429
+            else None,
         )
 
     final_model = (model_hint or "").strip() or None
     if check.status == QuotaStatus.EXCEEDED:
-        await _record_security_event(
-            event_type="quota_exceeded",
-            tenant_id=auth.tenant_id or user.tenant_id,
-            user_id=user.user_id,
-            service_id=service_name,
+        await _record_quota_exceeded_decision(
+            request=request,
+            auth=auth,
+            user=user,
+            service_name=service_name,
+            check=check,
         )
         if check.overage_strategy == OverageStrategy.DOWNGRADE_MODEL and check.downgraded_model:
             downgraded_model = check.downgraded_model.strip()
@@ -553,15 +676,23 @@ async def _apply_quota_policy(
             final_model = downgraded_model
         elif check.overage_strategy == OverageStrategy.ALLOW_BUT_ALERT:
             with contextlib.suppress(Exception):
-                await quota_service.create_alert(
-                    tenant_id=auth.tenant_id or user.tenant_id or "default",
-                    user_id=user.user_id or "anonymous",
-                    alert_type="quota_allow_but_alert",
-                    threshold_value=check.warning_threshold,
-                    current_value=check.daily_tokens_used,
-                    limit_value=check.daily_tokens_limit or 0,
-                    message=check.message,
-                )
+                tenant_id = auth.tenant_id or user.tenant_id or "default"
+                user_id = user.user_id or auth.user_id or "anonymous"
+                if _should_create_quota_alert(
+                    request=request,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    check=check,
+                ):
+                    await quota_service.create_alert(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        alert_type="quota_allow_but_alert",
+                        threshold_value=check.warning_threshold,
+                        current_value=check.daily_tokens_used,
+                        limit_value=check.daily_tokens_limit or 0,
+                        message=check.message,
+                    )
 
     return body, final_model
 
@@ -928,20 +1059,62 @@ async def check_proxy_rate_limit(
     service_name: str,
     operation: str = "proxy",
     service_config: ProxyServiceConfig | None = None,
+    request: Request | None = None,
 ) -> None:
     """检查代理限流"""
     if not rate_limiter:
         return
 
-    service_limit_enabled = bool(
+    if request is not None:
+        resolver = getattr(request.app.state, "rate_policy_resolver", None)
+        if resolver is None:
+            resolver = RatePolicyResolver()
+            request.app.state.rate_policy_resolver = resolver
+        policies = await resolver.resolve(
+            request=request,
+            user=user,
+            service_name=service_name,
+            operation=operation,
+            service_config=service_config,
+        )
+        for policy in policies:
+            result = await rate_limiter.check_custom_limit(
+                key=policy.key,
+                limit=policy.requests,
+                window=policy.window,
+                dimension=policy.dimension,
+            )
+            _record_rate_limit_decision(
+                result.dimension or policy.dimension, service_name, result.allowed
+            )
+            if not result.allowed:
+                await _record_security_event(
+                    event_type="rate_limited",
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id,
+                    service_id=service_name,
+                    metadata={
+                        "permission_check": {
+                            "dimension": result.dimension,
+                            "limit": result.limit,
+                            "remaining": result.remaining,
+                            "retry_after": result.retry_after,
+                        }
+                    },
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=RateLimitHeaders.build_exceeded_response(result),
+                    headers=RateLimitHeaders.build(result),
+                )
+        if policies:
+            return
+    elif (
         service_config
         and service_config.rate_limit_enabled
         and int(service_config.rate_limit_requests or 0) > 0
         and int(service_config.rate_limit_window or 0) > 0
-    )
-
-    if service_limit_enabled:
-        # Service-level limit has higher priority than global multi-dimension policies.
+    ):
         tenant_scope = (user.tenant_id or "public").strip() or "public"
         subject = (user.user_id or user.ip or "anonymous").strip() or "anonymous"
         safe_operation = str(operation or "proxy").strip() or "proxy"
@@ -1075,6 +1248,7 @@ async def transparent_proxy_handler(
         service_name=service_name,
         operation=operation,
         service_config=service_config,
+        request=request,
     )
     t_rate_limit = time.perf_counter()
 
@@ -1467,6 +1641,7 @@ async def proxy_service_selftest(
         service_name=service_name,
         operation="proxy_selftest",
         service_config=config,
+        request=request,
     )
 
     context = _build_request_context(request, user)

@@ -4,13 +4,14 @@ import hashlib
 import secrets
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...core.auth.permissions import (
     Capability,
 )
-from ai_gateway_core.logging import get_logger
+from ...core.gateway.rate_policy import RatePolicyResolver
 from ..deps import AuthContext, get_auth_context, require_gateway_capability
 
 logger = get_logger(__name__)
@@ -43,6 +44,7 @@ class RateLimitRule(BaseModel):
     requests: int = Field(..., description="允许的请求数")
     window: int = Field(..., description="时间窗口（秒）")
     burst: int = Field(0, description="突发允许数")
+    strategy: str = Field("sliding_window", description="限流策略")
     enabled: bool = True
 
 
@@ -88,6 +90,19 @@ _runtime_config: dict[str, Any] = {
     "rate_limits": [],
     "api_keys": [],
 }
+
+
+def _get_rate_policy_resolver(request: Request) -> RatePolicyResolver:
+    resolver = getattr(request.app.state, "rate_policy_resolver", None)
+    if resolver is None:
+        resolver = RatePolicyResolver()
+        request.app.state.rate_policy_resolver = resolver
+    return resolver
+
+
+def _sync_runtime_rate_limit_rules(request: Request) -> None:
+    request.app.state.rate_limit_rules = _runtime_config.setdefault("rate_limits", [])
+    _get_rate_policy_resolver(request).invalidate()
 
 
 # ===== LangGraph 服务快速注册 =====
@@ -338,6 +353,7 @@ async def list_rate_limits(
         limits = await db.get_rate_limits()
         return {"rules": limits}
 
+    _sync_runtime_rate_limit_rules(request)
     return {"rules": _runtime_config.get("rate_limits", [])}
 
 
@@ -361,8 +377,7 @@ async def create_rate_limit(
         # 运行时存储
         _runtime_config.setdefault("rate_limits", []).append(rule)
 
-    # 更新运行时限流器
-    # TODO: 动态更新 rate_limiter
+    _sync_runtime_rate_limit_rules(request)
 
     return {"status": "success", "message": "限流规则已创建"}
 
@@ -377,7 +392,21 @@ async def delete_rate_limit(
     """删除限流规则（仅管理员）"""
     require_gateway_capability(request, auth, Capability.GATEWAY_RATE_LIMIT_WRITE)
 
-    # TODO: 实现删除逻辑
+    db = getattr(request.app.state, "database", None)
+    if db and db.enabled and hasattr(db, "delete_rate_limit"):
+        await db.delete_rate_limit(scope, scope_id)
+    else:
+        rules = _runtime_config.setdefault("rate_limits", [])
+        _runtime_config["rate_limits"] = [
+            rule
+            for rule in rules
+            if not (
+                str(rule.get("scope") or "") == scope
+                and str(rule.get("scope_id") or "") == scope_id
+            )
+        ]
+
+    _sync_runtime_rate_limit_rules(request)
     return {"status": "success", "message": "限流规则已删除"}
 
 
@@ -533,6 +562,8 @@ async def get_service_config(
                 "priority": config.priority.priority,
                 "weight": config.priority.weight,
                 "max_queue_size": config.priority.max_queue_size,
+                "enforced": False,
+                "scheduler": "not_configured",
             },
         },
         # 兼容旧格式

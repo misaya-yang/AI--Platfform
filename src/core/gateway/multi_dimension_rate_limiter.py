@@ -226,7 +226,7 @@ class MultiDimensionRateLimiter:
             dimension=dimension,
         )
 
-    async def _check_global(self, context: RateLimitContext) -> RateLimitResult:
+    async def _check_global(self, _context: RateLimitContext) -> RateLimitResult:
         """检查全局限流"""
         return await self._sliding_window_check(
             key="ratelimit:global",
@@ -375,8 +375,8 @@ class MultiDimensionRateLimiter:
 
             # 移除过期的请求记录
             pipe.zremrangebyscore(key, 0, window_start)
-            # 添加当前请求
-            pipe.zadd(key, {str(now): now})
+            # 添加当前请求。member 必须唯一，否则同一时间戳下的并发请求会相互覆盖。
+            pipe.zadd(key, {f"{now}:{time.time_ns()}": now})
             # 获取窗口内的请求数
             pipe.zcard(key)
             # 设置 key 过期时间
@@ -421,12 +421,15 @@ class RateLimitHeaders:
 
     @staticmethod
     def build(result: RateLimitResult) -> dict[str, str]:
-        return {
+        headers = {
             "X-RateLimit-Limit": str(result.limit),
             "X-RateLimit-Remaining": str(result.remaining),
             "X-RateLimit-Reset": str(result.reset_at),
             "X-RateLimit-Dimension": result.dimension,
         }
+        if result.retry_after > 0:
+            headers["Retry-After"] = str(result.retry_after)
+        return headers
 
     @staticmethod
     def build_exceeded_response(result: RateLimitResult) -> dict[str, Any]:

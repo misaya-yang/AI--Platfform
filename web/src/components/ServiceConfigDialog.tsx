@@ -53,6 +53,8 @@ interface ServiceConfig {
     priority: number;
     weight: number;
     max_queue_size: number;
+    enforced?: boolean;
+    scheduler?: string;
   };
 }
 
@@ -183,6 +185,7 @@ export function ServiceConfigDialog({
   });
 
   const config = configQuery.data?.config;
+  const priorityEnforced = config?.priority?.enforced === true;
   const serviceDetail: ServiceDetail | undefined = serviceQuery.data;
   const isLangGraphService = detectLangGraphService(serviceDetail);
 
@@ -413,6 +416,7 @@ export function ServiceConfigDialog({
   };
 
   const handleSavePriority = () => {
+    if (!priorityEnforced) return;
     updateMutation.mutate({ priority: priorityForm });
   };
 
@@ -1225,6 +1229,18 @@ export function ServiceConfigDialog({
             {/* 优先级配置 */}
             <TabsContent value="priority" className="space-y-4 pt-4">
               <div className="rounded-lg border p-4 space-y-4">
+                {!priorityEnforced && (
+                  <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/30 p-3">
+                    <div>
+                      <Label>{t("services.configDialog.priority.notEnforced")}</Label>
+                      <p className="text-xs text-muted-foreground">
+                        {t("services.configDialog.priority.notEnforcedHint")}
+                      </p>
+                    </div>
+                    <Badge variant="secondary">{config?.priority?.scheduler || "disabled"}</Badge>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label>{t("services.configDialog.priority.level")}</Label>
                   <div className="flex items-center gap-4">
@@ -1239,6 +1255,7 @@ export function ServiceConfigDialog({
                           priority: parseInt(e.target.value),
                         })
                       }
+                      disabled={!priorityEnforced}
                       className="flex-1"
                     />
                     <span className="w-8 text-center font-mono">{priorityForm.priority}</span>
@@ -1257,6 +1274,7 @@ export function ServiceConfigDialog({
                       type="number"
                       min="1"
                       value={priorityForm.weight}
+                      disabled={!priorityEnforced}
                       onChange={(e) =>
                         setPriorityForm({
                           ...priorityForm,
@@ -1273,6 +1291,7 @@ export function ServiceConfigDialog({
                       type="number"
                       min="1"
                       value={priorityForm.max_queue_size}
+                      disabled={!priorityEnforced}
                       onChange={(e) =>
                         setPriorityForm({
                           ...priorityForm,
@@ -1286,7 +1305,10 @@ export function ServiceConfigDialog({
               </div>
 
               <div className="flex justify-end">
-                <Button onClick={handleSavePriority} disabled={updateMutation.isPending}>
+                <Button
+                  onClick={handleSavePriority}
+                  disabled={!priorityEnforced || updateMutation.isPending}
+                >
                   {updateMutation.isPending ? t("common.saving") : t("services.configDialog.priority.save")}
                 </Button>
               </div>
