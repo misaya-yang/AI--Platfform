@@ -21,23 +21,25 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ..core.observability.metrics import get_metrics
 from ..services.metrics.observability import (
     classify_error_type,
     ensure_duration_breakdown,
     extract_duration_breakdown,
 )
-
-# Phase 0 hotfix: retry & DLQ constants for billing flush failures
-_FLUSH_RETRY_BACKOFFS: tuple[float, ...] = (0.1, 0.5, 2.0)
-_BILLING_DLQ_KEY = "metrics:billing:dead_letter"
-_BILLING_DLQ_CAP = 10_000
 from ..services.metrics.usage_parser import (
     extract_assistant_id,
     extract_model,
     extract_provider,
     extract_token_usage,
 )
+
+# Phase 0 hotfix: retry & DLQ constants for billing flush failures
+_FLUSH_RETRY_BACKOFFS: tuple[float, ...] = (0.1, 0.5, 2.0)
+_BILLING_DLQ_KEY = "metrics:billing:dead_letter"
+_BILLING_DLQ_REPLAYED_KEY = "metrics:billing:dead_letter:replayed"
+_BILLING_DLQ_CAP = 10_000
 
 logger = get_logger(__name__)
 
@@ -329,6 +331,7 @@ class BillingInterceptor:
             get_metrics().request_metrics.billing_records_dropped_total.inc(
                 reason="dead_letter_full"
             )
+
             return
 
         try:
@@ -349,6 +352,75 @@ class BillingInterceptor:
             get_metrics().request_metrics.billing_records_dropped_total.inc(
                 reason="dead_letter_full"
             )
+
+    async def replay_dead_letter(self, limit: int = 100) -> dict[str, int]:
+        """Replay Redis DLQ items and keep an audit copy of successful replays."""
+        if self.redis is None:
+            return {"attempted": 0, "replayed": 0, "failed": 0}
+
+        attempted = 0
+        replayed = 0
+        failed = 0
+        limit = max(int(limit or 0), 0)
+
+        for _ in range(limit):
+            raw = await self.redis.rpop(_BILLING_DLQ_KEY)
+            if raw is None:
+                break
+            attempted += 1
+
+            raw_text = (
+                raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+            )
+
+            try:
+                payload = json.loads(raw_text)
+                usage_payload = payload.get("usage") if isinstance(payload, dict) else None
+                if not isinstance(usage_payload, dict):
+                    raise ValueError("DLQ payload missing usage")
+                usage = UsageData(**usage_payload)
+                stage = str(payload.get("stage") or "database")
+
+                if stage == "redis":
+                    ok = await self._run_stage_with_retry(
+                        stage="redis",
+                        coro_factory=lambda usage=usage: self._publish_to_redis(usage),
+                        usage=usage,
+                    )
+                elif stage == "callback" and self.callback:
+                    ok = await self._run_stage_with_retry(
+                        stage="callback",
+                        coro_factory=lambda usage=usage: self.callback(usage),
+                        usage=usage,
+                    )
+                else:
+                    ok = await self._run_stage_with_retry(
+                        stage="database",
+                        coro_factory=lambda usage=usage: self._record_to_database(usage),
+                        usage=usage,
+                    )
+
+                if not ok:
+                    raise RuntimeError(f"replay stage failed: {stage}")
+
+                payload["replayed_at"] = time.time()
+                await self.redis.lpush(
+                    _BILLING_DLQ_REPLAYED_KEY,
+                    json.dumps(payload, default=str),
+                )
+                await self.redis.ltrim(
+                    _BILLING_DLQ_REPLAYED_KEY,
+                    0,
+                    _BILLING_DLQ_CAP - 1,
+                )
+                replayed += 1
+            except Exception:
+                failed += 1
+                logger.exception("Failed to replay billing dead-letter item")
+                await self.redis.lpush(_BILLING_DLQ_KEY, raw_text)
+                break
+
+        return {"attempted": attempted, "replayed": replayed, "failed": failed}
 
     async def _record_to_database(self, usage: UsageData) -> None:
         """持久化使用记录到数据库 — raises on failure.
@@ -789,10 +861,11 @@ class StreamProcessor:
         assistant_id = self.assistant_id or extract_assistant_id(raw_data) or ""
         metadata = dict(raw_data) if isinstance(raw_data, dict) else {"raw_data": raw_data}
         metadata.update(self._error_metadata)
-        metadata.setdefault("source", "stream_usage")
+        metadata.setdefault("source", "transparent_proxy_stream")
         metadata.setdefault("request_type", self.request_type)
         metadata.setdefault("provider", provider)
         metadata.setdefault("model", model_name)
+        metadata.setdefault("token_source", "upstream")
         metadata["error_type"] = error_type
         metadata["duration_breakdown"] = breakdown
         metadata["tool_call_breakdown"] = tool_call_breakdown
@@ -899,8 +972,11 @@ class StreamProcessor:
                     fallback_breakdown,
                 ),
                 raw_metadata={
-                    "source": "stream_finalize_fallback",
+                    "source": "transparent_proxy_stream",
                     "request_type": self.request_type,
+                    "token_source": "zero_on_failure"
+                    if self._status != "success"
+                    else "estimated",
                     "error_type": error_type,
                     "duration_breakdown": fallback_breakdown,
                     **self._error_metadata,

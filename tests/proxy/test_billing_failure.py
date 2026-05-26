@@ -9,7 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,22 +39,23 @@ def fast_backoffs(monkeypatch):
 
 
 def _make_usage(**overrides) -> UsageData:
-    base = dict(
-        input_tokens=10,
-        output_tokens=5,
-        request_id="req-1",
-        service_id="svc-1",
-        user_id="u1",
-        tenant_id="t1",
-        model="gpt-4",
-    )
+    base = {
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "request_id": "req-1",
+        "service_id": "svc-1",
+        "user_id": "u1",
+        "tenant_id": "t1",
+        "model": "gpt-4",
+    }
     base.update(overrides)
     return UsageData(**base)
 
 
+@pytest.mark.usefixtures("fast_backoffs")
 class TestDatabaseRetryAndDLQ:
     @pytest.mark.asyncio
-    async def test_db_retry_then_dlq(self, fast_backoffs):
+    async def test_db_retry_then_dlq(self):
         """DB write always fails → counter counted (initial + 3 retries),
         DLQ receives record, dropped-counter increments."""
         redis = AsyncMock()
@@ -100,7 +100,7 @@ class TestDatabaseRetryAndDLQ:
         )
 
     @pytest.mark.asyncio
-    async def test_db_retry_succeeds_on_second_attempt(self, fast_backoffs):
+    async def test_db_retry_succeeds_on_second_attempt(self):
         redis = AsyncMock()
         redis.lpush = AsyncMock()
         redis.ltrim = AsyncMock()
@@ -136,9 +136,10 @@ class TestDatabaseRetryAndDLQ:
         assert interceptor._total_events == 1
 
 
+@pytest.mark.usefixtures("fast_backoffs")
 class TestRedisStageClassification:
     @pytest.mark.asyncio
-    async def test_redis_publish_failure_classified_and_dlq(self, fast_backoffs):
+    async def test_redis_publish_failure_classified_and_dlq(self):
         redis = AsyncMock()
         redis.publish = AsyncMock(side_effect=RuntimeError("publish boom"))
         redis.lpush = AsyncMock()
@@ -175,9 +176,10 @@ class TestRedisStageClassification:
         assert redis.lpush.await_count == 1
 
 
+@pytest.mark.usefixtures("fast_backoffs")
 class TestCallbackStageClassification:
     @pytest.mark.asyncio
-    async def test_callback_failure_classified(self, fast_backoffs):
+    async def test_callback_failure_classified(self):
         redis = AsyncMock()
         redis.publish = AsyncMock()
         redis.lpush = AsyncMock()
@@ -209,9 +211,10 @@ class TestCallbackStageClassification:
         )
 
 
+@pytest.mark.usefixtures("fast_backoffs")
 class TestDLQFullFallback:
     @pytest.mark.asyncio
-    async def test_dlq_push_itself_fails_increments_full_counter(self, fast_backoffs):
+    async def test_dlq_push_itself_fails_increments_full_counter(self):
         """If LPUSH to DLQ also fails, dead_letter_full counter bumps."""
         redis = AsyncMock()
         redis.publish = AsyncMock()
@@ -234,3 +237,38 @@ class TestDLQFullFallback:
         assert (
             metrics.billing_records_dropped_total.get(reason="dead_letter_full") == 1
         )
+
+
+@pytest.mark.usefixtures("fast_backoffs")
+class TestDLQReplay:
+    @pytest.mark.asyncio
+    async def test_dlq_item_replays_to_database_and_audits_success(self):
+        usage = _make_usage(request_id="req-replay")
+        payload = json.dumps(
+            {
+                "stage": "database",
+                "usage": usage.__dict__,
+                "dropped_at": 123.0,
+            }
+        )
+        redis = AsyncMock()
+        redis.rpop = AsyncMock(side_effect=[payload, None])
+        redis.lpush = AsyncMock()
+        redis.ltrim = AsyncMock()
+
+        interceptor = BillingInterceptor(redis_client=redis)
+        fake_recorder = MagicMock()
+        fake_recorder.record_usage = AsyncMock(return_value=None)
+
+        with patch(
+            "src.services.metrics.get_usage_recorder", return_value=fake_recorder
+        ):
+            result = await interceptor.replay_dead_letter(limit=10)
+
+        assert result == {"attempted": 1, "replayed": 1, "failed": 0}
+        fake_recorder.record_usage.assert_awaited_once()
+        audit_key, audit_payload = redis.lpush.await_args.args
+        assert audit_key == "metrics:billing:dead_letter:replayed"
+        decoded = json.loads(audit_payload)
+        assert decoded["usage"]["request_id"] == "req-replay"
+        assert decoded["replayed_at"] > 0

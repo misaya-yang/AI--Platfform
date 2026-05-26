@@ -9,7 +9,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -125,6 +125,41 @@ class TestNoRecordsLostOnShutdown:
 
         assert len(seen) == 5
         assert [u.request_id for u in seen] == [f"req-{i}" for i in range(5)]
+
+    @pytest.mark.asyncio
+    async def test_buffer_flush_preserves_billing_metadata_on_stop(self):
+        seen = []
+
+        async def callback(usage):
+            seen.append(usage)
+
+        interceptor = BillingInterceptor(callback=callback, buffer_size=1000)
+        usage = _make_usage(7)
+        usage.tenant_id = "tenant-a"
+        usage.user_id = "user-a"
+        usage.service_id = "svc-a"
+        usage.model = "gemini-3-flash-preview"
+        usage.provider = "google"
+        usage.raw_metadata = {
+            "source": "transparent_proxy_stream",
+            "token_source": "upstream",
+            "pricing_status": "catalog",
+        }
+
+        with patch("src.services.metrics.get_usage_recorder", return_value=None):
+            async with interceptor._buffer_lock:
+                interceptor._buffer.append(usage)
+
+            await interceptor.stop()
+
+        assert len(seen) == 1
+        flushed = seen[0]
+        assert flushed.tenant_id == "tenant-a"
+        assert flushed.user_id == "user-a"
+        assert flushed.service_id == "svc-a"
+        assert flushed.model == "gemini-3-flash-preview"
+        assert flushed.provider == "google"
+        assert flushed.raw_metadata["token_source"] == "upstream"
 
     @pytest.mark.asyncio
     async def test_inflight_flush_plus_final_flush_do_not_drop_records(self):

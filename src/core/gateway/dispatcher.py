@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ai_gateway_core.enums import ContentType, StreamEventType
+from ai_gateway_core.exceptions import RateLimitExceededError, ServiceNotFoundError
+
 from ...models.request import UnifiedRequest
 from ...models.response import StreamChunk, UnifiedResponse
 from ...models.service import ServiceDefinition
@@ -19,7 +21,6 @@ from ...services.registry.service_registry import ServiceRegistry
 from ...services.session.session_manager import SessionManager
 from ...services.task.task_manager import TaskManager
 from ..auth.rbac import RBAC
-from ai_gateway_core.exceptions import RateLimitExceededError, ServiceNotFoundError
 from ..utils import estimate_tokens
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import RateLimiter
@@ -124,12 +125,13 @@ class GatewayDispatcher:
         payload: Any,
         input_text: str,
         output_text: str,
-    ) -> dict[str, int]:
+    ) -> dict[str, int | str]:
         extracted = extract_token_usage(payload) or {}
 
         input_raw = extracted.get("input_tokens") if "input_tokens" in extracted else None
         output_raw = extracted.get("output_tokens") if "output_tokens" in extracted else None
         total_raw = extracted.get("total_tokens") if "total_tokens" in extracted else None
+        token_source = "upstream" if extracted else "estimated"
 
         input_tokens = int(input_raw) if input_raw is not None else estimate_tokens(input_text)
         output_tokens = int(output_raw) if output_raw is not None else estimate_tokens(output_text)
@@ -140,6 +142,7 @@ class GatewayDispatcher:
             "input_tokens": max(input_tokens, 0),
             "output_tokens": max(output_tokens, 0),
             "total_tokens": max(total_tokens, 0),
+            "token_source": token_source,
         }
 
     async def _record_usage_event(
@@ -176,6 +179,7 @@ class GatewayDispatcher:
                 request_type=request_type,
                 metadata={
                     "source": "dispatcher",
+                    "token_source": tokens["token_source"],
                 },
             )
         except Exception as e:

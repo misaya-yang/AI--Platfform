@@ -157,12 +157,31 @@ def extract_string_value(payload: Any, keys: Iterable[str]) -> str | None:
     return None
 
 
+def _extract_hejaz_model_field(payload: Any, keys: Iterable[str]) -> str | None:
+    ordered_keys = tuple(keys)
+    for node in _iter_nodes(payload):
+        if not isinstance(node, dict):
+            continue
+        hejaz_model = node.get("hejaz_model")
+        if not isinstance(hejaz_model, dict):
+            continue
+        for key in ordered_keys:
+            value = _to_text(hejaz_model.get(key))
+            if value:
+                return value
+    return None
+
+
 def extract_model(payload: Any) -> str | None:
-    return extract_string_value(payload, _MODEL_KEYS)
+    return _extract_hejaz_model_field(payload, ("model", "model_id")) or extract_string_value(
+        payload, _MODEL_KEYS
+    )
 
 
 def extract_provider(payload: Any) -> str | None:
-    return extract_string_value(payload, _PROVIDER_KEYS)
+    return _extract_hejaz_model_field(payload, ("provider", "provider_id")) or extract_string_value(
+        payload, _PROVIDER_KEYS
+    )
 
 
 def extract_assistant_id(payload: Any) -> str | None:

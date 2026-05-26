@@ -1618,6 +1618,14 @@ CREATE INDEX IF NOT EXISTS idx_usage_assistant ON usage_records (assistant_id, c
 CREATE INDEX IF NOT EXISTS idx_usage_service ON usage_records (service_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_status_error_type ON usage_records (status, error_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_records (created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_records_request_identity
+ON usage_records (
+    tenant_id,
+    COALESCE(request_id, ''),
+    COALESCE(service_id, ''),
+    COALESCE(request_type, '')
+)
+WHERE request_id IS NOT NULL AND request_id <> '';
 
 -- request_traces indexes
 CREATE INDEX IF NOT EXISTS idx_request_traces_tenant_created ON request_traces (tenant_id, created_at DESC);

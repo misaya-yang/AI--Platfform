@@ -10,6 +10,7 @@ from ai_gateway_core.billing.pricing_catalog import (
     MICROCENTS_PER_USD,
     microcents_to_usd,
     resolve_pricing,
+    resolve_pricing_with_status,
     to_model_pricing_defaults,
     usd_to_microcents,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "MICROCENTS_PER_USD",
     "microcents_to_usd",
     "resolve_pricing",
+    "resolve_pricing_with_status",
     "to_model_pricing_defaults",
     "usd_to_microcents",
 ]

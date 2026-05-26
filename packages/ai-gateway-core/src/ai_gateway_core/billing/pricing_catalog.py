@@ -130,11 +130,11 @@ def _normalize_model_id(model: str) -> str:
     return normalized.strip()
 
 
-def resolve_pricing(model: str) -> dict[str, Any]:
-    """Resolve pricing for a model with aliases and prefix fallback."""
+def resolve_pricing_with_status(model: str) -> tuple[dict[str, Any], str]:
+    """Resolve pricing and classify whether the match was exact, inferred, or unknown."""
     normalized = _normalize_model_id(model)
     if not normalized:
-        return DEFAULT_TOKEN_PRICING_PER_1K_USD["default"]
+        return DEFAULT_TOKEN_PRICING_PER_1K_USD["default"], "unknown"
 
     canonical = (
         MODEL_ID_ALIASES.get(normalized)
@@ -145,7 +145,7 @@ def resolve_pricing(model: str) -> dict[str, Any]:
 
     for known_model, pricing in DEFAULT_TOKEN_PRICING_PER_1K_USD.items():
         if known_model.lower() == canonical_lower:
-            return pricing
+            return pricing, "catalog"
 
     matched: tuple[int, dict[str, Any]] | None = None
     for known_model, pricing in DEFAULT_TOKEN_PRICING_PER_1K_USD.items():
@@ -159,9 +159,15 @@ def resolve_pricing(model: str) -> dict[str, Any]:
             if matched is None or score > matched[0]:
                 matched = (score, pricing)
     if matched:
-        return matched[1]
+        return matched[1], "provider_model"
 
-    return DEFAULT_TOKEN_PRICING_PER_1K_USD["default"]
+    return DEFAULT_TOKEN_PRICING_PER_1K_USD["default"], "unknown"
+
+
+def resolve_pricing(model: str) -> dict[str, Any]:
+    """Resolve pricing for a model with aliases and prefix fallback."""
+    pricing, _status = resolve_pricing_with_status(model)
+    return pricing
 
 
 def to_model_pricing_defaults() -> dict[str, dict[str, Any]]:

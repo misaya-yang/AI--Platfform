@@ -28,7 +28,11 @@ if TYPE_CHECKING:
 
 import contextlib
 
-from ai_gateway_core.billing import DEFAULT_TOKEN_PRICING_PER_1K_USD, resolve_pricing
+from ai_gateway_core.billing import (
+    DEFAULT_TOKEN_PRICING_PER_1K_USD,
+    resolve_pricing_with_status,
+    usd_to_microcents,
+)
 
 from .observability import KNOWN_ERROR_TYPES, should_sample_trace
 
@@ -162,6 +166,7 @@ class UsageRecorder:
         self._pricing_cache_ttl: float = 300  # 5 minutes
         self._trace_p95_cache: dict[str, tuple[int, float]] = {}
         self._flushed_ids: set[str] = set()
+        self._flushed_identities: set[tuple[str, str, str, str]] = set()
         self._flushed_ids_max: int = 5000
 
         # ── Phase 6 dual-write event bus ────────────────────────────────
@@ -257,8 +262,19 @@ class UsageRecorder:
             provider = await self._get_provider_for_model(record.model)
 
         record.provider = provider or UNATTRIBUTED_PROVIDER
+        metadata.setdefault("provider", record.provider)
+        metadata.setdefault("model", record.model)
         if record.provider == UNATTRIBUTED_PROVIDER and isinstance(metadata, dict):
             metadata.setdefault("attribution_issue", "missing_provider")
+            record.metadata = metadata
+
+        if "token_source" not in metadata:
+            if record.input_tokens > 0 or record.output_tokens > 0:
+                metadata["token_source"] = "upstream"
+            elif (record.status or "").lower() != "success":
+                metadata["token_source"] = "zero_on_failure"
+            else:
+                metadata["token_source"] = "estimated"
             record.metadata = metadata
 
         if record.request_total_duration_ms <= 0 and record.latency_ms > 0:
@@ -269,6 +285,45 @@ class UsageRecorder:
             record.error_type = (
                 normalized_error if normalized_error in KNOWN_ERROR_TYPES else "unknown"
             )
+
+    @staticmethod
+    def _request_identity(record: UsageRecord) -> tuple[str, str, str, str]:
+        return (
+            str(record.tenant_id or "default"),
+            str(record.request_id or ""),
+            str(record.service_id or ""),
+            str(record.request_type or ""),
+        )
+
+    @staticmethod
+    def _merge_idempotent_record(existing: UsageRecord, incoming: UsageRecord) -> None:
+        """Merge duplicate request identities without changing billing dimensions."""
+        existing.metadata = {
+            **(existing.metadata if isinstance(existing.metadata, dict) else {}),
+            **(incoming.metadata if isinstance(incoming.metadata, dict) else {}),
+        }
+        if existing.status in {"running", "pending"} and incoming.status == "success":
+            existing.status = "success"
+            existing.error_type = incoming.error_type
+        if not existing.trace_steps and incoming.trace_steps:
+            existing.trace_steps = incoming.trace_steps
+        if existing.request_total_duration_ms <= 0 and incoming.request_total_duration_ms > 0:
+            existing.request_total_duration_ms = incoming.request_total_duration_ms
+        if existing.first_token_ms <= 0 and incoming.first_token_ms > 0:
+            existing.first_token_ms = incoming.first_token_ms
+
+    def _coalesce_idempotent_records(self, records: list[UsageRecord]) -> list[UsageRecord]:
+        coalesced: dict[tuple[str, str, str, str], UsageRecord] = {}
+        ordered: list[UsageRecord] = []
+        for record in records:
+            identity = self._request_identity(record)
+            existing = coalesced.get(identity)
+            if existing is None:
+                coalesced[identity] = record
+                ordered.append(record)
+                continue
+            self._merge_idempotent_record(existing, record)
+        return ordered
 
     async def start(self) -> None:
         """Start the background flush task."""
@@ -431,19 +486,24 @@ class UsageRecorder:
         """Calculate cost based on model pricing."""
         pricing = await self._get_model_pricing(record.model)
         if pricing:
-            input_price = pricing.get("input", Decimal("0.001"))
-            output_price = pricing.get("output", Decimal("0.002"))
+            input_price = Decimal(str(pricing.get("input", Decimal("0.001"))))
+            output_price = Decimal(str(pricing.get("output", Decimal("0.002"))))
 
-            # Cost in microcents (multiply by 100 * 10000 = 1000000) for precision
-            # 1 dollar = 100 cents = 1,000,000 microcents
-            # Final cost_usd = cost_cents / 100, but we store cents as microcents / 10000
-            # So we use cents * 10000 for internal storage precision
-            input_cost = (Decimal(record.input_tokens) / 1000) * input_price * 100 * 10000
-            output_cost = (Decimal(record.output_tokens) / 1000) * output_price * 100 * 10000
+            input_cost_usd = (Decimal(int(record.input_tokens or 0)) / Decimal(1000)) * input_price
+            output_cost_usd = (
+                Decimal(int(record.output_tokens or 0)) / Decimal(1000)
+            ) * output_price
 
-            # Store as microcents (cents * 10000) to preserve precision for low-cost models
-            record.input_cost_cents = round(float(input_cost))
-            record.output_cost_cents = round(float(output_cost))
+            # Persist microcents in the legacy *_cost_cents columns to preserve
+            # precision for low-cost models without using float arithmetic.
+            record.input_cost_cents = usd_to_microcents(input_cost_usd)
+            record.output_cost_cents = usd_to_microcents(output_cost_usd)
+
+            metadata = record.metadata if isinstance(record.metadata, dict) else {}
+            metadata.setdefault("provider", str(pricing.get("provider") or record.provider or ""))
+            metadata.setdefault("model", record.model)
+            metadata["pricing_status"] = str(pricing.get("pricing_status") or "unknown")
+            record.metadata = metadata
 
     async def _get_model_pricing(self, model: str) -> dict[str, Any] | None:
         """Get pricing for a model from cache or database."""
@@ -459,10 +519,15 @@ class UsageRecorder:
         # Try partial match (for model variants like gpt-4-0613)
         for cached_model, pricing in self._pricing_cache.items():
             if model.startswith(cached_model) or cached_model.startswith(model):
-                return pricing
+                matched = dict(pricing)
+                matched["pricing_status"] = "provider_model"
+                return matched
 
         # Return resolved default pricing when model is unknown.
-        return resolve_pricing(model)
+        pricing, pricing_status = resolve_pricing_with_status(model)
+        resolved = dict(pricing)
+        resolved["pricing_status"] = pricing_status
+        return resolved
 
     async def _refresh_pricing_cache(self) -> None:
         """Refresh pricing cache from database."""
@@ -473,6 +538,7 @@ class UsageRecorder:
                     "input": Decimal(str(pricing["input"])),
                     "output": Decimal(str(pricing["output"])),
                     "provider": str(pricing.get("provider") or UNATTRIBUTED_PROVIDER),
+                    "pricing_status": "catalog" if model != "default" else "unknown",
                 }
                 for model, pricing in DEFAULT_TOKEN_PRICING_PER_1K_USD.items()
             }
@@ -493,6 +559,7 @@ class UsageRecorder:
                         "input": Decimal(str(row["input_price_per_1k"])),
                         "output": Decimal(str(row["output_price_per_1k"])),
                         "provider": str(row["provider"] or "").strip(),
+                        "pricing_status": "catalog",
                     }
                     for row in rows
                 }
@@ -525,9 +592,12 @@ class UsageRecorder:
         records = self._buffer.copy()
         self._buffer.clear()
         self._ensure_request_ids(records)
+        records = self._coalesce_idempotent_records(records)
 
-        # Dedup: skip records already flushed successfully
-        records = [r for r in records if r.request_id not in self._flushed_ids]
+        # Dedup: skip identities already flushed successfully in this process.
+        records = [
+            r for r in records if self._request_identity(r) not in self._flushed_identities
+        ]
         if not records:
             return
 
@@ -535,25 +605,68 @@ class UsageRecorder:
             logger.warning(f"No database connection, dropping {len(records)} usage records")
             return
 
+        accepted_records: list[UsageRecord] = []
         try:
-            async with self.database._pool.acquire() as conn, conn.transaction():
-                await self._write_records(conn, records)
-                await self._update_quota_counters(conn, records)
-                await self._write_sampled_traces(conn, records)
-                await self._update_daily_aggregates(conn, records)
-                await self._update_hourly_aggregates(conn, records)
+            async with self.database._pool.acquire() as conn:
+                async with conn.transaction():
+                    accepted_records = await self._write_records(conn, records)
+
+                if accepted_records:
+                    await self._run_post_write_stage(
+                        conn,
+                        accepted_records,
+                        "quota_counters",
+                        self._update_quota_counters,
+                    )
+                    await self._run_post_write_stage(
+                        conn,
+                        accepted_records,
+                        "request_traces",
+                        self._write_sampled_traces,
+                    )
+                    await self._run_post_write_stage(
+                        conn,
+                        accepted_records,
+                        "daily_aggregates",
+                        self._update_daily_aggregates,
+                    )
+                    await self._run_post_write_stage(
+                        conn,
+                        accepted_records,
+                        "hourly_aggregates",
+                        self._update_hourly_aggregates,
+                    )
             # Track flushed request_ids to prevent double-counting on retry
             for r in records:
                 self._flushed_ids.add(r.request_id)
+                self._flushed_identities.add(self._request_identity(r))
             if len(self._flushed_ids) > self._flushed_ids_max:
                 # Evict: clear and keep only current batch ids
                 self._flushed_ids = {r.request_id for r in records}
-            logger.debug(f"Flushed {len(records)} usage records")
+                self._flushed_identities = {self._request_identity(r) for r in records}
+            logger.debug(
+                "Flushed %s usage records (%s accepted)",
+                len(records),
+                len(accepted_records),
+            )
         except Exception as e:
             logger.error(f"Failed to flush usage records: {e}")
             # Re-add failed records to buffer (with limit)
             if len(self._buffer) + len(records) <= self.buffer_size * 2:
                 self._buffer.extend(records)
+
+    async def _run_post_write_stage(
+        self,
+        conn: Connection,
+        records: list[UsageRecord],
+        stage: str,
+        func: Any,
+    ) -> None:
+        try:
+            await func(conn, records)
+        except Exception as exc:
+            logger.error("Usage post-write stage failed (%s): %s", stage, exc)
+            await self._record_reconciliation_event(conn, records, stage, exc)
 
     @staticmethod
     def _ensure_request_ids(records: list[UsageRecord]) -> None:
@@ -678,10 +791,71 @@ class UsageRecorder:
             sampled_flags,
         )
 
-    async def _write_records(self, conn: Connection, records: list[UsageRecord]) -> None:
+    async def _record_reconciliation_event(
+        self,
+        conn: Connection,
+        records: list[UsageRecord],
+        stage: str,
+        exc: Exception,
+    ) -> None:
+        if not records:
+            return
+        first = records[0]
+        try:
+            await conn.execute(
+                """
+                INSERT INTO billing_events (
+                    event_id, request_id, service_id, user_id, tenant_id,
+                    input_tokens, output_tokens, total_tokens,
+                    model, assistant_id, duration_ms, status,
+                    cost_amount, cost_currency, metadata, event_time
+                ) VALUES (
+                    $1, $2, $3, $4, $5,
+                    $6, $7, $8,
+                    $9, $10, $11, $12,
+                    $13, $14, $15::jsonb, $16
+                )
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                f"usage-reconcile:{stage}:{first.request_id}:{uuid.uuid4()}",
+                first.request_id or "",
+                first.service_id or UNATTRIBUTED_SERVICE,
+                first.user_id or "anonymous",
+                first.tenant_id or "default",
+                max(int(first.input_tokens or 0), 0),
+                max(int(first.output_tokens or 0), 0),
+                max(int((first.input_tokens or 0) + (first.output_tokens or 0)), 0),
+                first.model or UNATTRIBUTED_MODEL,
+                first.assistant_id or "",
+                self._record_total_duration(first),
+                "reconciliation_required",
+                None,
+                "USD",
+                json.dumps(
+                    {
+                        "event": "usage_accounting_reconciliation_required",
+                        "stage": stage,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:512],
+                        "record_count": len(records),
+                    },
+                    ensure_ascii=False,
+                ),
+                datetime.fromtimestamp(time.time(), tz=timezone.utc),
+            )
+        except Exception as event_exc:
+            logger.error(
+                "Failed to record usage reconciliation event (%s): %s",
+                stage,
+                event_exc,
+            )
+
+    async def _write_records(self, conn: Connection, records: list[UsageRecord]) -> list[UsageRecord]:
         """Write records to usage_records table."""
-        await conn.executemany(
-            """
+        accepted: list[UsageRecord] = []
+        for r in records:
+            row = await conn.fetchrow(
+                """
             INSERT INTO usage_records (
                 tenant_id, user_id, request_id,
                 service_id, assistant_id, model, provider,
@@ -704,37 +878,59 @@ class UsageRecorder:
                 $19::jsonb, $20, $21,
                 $22, $23::jsonb, $24
             )
-            """,
-            [
-                (
-                    r.tenant_id,
-                    r.user_id,
-                    r.request_id,
-                    r.service_id or None,
-                    r.assistant_id or None,
-                    r.model,
-                    r.provider or None,
-                    r.input_tokens,
-                    r.output_tokens,
-                    r.input_cost_cents,
-                    r.output_cost_cents,
-                    r.latency_ms,
-                    r.first_token_ms,
-                    r.request_total_duration_ms or r.latency_ms,
-                    r.llm_inference_duration_ms,
-                    r.retrieval_duration_ms,
-                    r.tool_call_duration_ms,
-                    r.agent_or_graph_overhead_ms,
-                    json.dumps(r.tool_call_breakdown or {}, ensure_ascii=False),
-                    r.error_type,
-                    r.status,
-                    r.request_type,
-                    json.dumps(r.metadata, ensure_ascii=False) if r.metadata else "{}",
-                    datetime.utcfromtimestamp(r.timestamp),
-                )
-                for r in records
-            ],
-        )
+            ON CONFLICT (
+                tenant_id,
+                (COALESCE(request_id, '')),
+                (COALESCE(service_id, '')),
+                (COALESCE(request_type, ''))
+            )
+            WHERE request_id IS NOT NULL AND request_id <> ''
+            DO UPDATE SET
+                status = CASE
+                    WHEN usage_records.status IN ('running', 'pending')
+                         AND EXCLUDED.status = 'success'
+                    THEN EXCLUDED.status
+                    ELSE usage_records.status
+                END,
+                error_type = COALESCE(usage_records.error_type, EXCLUDED.error_type),
+                metadata = COALESCE(usage_records.metadata, '{}'::jsonb)
+                    || COALESCE(EXCLUDED.metadata, '{}'::jsonb)
+            RETURNING (xmax = 0) AS inserted
+                """,
+                r.tenant_id,
+                r.user_id,
+                r.request_id,
+                r.service_id or None,
+                r.assistant_id or None,
+                r.model,
+                r.provider or None,
+                r.input_tokens,
+                r.output_tokens,
+                r.input_cost_cents,
+                r.output_cost_cents,
+                r.latency_ms,
+                r.first_token_ms,
+                r.request_total_duration_ms or r.latency_ms,
+                r.llm_inference_duration_ms,
+                r.retrieval_duration_ms,
+                r.tool_call_duration_ms,
+                r.agent_or_graph_overhead_ms,
+                json.dumps(r.tool_call_breakdown or {}, ensure_ascii=False),
+                r.error_type,
+                r.status,
+                r.request_type,
+                json.dumps(r.metadata, ensure_ascii=False) if r.metadata else "{}",
+                datetime.utcfromtimestamp(r.timestamp),
+            )
+            inserted = False
+            if row:
+                try:
+                    inserted = bool(row.get("inserted"))  # type: ignore[attr-defined]
+                except AttributeError:
+                    inserted = bool(row["inserted"])
+            if inserted:
+                accepted.append(r)
+        return accepted
 
     async def _update_quota_counters(self, conn: Connection, records: list[UsageRecord]) -> None:
         """Update quota counters from flushed usage records."""

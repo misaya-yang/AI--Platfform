@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ...persistence.database import DatabaseStorage
 
-from .pricing_catalog import resolve_pricing, to_model_pricing_defaults
+from .pricing_catalog import resolve_pricing_with_status, to_model_pricing_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ class ModelPrice:
     supports_vision: bool = False
     supports_tools: bool = True
     is_active: bool = True
+    pricing_status: str = "catalog"
 
     def calculate_cost(self, input_tokens: int, output_tokens: int) -> dict[str, Any]:
         """
@@ -64,6 +65,7 @@ class ModelPrice:
             "input_cost_cents": int(input_cost * 100),
             "output_cost_cents": int(output_cost * 100),
             "total_cost_cents": int(total_cost * 100),
+            "pricing_status": self.pricing_status,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -111,6 +113,22 @@ class ModelPricingService:
         """Set or update the database storage instance."""
         self.database = database
 
+    @staticmethod
+    def _with_pricing_status(price: ModelPrice, pricing_status: str) -> ModelPrice:
+        return ModelPrice(
+            model=price.model,
+            provider=price.provider,
+            input_price_per_1k=price.input_price_per_1k,
+            output_price_per_1k=price.output_price_per_1k,
+            display_name=price.display_name,
+            context_window=price.context_window,
+            max_output_tokens=price.max_output_tokens,
+            supports_vision=price.supports_vision,
+            supports_tools=price.supports_tools,
+            is_active=price.is_active,
+            pricing_status=pricing_status,
+        )
+
     async def get_model_pricing(self, model: str) -> ModelPrice:
         """
         Get pricing for a specific model.
@@ -130,7 +148,7 @@ class ModelPricingService:
         # Partial match (for model variants)
         for cached_model, price in self._cache.items():
             if model.startswith(cached_model) or cached_model.startswith(model):
-                return price
+                return self._with_pricing_status(price, "provider_model")
 
         # Return default
         return self._cache.get("default", self._get_default_price(model))
@@ -159,6 +177,7 @@ class ModelPricingService:
         cost = price.calculate_cost(input_tokens, output_tokens)
         cost["model"] = price.model
         cost["provider"] = price.provider
+        cost["pricing_status"] = price.pricing_status
         return cost
 
     async def update_pricing(
@@ -288,6 +307,7 @@ class ModelPricingService:
                         if row["supports_tools"] is not None
                         else True,
                         is_active=row["is_active"] if row["is_active"] is not None else True,
+                        pricing_status="catalog",
                     )
                     self._cache[price.model] = price
                     self._all_models_cache.append(price)
@@ -310,6 +330,7 @@ class ModelPricingService:
                 provider=pricing.get("provider", "unknown"),
                 input_price_per_1k=Decimal(str(pricing["input"])),
                 output_price_per_1k=Decimal(str(pricing["output"])),
+                pricing_status="catalog" if model != "default" else "unknown",
             )
             self._cache[model] = price
             self._all_models_cache.append(price)
@@ -318,12 +339,13 @@ class ModelPricingService:
 
     def _get_default_price(self, model: str) -> ModelPrice:
         """Get default price for unknown model."""
-        pricing = resolve_pricing(model)
+        pricing, pricing_status = resolve_pricing_with_status(model)
         return ModelPrice(
             model=model,
             provider=pricing.get("provider", "unknown"),
             input_price_per_1k=Decimal(str(pricing["input"])),
             output_price_per_1k=Decimal(str(pricing["output"])),
+            pricing_status=pricing_status,
         )
 
 

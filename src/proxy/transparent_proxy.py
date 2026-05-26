@@ -17,13 +17,13 @@ import json
 import random
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
-
 from ai_gateway_core.logging import get_logger
+
 from ..services.metrics.observability import (
     classify_error_type,
     ensure_duration_breakdown,
@@ -48,6 +48,7 @@ class ProxyQueueTimeoutError(RuntimeError):
 
 
 # LangGraph 需要 assistant_id 的路径模式（正则匹配）
+LANGGRAPH_ASSISTANT_PATHS = ("/runs", "/runs/stream", "/runs/wait", "/threads/")
 _LANGGRAPH_RUN_RE = re.compile(
     r"/(runs|threads/[^/]+/runs)(/stream|/wait)?$", re.IGNORECASE
 )
@@ -1069,6 +1070,11 @@ class TransparentProxy:
             "http_status": status_code,
             "response_has_usage": bool(usage),
             "response_has_error": response_error,
+            "token_source": "upstream"
+            if usage
+            else ("zero_on_failure" if status == "error" else "estimated"),
+            "provider": provider,
+            "model": model,
         }
         metadata.update(self._extract_error_metadata(response_data))
 

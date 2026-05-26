@@ -9,6 +9,7 @@ from .pricing_catalog import (
     DEFAULT_TOKEN_PRICING_PER_1K_USD,
     microcents_to_usd,
     resolve_pricing,
+    resolve_pricing_with_status,
     usd_to_microcents,
 )
 
@@ -16,5 +17,6 @@ __all__ = [
     "DEFAULT_TOKEN_PRICING_PER_1K_USD",
     "microcents_to_usd",
     "resolve_pricing",
+    "resolve_pricing_with_status",
     "usd_to_microcents",
 ]
