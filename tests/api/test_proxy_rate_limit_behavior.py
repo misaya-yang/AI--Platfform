@@ -51,9 +51,15 @@ def _make_service_config(enabled: bool) -> ProxyServiceConfig:
 async def test_service_rate_limit_override_takes_precedence() -> None:
     limiter = _FakeRateLimiter(
         custom_result=RateLimitResult(allowed=True, dimension="service:imam"),
-        global_result=RateLimitResult(allowed=True, dimension="user"),
+        global_result=RateLimitResult(
+            allowed=True,
+            dimension="user",
+            limit=60,
+            remaining=59,
+            reset_at=9999999999,
+        ),
     )
-    await check_proxy_rate_limit(
+    headers = await check_proxy_rate_limit(
         user=_make_user(),
         rate_limiter=limiter,
         service_name="imam",
@@ -63,15 +69,22 @@ async def test_service_rate_limit_override_takes_precedence() -> None:
     assert len(limiter.custom_calls) == 1
     assert len(limiter.global_calls) == 0
     assert "tenant_1" in limiter.custom_calls[0]["key"]
+    assert headers["X-RateLimit-Dimension"] == "service:imam"
 
 
 @pytest.mark.asyncio
 async def test_global_rate_limit_used_when_service_override_disabled() -> None:
     limiter = _FakeRateLimiter(
         custom_result=RateLimitResult(allowed=True, dimension="service:imam"),
-        global_result=RateLimitResult(allowed=True, dimension="user"),
+        global_result=RateLimitResult(
+            allowed=True,
+            dimension="user",
+            limit=60,
+            remaining=59,
+            reset_at=9999999999,
+        ),
     )
-    await check_proxy_rate_limit(
+    headers = await check_proxy_rate_limit(
         user=_make_user(),
         rate_limiter=limiter,
         service_name="imam",
@@ -80,6 +93,19 @@ async def test_global_rate_limit_used_when_service_override_disabled() -> None:
     )
     assert len(limiter.custom_calls) == 0
     assert len(limiter.global_calls) == 1
+    assert headers["X-RateLimit-Dimension"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_no_limiter_marks_rate_limit_exempt() -> None:
+    headers = await check_proxy_rate_limit(
+        user=_make_user(),
+        rate_limiter=None,
+        service_name="imam",
+        operation="run_wait",
+        service_config=_make_service_config(True),
+    )
+    assert headers == {"X-Gateway-Policy-Exempt": "rate_limit"}
 
 
 @pytest.mark.asyncio

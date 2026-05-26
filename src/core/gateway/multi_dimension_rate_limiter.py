@@ -201,12 +201,15 @@ class MultiDimensionRateLimiter:
         if context.operation and context.operation in self.config.operation_limits:
             checks.append(("operation", self._check_operation, context))
 
+        allowed_result: RateLimitResult | None = None
         for _dimension, check_func, ctx in checks:
             result = await check_func(ctx)
             if not result.allowed:
                 return result
+            if result.limit > 0:
+                allowed_result = result
 
-        return RateLimitResult(allowed=True)
+        return allowed_result or RateLimitResult(allowed=True)
 
     async def check_custom_limit(
         self,

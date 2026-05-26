@@ -1060,10 +1060,10 @@ async def check_proxy_rate_limit(
     operation: str = "proxy",
     service_config: ProxyServiceConfig | None = None,
     request: Request | None = None,
-) -> None:
+) -> dict[str, str]:
     """检查代理限流"""
     if not rate_limiter:
-        return
+        return {"X-Gateway-Policy-Exempt": "rate_limit"}
 
     if request is not None:
         resolver = getattr(request.app.state, "rate_policy_resolver", None)
@@ -1077,6 +1077,7 @@ async def check_proxy_rate_limit(
             operation=operation,
             service_config=service_config,
         )
+        admitted_headers: dict[str, str] = {}
         for policy in policies:
             result = await rate_limiter.check_custom_limit(
                 key=policy.key,
@@ -1107,8 +1108,9 @@ async def check_proxy_rate_limit(
                     detail=RateLimitHeaders.build_exceeded_response(result),
                     headers=RateLimitHeaders.build(result),
                 )
+            admitted_headers = RateLimitHeaders.build(result)
         if policies:
-            return
+            return admitted_headers
     elif (
         service_config
         and service_config.rate_limit_enabled
@@ -1146,7 +1148,7 @@ async def check_proxy_rate_limit(
                 detail=RateLimitHeaders.build_exceeded_response(result),
                 headers=RateLimitHeaders.build(result),
             )
-        return
+        return RateLimitHeaders.build(result)
 
     context = RateLimitContext.from_user_context(
         user=user,
@@ -1168,6 +1170,11 @@ async def check_proxy_rate_limit(
             detail=RateLimitHeaders.build_exceeded_response(result),
             headers=RateLimitHeaders.build(result),
         )
+    return (
+        RateLimitHeaders.build(result)
+        if result.limit > 0
+        else {"X-Gateway-Policy-Exempt": "rate_limit"}
+    )
 
 
 # ============ 主路由处理 ============
@@ -1242,7 +1249,7 @@ async def transparent_proxy_handler(
     t_config = time.perf_counter()
 
     # 4. 限流检查
-    await check_proxy_rate_limit(
+    rate_limit_headers = await check_proxy_rate_limit(
         user=user,
         rate_limiter=rate_limiter,
         service_name=service_name,
@@ -1369,21 +1376,23 @@ async def transparent_proxy_handler(
 
     # 9. 返回响应（包括上游的 4xx/5xx 错误，原样透传）
     if response.is_streaming and response.stream:
+        headers = {**response.headers, **rate_limit_headers}
         return StreamingResponse(
             response.stream,
             status_code=response.status_code,
-            headers=response.headers,
+            headers=headers,
             media_type="text/event-stream",
         )
     else:
         # 确定 content-type，保留原始响应的 content-type
         content_type = response.headers.get("content-type", "application/json")
+        headers = {**response.headers, **rate_limit_headers}
 
         # 错误透传：即使是 4xx/5xx，也原样返回上游的响应内容
         return Response(
             content=response.body or b"",
             status_code=response.status_code,
-            headers=response.headers,
+            headers=headers,
             media_type=content_type,
         )
 
