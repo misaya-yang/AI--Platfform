@@ -1429,6 +1429,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     api_type VARCHAR(20) DEFAULT 'openai',
     base_url VARCHAR(500),
     api_key_encrypted TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     is_enabled BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),

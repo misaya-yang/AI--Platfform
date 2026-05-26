@@ -6,6 +6,7 @@ Pydantic models for LLM provider and model management endpoints.
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,7 @@ class ProviderBase(BaseModel):
         description="API type: openai, anthropic, google, or google-vertex",
     )
     base_url: str | None = Field(None, max_length=500, description="Custom API base URL")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Safe provider metadata")
     is_enabled: bool = Field(default=True, description="Whether the provider is enabled")
 
 
@@ -41,6 +43,7 @@ class ProviderUpdate(BaseModel):
     display_name: str | None = Field(None, min_length=1, max_length=100)
     api_type: str | None = None
     base_url: str | None = Field(None, max_length=500)
+    metadata: dict[str, Any] | None = Field(None, description="Safe provider metadata")
     api_key: str | None = Field(None, description="New API key (will be encrypted)")
     is_enabled: bool | None = None
 
@@ -119,6 +122,7 @@ class ProviderFromTemplateCreate(BaseModel):
     provider_id: str | None = Field(None, min_length=1, max_length=50)
     display_name: str | None = Field(None, min_length=1, max_length=100)
     base_url: str | None = Field(None, max_length=500)
+    metadata: dict[str, Any] | None = Field(None, description="Safe provider metadata")
     api_key: str | None = Field(None, description="API key (will be encrypted)")
     is_enabled: bool = True
 

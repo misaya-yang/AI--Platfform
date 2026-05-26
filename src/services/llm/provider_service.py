@@ -4,6 +4,9 @@ LLM Provider Service.
 Manages LLM provider configurations including API keys and endpoints.
 """
 
+import asyncio
+import json
+import os
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -33,7 +36,7 @@ class ProviderService:
         if include_disabled:
             query = """
                 SELECT provider_id, tenant_id, display_name, api_type, base_url,
-                       api_key_encrypted, is_enabled, created_at, updated_at
+                       api_key_encrypted, metadata, is_enabled, created_at, updated_at
                 FROM llm_providers
                 WHERE tenant_id = $1
                 ORDER BY display_name
@@ -42,7 +45,7 @@ class ProviderService:
         else:
             query = """
                 SELECT provider_id, tenant_id, display_name, api_type, base_url,
-                       api_key_encrypted, is_enabled, created_at, updated_at
+                       api_key_encrypted, metadata, is_enabled, created_at, updated_at
                 FROM llm_providers
                 WHERE tenant_id = $1 AND is_enabled = true
                 ORDER BY display_name
@@ -59,7 +62,7 @@ class ProviderService:
         """Get a specific provider."""
         query = """
             SELECT provider_id, tenant_id, display_name, api_type, base_url,
-                   api_key_encrypted, is_enabled, created_at, updated_at
+                   api_key_encrypted, metadata, is_enabled, created_at, updated_at
             FROM llm_providers
             WHERE tenant_id = $1 AND provider_id = $2
         """
@@ -74,6 +77,7 @@ class ProviderService:
         api_type: str = "openai",
         base_url: str | None = None,
         api_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
         is_enabled: bool = True,
     ) -> dict[str, Any]:
         """Create a new provider."""
@@ -85,10 +89,10 @@ class ProviderService:
         query = """
             INSERT INTO llm_providers (
                 provider_id, tenant_id, display_name, api_type, base_url,
-                api_key_encrypted, is_enabled
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                api_key_encrypted, metadata, is_enabled
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING provider_id, tenant_id, display_name, api_type, base_url,
-                      api_key_encrypted, is_enabled, created_at, updated_at
+                      api_key_encrypted, metadata, is_enabled, created_at, updated_at
         """
         row = await self.db.fetchrow(
             query,
@@ -98,6 +102,7 @@ class ProviderService:
             api_type,
             base_url,
             api_key_encrypted,
+            metadata or {},
             is_enabled,
         )
         return self._row_to_dict(row)
@@ -110,6 +115,7 @@ class ProviderService:
         api_type: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
         is_enabled: bool | None = None,
     ) -> dict[str, Any] | None:
         """Update a provider."""
@@ -139,6 +145,11 @@ class ProviderService:
             params.append(encrypted)
             param_idx += 1
 
+        if metadata is not None:
+            updates.append(f"metadata = ${param_idx}")
+            params.append(metadata)
+            param_idx += 1
+
         if is_enabled is not None:
             updates.append(f"is_enabled = ${param_idx}")
             params.append(is_enabled)
@@ -158,7 +169,7 @@ class ProviderService:
             SET {", ".join(updates)}
             WHERE tenant_id = ${param_idx} AND provider_id = ${param_idx + 1}
             RETURNING provider_id, tenant_id, display_name, api_type, base_url,
-                      api_key_encrypted, is_enabled, created_at, updated_at
+                      api_key_encrypted, metadata, is_enabled, created_at, updated_at
         """
         row = await self.db.fetchrow(query, *params)
         return self._row_to_dict(row) if row else None
@@ -195,10 +206,9 @@ class ProviderService:
 
         # Get decrypted API key
         api_key = await self._get_api_key(tenant_id, provider_id)
-        if not api_key:
-            return {"success": False, "message": "No API key configured"}
-
         api_type = provider.get("api_type", "openai")
+        if not api_key and api_type != "google-vertex":
+            return {"success": False, "message": "No API key configured"}
         base_url = provider.get("base_url", "")
 
         try:
@@ -231,11 +241,53 @@ class ProviderService:
                     url = f"{base_url}/v1beta/models?key={api_key}"
                     response = await client.get(url)
                 elif api_type == "google-vertex":
-                    # Vertex Express Mode — list publisher models; same
-                    # ?key= query param shape as AI Studio but under the
-                    # /v1/publishers/google namespace.
-                    url = f"{base_url}/v1/publishers/google/models?key={api_key}"
-                    response = await client.get(url)
+                    metadata = provider.get("metadata") if isinstance(provider.get("metadata"), dict) else {}
+                    if not api_key or api_key.lstrip().startswith("{"):
+                        project = (
+                            metadata.get("project")
+                            or metadata.get("project_id")
+                            or os.getenv("GOOGLE_CLOUD_PROJECT")
+                            or os.getenv("GOOGLE_PROJECT_ID")
+                        )
+                        location = (
+                            metadata.get("location")
+                            or metadata.get("region")
+                            or os.getenv("GOOGLE_CLOUD_LOCATION")
+                            or os.getenv("GOOGLE_CLOUD_REGION")
+                            or "us-central1"
+                        )
+                        import google.auth
+                        from google.auth.transport.requests import Request as GoogleAuthRequest
+                        from google.oauth2 import service_account
+
+                        scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+                        if api_key:
+                            service_account_info = json.loads(api_key)
+                            if isinstance(service_account_info, dict):
+                                project = project or service_account_info.get("project_id")
+                            credentials = service_account.Credentials.from_service_account_info(
+                                service_account_info,
+                                scopes=scopes,
+                            )
+                        else:
+                            credentials, default_project = google.auth.default(scopes=scopes)
+                            project = project or default_project
+                        if not project:
+                            return {"success": False, "message": "Google Cloud project is required"}
+                        await asyncio.to_thread(credentials.refresh, GoogleAuthRequest())
+                        url = (
+                            f"https://{location}-aiplatform.googleapis.com/v1/projects/"
+                            f"{project}/locations/{location}/publishers/google/models"
+                        )
+                        response = await client.get(
+                            url,
+                            headers={"Authorization": f"Bearer {credentials.token}"},
+                        )
+                    else:
+                        # API-key smoke test. Production Vertex credentials are
+                        # verified by the Agent runtime with official Google auth.
+                        url = f"{base_url}/v1/publishers/google/models?key={api_key}"
+                        response = await client.get(url)
                 else:
                     return {"success": False, "message": f"Unknown API type: {api_type}"}
 
@@ -311,6 +363,9 @@ class ProviderService:
     @staticmethod
     def allows_environment_credentials(provider: Mapping[str, Any]) -> bool:
         """Whether this provider may rely on Agent-side environment credentials."""
+        api_type = str(provider.get("api_type") or "").strip().lower()
+        if api_type in {"google-vertex", "vertex"}:
+            return True
         return bool(
             provider.get("allow_environment_credentials")
             or provider.get("uses_environment_credentials")
@@ -339,4 +394,6 @@ class ProviderService:
         result = dict(row)
         # Add has_api_key flag without exposing the actual key
         result["has_api_key"] = bool(result.pop("api_key_encrypted", None))
+        metadata = result.get("metadata")
+        result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
         return result

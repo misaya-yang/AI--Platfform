@@ -4,12 +4,15 @@ LLM Provider Management API.
 REST endpoints for managing LLM providers.
 """
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...core.auth.permissions import Capability, build_permission_denied_detail, check_capability
 from ...core.auth.rbac import RBAC
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_catalog_sync import ModelCatalogSyncService
+from ...services.llm.model_failover import has_secret_field
 from ...services.llm.model_service import ModelService
 from ...services.llm.provider_service import ProviderService
 from ...services.llm.provider_templates import (
@@ -54,6 +57,18 @@ def _require_user_gateway_capability(user: UserContext, capability: Capability) 
         status_code=403,
         detail=build_permission_denied_detail(capability=capability),
     )
+
+
+def _safe_provider_metadata(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+    if metadata is None:
+        return None
+    if has_secret_field(metadata):
+        raise HTTPException(status_code=422, detail="PROVIDER_METADATA_MUST_NOT_CONTAIN_SECRETS")
+    return {
+        str(key): value
+        for key, value in metadata.items()
+        if str(key).strip() and value not in (None, "")
+    }
 
 
 def get_provider_service(request: Request) -> ProviderService:
@@ -123,6 +138,7 @@ async def create_provider(
             api_type=body.api_type,
             base_url=body.base_url,
             api_key=body.api_key,
+            metadata=_safe_provider_metadata(body.metadata),
             is_enabled=body.is_enabled,
         )
         if request is not None:
@@ -182,6 +198,7 @@ async def create_provider_from_template(
             api_type=template.api_type,
             base_url=base_url,
             api_key=body.api_key,
+            metadata=_safe_provider_metadata(body.metadata),
             is_enabled=body.is_enabled,
         )
         if not provider:
@@ -206,6 +223,7 @@ async def create_provider_from_template(
             api_type=template.api_type,
             base_url=base_url,
             api_key=body.api_key,
+            metadata=_safe_provider_metadata(body.metadata),
             is_enabled=body.is_enabled,
         )
         if request is not None:
@@ -259,6 +277,7 @@ async def update_provider(
         api_type=body.api_type,
         base_url=body.base_url,
         api_key=body.api_key,
+        metadata=_safe_provider_metadata(body.metadata),
         is_enabled=body.is_enabled,
     )
     if not provider:

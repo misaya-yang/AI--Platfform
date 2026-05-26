@@ -268,15 +268,28 @@ PROVIDER_TEMPLATES: tuple[ProviderTemplate, ...] = (
     ProviderTemplate(
         template_id="google-vertex",
         display_name="Google Vertex AI",
-        description="Google Vertex AI Express Mode Gemini endpoint.",
+        description="Google Vertex AI Gemini via official Google auth.",
         default_provider_id="google-vertex",
         api_type="google-vertex",
         default_base_url="https://aiplatform.googleapis.com",
         credential_fields=(
             CredentialField(
+                name="project",
+                label="Project ID",
+                field_type="text",
+                placeholder="my-gcp-project",
+            ),
+            CredentialField(
+                name="location",
+                label="Location",
+                field_type="text",
+                placeholder="us-central1",
+            ),
+            CredentialField(
                 name="api_key",
-                label="Express Mode API Key",
-                placeholder="AQ.xxx",
+                label="Service account JSON",
+                required=False,
+                placeholder="Leave blank to use server ADC",
             ),
         ),
         discovery_strategy="vertex_best_effort",

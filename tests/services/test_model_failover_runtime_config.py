@@ -44,6 +44,8 @@ def _provider(
     base_url: str | None = None,
     api_key: str | None = "runtime-secret",
     enabled: bool = True,
+    metadata: dict[str, Any] | None = None,
+    allow_environment_credentials: bool = False,
 ) -> dict[str, Any]:
     return {
         "provider_id": provider_id,
@@ -51,7 +53,8 @@ def _provider(
         "runtime_provider": runtime_provider,
         "runtime_base_url": base_url,
         "api_key": api_key,
-        "allow_environment_credentials": False,
+        "metadata": metadata or {},
+        "allow_environment_credentials": allow_environment_credentials,
     }
 
 
@@ -177,3 +180,46 @@ def test_nested_secret_detection_catches_failover_candidate_keys():
             },
         }
     )
+    assert has_secret_field({"metadata": {"service_account_json": "{}"}})
+
+
+@pytest.mark.asyncio
+async def test_vertex_runtime_metadata_is_forwarded_without_browser_secret():
+    runtime = await build_runtime_model_override_config(
+        tenant_id="tenant-a",
+        model_override={
+            "enabled": True,
+            "provider_id": "google-vertex",
+            "model_id": "gemini-3.5-flash",
+            "cache_epoch": 3,
+        },
+        provider_service=FakeProviderService(
+            {
+                "google-vertex": _provider(
+                    "google-vertex",
+                    runtime_provider="vertex",
+                    base_url="https://aiplatform.googleapis.com",
+                    api_key=None,
+                    allow_environment_credentials=True,
+                    metadata={
+                        "project": "hjz-csgmn-260422",
+                        "location": "us-central1",
+                    },
+                ),
+            }
+        ),
+        model_service=FakeModelService(
+            {
+                ("google-vertex", "gemini-3.5-flash"): _model(
+                    "google-vertex",
+                    "gemini-3.5-flash",
+                ),
+            }
+        ),
+    )
+
+    assert runtime["provider"] == "vertex"
+    assert runtime["project"] == "hjz-csgmn-260422"
+    assert runtime["location"] == "us-central1"
+    assert "_api_key" not in runtime
+    assert runtime["api_key_fingerprint"] is None

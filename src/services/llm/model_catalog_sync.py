@@ -179,7 +179,7 @@ class ModelCatalogSyncService:
         provider: dict[str, Any],
     ) -> list[dict[str, Any]]:
         api_key = await self._get_runtime_api_key(tenant_id, provider["provider_id"])
-        if not api_key:
+        if not api_key or api_key.lstrip().startswith("{"):
             return []
 
         base_url = str(provider.get("base_url") or "https://aiplatform.googleapis.com")

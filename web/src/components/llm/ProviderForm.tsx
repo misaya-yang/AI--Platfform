@@ -51,6 +51,8 @@ interface FormData {
   display_name: string;
   api_type: string;
   base_url: string;
+  vertex_project: string;
+  vertex_location: string;
   api_key: string;
   is_enabled: boolean;
 }
@@ -62,15 +64,31 @@ const API_TYPES = [
   { value: "google-vertex", label: "Google Vertex AI" },
 ];
 
-// Per-api-type hints for the API key field. Vertex Express Mode keys have
-// a distinct format (``AQ.xxx``) and land on a different host, so surface
-// that in the placeholder to reduce copy/paste-the-wrong-key incidents.
 const API_KEY_PLACEHOLDERS: Record<string, string> = {
   openai: "sk-...",
   anthropic: "sk-ant-...",
   google: "AIzaSy...",
-  "google-vertex": "AQ.xxx  (Vertex Express Mode key)",
+  "google-vertex": "Leave blank for server ADC or paste service account JSON",
 };
+
+function readMetadataString(metadata: Record<string, unknown> | undefined, keys: string[]) {
+  for (const key of keys) {
+    const value = metadata?.[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
+function buildProviderMetadata(data: FormData, apiType: string) {
+  if (apiType !== "google-vertex") return undefined;
+  const project = data.vertex_project.trim();
+  const location = data.vertex_location.trim() || "us-central1";
+  return {
+    ...(project ? { project } : {}),
+    location,
+    auth_mode: data.api_key ? "credential" : "adc",
+  };
+}
 
 export function ProviderForm({
   open,
@@ -107,6 +125,8 @@ export function ProviderForm({
       display_name: "",
       api_type: "openai",
       base_url: "",
+      vertex_project: "",
+      vertex_location: "us-central1",
       api_key: "",
       is_enabled: true,
     },
@@ -133,6 +153,17 @@ export function ProviderForm({
         display_name: provider.display_name,
         api_type: provider.api_type,
         base_url: provider.base_url || "",
+        vertex_project: readMetadataString(provider.metadata, [
+          "project",
+          "project_id",
+          "google_cloud_project",
+        ]),
+        vertex_location:
+          readMetadataString(provider.metadata, [
+            "location",
+            "region",
+            "google_cloud_location",
+          ]) || "us-central1",
         api_key: "",
         is_enabled: provider.is_enabled,
       });
@@ -144,6 +175,8 @@ export function ProviderForm({
         display_name: "",
         api_type: "openai",
         base_url: getDefaultBaseUrl("openai"),
+        vertex_project: "",
+        vertex_location: "us-central1",
         api_key: "",
         is_enabled: true,
       });
@@ -163,6 +196,9 @@ export function ProviderForm({
       setValue("base_url", selectedTemplate.default_base_url || "");
       setValue("provider_id", selectedTemplate.default_provider_id);
       setValue("display_name", selectedTemplate.display_name);
+      if (selectedTemplate.api_type === "google-vertex") {
+        setValue("vertex_location", "us-central1");
+      }
     }
   }, [advancedMode, isEdit, selectedTemplate, setValue]);
 
@@ -171,6 +207,7 @@ export function ProviderForm({
       const submitData: ProviderFromTemplateCreate = {
         template_id: selectedTemplate.template_id,
         api_key: data.api_key || undefined,
+        metadata: buildProviderMetadata(data, selectedTemplate.api_type),
         is_enabled: data.is_enabled,
       };
       await onSubmit(submitData);
@@ -182,6 +219,7 @@ export function ProviderForm({
           display_name: data.display_name,
           api_type: data.api_type,
           base_url: data.base_url || undefined,
+          metadata: buildProviderMetadata(data, data.api_type),
           api_key: data.api_key || undefined,
           is_enabled: data.is_enabled,
         }
@@ -190,6 +228,7 @@ export function ProviderForm({
           display_name: data.display_name,
           api_type: data.api_type,
           base_url: data.base_url || undefined,
+          metadata: buildProviderMetadata(data, data.api_type),
           api_key: data.api_key || undefined,
           is_enabled: data.is_enabled,
         };
@@ -324,6 +363,30 @@ export function ProviderForm({
             </div>
             )}
 
+            {apiType === "google-vertex" && (
+              <div className="grid gap-4 rounded-lg border border-border/70 p-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="vertex_project">Project ID</Label>
+                  <Input
+                    id="vertex_project"
+                    placeholder="hjz-csgmn-260422"
+                    {...register("vertex_project")}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Required unless the Agent container already sets GOOGLE_CLOUD_PROJECT.
+                  </p>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="vertex_location">Location</Label>
+                  <Input
+                    id="vertex_location"
+                    placeholder="us-central1"
+                    {...register("vertex_location")}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* API Key */}
             <div className="grid gap-2">
               <Label htmlFor="api_key">
@@ -346,9 +409,8 @@ export function ProviderForm({
               />
               {apiType === "google-vertex" && (
                 <p className="text-xs text-muted-foreground">
-                  Paste an Express Mode API key (format <code>AQ.xxx</code>).
-                  Vertex Express Mode works without OAuth / project / location
-                  setup.
+                  Official Vertex auth uses server ADC or encrypted service account
+                  JSON; API keys are only kept for legacy compatibility.
                 </p>
               )}
             </div>

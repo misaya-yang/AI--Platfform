@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-
 MODEL_OVERRIDE_SECRET_FIELD_NAMES = {
     "_api_key",
     "api_key",
@@ -19,7 +18,10 @@ MODEL_OVERRIDE_SECRET_FIELD_NAMES = {
     "credential",
     "credentials",
     "password",
+    "private_key",
     "secret",
+    "service_account",
+    "service_account_json",
     "token",
 }
 
@@ -86,6 +88,27 @@ def _allows_environment_credentials(provider: dict[str, Any]) -> bool:
         provider.get("allow_environment_credentials")
         or provider.get("uses_environment_credentials")
     )
+
+
+def _provider_runtime_metadata(provider: dict[str, Any]) -> dict[str, Any]:
+    metadata = provider.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    runtime: dict[str, Any] = {}
+    for source, target in (
+        ("project", "project"),
+        ("project_id", "project"),
+        ("google_cloud_project", "project"),
+        ("location", "location"),
+        ("region", "location"),
+        ("google_cloud_location", "location"),
+        ("credentials_path", "credentials_path"),
+        ("google_application_credentials", "credentials_path"),
+    ):
+        value = metadata.get(source)
+        if value is not None and str(value).strip():
+            runtime[target] = str(value).strip()
+    return runtime
 
 
 async def _load_model(
@@ -162,6 +185,7 @@ async def build_runtime_candidate(
         "api_key_fingerprint": safe_api_key_fingerprint(api_key),
         "cache_epoch": str(cache_epoch or "0"),
     }
+    candidate.update(_provider_runtime_metadata(provider))
     if api_key:
         candidate["_api_key"] = api_key
     return candidate

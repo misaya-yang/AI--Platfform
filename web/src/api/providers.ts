@@ -16,6 +16,7 @@ export interface Provider {
   display_name: string;
   api_type: string;
   base_url?: string | null;
+  metadata?: Record<string, unknown>;
   has_api_key: boolean;
   is_enabled: boolean;
   created_at: string;
@@ -27,6 +28,7 @@ export interface ProviderCreate {
   display_name: string;
   api_type?: string;
   base_url?: string;
+  metadata?: Record<string, unknown>;
   api_key?: string;
   is_enabled?: boolean;
 }
@@ -71,6 +73,7 @@ export interface ProviderFromTemplateCreate {
   display_name?: string;
   api_key?: string;
   base_url?: string;
+  metadata?: Record<string, unknown>;
   is_enabled?: boolean;
 }
 
@@ -78,6 +81,7 @@ export interface ProviderUpdate {
   display_name?: string;
   api_type?: string;
   base_url?: string;
+  metadata?: Record<string, unknown>;
   api_key?: string;
   is_enabled?: boolean;
 }

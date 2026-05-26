@@ -46,3 +46,16 @@ def test_gemini35_flash_is_scoped_to_google_templates_not_anthropic() -> None:
 
     assert "google" in provider_ids
     assert "anthropic" not in provider_ids
+
+
+def test_vertex_template_collects_official_auth_fields() -> None:
+    template = get_provider_template("google-vertex")
+
+    assert template is not None
+    assert template.api_type == "google-vertex"
+    assert template.description == "Google Vertex AI Gemini via official Google auth."
+    assert {field.name for field in template.credential_fields} == {
+        "project",
+        "location",
+        "api_key",
+    }
