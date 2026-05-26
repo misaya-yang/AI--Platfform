@@ -1900,10 +1900,10 @@
     "chatLog": "对话记录",
     "disclaimer": "AI 回答可能不准确",
     "modelFailover": {
-      "fallbackProvider": "备用供应商",
-      "fallbackModel": "备用模型",
-      "selected": "已启用模型降级：网关已将本次回答切换到 {{provider}} / {{model}}。",
-      "exhausted": "所有已配置的模型降级项都调用失败。请稍后重试，或调整服务模型策略。"
+      "fallbackProvider": "fallback provider",
+      "fallbackModel": "fallback model",
+      "selected": "Model fallback is active. The gateway switched this response to {{provider}} / {{model}}.",
+      "exhausted": "All configured model fallbacks failed. Please try again later or update the service model policy."
     },
     "errors": {
       "cancelled": "请求已取消。",
@@ -1911,9 +1911,9 @@
       "forbidden": "你没有权限使用该服务。",
       "notFound": "请求的服务不可用或配置异常。",
       "rateLimited": "当前模型繁忙或额度已达上限，请稍后重试。",
-      "modelProviderUnavailable": "当前选择的模型服务不可用，网关已记录失败原因。请重试，或切换到其他可用模型。",
-      "modelFallbackExhausted": "所有已配置的模型降级项都不可用。请稍后重试，或调整服务模型策略。",
-      "modelQuotaExhausted": "当前模型账号额度不可用。请切换到有额度的供应商，或更新服务配置。",
+      "modelProviderUnavailable": "The selected model provider is unavailable. The gateway logged the failure; please retry or choose another model.",
+      "modelFallbackExhausted": "All configured model fallbacks are unavailable. Please retry later or update the service model policy.",
+      "modelQuotaExhausted": "The selected model account has no available quota. Please choose another funded provider or update the service configuration.",
       "invalidAssistant": "服务配置异常（assistant/graph 不匹配），请联系管理员检查。",
       "upstreamUnavailable": "上游 Agent 服务暂时不可用，请确认服务状态后重试。",
       "timeout": "请求超时，请稍后重试。",
