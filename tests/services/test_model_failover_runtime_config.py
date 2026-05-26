@@ -169,6 +169,46 @@ async def test_invalid_fallback_candidate_is_skipped_with_safe_warning():
     assert "api_key" not in json.dumps(failover["warnings"])
 
 
+@pytest.mark.asyncio
+async def test_runtime_failover_attempts_reach_configured_fallback():
+    runtime = await build_runtime_model_override_config(
+        tenant_id="tenant-a",
+        model_override={
+            "enabled": True,
+            "provider_id": "dashscope-cn",
+            "model_id": "qwen-max",
+            "cache_epoch": 1,
+            "failover": {
+                "enabled": True,
+                "max_attempts": 1,
+                "candidates": [
+                    {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"}
+                ],
+            },
+        },
+        provider_service=FakeProviderService(
+            {
+                "dashscope-cn": _provider("dashscope-cn", runtime_provider="dashscope"),
+                "google-ai-studio": _provider(
+                    "google-ai-studio",
+                    runtime_provider="gemini",
+                ),
+            }
+        ),
+        model_service=FakeModelService(
+            {
+                ("dashscope-cn", "qwen-max"): _model("dashscope-cn", "qwen-max"),
+                ("google-ai-studio", "gemini-3.5-flash"): _model(
+                    "google-ai-studio",
+                    "gemini-3.5-flash",
+                ),
+            }
+        ),
+    )
+
+    assert runtime["failover"]["max_attempts"] == 2
+
+
 def test_nested_secret_detection_catches_failover_candidate_keys():
     assert has_secret_field(
         {

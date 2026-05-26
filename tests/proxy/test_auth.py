@@ -16,9 +16,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import httpx
 import jwt
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from src.core.auth.user_resolver import UserContext
 from src.core.middleware.auth import (
@@ -310,7 +311,7 @@ class TestAuthMiddleware:
         return decoder
 
     @pytest.mark.asyncio
-    async def test_whitelist_path_bypasses_auth(self, mock_request, mock_call_next):
+    async def test_whitelist_path_bypasses_auth(self, mock_request):
         """测试白名单路径跳过认证"""
         mock_request.url.path = "/health"
 
@@ -350,8 +351,8 @@ class TestAuthMiddleware:
         ip = middleware._get_client_ip(mock_request)
         assert ip == "192.168.1.1"
 
-    def test_get_client_ip_from_real_ip(self, mock_request):
-        """测试从 X-Real-IP 获取 IP"""
+    def test_get_client_ip_ignores_real_ip_without_trusted_proxy(self, mock_request):
+        """非可信直连来源不能用 X-Real-IP 伪造客户端 IP。"""
         mock_request.headers = {"X-Real-IP": "10.0.0.5"}
 
         config = AuthConfig()
@@ -361,7 +362,7 @@ class TestAuthMiddleware:
         )
 
         ip = middleware._get_client_ip(mock_request)
-        assert ip == "10.0.0.5"
+        assert ip == "192.168.1.1"
 
     def test_get_client_ip_fallback(self, mock_request):
         """测试 IP 获取回退到 client.host"""
@@ -560,7 +561,7 @@ class TestRemoteJWTValidator:
 
         # 由于缓存过期，会尝试远程验证
         # 这里会失败因为没有真实的远程服务
-        with pytest.raises(Exception):
+        with pytest.raises((HTTPException, httpx.HTTPError)):
             await remote_validator(token)
 
 

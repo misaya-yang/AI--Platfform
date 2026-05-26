@@ -22,6 +22,7 @@ from ...core.auth.service_access import (
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_failover import (
     has_secret_field,
+    normalize_failover_attempts,
     normalize_max_attempts,
 )
 from ...services.registry.service_registry import ServiceRegistry
@@ -412,6 +413,11 @@ async def _normalize_langgraph_failover(
         seen.add((provider_id, model_id))
 
     normalized["candidates"] = candidates
+    normalized["max_attempts"] = normalize_failover_attempts(
+        normalized["max_attempts"],
+        candidate_count=len(candidates) + 1,
+        default=3,
+    )
     return normalized
 
 

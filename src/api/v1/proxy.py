@@ -838,6 +838,12 @@ def _service_allowed(allowed: list[str], candidates: set) -> bool:
 
 def _build_service_access_cache_key(request: Request, user: UserContext) -> str:
     api_key_hash = str(getattr(request.state, "api_key_hash", "") or "")
+    api_key_info = getattr(request.state, "api_key_info", None)
+    api_allowed_key = ""
+    if isinstance(api_key_info, dict):
+        api_allowed_key = ",".join(
+            _normalize_allowed_services(api_key_info.get("allowed_services"))
+        )
     db_identity = id(getattr(request.app.state, "database", None))
     role_key = ",".join(sorted(str(role) for role in (user.roles or [])))
     return "|".join(
@@ -846,6 +852,7 @@ def _build_service_access_cache_key(request: Request, user: UserContext) -> str:
             str(user.user_id or ""),
             str(user.tenant_id or ""),
             api_key_hash,
+            api_allowed_key,
             role_key,
         )
     )

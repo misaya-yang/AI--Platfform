@@ -49,6 +49,8 @@ i18n
     resources,
     fallbackLng: DEFAULT_LOCALE,
     supportedLngs: [...APP_LOCALES],
+    debug: false,
+    showSupportNotice: false,
     nonExplicitSupportedLngs: false,
     load: "currentOnly",
     cleanCode: true,

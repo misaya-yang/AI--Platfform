@@ -515,6 +515,52 @@ async def test_update_service_increments_cache_epoch_when_failover_order_changes
 
 
 @pytest.mark.asyncio
+async def test_update_service_clamps_failover_attempts_to_reach_fallback():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    request = _request(
+        provider_service=FakeProviderService(
+            {
+                "dashscope-prod": _provider(),
+                "google-ai-studio": _provider("google-ai-studio"),
+            }
+        ),
+        model_service=FakeModelService(
+            {
+                ("dashscope-prod", "qwen-max"): _model(),
+                ("google-ai-studio", "gemini-3.5-flash"): _model(
+                    "google-ai-studio",
+                    "gemini-3.5-flash",
+                ),
+            }
+        ),
+    )
+
+    await register_service(
+        request=request,
+        definition=_definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+                "failover": {
+                    "enabled": True,
+                    "max_attempts": 1,
+                    "candidates": [
+                        {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"}
+                    ],
+                },
+            }
+        ),
+        registry=registry,
+        auth=_auth(),
+    )
+    stored = await registry.get("imam-agent")
+    model_override = stored.connector_config["model_override"]
+
+    assert model_override["failover"]["max_attempts"] == 2
+
+
+@pytest.mark.asyncio
 async def test_disabled_failover_can_save_primary_only():
     registry = ServiceRegistry(MemoryRegistryStorage())
     request = _request(

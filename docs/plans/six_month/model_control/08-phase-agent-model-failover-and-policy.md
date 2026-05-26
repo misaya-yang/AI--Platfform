@@ -31,7 +31,7 @@ In scope:
 - Ordered primary + fallback candidates using existing registered Providers/Models.
 - Gateway validation, secret resolution, safe runtime injection, and cache-key-safe fingerprints for every candidate.
 - Imam Agent model-call retry/failover inside the existing model switcher middleware.
-- Clear console/server logs showing attempted provider/model, failover reason, selected fallback, and cache epoch.
+- Clear server-side logs and custom stream events showing attempted provider/model, failover reason, selected fallback, and cache epoch. Browser console debug logs are disabled for normal production use.
 - Browser validation against Sheikh Wahda after deployment.
 
 Out of scope:
@@ -188,7 +188,8 @@ Frontend:
 - Modify: `/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/web/src/types/gateway.ts`
   - Add `ServiceModelFailoverConfig` and candidate types.
 - Modify: `/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/web/src/pages/playground/hooks/usePlaygroundStream.ts`
-  - Extend debug console output with candidate count, active attempt, and failover status when present.
+  - Consume failover stream events only for user-visible exhausted-state messaging.
+  - Do not print model-control-plane snapshots or failover attempts to the browser console in production.
 
 Imam Agent repo:
 
@@ -388,18 +389,20 @@ Browser acceptance:
 - **Do not switch after partial text has streamed.** Mixed-provider output is hard to explain and debug.
 - **Do not auto-select fallbacks from all providers.** Candidate order is admin-controlled.
 - **Do not treat image generation as a fallback candidate.** This phase is chat model only.
-- **Do not hide failover in logs.** Operators must see primary failure and fallback selection clearly, with no secrets.
+- **Do not hide failover in server logs.** Operators must see primary failure and fallback selection clearly, with no secrets; browser console logs stay quiet unless a dedicated debug mode is reintroduced.
 
 ## Acceptance Evidence - 2026-05-26
 
-- Local LangGraph gate: `conda run -n lgdemo python -m pytest agents/Imam_agent/tests/unit_tests/test_model_failover.py agents/Imam_agent/tests/unit_tests/test_llm_vertex.py -q` -> `15 passed`.
+- Local LangGraph gate: `conda run -n lgdemo python -m pytest agents/Imam_agent/tests/unit_tests/test_model_failover.py agents/Imam_agent/tests/unit_tests/test_llm_vertex.py -q` -> `16 passed`.
 - Local lint gate: `conda run -n lgdemo python -m ruff check shared/utils/model_switcher.py shared/utils/llm.py agents/Imam_agent/tests/unit_tests/test_model_failover.py agents/Imam_agent/tests/unit_tests/test_llm_vertex.py` -> `All checks passed`.
-- Local Gateway gate: `conda run -n ai_gateway python -m pytest tests/api/test_service_model_override_validation.py tests/api/test_proxy_model_override_injection.py tests/services/test_langgraph_model_override_config.py tests/services/test_model_failover_runtime_config.py tests/services/test_provider_templates.py tests/services/test_model_catalog_sync.py -q --no-cov` -> `36 passed`.
+- Local Gateway gate: `conda run -n ai_gateway python -m pytest tests/api/test_service_model_override_validation.py tests/api/test_proxy_model_override_injection.py tests/services/test_langgraph_model_override_config.py tests/services/test_model_failover_runtime_config.py tests/services/test_provider_templates.py tests/services/test_model_catalog_sync.py -q --no-cov` -> `38 passed`.
 - Server deploy gate: copied mounted Imam files `shared/utils/model_switcher.py` and `shared/utils/llm.py`, restarted only `imam-agent`, and confirmed `imam-agent` healthy.
 - Browser failover gate: configured Sheikh Wahda primary `Google Vertex AI / Gemini 3 Flash (Vertex)` with fallback `Qwen/DashScope Intl / Qwen 3.7 Max`; Playground returned a normal answer after Vertex credentials failed.
 - Log evidence: Gateway injected `provider_id=google-vertex model_id=gemini-3-flash-preview-vertex failover_candidates=2`; Imam logged Vertex `DefaultCredentialsError`, then selected `provider=dashscope model=qwen3.7-max`, and `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` returned `200 OK`.
 - Restore gate: Sheikh Wahda restored to default primary `Google Gemini / Gemini 3.5 Flash` with fallback `Qwen/DashScope Intl / Qwen 3.7 Max`.
 - Browser primary-switch gate: after restore, Playground returned a normal answer; Gateway injected `provider_id=google model_id=gemini-3.5-flash`, Imam selected `provider=gemini model=gemini-3.5-flash`, and the AI Studio endpoint returned `200 OK`.
-- Current-state server gate: verified `/opt/deploy/imam-agent/shared/utils/model_switcher.py` has `_should_retry(...): return failover.enabled`; verified `/opt/deploy/imam-agent/shared/utils/llm.py` strips Vertex-only kwargs for non-Vertex providers and constructs Vertex with `vertexai=True`.
+- Current-state server gate: verified `/opt/deploy/imam-agent/shared/utils/model_switcher.py` advances to the next configured candidate on model construction/call exceptions while candidates remain; verified `/opt/deploy/imam-agent/shared/utils/llm.py` strips Vertex-only kwargs for non-Vertex providers and constructs Vertex with official Google auth fields.
 - Current-state browser gate after service restart: Codex in-app Browser sent `codex-live-1779780941629` in Playground; the UI returned a normal response containing the marker.
 - Current-state log gate after service restart: Gateway injected `provider_id=google model_id=gemini-3.5-flash cache_epoch=21 failover_candidates=2`; Imam selected `provider=gemini model=gemini-3.5-flash`; `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse` returned `200 OK`.
+- Follow-up hardening gate: `conda run -n ai_gateway python -m pytest tests/proxy/test_auth.py tests/proxy/test_rate_limit.py tests/proxy/test_gateway_admission_control.py tests/proxy/test_gateway_priority_queue.py tests/proxy/test_gateway_shared_upstream_budget.py tests/proxy/test_gateway_header_spoofing.py tests/api/test_proxy_authorization_matrix.py tests/api/test_proxy_rate_limit_behavior.py tests/api/test_gateway_rate_limit_config_runtime.py tests/api/test_uat_capacity_contract.py tests/api/test_gateway_capacity_status_api.py tests/services/test_billing.py tests/services/test_usage_recorder_aggregates.py tests/services/test_quota_gateway_enforcement.py tests/services/test_gateway_quota_usage_sync.py tests/core/test_ratelimit.py tests/core/test_streaming_rate_limit.py tests/core/auth/test_jwt.py tests/core/auth/test_api_key.py tests/core/auth/test_service_access.py -q --no-cov` -> `180 passed`.
+- Follow-up frontend gate: `npm --prefix web run lint` -> `0 errors`, existing warnings only; `npm --prefix web run type-check` -> passed; `npm --prefix web run build` -> passed with existing chunk-size warnings only.

@@ -6,14 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>web</title>
     <meta name="color-scheme" content="light dark" />
-    <!-- Typography: Geist Sans (UI) + Inter (Activity) + Noto Naskh Arabic + IBM Plex Mono + JetBrains Mono -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/style.css">
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Naskh+Arabic:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    >
   </head>
   <body>
     <div id="root">
@@ -55,86 +47,7 @@
         html.dark #app-boot-fallback [id="app-boot-error"] > div { color:#cbd5e1; }
       </style>
     </div>
-    <script>
-      // Boot-timeout watchdog. React's root.render() wipes #app-boot-fallback
-      // on successful mount. If that didn't happen within 15s, the bundle
-      // almost certainly failed to download — swap the spinner for an
-      // error panel + reload button. Removes the silent white screen
-      // symptom on flaky networks.
-      //
-      // 15s was chosen over 10s after the 2026-04-24 deploy: a cold-start
-      // TCP+TLS handshake from a loaded connection to AWS Sydney can run
-      // 7-9s end-to-end before the bundle arrives; 10s fired spurious
-      // "Couldn't load" panels on slow-but-working connections.
-      (function appBootWatchdog() {
-        var TIMEOUT_MS = 15000;
-        setTimeout(function () {
-          var fallback = document.getElementById('app-boot-fallback');
-          if (!fallback) return; // React already mounted; nothing to do.
-          var msg = document.getElementById('app-boot-msg');
-          var err = document.getElementById('app-boot-error');
-          if (msg) msg.style.display = 'none';
-          if (err) err.style.display = 'block';
-          var btn = document.getElementById('app-boot-retry');
-          if (btn) btn.addEventListener('click', function () { location.reload(); });
-        }, TIMEOUT_MS);
-      })();
-    </script>
-    <script>
-      (function applyInitialThemeAndLocale() {
-        var params = new URLSearchParams(window.location.search);
-        if (params.get("reset") === "true") {
-          localStorage.removeItem("agent-gateway-storage");
-        }
-
-        var storageRaw = localStorage.getItem("agent-gateway-storage");
-        var i18nLng = localStorage.getItem("i18nextLng") || "zh-CN";
-        var locale = /^en/i.test(i18nLng) ? "en-US" : "zh-CN";
-        document.documentElement.lang = locale;
-        document.documentElement.dir = "ltr";
-
-        var mode = "system";
-        var resolved = null;
-        var legacyDarkMode = null;
-        try {
-          var parsed = storageRaw ? JSON.parse(storageRaw) : null;
-          var state = parsed && parsed.state ? parsed.state : {};
-          mode = state.themeMode || mode;
-          resolved = state.resolvedTheme || null;
-          legacyDarkMode = typeof state.darkMode === "boolean" ? state.darkMode : null;
-        } catch (_e) {
-          mode = "system";
-        }
-
-        if (mode === "system") {
-          var systemDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-          resolved = systemDark ? "dark" : "light";
-        } else if (mode === "dark" || mode === "light") {
-          resolved = mode;
-        } else if (legacyDarkMode !== null) {
-          resolved = legacyDarkMode ? "dark" : "light";
-        } else {
-          resolved = "light";
-        }
-
-        var isDark = resolved === "dark";
-        document.documentElement.classList.toggle("dark", isDark);
-        document.documentElement.style.colorScheme = isDark ? "dark" : "light";
-        document.documentElement.dataset.theme = isDark ? "dark" : "light";
-      })();
-    </script>
-    <!-- Emergency reset script: runs BEFORE any modules load -->
-    <script>
-      (function() {
-        var params = new URLSearchParams(window.location.search);
-        if (params.get("reset") === "true") {
-          console.log("[Emergency Reset] Clearing localStorage before React loads");
-          localStorage.removeItem("agent-gateway-storage");
-          var newUrl = window.location.pathname;
-          window.history.replaceState({}, "", newUrl);
-        }
-      })();
-    </script>
+    <script type="module" src="/src/boot.ts"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

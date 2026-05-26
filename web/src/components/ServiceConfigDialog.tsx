@@ -375,6 +375,38 @@ export function ServiceConfigDialog({
     },
     [buildDefaultFailoverCandidates]
   );
+  const reconcileFailoverForPrimary = useCallback(
+    (
+      current: ServiceModelOverride["failover"],
+      primaryProviderId?: string,
+      primaryModelId?: string
+    ): NonNullable<ServiceModelOverride["failover"]> => {
+      const currentFailover = current ?? {
+        enabled: false,
+        max_attempts: 3,
+        candidates: [],
+      };
+      const candidates = (currentFailover.candidates ?? []).filter(
+        (candidate) =>
+          candidate.provider_id !== primaryProviderId ||
+          candidate.model_id !== primaryModelId
+      );
+      const reconciled = {
+        ...currentFailover,
+        candidates,
+        max_attempts:
+          candidates.length > 0
+            ? Math.max(currentFailover.max_attempts ?? 3, 2)
+            : (currentFailover.max_attempts ?? 3),
+      };
+
+      if (!reconciled.enabled || candidates.length > 0) {
+        return reconciled;
+      }
+      return seedDefaultFailover(reconciled, primaryProviderId, primaryModelId);
+    },
+    [seedDefaultFailover]
+  );
   const fallbackInvalid = Boolean(
     modelOverrideForm.enabled &&
       failover.enabled &&
@@ -566,7 +598,7 @@ export function ServiceConfigDialog({
         ...current,
         provider_id: providerId,
         model_id: modelId,
-        failover: seedDefaultFailover(current.failover, providerId, modelId),
+        failover: reconcileFailoverForPrimary(current.failover, providerId, modelId),
       };
     });
   };
@@ -575,7 +607,7 @@ export function ServiceConfigDialog({
     setModelOverrideForm((current) => ({
       ...current,
       model_id: modelId,
-      failover: seedDefaultFailover(current.failover, current.provider_id, modelId),
+      failover: reconcileFailoverForPrimary(current.failover, current.provider_id, modelId),
     }));
   };
 
@@ -603,12 +635,23 @@ export function ServiceConfigDialog({
   };
 
   const handleFailoverToggle = (enabled: boolean) => {
-    updateFailover((current) => ({
-      ...current,
-      enabled,
-      max_attempts: current.max_attempts ?? 3,
-      candidates: current.candidates ?? [],
-    }));
+    setModelOverrideForm((current) => {
+      const currentFailover = current.failover ?? {
+        enabled: false,
+        max_attempts: 3,
+        candidates: [],
+      };
+      const next = {
+        ...currentFailover,
+        enabled,
+        max_attempts: enabled ? Math.max(currentFailover.max_attempts ?? 3, 2) : (currentFailover.max_attempts ?? 3),
+        candidates: currentFailover.candidates ?? [],
+      };
+      return {
+        ...current,
+        failover: reconcileFailoverForPrimary(next, current.provider_id, current.model_id),
+      };
+    });
   };
 
   const handleAddFallback = () => {
@@ -682,14 +725,16 @@ export function ServiceConfigDialog({
         setBasicError(t("services.configDialog.model.overrideInvalid"));
         return;
       }
-      const defaultFailoverCandidates = buildDefaultFailoverCandidates(
-        modelOverrideForm.provider_id,
-        modelOverrideForm.model_id
-      );
+      const defaultFailoverCandidates = failover.enabled
+        ? buildDefaultFailoverCandidates(
+            modelOverrideForm.provider_id,
+            modelOverrideForm.model_id
+          )
+        : [];
       const effectiveFailoverCandidates =
         failoverCandidates.length > 0 ? failoverCandidates : defaultFailoverCandidates;
       const effectiveFailoverEnabled = Boolean(
-        modelOverrideForm.enabled && effectiveFailoverCandidates.length > 0
+        modelOverrideForm.enabled && failover.enabled && effectiveFailoverCandidates.length > 0
       );
 
       patch.connector_config = {
@@ -705,7 +750,9 @@ export function ServiceConfigDialog({
           temperature: modelOverrideForm.temperature ?? null,
           failover: {
             enabled: effectiveFailoverEnabled,
-            max_attempts: failover.max_attempts ?? 3,
+            max_attempts: effectiveFailoverEnabled
+              ? Math.max(failover.max_attempts ?? 3, 2)
+              : (failover.max_attempts ?? 3),
             candidates: effectiveFailoverEnabled ? effectiveFailoverCandidates : [],
           },
         },

@@ -1,16 +1,3 @@
-// Emergency reset: Clear localStorage BEFORE React loads if ?reset=true is in URL
-// This prevents infinite loops and frozen pages from corrupted state
-(function emergencyReset() {
-  const params = new URLSearchParams(window.location.search);
-  if (params.get("reset") === "true") {
-    console.log("[Emergency Reset] Clearing localStorage to recover from stuck state");
-    localStorage.removeItem("agent-gateway-storage");
-    // Remove the reset param from URL without reload
-    const newUrl = window.location.pathname;
-    window.history.replaceState({}, "", newUrl);
-  }
-})();
-
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";

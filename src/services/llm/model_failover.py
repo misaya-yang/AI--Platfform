@@ -62,6 +62,14 @@ def normalize_max_attempts(value: Any, *, default: int = 3) -> int:
     return max(1, min(parsed, 10))
 
 
+def normalize_failover_attempts(value: Any, *, candidate_count: int, default: int = 3) -> int:
+    """Normalize attempts so an enabled fallback chain can actually reach a fallback."""
+    max_attempts = normalize_max_attempts(value, default=default)
+    if candidate_count > 1:
+        max_attempts = max(max_attempts, 2)
+    return min(max_attempts, max(candidate_count, 1))
+
+
 def _allows_environment_credentials(provider: dict[str, Any]) -> bool:
     return bool(
         provider.get("allow_environment_credentials")
@@ -238,7 +246,11 @@ async def build_runtime_model_override_config(
 
     runtime_config["failover"] = {
         "enabled": True,
-        "max_attempts": max_attempts,
+        "max_attempts": normalize_failover_attempts(
+            max_attempts,
+            candidate_count=len(candidates),
+            default=3,
+        ),
         "candidates": candidates,
     }
     if warnings:

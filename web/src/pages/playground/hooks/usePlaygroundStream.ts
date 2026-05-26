@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, startTransition } from "react";
 
-import { getService, invokeService } from "@/api/gateway";
+import { invokeService } from "@/api/gateway";
 import { createSession, getSession, updateSession, addSessionMessage } from "@/api/sessions";
 import {
   sseFetch,
@@ -14,7 +14,6 @@ import { buildHttpFailureError, getPlaygroundErrorMessage } from "@/lib/utils";
 import type { ChatMessage, ToolCallWithResult } from "@/components/ChatWindow";
 import type {
   ContentItem,
-  ServiceDetail,
   StreamChunk,
   ServiceUiPreferences,
 } from "@/types/gateway";
@@ -141,9 +140,6 @@ export interface UsePlaygroundStreamOptions {
   loading: boolean;
 }
 
-const MODEL_DEBUG_LABEL = "[Hejaz Model Debug]";
-const serviceDebugDetailCache = new Map<string, Promise<ServiceDetail>>();
-
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
@@ -154,216 +150,10 @@ function asSafeString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function summarizeModelOverride(value: unknown) {
-  const override = asRecord(value);
-  const failover = asRecord(override?.failover);
-  const candidates = Array.isArray(failover?.candidates)
-    ? failover.candidates
-        .map((candidate) => asRecord(candidate))
-        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate))
-        .map((candidate) => ({
-          provider_id: asSafeString(candidate.provider_id),
-          model_id: asSafeString(candidate.model_id),
-        }))
-    : [];
-
-  return {
-    enabled: Boolean(override?.enabled),
-    provider_id: asSafeString(override?.provider_id),
-    model_id: asSafeString(override?.model_id),
-    cache_epoch:
-      typeof override?.cache_epoch === "number" ||
-      typeof override?.cache_epoch === "string"
-        ? override.cache_epoch
-        : null,
-    temperature:
-      typeof override?.temperature === "number" ? override.temperature : null,
-    failover: {
-      enabled: Boolean(failover?.enabled),
-      max_attempts:
-        typeof failover?.max_attempts === "number" ? failover.max_attempts : null,
-      candidate_count: candidates.length,
-      candidates,
-    },
-  };
-}
-
-function compactLogValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "-";
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  return JSON.stringify(String(value));
-}
-
-function formatModelDebugLine(data: Record<string, unknown>): string {
-  const parts: string[] = [];
-  const push = (key: string, value: unknown) => {
-    parts.push(`${key}=${compactLogValue(value)}`);
-  };
-
-  push("stage", data.stage);
-  push("service_id", data.service_id);
-  push("service_name", data.service_name);
-  push("service_type", data.service_type);
-  push("adapter_type", data.adapter_type);
-  push("proxy_mode", data.proxy_mode);
-  push("transparent_proxy", data.transparent_proxy);
-  push("request_path", data.gateway_request_path);
-  push("thread_id", data.langgraph_thread_id);
-  push("upstream_base_url", data.upstream_base_url);
-  push("graph_id", data.graph_id);
-  push("assistant_id", data.assistant_id);
-
-  const override = asRecord(data.model_override);
-  if (override) {
-    push("override_enabled", override.enabled);
-    push("provider_id", override.provider_id);
-    push("model_id", override.model_id);
-    push("cache_epoch", override.cache_epoch);
-    push("temperature", override.temperature);
-    const failover = asRecord(override.failover);
-    if (failover) {
-      push("failover_enabled", failover.enabled);
-      push("failover_candidates", failover.candidate_count);
-      push("failover_max_attempts", failover.max_attempts);
-    }
-  }
-
-  return `${MODEL_DEBUG_LABEL} ${parts.join(" ")}`;
-}
-
 function readHejazFailoverEvent(value: unknown): Record<string, unknown> | null {
   const data = asRecord(value);
   if (!data || data.type !== "hejaz_model_failover") return null;
   return data;
-}
-
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
-function hasControlPlaneDebugSnapshot(
-  activeService?: UsePlaygroundStreamOptions["activeService"]
-): boolean {
-  if (!activeService) return false;
-  const connectorConfig = asRecord(activeService.connector_config);
-  if (connectorConfig) return true;
-
-  const metadata = asRecord(activeService.metadata);
-  return Boolean(metadata && hasOwn(metadata, "model_override"));
-}
-
-function getCachedServiceDetail(serviceId: string): Promise<ServiceDetail> {
-  const cached = serviceDebugDetailCache.get(serviceId);
-  if (cached) return cached;
-
-  const pending = getService(serviceId).finally(() => {
-    serviceDebugDetailCache.delete(serviceId);
-  });
-  serviceDebugDetailCache.set(serviceId, pending);
-  return pending;
-}
-
-function buildControlPlaneModelDebug({
-  base,
-  service,
-  stage,
-}: {
-  base: Record<string, unknown>;
-  service: UsePlaygroundStreamOptions["activeService"] | ServiceDetail;
-  stage: string;
-}): Record<string, unknown> {
-  const serviceRecord = asRecord(service) ?? {};
-  const connectorConfig = asRecord(serviceRecord.connector_config) ?? {};
-  const metadata = asRecord(serviceRecord.metadata) ?? {};
-
-  return {
-    ...base,
-    stage: `${stage}:control-plane`,
-    service_name:
-      asSafeString(serviceRecord.name) ||
-      asSafeString(serviceRecord.display_name) ||
-      asSafeString(base.service_name) ||
-      asSafeString(serviceRecord.service_id),
-    service_type: asSafeString(serviceRecord.service_type) ?? base.service_type,
-    adapter_type: asSafeString(
-      connectorConfig.adapter_type ?? metadata.adapter_type
-    ),
-    proxy_mode: asSafeString(
-      connectorConfig.proxy_mode ?? metadata.proxy_mode
-    ),
-    upstream_base_url: asSafeString(
-      connectorConfig.upstream_url ??
-        connectorConfig.base_url ??
-        serviceRecord.upstream_url
-    ),
-    graph_id: asSafeString(connectorConfig.graph_id ?? serviceRecord.graph_id),
-    assistant_id: asSafeString(
-      connectorConfig.assistant_id ?? serviceRecord.assistant_id
-    ),
-    model_override: summarizeModelOverride(
-      connectorConfig.model_override ?? metadata.model_override
-    ),
-  };
-}
-
-async function logPlaygroundModelDebug({
-  stage,
-  serviceId,
-  activeService,
-  transparentProxy,
-  threadId,
-  path,
-}: {
-  stage: string;
-  serviceId: string;
-  activeService?: UsePlaygroundStreamOptions["activeService"];
-  transparentProxy: boolean;
-  threadId?: string | null;
-  path?: string | null;
-}) {
-  const base = {
-    stage,
-    service_id: serviceId,
-    service_name:
-      activeService?.name || activeService?.display_name || activeService?.service_id,
-    service_type: activeService?.service_type ?? null,
-    adapter_type: asSafeString(activeService?.metadata?.adapter_type),
-    proxy_mode: asSafeString(activeService?.metadata?.proxy_mode),
-    transparent_proxy: transparentProxy,
-    gateway_request_path: path ?? null,
-    langgraph_thread_id: threadId ?? null,
-  };
-
-  console.info(formatModelDebugLine(base), base);
-
-  if (hasControlPlaneDebugSnapshot(activeService)) {
-    const controlPlaneDebug = buildControlPlaneModelDebug({
-      base,
-      service: activeService,
-      stage,
-    });
-    console.info(formatModelDebugLine(controlPlaneDebug), controlPlaneDebug);
-    return;
-  }
-
-  try {
-    const serviceDetail = await getCachedServiceDetail(serviceId);
-    const controlPlaneDebug = buildControlPlaneModelDebug({
-      base,
-      service: serviceDetail,
-      stage,
-    });
-
-    console.info(formatModelDebugLine(controlPlaneDebug), controlPlaneDebug);
-  } catch (error) {
-    const failedDebug = {
-      ...base,
-      stage: `${stage}:control-plane-fetch-failed`,
-      error: error instanceof Error ? error.message : String(error),
-    };
-
-    console.warn(formatModelDebugLine(failedDebug), failedDebug);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -984,14 +774,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             const streamPath = threadId
               ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/stream`
               : `/api/v1/proxy/${serviceId}/runs/stream`;
-            void logPlaygroundModelDebug({
-              stage: "transparent-proxy-stream-submit",
-              serviceId,
-              activeService,
-              transparentProxy: useTransparentProxy,
-              threadId,
-              path: streamPath,
-            });
             let lastCumulativeContent = "";
             // Tracks the last content we applied for each message id, so
             // we can tell post-middleware mutations apart from cross-turn
@@ -1089,15 +871,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                   const modelId = asSafeString(failoverEvent.model_id);
                   const reason = asSafeString(failoverEvent.reason);
                   const noticeKey = `${status || "unknown"}:${providerId || "-"}:${modelId || "-"}`;
-                  console.warn("[Hejaz Model Failover]", {
-                    status,
-                    provider_id: providerId,
-                    model_id: modelId,
-                    reason,
-                    attempt: failoverEvent.attempt,
-                    failover_candidates: failoverEvent.failover_candidates,
-                    cache_epoch: failoverEvent.cache_epoch,
-                  });
                   if (status === "selected") {
                     continue;
                   }
@@ -1946,12 +1719,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 const waitPath = threadId
                   ? `/api/v1/proxy/${serviceId}/threads/${threadId}/runs/wait`
                   : `/api/v1/proxy/${serviceId}/runs/wait`;
-                console.info(MODEL_DEBUG_LABEL, {
-                  stage: "transparent-proxy-wait-fallback",
-                  service_id: serviceId,
-                  gateway_request_path: waitPath,
-                  langgraph_thread_id: threadId ?? null,
-                });
                 const waitPayload = {
                   input: {
                     messages: [
@@ -1997,14 +1764,6 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                 );
               }
             } else {
-              void logPlaygroundModelDebug({
-                stage: "invoke-service-submit",
-                serviceId,
-                activeService,
-                transparentProxy: useTransparentProxy,
-                threadId,
-                path: "/api/v1/invoke",
-              });
               const resp = await invokeService(req);
               streamState = setStreamTurnContent(
                 streamState,
