@@ -91,6 +91,10 @@ const DEFAULT_MODEL_FAILOVER_PROVIDER_PRIORITY = [
 ];
 const DEFAULT_MODEL_FAILOVER_MAX_CANDIDATES = 2;
 
+function providerHasRuntimeCredentials(provider?: providersApi.Provider): boolean {
+  return Boolean(provider?.has_api_key || provider?.allow_environment_credentials);
+}
+
 function normalizeUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
@@ -279,7 +283,7 @@ export function ServiceConfigDialog({
   const selectableProviders = useMemo(
     () =>
       providers.filter(
-        (provider) => provider.is_enabled && provider.has_api_key
+        (provider) => provider.is_enabled && providerHasRuntimeCredentials(provider)
       ),
     [providers]
   );
@@ -325,7 +329,7 @@ export function ServiceConfigDialog({
         if (seenProviders.has(providerId)) continue;
 
         const provider = providerById.get(providerId);
-        if (!provider?.is_enabled || !provider.has_api_key) continue;
+        if (!provider?.is_enabled || !providerHasRuntimeCredentials(provider)) continue;
 
         const model = [...getProviderModels(providerId)].sort((a, b) => {
           const order = (b.sort_order || 0) - (a.sort_order || 0);
@@ -398,7 +402,7 @@ export function ServiceConfigDialog({
           !candidate.model_id ||
           !provider ||
           !provider.is_enabled ||
-          !provider.has_api_key ||
+          !providerHasRuntimeCredentials(provider) ||
           !model ||
           duplicatePrimary ||
           duplicateFallback
@@ -414,7 +418,7 @@ export function ServiceConfigDialog({
       modelOverrideForm.enabled &&
       (!selectedProvider ||
         !selectedProvider.is_enabled ||
-        !selectedProvider.has_api_key ||
+        !providerHasRuntimeCredentials(selectedProvider) ||
         !selectedModel ||
         !selectedModel.is_enabled ||
         temperatureInvalid ||
@@ -851,7 +855,7 @@ export function ServiceConfigDialog({
                                   <div className="flex min-w-0 items-center gap-2">
                                     <span className="truncate">{provider.display_name}</span>
                                     <span className="text-xs text-muted-foreground">
-                                      {provider.has_api_key
+                                      {providerHasRuntimeCredentials(provider)
                                         ? t("services.configDialog.model.keyConfigured")
                                         : t("services.configDialog.model.keyMissing")}
                                     </span>
@@ -1077,7 +1081,8 @@ export function ServiceConfigDialog({
                       <div className="flex flex-wrap items-center gap-2 text-xs">
                         <Badge
                           variant={
-                            selectedProvider?.is_enabled && selectedProvider?.has_api_key
+                            selectedProvider?.is_enabled &&
+                            providerHasRuntimeCredentials(selectedProvider)
                               ? "secondary"
                               : "destructive"
                           }
@@ -1085,7 +1090,7 @@ export function ServiceConfigDialog({
                           {selectedProvider
                             ? !selectedProvider.is_enabled
                               ? t("services.configDialog.model.providerDisabled")
-                              : selectedProvider.has_api_key
+                              : providerHasRuntimeCredentials(selectedProvider)
                                 ? t("services.configDialog.model.keyConfigured")
                                 : t("services.configDialog.model.keyMissing")
                             : t("services.configDialog.model.providerRequired")}

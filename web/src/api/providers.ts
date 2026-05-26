@@ -18,6 +18,7 @@ export interface Provider {
   base_url?: string | null;
   metadata?: Record<string, unknown>;
   has_api_key: boolean;
+  allow_environment_credentials?: boolean;
   is_enabled: boolean;
   created_at: string;
   updated_at: string;

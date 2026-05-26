@@ -53,6 +53,10 @@ class ProviderResponse(ProviderBase):
 
     tenant_id: str
     has_api_key: bool = Field(description="Whether API key is configured")
+    allow_environment_credentials: bool = Field(
+        default=False,
+        description="Whether the provider can use server-side environment credentials",
+    )
     created_at: datetime
     updated_at: datetime
 

@@ -62,6 +62,7 @@ export function ProviderCard({
 }: ProviderCardProps) {
   const { t } = useTranslation();
   const [testing, setTesting] = useState(false);
+  const runtimeReady = provider.has_api_key || provider.allow_environment_credentials;
   const [testResult, setTestResult] = useState<{
     success: boolean;
     message: string;
@@ -131,13 +132,13 @@ export function ProviderCard({
                 variant="outline"
                 className={cn(
                   "text-[10px] font-semibold border px-1.5 py-0",
-                  provider.has_api_key
+                  runtimeReady
                     ? "bg-green-50 text-green-700 border-green-200 dark:bg-green-950/30 dark:text-green-300 dark:border-green-800"
                     : "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-800"
                 )}
               >
                 <Key className="h-2.5 w-2.5 mr-1" />
-                {provider.has_api_key ? t("providers.apiKey.configured", "Configured") : t("providers.apiKey.missing", "Missing Key")}
+                {runtimeReady ? t("providers.apiKey.configured", "Configured") : t("providers.apiKey.missing", "Missing Key")}
               </Badge>
             </div>
           </div>
@@ -158,7 +159,7 @@ export function ProviderCard({
               variant="ghost"
               size="icon"
               onClick={handleTest}
-              disabled={testing || !provider.has_api_key}
+              disabled={testing || !runtimeReady}
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted"
               title={t("common.test", "Test")}
             >

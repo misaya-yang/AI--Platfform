@@ -75,6 +75,10 @@ interface CatalogProviderOption {
 
 const CUSTOM_MODEL_VALUE = "__custom_model__";
 
+function providerHasRuntimeCredentials(provider: Provider): boolean {
+  return Boolean(provider.has_api_key || provider.allow_environment_credentials);
+}
+
 function normalizeUrl(value?: string | null) {
   return (value || "").trim().replace(/\/+$/, "").toLowerCase();
 }
@@ -195,7 +199,7 @@ export function ModelForm({
         provider,
         template,
         registered: true,
-        hasApiKey: provider.has_api_key,
+        hasApiKey: providerHasRuntimeCredentials(provider),
       };
     });
     const coveredTemplateIds = new Set(

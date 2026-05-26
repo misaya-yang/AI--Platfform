@@ -395,6 +395,7 @@ class ProviderService:
         result = dict(row)
         # Add has_api_key flag without exposing the actual key
         result["has_api_key"] = bool(result.pop("api_key_encrypted", None))
+        result["allow_environment_credentials"] = self.allows_environment_credentials(result)
         metadata = result.get("metadata")
         if isinstance(metadata, str):
             try:
