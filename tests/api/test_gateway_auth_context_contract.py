@@ -6,11 +6,15 @@ from unittest.mock import AsyncMock
 
 import jwt
 import pytest
-
 from ai_gateway_core.exceptions import AuthError
-from src.api.deps import get_auth_context, get_user_context
-from src.config.settings import AuthAPIKeySettings, AuthenticationSettings, AuthJWTSettings, Settings
 
+from src.api.deps import get_auth_context, get_user_context
+from src.config.settings import (
+    AuthAPIKeySettings,
+    AuthenticationSettings,
+    AuthJWTSettings,
+    Settings,
+)
 
 TEST_JWT_SECRET = "test-secret-key-for-gateway-auth-contract"
 TEST_JWT_ALGORITHM = "HS256"
