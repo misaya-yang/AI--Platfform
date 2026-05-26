@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -26,7 +26,11 @@ import { api } from "@/lib/api";
 import { getService, updateService, deleteService as deleteServiceDef } from "@/api/gateway";
 import * as providersApi from "@/api/providers";
 import * as modelsApi from "@/api/models";
-import type { ServiceDetail, ServiceModelOverride } from "@/types/gateway";
+import type {
+  ServiceDetail,
+  ServiceModelFailoverCandidate,
+  ServiceModelOverride,
+} from "@/types/gateway";
 import { useTranslation } from "react-i18next";
 
 interface ServiceConfig {
@@ -70,6 +74,14 @@ interface ServiceConfigResponse {
     recovery_timeout: number;
   };
 }
+
+const DEFAULT_MODEL_FAILOVER_PROVIDER_PRIORITY = [
+  "google",
+  "dashscope",
+  "dashscope-intl",
+  "dashscope-cn",
+];
+const DEFAULT_MODEL_FAILOVER_MAX_CANDIDATES = 2;
 
 function normalizeUrl(value: string): string {
   const trimmed = value.trim();
@@ -283,8 +295,72 @@ export function ServiceConfigDialog({
     candidates: [],
   };
   const failoverCandidates = failover.candidates ?? [];
-  const getProviderModels = (providerId?: string) =>
-    providerId ? (modelsByProvider.get(providerId) ?? []).filter((model) => model.is_enabled) : [];
+  const getProviderModels = useCallback(
+    (providerId?: string) =>
+      providerId ? (modelsByProvider.get(providerId) ?? []).filter((model) => model.is_enabled) : [],
+    [modelsByProvider]
+  );
+  const buildDefaultFailoverCandidates = useCallback(
+    (primaryProviderId?: string, primaryModelId?: string): ServiceModelFailoverCandidate[] => {
+      const candidates: ServiceModelFailoverCandidate[] = [];
+      const seen = new Set([`${primaryProviderId || ""}::${primaryModelId || ""}`]);
+      const seenProviders = new Set(primaryProviderId ? [primaryProviderId] : []);
+
+      for (const providerId of DEFAULT_MODEL_FAILOVER_PROVIDER_PRIORITY) {
+        if (seenProviders.has(providerId)) continue;
+
+        const provider = providerById.get(providerId);
+        if (!provider?.is_enabled || !provider.has_api_key) continue;
+
+        const model = [...getProviderModels(providerId)].sort((a, b) => {
+          const order = (b.sort_order || 0) - (a.sort_order || 0);
+          if (order !== 0) return order;
+          return (a.display_name || a.model_id).localeCompare(b.display_name || b.model_id);
+        })[0];
+        if (!model) continue;
+
+        const key = `${providerId}::${model.model_id}`;
+        if (seen.has(key)) continue;
+
+        candidates.push({ provider_id: providerId, model_id: model.model_id });
+        seen.add(key);
+        seenProviders.add(providerId);
+        if (candidates.length >= DEFAULT_MODEL_FAILOVER_MAX_CANDIDATES) break;
+      }
+
+      return candidates;
+    },
+    [getProviderModels, providerById]
+  );
+  const seedDefaultFailover = useCallback(
+    (
+      current: ServiceModelOverride["failover"],
+      primaryProviderId?: string,
+      primaryModelId?: string
+    ): NonNullable<ServiceModelOverride["failover"]> => {
+      const currentFailover = current ?? {
+        enabled: false,
+        max_attempts: 3,
+        candidates: [],
+      };
+      if ((currentFailover.candidates ?? []).length > 0) {
+        return currentFailover;
+      }
+
+      const candidates = buildDefaultFailoverCandidates(primaryProviderId, primaryModelId);
+      if (candidates.length === 0) {
+        return currentFailover;
+      }
+
+      return {
+        ...currentFailover,
+        enabled: true,
+        max_attempts: Math.max(currentFailover.max_attempts ?? 3, 2),
+        candidates,
+      };
+    },
+    [buildDefaultFailoverCandidates]
+  );
   const fallbackInvalid = Boolean(
     modelOverrideForm.enabled &&
       failover.enabled &&
@@ -366,6 +442,32 @@ export function ServiceConfigDialog({
     });
     setModelOverrideForm(readModelOverride(cc.model_override));
   }, [serviceDetail]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      !isLangGraphService ||
+      !modelOverrideForm.enabled ||
+      !modelOverrideForm.provider_id ||
+      !modelOverrideForm.model_id ||
+      failoverCandidates.length > 0
+    ) {
+      return;
+    }
+
+    setModelOverrideForm((current) => ({
+      ...current,
+      failover: seedDefaultFailover(current.failover, current.provider_id, current.model_id),
+    }));
+  }, [
+    failoverCandidates.length,
+    isLangGraphService,
+    modelOverrideForm.enabled,
+    modelOverrideForm.model_id,
+    modelOverrideForm.provider_id,
+    open,
+    seedDefaultFailover,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // 更新配置
@@ -421,10 +523,22 @@ export function ServiceConfigDialog({
   };
 
   const handleProviderChange = (providerId: string) => {
+    setModelOverrideForm((current) => {
+      const modelId = current.provider_id === providerId ? current.model_id : undefined;
+      return {
+        ...current,
+        provider_id: providerId,
+        model_id: modelId,
+        failover: seedDefaultFailover(current.failover, providerId, modelId),
+      };
+    });
+  };
+
+  const handleModelChange = (modelId: string) => {
     setModelOverrideForm((current) => ({
       ...current,
-      provider_id: providerId,
-      model_id: current.provider_id === providerId ? current.model_id : undefined,
+      model_id: modelId,
+      failover: seedDefaultFailover(current.failover, current.provider_id, modelId),
     }));
   };
 
@@ -531,6 +645,15 @@ export function ServiceConfigDialog({
         setBasicError(t("services.configDialog.model.overrideInvalid"));
         return;
       }
+      const defaultFailoverCandidates = buildDefaultFailoverCandidates(
+        modelOverrideForm.provider_id,
+        modelOverrideForm.model_id
+      );
+      const effectiveFailoverCandidates =
+        failoverCandidates.length > 0 ? failoverCandidates : defaultFailoverCandidates;
+      const effectiveFailoverEnabled = Boolean(
+        modelOverrideForm.enabled && effectiveFailoverCandidates.length > 0
+      );
 
       patch.connector_config = {
         ...(serviceDetail.connector_config || {}),
@@ -544,10 +667,10 @@ export function ServiceConfigDialog({
           model_id: modelOverrideForm.model_id,
           temperature: modelOverrideForm.temperature ?? null,
           failover: {
-            enabled: Boolean(failover.enabled),
+            enabled: effectiveFailoverEnabled,
             max_attempts: failover.max_attempts ?? 3,
             retryable_error_codes: failover.retryable_error_codes,
-            candidates: failover.enabled ? failoverCandidates : [],
+            candidates: effectiveFailoverEnabled ? effectiveFailoverCandidates : [],
           },
         },
       };
@@ -713,9 +836,7 @@ export function ServiceConfigDialog({
                           <Label>{t("services.configDialog.model.model")}</Label>
                           <Select
                             value={modelOverrideForm.model_id || ""}
-                            onValueChange={(modelId) =>
-                              setModelOverrideForm({ ...modelOverrideForm, model_id: modelId })
-                            }
+                            onValueChange={handleModelChange}
                             disabled={
                               !modelOverrideForm.enabled ||
                               !modelOverrideForm.provider_id ||

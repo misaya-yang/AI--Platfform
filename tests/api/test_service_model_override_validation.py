@@ -362,6 +362,82 @@ async def test_update_service_rejects_unknown_failover_model():
 
 
 @pytest.mark.asyncio
+async def test_update_service_auto_seeds_default_failover_candidates():
+    registry = ServiceRegistry(MemoryRegistryStorage())
+    initial = registry._service_from_dict(
+        _definition(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-old",
+                "cache_epoch": 4,
+            }
+        )
+    )
+    await registry.register(initial)
+    request = _request(
+        provider_service=FakeProviderService(
+            {
+                "google-vertex": _provider("google-vertex"),
+                "google": _provider("google"),
+                "dashscope": _provider("dashscope"),
+            }
+        ),
+        model_service=FakeModelService(
+            {
+                ("google-vertex", "gemini-3-flash-preview-vertex"): _model(
+                    "google-vertex",
+                    "gemini-3-flash-preview-vertex",
+                ),
+                ("google", "gemini-3.5-flash"): {
+                    **_model("google", "gemini-3.5-flash"),
+                    "display_name": "Gemini 3.5 Flash",
+                    "sort_order": 120,
+                },
+                ("dashscope", "qwen3.6-plus"): {
+                    **_model("dashscope", "qwen3.6-plus"),
+                    "display_name": "Qwen 3.6 Plus",
+                    "sort_order": 100,
+                },
+                ("dashscope", "qwen3.7-max"): {
+                    **_model("dashscope", "qwen3.7-max"),
+                    "display_name": "Qwen 3.7 Max",
+                    "sort_order": 120,
+                },
+            }
+        ),
+    )
+
+    await update_service(
+        service_id="imam-agent",
+        request=request,
+        patch={
+            "connector_config": {
+                "base_url": "http://imam-agent:8000",
+                "graph_id": "Imam",
+                "model_override": {
+                    "enabled": True,
+                    "provider_id": "google-vertex",
+                    "model_id": "gemini-3-flash-preview-vertex",
+                    "failover": {"enabled": False, "candidates": []},
+                },
+            }
+        },
+        registry=registry,
+        auth=_auth(),
+    )
+    stored = await registry.get("imam-agent")
+    model_override = stored.connector_config["model_override"]
+
+    assert model_override["cache_epoch"] == 5
+    assert model_override["failover"]["enabled"] is True
+    assert model_override["failover"]["candidates"] == [
+        {"provider_id": "google", "model_id": "gemini-3.5-flash"},
+        {"provider_id": "dashscope", "model_id": "qwen3.7-max"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_update_service_increments_cache_epoch_when_failover_order_changes():
     registry = ServiceRegistry(MemoryRegistryStorage())
     initial = registry._service_from_dict(

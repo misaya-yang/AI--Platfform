@@ -77,6 +77,13 @@ _SENSITIVE_CONNECTOR_FIELDS = {
 }
 
 _MODEL_OVERRIDE_EPOCH_IGNORED_FIELDS = {"cache_epoch"}
+_DEFAULT_LANGGRAPH_FAILOVER_PROVIDER_PRIORITY = (
+    "google",
+    "dashscope",
+    "dashscope-intl",
+    "dashscope-cn",
+)
+_DEFAULT_LANGGRAPH_FAILOVER_MAX_CANDIDATES = 2
 
 
 def _current_trace_id(request: Request) -> str:
@@ -412,6 +419,126 @@ async def _normalize_langgraph_failover(
     return normalized
 
 
+def _raw_failover_has_candidates(raw_failover: Any) -> bool:
+    if not isinstance(raw_failover, dict):
+        return False
+    raw_candidates = raw_failover.get("candidates")
+    return isinstance(raw_candidates, list) and len(raw_candidates) > 0
+
+
+def _model_sort_key(model: dict[str, Any]) -> tuple[int, str]:
+    try:
+        sort_order = int(model.get("sort_order") or 0)
+    except (TypeError, ValueError):
+        sort_order = 0
+    return (sort_order, str(model.get("display_name") or model.get("model_id") or ""))
+
+
+async def _list_enabled_provider_models(
+    *,
+    tenant_id: str,
+    provider_id: str,
+    model_service: Any,
+) -> list[dict[str, Any]]:
+    list_models = getattr(model_service, "list_models", None)
+    if callable(list_models):
+        models = await list_models(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            include_disabled=False,
+        )
+    else:
+        models = [
+            model
+            for (candidate_provider_id, _), model in getattr(model_service, "models", {}).items()
+            if candidate_provider_id == provider_id
+        ]
+    if not isinstance(models, list):
+        return []
+    return [model for model in models if isinstance(model, dict) and bool(model.get("is_enabled"))]
+
+
+async def _build_default_langgraph_failover_candidates(
+    *,
+    tenant_id: str,
+    primary_provider_id: str,
+    primary_model_id: str,
+    provider_service: Any,
+    model_service: Any,
+) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    seen = {(primary_provider_id, primary_model_id)}
+    seen_providers = {primary_provider_id}
+
+    for provider_id in _DEFAULT_LANGGRAPH_FAILOVER_PROVIDER_PRIORITY:
+        if provider_id in seen_providers:
+            continue
+        provider = await provider_service.get_provider(tenant_id, provider_id)
+        if not provider or not bool(provider.get("is_enabled")):
+            continue
+        if not bool(provider.get("has_api_key")) and not _override_allows_environment_credentials(
+            provider_service,
+            provider,
+        ):
+            continue
+
+        models = await _list_enabled_provider_models(
+            tenant_id=tenant_id,
+            provider_id=provider_id,
+            model_service=model_service,
+        )
+        if not models:
+            continue
+
+        model = max(models, key=_model_sort_key)
+        model_id = str(model.get("model_id") or "").strip()
+        if not model_id or (provider_id, model_id) in seen:
+            continue
+
+        candidates.append({"provider_id": provider_id, "model_id": model_id})
+        seen.add((provider_id, model_id))
+        seen_providers.add(provider_id)
+        if len(candidates) >= _DEFAULT_LANGGRAPH_FAILOVER_MAX_CANDIDATES:
+            break
+
+    return candidates
+
+
+async def _seed_default_langgraph_failover(
+    *,
+    tenant_id: str,
+    model_override: dict[str, Any],
+    primary_provider_id: str,
+    primary_model_id: str,
+    provider_service: Any,
+    model_service: Any,
+) -> None:
+    raw_failover = model_override.get("failover")
+    if _raw_failover_has_candidates(raw_failover):
+        return
+
+    candidates = await _build_default_langgraph_failover_candidates(
+        tenant_id=tenant_id,
+        primary_provider_id=primary_provider_id,
+        primary_model_id=primary_model_id,
+        provider_service=provider_service,
+        model_service=model_service,
+    )
+    if not candidates:
+        return
+
+    failover = raw_failover if isinstance(raw_failover, dict) else {}
+    model_override["failover"] = {
+        **failover,
+        "enabled": True,
+        "max_attempts": max(normalize_max_attempts(failover.get("max_attempts"), default=3), 2),
+        "retryable_error_codes": normalize_retryable_error_codes(
+            failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
+        ),
+        "candidates": candidates,
+    }
+
+
 async def _validate_langgraph_model_override(
     request: Request,
     *,
@@ -486,6 +613,14 @@ async def _validate_langgraph_model_override(
             provider_service=provider_service,
             model_service=model_service,
             error_prefix="MODEL_OVERRIDE",
+        )
+        await _seed_default_langgraph_failover(
+            tenant_id=tenant_id,
+            model_override=model_override,
+            primary_provider_id=provider_id,
+            primary_model_id=model_id,
+            provider_service=provider_service,
+            model_service=model_service,
         )
         normalized_failover = await _normalize_langgraph_failover(
             model_override.get("failover"),
