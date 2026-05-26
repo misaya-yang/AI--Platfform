@@ -90,10 +90,11 @@ class ProviderService:
             INSERT INTO llm_providers (
                 provider_id, tenant_id, display_name, api_type, base_url,
                 api_key_encrypted, metadata, is_enabled
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
             RETURNING provider_id, tenant_id, display_name, api_type, base_url,
                       api_key_encrypted, metadata, is_enabled, created_at, updated_at
         """
+        metadata_json = json.dumps(metadata or {})
         row = await self.db.fetchrow(
             query,
             provider_id,
@@ -102,7 +103,7 @@ class ProviderService:
             api_type,
             base_url,
             api_key_encrypted,
-            metadata or {},
+            metadata_json,
             is_enabled,
         )
         return self._row_to_dict(row)
@@ -146,8 +147,8 @@ class ProviderService:
             param_idx += 1
 
         if metadata is not None:
-            updates.append(f"metadata = ${param_idx}")
-            params.append(metadata)
+            updates.append(f"metadata = ${param_idx}::jsonb")
+            params.append(json.dumps(metadata))
             param_idx += 1
 
         if is_enabled is not None:
@@ -395,5 +396,10 @@ class ProviderService:
         # Add has_api_key flag without exposing the actual key
         result["has_api_key"] = bool(result.pop("api_key_encrypted", None))
         metadata = result.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = {}
         result["metadata"] = dict(metadata) if isinstance(metadata, dict) else {}
         return result

@@ -98,3 +98,28 @@ def test_provider_service_maps_google_studio_to_gemini():
     }
 
     assert ProviderService.to_runtime_provider(provider) == "gemini"
+
+
+def test_provider_service_decodes_jsonb_metadata_strings():
+    service = ProviderService(database=None)
+
+    row = {
+        "provider_id": "google-vertex",
+        "tenant_id": "default",
+        "display_name": "Google Vertex AI",
+        "api_type": "google-vertex",
+        "base_url": "https://aiplatform.googleapis.com",
+        "api_key_encrypted": "encrypted",
+        "metadata": '{"project":"hjz-csgmn-260422","location":"us-central1"}',
+        "is_enabled": True,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+    result = service._row_to_dict(row)
+
+    assert result["has_api_key"] is True
+    assert result["metadata"] == {
+        "project": "hjz-csgmn-260422",
+        "location": "us-central1",
+    }
