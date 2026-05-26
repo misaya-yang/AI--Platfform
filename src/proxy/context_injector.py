@@ -116,13 +116,17 @@ class ContextInjector:
         "x-user-id",
         "x-gw-user-id",
         "x-user-type",
+        "x-gw-user-type",
         "x-user-tier",
+        "x-gw-user-tier",
         "x-gw-user-roles",
         "x-gw-authenticated",
         "x-tenant-id",
         "x-gw-tenant-id",
         "x-user-permissions",
+        "x-gw-user-permissions",
         "x-user-name",
+        "x-gw-user-name",
     }
 
     def __init__(

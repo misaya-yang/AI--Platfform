@@ -9,11 +9,9 @@ from pydantic import BaseModel, Field
 
 from ...core.auth.permissions import (
     Capability,
-    build_permission_denied_detail,
-    check_capability,
 )
 from ai_gateway_core.logging import get_logger
-from ..deps import AuthContext, get_auth_context
+from ..deps import AuthContext, get_auth_context, require_gateway_capability
 
 logger = get_logger(__name__)
 
@@ -103,22 +101,7 @@ async def create_langgraph_service(
 ):
     """快速注册 LangGraph 服务（支持透明代理模式）"""
     registry = request.app.state.registry
-    # 权限：ServiceConfigWrite capability（兼容 legacy alias）
-    decision = check_capability(
-        rbac=request.app.state.dispatcher.rbac,
-        roles=auth.roles,
-        permissions=auth.permissions,
-        capability=Capability.SERVICE_CONFIG_WRITE,
-    )
-    if not decision.allowed:
-        trace_id = str(getattr(request.state, "request_id", "") or "")
-        raise HTTPException(
-            status_code=403,
-            detail=build_permission_denied_detail(
-                capability=Capability.SERVICE_CONFIG_WRITE,
-                trace_id=trace_id,
-            ),
-        )
+    require_gateway_capability(request, auth, Capability.GATEWAY_SERVICE_CONFIG_WRITE)
 
     # 构建连接器配置
     connector_config = {
@@ -365,8 +348,7 @@ async def create_rate_limit(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """创建限流规则（仅管理员）"""
-    # 权限检查：仅管理员可创建限流规则
-    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+    require_gateway_capability(request, auth, Capability.GATEWAY_RATE_LIMIT_WRITE)
 
     rule = body.model_dump()
 
@@ -393,8 +375,7 @@ async def delete_rate_limit(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """删除限流规则（仅管理员）"""
-    # 权限检查：仅管理员可删除限流规则
-    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+    require_gateway_capability(request, auth, Capability.GATEWAY_RATE_LIMIT_WRITE)
 
     # TODO: 实现删除逻辑
     return {"status": "success", "message": "限流规则已删除"}
@@ -515,8 +496,7 @@ async def get_service_config(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """获取指定服务的配置（仅管理员）"""
-    # 权限检查：仅管理员可查看服务配置
-    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+    require_gateway_capability(request, auth, Capability.GATEWAY_SERVICE_CONFIG_WRITE)
 
     registry = request.app.state.registry
     service = await registry.get(service_id)
@@ -576,8 +556,7 @@ async def update_service_config(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """更新指定服务的配置（仅管理员）"""
-    # 权限检查：仅管理员可修改服务配置
-    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+    require_gateway_capability(request, auth, Capability.GATEWAY_SERVICE_CONFIG_WRITE)
 
     from ...models.service import (
         ServiceAuthConfig,
@@ -664,8 +643,7 @@ async def delete_service(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """删除服务（仅管理员）"""
-    # 权限检查：仅管理员可删除服务
-    request.app.state.dispatcher.rbac.require(auth.roles, "admin")
+    require_gateway_capability(request, auth, Capability.GATEWAY_SERVICE_CONFIG_WRITE)
 
     registry = request.app.state.registry
     service = await registry.get(service_id)

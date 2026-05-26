@@ -665,18 +665,18 @@ async def _load_service_access_constraints(
     allowed_sources: list[tuple[str, list[str]]] = []
     user_policy = ServiceAccessPolicy()
 
+    api_key_info = getattr(request.state, "api_key_info", None)
+    if api_key_info:
+        api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
+        if api_allowed:
+            allowed_sources.append(("api_key", api_allowed))
+
     db = getattr(request.app.state, "database", None)
     if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
         result = (allowed_sources, user_policy)
         request.state._service_access_constraints_cache = result
         await _set_cached_service_access_constraints(request, user, allowed_sources, user_policy)
         return result
-
-    api_key_info = getattr(request.state, "api_key_info", None)
-    if api_key_info:
-        api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
-        if api_allowed:
-            allowed_sources.append(("api_key", api_allowed))
 
     if user.tenant_id:
         try:

@@ -6,6 +6,8 @@ REST endpoints for managing LLM providers.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ...core.auth.permissions import Capability, build_permission_denied_detail, check_capability
+from ...core.auth.rbac import RBAC
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_catalog_sync import ModelCatalogSyncService
 from ...services.llm.model_service import ModelService
@@ -25,6 +27,22 @@ from ..schemas.providers import (
 )
 
 router = APIRouter()
+_USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
+
+
+def _require_user_gateway_capability(user: UserContext, capability: Capability) -> None:
+    decision = check_capability(
+        rbac=_USER_CONTEXT_RBAC,
+        roles=user.roles,
+        permissions=[],
+        capability=capability,
+    )
+    if decision.allowed:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=build_permission_denied_detail(capability=capability),
+    )
 
 
 def get_provider_service(request: Request) -> ProviderService:
@@ -83,9 +101,7 @@ async def create_provider(
     user: UserContext = Depends(get_user_context),
 ):
     """Create a new provider."""
-    # Check admin permission
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     try:
         provider = await provider_service.create_provider(
@@ -111,8 +127,7 @@ async def create_provider_from_template(
     user: UserContext = Depends(get_user_context),
 ):
     """Create or update a provider from a guided template."""
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     template = get_provider_template(body.template_id)
     if not template:
@@ -190,9 +205,7 @@ async def update_provider(
     user: UserContext = Depends(get_user_context),
 ):
     """Update a provider."""
-    # Check admin permission
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     provider = await provider_service.update_provider(
         tenant_id=user.tenant_id or "default",
@@ -215,9 +228,7 @@ async def delete_provider(
     user: UserContext = Depends(get_user_context),
 ):
     """Delete a provider and all its models."""
-    # Check admin permission
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     deleted = await provider_service.delete_provider(
         tenant_id=user.tenant_id or "default",
@@ -235,9 +246,7 @@ async def test_provider_connection(
     user: UserContext = Depends(get_user_context),
 ):
     """Test API connection for a provider."""
-    # Check admin permission
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     result = await provider_service.test_connection(
         tenant_id=user.tenant_id or "default",
@@ -254,8 +263,7 @@ async def sync_provider_models(
     user: UserContext = Depends(get_user_context),
 ):
     """Sync provider-supported models into llm_models/model_pricing."""
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_WRITE)
 
     sync_service = ModelCatalogSyncService(provider_service, model_service)
     try:

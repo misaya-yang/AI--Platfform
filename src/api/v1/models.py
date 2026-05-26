@@ -13,6 +13,8 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from ...core.auth.permissions import Capability, build_permission_denied_detail, check_capability
+from ...core.auth.rbac import RBAC
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_service import ModelService
 from ..deps import get_user_context
@@ -23,6 +25,22 @@ from ..schemas.providers import (
 )
 
 router = APIRouter()
+_USER_CONTEXT_RBAC = RBAC(role_permissions={"admin": ["admin:*"]})
+
+
+def _require_user_gateway_capability(user: UserContext, capability: Capability) -> None:
+    decision = check_capability(
+        rbac=_USER_CONTEXT_RBAC,
+        roles=user.roles,
+        permissions=[],
+        capability=capability,
+    )
+    if decision.allowed:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=build_permission_denied_detail(capability=capability),
+    )
 
 
 def get_model_service(request: Request) -> ModelService:
@@ -70,8 +88,7 @@ async def create_model(
     user: UserContext = Depends(get_user_context),
 ):
     """Create a new model."""
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_MODEL_CONFIG_WRITE)
 
     try:
         model = await model_service.create_model(
@@ -128,8 +145,7 @@ async def update_model(
     first row by sort_order+provider_id wins — which works for the
     common case of a single provider per model_id.
     """
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_MODEL_CONFIG_WRITE)
 
     input_price = (
         Decimal(str(body.input_price_per_1k)) if body.input_price_per_1k is not None else None
@@ -169,8 +185,7 @@ async def delete_model(
     user: UserContext = Depends(get_user_context),
 ):
     """Delete a model."""
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_MODEL_CONFIG_WRITE)
 
     deleted = await model_service.delete_model(
         tenant_id=user.tenant_id or "default",
@@ -192,8 +207,7 @@ async def toggle_model(
     user: UserContext = Depends(get_user_context),
 ):
     """Toggle model enabled state."""
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin permission required")
+    _require_user_gateway_capability(user, Capability.GATEWAY_MODEL_CONFIG_WRITE)
 
     model = await model_service.toggle_model(
         tenant_id=user.tenant_id or "default",

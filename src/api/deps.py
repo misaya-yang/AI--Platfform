@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 import os
@@ -15,6 +14,8 @@ from ..config.settings import Settings
 from ..core.auth.api_key import verify_api_key
 from ..core.auth.jwt import decode_jwt_token
 from ..core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
+from ..core.auth.permissions import Capability, build_permission_denied_detail, check_capability
+from ..core.auth.rbac import RBAC
 from ..core.auth.user_resolver import UserContext
 from ai_gateway_core.exceptions import AuthError
 from ..core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
@@ -26,6 +27,7 @@ class AuthContext(BaseModel):
     tenant_id: str = ""
     roles: list[str] = ["guest"]
     permissions: list[str] = []
+    is_authenticated: bool = False
 
 
 def get_settings(request: Request) -> Settings:
@@ -169,6 +171,50 @@ def _get_client_ip(request: Request) -> str:
     return "unknown"
 
 
+def _request_trace_id(request: Request) -> str:
+    request_id = getattr(request.state, "request_id", "")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    trace_id = getattr(request.state, "trace_id", "")
+    if isinstance(trace_id, str) and trace_id:
+        return trace_id
+    return ""
+
+
+def _gateway_rbac(request: Request) -> RBAC:
+    dispatcher = getattr(request.app.state, "dispatcher", None)
+    rbac = getattr(dispatcher, "rbac", None)
+    if isinstance(rbac, RBAC):
+        return rbac
+
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        settings = Settings()
+    return RBAC(role_permissions=settings.rbac.roles)
+
+
+def require_gateway_capability(
+    request: Request,
+    auth: AuthContext,
+    capability: Capability,
+) -> None:
+    decision = check_capability(
+        rbac=_gateway_rbac(request),
+        roles=auth.roles,
+        permissions=auth.permissions,
+        capability=capability,
+    )
+    if decision.allowed:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=build_permission_denied_detail(
+            capability=capability,
+            trace_id=_request_trace_id(request),
+        ),
+    )
+
+
 def _derive_api_key_user_id(api_key: str) -> str:
     digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
     return f"apikey:{digest[:16]}"
@@ -247,16 +293,22 @@ def _cache_auth_resolution(
     }
 
 
-def _build_auth_context_from_resolution(payload: dict[str, Any]) -> AuthContext | None:
+def _build_auth_context_from_resolution(
+    payload: dict[str, Any],
+    *,
+    include_unauthenticated: bool = False,
+) -> AuthContext | None:
     if not isinstance(payload, dict):
         return None
-    if not payload.get("authenticated"):
+    authenticated = bool(payload.get("authenticated"))
+    if not authenticated and not include_unauthenticated:
         return None
     return AuthContext(
         user_id=str(payload.get("user_id") or ""),
         tenant_id=str(payload.get("tenant_id") or ""),
         roles=[str(r) for r in list(payload.get("roles") or [])],
         permissions=[str(p) for p in list(payload.get("permissions") or [])],
+        is_authenticated=authenticated,
     )
 
 
@@ -539,16 +591,24 @@ async def get_auth_context(
 
     auth_cfg = settings.authentication
     if not auth_cfg.jwt.enabled and not auth_cfg.api_key.enabled:
-        ctx = AuthContext(user_id="guest", tenant_id="public", roles=["guest"], permissions=[])
+        ctx = AuthContext(
+            user_id="guest",
+            tenant_id="public",
+            roles=["guest"],
+            permissions=[],
+            is_authenticated=False,
+        )
         request.state.auth = ctx
         return ctx
 
     auth_resolution = getattr(request.state, "_auth_resolution", None)
     if auth_resolution is None:
-        with contextlib.suppress(Exception):
-            await get_user_context(request=request, settings=settings)
-            auth_resolution = getattr(request.state, "_auth_resolution", None)
-    resolved_ctx = _build_auth_context_from_resolution(auth_resolution)
+        await get_user_context(request=request, settings=settings)
+        auth_resolution = getattr(request.state, "_auth_resolution", None)
+    resolved_ctx = _build_auth_context_from_resolution(
+        auth_resolution,
+        include_unauthenticated=not auth_cfg.api_key.enabled,
+    )
     if resolved_ctx is not None:
         request.state.auth = resolved_ctx
         return resolved_ctx
@@ -580,6 +640,9 @@ async def get_auth_context(
             raise
         user_id = str(payload.get("sub") or payload.get("user_id") or "")
         tenant_id = str(payload.get("tenant_id") or "")
+        if not user_id:
+            await _record_auth_failure(request, None, tenant_id)
+            raise AuthError("Missing user_id in JWT token")
 
         # Check token revocation in Redis (if available)
         token_id = payload.get("jti")
@@ -617,7 +680,11 @@ async def get_auth_context(
                 roles.append(perm)
 
         ctx = AuthContext(
-            user_id=user_id, tenant_id=tenant_id, roles=roles, permissions=permissions
+            user_id=user_id,
+            tenant_id=tenant_id,
+            roles=roles,
+            permissions=permissions,
+            is_authenticated=True,
         )
         _cache_auth_resolution(
             request,
@@ -676,6 +743,7 @@ async def get_auth_context(
                     tenant_id=tenant_id,
                     roles=roles,
                     permissions=permissions,
+                    is_authenticated=True,
                 )
                 _cache_auth_resolution(
                     request,
@@ -695,7 +763,11 @@ async def get_auth_context(
             await _record_auth_failure(request, _derive_api_key_user_id(key), tenant_id)
             raise
         ctx = AuthContext(
-            user_id=_derive_api_key_user_id(key), tenant_id="", roles=["user"], permissions=[]
+            user_id=_derive_api_key_user_id(key),
+            tenant_id="",
+            roles=["user"],
+            permissions=[],
+            is_authenticated=True,
         )
         _cache_auth_resolution(
             request,

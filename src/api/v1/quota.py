@@ -16,13 +16,70 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from ...api.deps import AuthContext, get_auth_context
+from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
+from ...core.auth.permissions import Capability
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/quota", tags=["quota"])
+
+
+def _require_quota_read(request: Request, auth: AuthContext) -> None:
+    require_gateway_capability(request, auth, Capability.GATEWAY_QUOTA_READ)
+
+
+def _require_quota_write(request: Request, auth: AuthContext) -> None:
+    require_gateway_capability(request, auth, Capability.GATEWAY_QUOTA_WRITE)
+
+
+def _is_quota_operator(auth: AuthContext) -> bool:
+    return any(role in {"admin", "operator"} for role in auth.roles)
+
+
+def _require_quota_tenant_scope(request: Request, auth: AuthContext, capability: Capability) -> None:
+    if auth.tenant_id:
+        return
+    permission = (
+        "console:quota:edit"
+        if capability == Capability.GATEWAY_QUOTA_WRITE
+        else "console:quota:view"
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "message": "Permission denied: tenant scope required for quota operations",
+            "required_capability": capability.value,
+            "required_permission": permission,
+            "trace_id": str(getattr(request.state, "request_id", "") or ""),
+        },
+    )
+
+
+def _require_quota_subject(
+    request: Request,
+    auth: AuthContext,
+    target_user_id: str,
+    capability: Capability,
+) -> None:
+    _require_quota_tenant_scope(request, auth, capability)
+    if target_user_id == auth.user_id or _is_quota_operator(auth):
+        return
+    permission = (
+        "console:quota:edit"
+        if capability == Capability.GATEWAY_QUOTA_WRITE
+        else "console:quota:view"
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "message": "Permission denied: cannot access another user's quota",
+            "required_capability": capability.value,
+            "required_permission": permission,
+            "trace_id": str(getattr(request.state, "request_id", "") or ""),
+        },
+    )
 
 
 # ============ Request/Response Models ============
@@ -258,6 +315,8 @@ async def get_quota_summary(
 
     Returns counts of users by quota status and total alerts.
     """
+    _require_quota_read(request, auth)
+    _require_quota_tenant_scope(request, auth, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
 
     summary = {
@@ -325,6 +384,8 @@ async def get_quota_users_overview(
 
     Returns real quota limits, current usage, and computed status for each user.
     """
+    _require_quota_read(request, auth)
+    _require_quota_tenant_scope(request, auth, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
     users: list[QuotaUserOverviewItem] = []
     summary_counts = {"total": 0, "blocked": 0, "exceeded": 0, "warning": 0, "ok": 0}
@@ -435,6 +496,8 @@ async def get_quota_alerts(
 
     Returns alerts for users approaching or exceeding limits.
     """
+    _require_quota_read(request, auth)
+    _require_quota_tenant_scope(request, auth, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
 
     alerts = await quota_service.get_quota_alerts(
@@ -460,6 +523,8 @@ async def acknowledge_alert(
 
     Marks the alert as acknowledged so it won't appear in unacknowledged list.
     """
+    _require_quota_write(request, auth)
+    _require_quota_tenant_scope(request, auth, Capability.GATEWAY_QUOTA_WRITE)
     quota_service = get_quota_service()
 
     if quota_service.database and quota_service.database._pool:
@@ -502,6 +567,8 @@ async def get_user_quota(
 
     Returns limits, current usage, status, and reset times.
     """
+    _require_quota_read(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
 
     quota = await quota_service.get_user_quota(auth.tenant_id, user_id)
@@ -569,6 +636,8 @@ async def set_user_quota(
     Pass null/None for fields to keep existing values.
     Pass 0 to set unlimited.
     """
+    _require_quota_write(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_WRITE)
     quota_service = get_quota_service()
 
     temporary_expires_at = None
@@ -617,6 +686,8 @@ async def check_user_quota(
 
     Used before making requests to pre-validate quota availability.
     """
+    _require_quota_read(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
 
     result = await quota_service.check_quota(
@@ -631,6 +702,7 @@ async def check_user_quota(
 @router.get("/{user_id}/forecast", response_model=QuotaForecastResponse)
 async def get_user_quota_forecast(
     user_id: str,
+    request: Request,
     lookback_days: int = Query(7, ge=1, le=30, description="Recent days used for trend projection"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> QuotaForecastResponse:
@@ -639,6 +711,8 @@ async def get_user_quota_forecast(
 
     Uses recent daily usage trend to project month-end usage and predicted breach dates.
     """
+    _require_quota_read(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_READ)
     quota_service = get_quota_service()
     forecast = await quota_service.get_quota_forecast(
         tenant_id=auth.tenant_id,
@@ -662,6 +736,8 @@ async def reset_user_quota(
 
     Can reset daily or monthly quota counters.
     """
+    _require_quota_write(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_WRITE)
     quota_service = get_quota_service()
 
     if reset_type == "daily":
@@ -715,6 +791,8 @@ async def block_user(
 
     Blocked users will receive quota exceeded errors.
     """
+    _require_quota_write(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_WRITE)
     quota_service = get_quota_service()
 
     success = await quota_service.block_user(
@@ -745,6 +823,8 @@ async def unblock_user(
 
     Removes the block status and allows requests again.
     """
+    _require_quota_write(request, auth)
+    _require_quota_subject(request, auth, user_id, Capability.GATEWAY_QUOTA_WRITE)
     quota_service = get_quota_service()
 
     success = await quota_service.unblock_user(

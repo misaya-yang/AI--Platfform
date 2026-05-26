@@ -17,10 +17,40 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ...api.deps import AuthContext, get_auth_context
+from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
+from ...core.auth.permissions import Capability
 from ...services.metrics import compute_data_status, get_usage_recorder
 
 router = APIRouter(prefix="/usage", tags=["usage"])
+
+
+def _require_usage_read(request: Request, auth: AuthContext) -> None:
+    require_gateway_capability(request, auth, Capability.GATEWAY_USAGE_READ)
+
+
+def _is_usage_operator(auth: AuthContext) -> bool:
+    return any(role in {"admin", "operator"} for role in auth.roles)
+
+
+def _require_usage_tenant_scope(request: Request, auth: AuthContext) -> None:
+    if auth.tenant_id:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "message": "Permission denied: tenant scope required for usage queries",
+            "required_capability": Capability.GATEWAY_USAGE_READ.value,
+            "required_permission": "console:usage:view",
+            "trace_id": str(getattr(request.state, "request_id", "") or ""),
+        },
+    )
+
+
+def _scope_usage_user_id(request: Request, auth: AuthContext, user_id: str | None) -> str | None:
+    _require_usage_tenant_scope(request, auth)
+    if _is_usage_operator(auth):
+        return user_id
+    return auth.user_id or user_id
 
 
 # ============ Response Models ============
@@ -201,6 +231,8 @@ async def get_usage_summary(
 
     Returns total requests, tokens, cost, and latency for the specified period.
     """
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
 
     # Default to last 7 days
@@ -257,6 +289,8 @@ async def get_usage_breakdown(
 
     Breaks down usage by model, user, assistant, or service with cost and percentage.
     """
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
 
     # Validate dimension
@@ -325,6 +359,8 @@ async def get_usage_timeseries(
 
     Returns daily usage data for charts and trend analysis.
     """
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
 
     # Default to last 30 days
@@ -380,6 +416,8 @@ async def get_performance_breakdown(
     auth: AuthContext = Depends(get_auth_context),
 ) -> LatencyBreakdownResponse:
     """Get detailed latency phase breakdown (TTFB/LLM/Retrieval/Tool/Overhead)."""
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
 
     if not end_date:
@@ -435,6 +473,8 @@ async def get_failure_breakdown(
     auth: AuthContext = Depends(get_auth_context),
 ) -> FailureBreakdownResponse:
     """Get failure classification breakdown for operational analysis."""
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
     if dimension not in {"service", "model", "provider", "user"}:
         raise HTTPException(status_code=400, detail="Invalid dimension")
@@ -478,6 +518,8 @@ async def list_request_traces(
     auth: AuthContext = Depends(get_auth_context),
 ) -> list[RequestTraceResponse]:
     """List sampled traces."""
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
     if not end_date:
         end_date = date.today()
@@ -506,6 +548,8 @@ async def get_request_trace(
     auth: AuthContext = Depends(get_auth_context),
 ) -> RequestTraceResponse:
     """Get latest sampled trace for a request."""
+    _require_usage_read(request, auth)
+    _require_usage_tenant_scope(request, auth)
     recorder = get_usage_recorder()
     trace = await recorder.get_request_trace_by_id(auth.tenant_id, request_id)
     if not trace:
@@ -526,6 +570,8 @@ async def get_user_usage(
 
     Includes summary, top models, and daily trend.
     """
+    _require_usage_read(request, auth)
+    user_id = _scope_usage_user_id(request, auth, user_id)
     recorder = get_usage_recorder()
 
     # Default to last 7 days
@@ -596,6 +642,8 @@ async def export_usage(
 
     Supports CSV and JSON formats for download.
     """
+    _require_usage_read(request, auth)
+    _require_usage_tenant_scope(request, auth)
     recorder = get_usage_recorder()
 
     # Default to last 30 days
@@ -712,6 +760,8 @@ async def get_model_usage(
 
     Provides detailed breakdown of usage per model including token counts and costs.
     """
+    _require_usage_read(request, auth)
+    _require_usage_tenant_scope(request, auth)
     recorder = get_usage_recorder()
 
     # Default to last 7 days
