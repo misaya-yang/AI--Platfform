@@ -29,6 +29,7 @@ DEFAULT_RETRYABLE_ERROR_CODES = [
     "rate_limit",
     "quota_exhausted",
     "provider_5xx",
+    "provider_unavailable",
 ]
 
 
