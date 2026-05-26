@@ -1899,6 +1899,12 @@
     "scrollToBottom": "Scroll to bottom",
     "chatLog": "Conversation log",
     "disclaimer": "AI responses may be inaccurate",
+    "modelFailover": {
+      "fallbackProvider": "fallback provider",
+      "fallbackModel": "fallback model",
+      "selected": "Model fallback is active. The gateway switched this response to {{provider}} / {{model}}.",
+      "exhausted": "All configured model fallbacks failed. Please try again later or update the service model policy."
+    },
     "errors": {
       "cancelled": "Request was cancelled.",
       "authExpired": "Your login has expired. Please sign in again.",

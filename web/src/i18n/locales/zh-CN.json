@@ -1899,6 +1899,12 @@
     "scrollToBottom": "滚动到底部",
     "chatLog": "对话记录",
     "disclaimer": "AI 回答可能不准确",
+    "modelFailover": {
+      "fallbackProvider": "备用供应商",
+      "fallbackModel": "备用模型",
+      "selected": "已启用模型降级：网关已将本次回答切换到 {{provider}} / {{model}}。",
+      "exhausted": "所有已配置的模型降级项都调用失败。请稍后重试，或调整服务模型策略。"
+    },
     "errors": {
       "cancelled": "请求已取消。",
       "authExpired": "登录状态已过期，请重新登录。",

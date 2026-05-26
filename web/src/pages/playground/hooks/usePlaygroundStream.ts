@@ -1105,8 +1105,11 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     shownFailoverNotices.add(noticeKey);
                     const content =
                       status === "selected"
-                        ? `Model fallback active: switched to ${providerId || "fallback provider"} / ${modelId || "fallback model"}.`
-                        : "All configured model fallbacks failed. Please try again later or change the service model configuration.";
+                        ? t("playground.modelFailover.selected", {
+                            provider: providerId || t("playground.modelFailover.fallbackProvider"),
+                            model: modelId || t("playground.modelFailover.fallbackModel"),
+                          })
+                        : t("playground.modelFailover.exhausted");
                     setMessages((current) => [
                       ...current,
                       {
