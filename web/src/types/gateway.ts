@@ -132,7 +132,6 @@ export interface ServiceModelFailoverCandidate {
 export interface ServiceModelFailoverConfig {
   enabled: boolean;
   max_attempts?: number;
-  retryable_error_codes?: string[];
   candidates: ServiceModelFailoverCandidate[];
 }
 

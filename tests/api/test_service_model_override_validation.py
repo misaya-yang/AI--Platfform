@@ -450,7 +450,6 @@ async def test_update_service_increments_cache_epoch_when_failover_order_changes
                 "failover": {
                     "enabled": True,
                     "max_attempts": 3,
-                    "retryable_error_codes": ["timeout"],
                     "candidates": [
                         {"provider_id": "dashscope-intl", "model_id": "qwen-max"},
                         {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"},
@@ -494,7 +493,6 @@ async def test_update_service_increments_cache_epoch_when_failover_order_changes
                     "failover": {
                         "enabled": True,
                         "max_attempts": 3,
-                        "retryable_error_codes": ["timeout"],
                         "candidates": [
                             {"provider_id": "google-ai-studio", "model_id": "gemini-3.5-flash"},
                             {"provider_id": "dashscope-intl", "model_id": "qwen-max"},

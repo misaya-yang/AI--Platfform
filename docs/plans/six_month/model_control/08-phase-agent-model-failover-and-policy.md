@@ -65,7 +65,7 @@ Runtime behavior:
 - If any configured candidate raises during model construction or model call, Imam Agent retries the same model call with the next configured candidate.
 - If a candidate fails validation before run start, Gateway excludes it from the injected candidate chain and records a safe warning.
 - If all candidates fail before any assistant text is emitted, return a normal user-visible English error to the UI.
-- If partial assistant text has already streamed, do not transparently switch models in the same turn; surface a retryable failure with debug metadata. This prevents mixed-provider answers and broken citations.
+- If partial assistant text has already streamed, do not transparently switch models in the same turn; surface a failure with debug metadata. This prevents mixed-provider answers and broken citations.
 
 ## Data Contract
 
@@ -81,7 +81,6 @@ Extend `connector_config.model_override` to support fallback policy:
   "failover": {
     "enabled": true,
     "max_attempts": 3,
-    "retryable_error_codes": ["timeout", "connect_error", "rate_limit", "quota_exhausted", "provider_5xx"],
     "candidates": [
       {"provider_id": "dashscope-intl", "model_id": "qwen3.6-plus"},
       {"provider_id": "google", "model_id": "gemini-3.5-flash"}
@@ -286,7 +285,7 @@ python -m pytest tests/unit_tests/test_model_switcher.py tests/unit_tests/test_m
 Expected new tests:
 
 - `test_wrap_model_call_uses_primary_when_successful`
-- `test_wrap_model_call_falls_back_on_retryable_error`
+- `test_wrap_model_call_falls_back_on_primary_error`
 - `test_wrap_model_call_falls_back_on_invalid_request`
 - `test_wrap_model_call_continues_after_fallback_type_error`
 - `test_awrap_model_call_matches_sync_failover_behavior`

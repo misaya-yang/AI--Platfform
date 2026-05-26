@@ -25,16 +25,6 @@ MODEL_OVERRIDE_SECRET_FIELD_NAMES = {
     "token",
 }
 
-DEFAULT_RETRYABLE_ERROR_CODES = [
-    "timeout",
-    "connect_error",
-    "rate_limit",
-    "quota_exhausted",
-    "provider_5xx",
-    "provider_unavailable",
-]
-
-
 class ModelOverrideRuntimeError(ValueError):
     """Safe error raised while resolving Gateway-owned model runtime config."""
 
@@ -62,17 +52,6 @@ def safe_api_key_fingerprint(api_key: object) -> str | None:
     if not api_key:
         return None
     return hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:16]
-
-
-def normalize_retryable_error_codes(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return list(DEFAULT_RETRYABLE_ERROR_CODES)
-    normalized: list[str] = []
-    for item in value:
-        token = str(item or "").strip().lower()
-        if token and token not in normalized:
-            normalized.append(token)
-    return normalized or list(DEFAULT_RETRYABLE_ERROR_CODES)
 
 
 def normalize_max_attempts(value: Any, *, default: int = 3) -> int:
@@ -220,9 +199,6 @@ async def build_runtime_model_override_config(
         return runtime_config
 
     max_attempts = normalize_max_attempts(failover.get("max_attempts"), default=3)
-    retryable_error_codes = normalize_retryable_error_codes(
-        failover.get("retryable_error_codes")
-    )
     candidates = [primary]
     warnings: list[dict[str, Any]] = []
     seen = {(primary["provider_id"], primary["model_id"])}
@@ -263,7 +239,6 @@ async def build_runtime_model_override_config(
     runtime_config["failover"] = {
         "enabled": True,
         "max_attempts": max_attempts,
-        "retryable_error_codes": retryable_error_codes,
         "candidates": candidates,
     }
     if warnings:

@@ -21,10 +21,8 @@ from ...core.auth.service_access import (
 )
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_failover import (
-    DEFAULT_RETRYABLE_ERROR_CODES,
     has_secret_field,
     normalize_max_attempts,
-    normalize_retryable_error_codes,
 )
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
@@ -374,9 +372,6 @@ async def _normalize_langgraph_failover(
     normalized = {
         "enabled": enabled,
         "max_attempts": normalize_max_attempts(raw_failover.get("max_attempts"), default=3),
-        "retryable_error_codes": normalize_retryable_error_codes(
-            raw_failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
-        ),
         "candidates": [],
     }
     if not enabled:
@@ -533,9 +528,6 @@ async def _seed_default_langgraph_failover(
         **failover,
         "enabled": True,
         "max_attempts": max(normalize_max_attempts(failover.get("max_attempts"), default=3), 2),
-        "retryable_error_codes": normalize_retryable_error_codes(
-            failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
-        ),
         "candidates": candidates,
     }
 
@@ -596,9 +588,6 @@ async def _validate_langgraph_model_override(
             normalized_failover = {
                 "enabled": False,
                 "max_attempts": normalize_max_attempts(raw_failover.get("max_attempts"), default=3),
-                "retryable_error_codes": normalize_retryable_error_codes(
-                    raw_failover.get("retryable_error_codes", DEFAULT_RETRYABLE_ERROR_CODES)
-                ),
                 "candidates": [],
             }
     else:

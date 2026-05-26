@@ -159,11 +159,6 @@ function readModelOverride(value: unknown): ServiceModelOverride {
         typeof failover?.max_attempts === "number" && Number.isFinite(failover.max_attempts)
           ? failover.max_attempts
           : 3,
-      retryable_error_codes: Array.isArray(failover?.retryable_error_codes)
-        ? failover.retryable_error_codes.filter(
-            (code): code is string => typeof code === "string" && Boolean(code.trim())
-          )
-        : undefined,
       candidates,
     },
   };
@@ -711,7 +706,6 @@ export function ServiceConfigDialog({
           failover: {
             enabled: effectiveFailoverEnabled,
             max_attempts: failover.max_attempts ?? 3,
-            retryable_error_codes: failover.retryable_error_codes,
             candidates: effectiveFailoverEnabled ? effectiveFailoverCandidates : [],
           },
         },
