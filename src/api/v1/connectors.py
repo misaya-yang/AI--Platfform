@@ -14,6 +14,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from ..deps import get_user_context
 logger = get_logger(__name__)
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
 OAUTH_STATE_TTL_SECONDS = 600
+OAUTH_STATE_KEY_PREFIX = "oauth:state:"
 
 
 # ─── Models ───────────────────────────────────────────────────────────
@@ -55,19 +57,51 @@ def _get_db(request: Request):
     return getattr(request.app.state, "database", None)
 
 
-def _oauth_state_cache(request: Request) -> dict[str, dict[str, Any]]:
-    cache = getattr(request.app.state, "oauth_states", None)
-    if cache is None:
-        cache = {}
-        request.app.state.oauth_states = cache
-    now = datetime.now(timezone.utc)
-    expired = [key for key, value in cache.items() if value["expires_at"] <= now]
-    for key in expired:
-        cache.pop(key, None)
-    return cache
+def _oauth_state_key(state: str) -> str:
+    return f"{OAUTH_STATE_KEY_PREFIX}{state}"
 
 
-def _store_oauth_state(
+def _get_oauth_redis(request: Request | None) -> Any | None:
+    if request is None:
+        return None
+    return getattr(request.app.state, "redis", None)
+
+
+def _decode_oauth_state(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        return json.loads(raw)
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+async def _redis_save_json(redis: Any, key: str, value: dict[str, Any], ttl: int) -> None:
+    if hasattr(redis, "save"):
+        await redis.save(key, value, ttl)
+    elif hasattr(redis, "setex"):
+        await redis.setex(key, ttl, json.dumps(value, default=str))
+    elif hasattr(redis, "set"):
+        await redis.set(key, json.dumps(value, default=str), ex=ttl)
+    else:
+        raise RuntimeError("redis client does not support save/set")
+
+
+async def _redis_get_json(redis: Any, key: str) -> dict[str, Any] | None:
+    if hasattr(redis, "get"):
+        return _decode_oauth_state(await redis.get(key))
+    raise RuntimeError("redis client does not support get")
+
+
+async def _redis_delete(redis: Any, key: str) -> None:
+    if hasattr(redis, "delete"):
+        await redis.delete(key)
+
+
+async def _store_oauth_state(
     request: Request,
     *,
     state: str,
@@ -76,22 +110,46 @@ def _store_oauth_state(
     provider: str,
     nonce: str,
 ) -> None:
-    _oauth_state_cache(request)[state] = {
+    redis = _get_oauth_redis(request)
+    if redis is None:
+        raise HTTPException(503, "OAuth state store unavailable")
+    entry = {
         "tenant_id": tenant_id,
         "user_id": user_id,
         "provider": provider,
         "nonce": nonce,
-        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=OAUTH_STATE_TTL_SECONDS),
+        "expires_at": (
+            datetime.now(timezone.utc) + timedelta(seconds=OAUTH_STATE_TTL_SECONDS)
+        ).isoformat(),
     }
+    try:
+        await _redis_save_json(redis, _oauth_state_key(state), entry, OAUTH_STATE_TTL_SECONDS)
+    except Exception as exc:
+        logger.warning("OAuth state store failed: %s", exc)
+        raise HTTPException(503, "OAuth state store unavailable") from exc
 
 
-def _consume_oauth_state(request: Request | None, state: str) -> dict[str, Any]:
-    if request is None:
-        raise HTTPException(400, "Invalid state parameter")
-    entry = _oauth_state_cache(request).pop(state, None)
+async def _consume_oauth_state(request: Request | None, state: str) -> dict[str, Any]:
+    redis = _get_oauth_redis(request)
+    if redis is None:
+        raise HTTPException(400, "Invalid or expired state parameter")
+    key = _oauth_state_key(state)
+    try:
+        entry = await _redis_get_json(redis, key)
+        await _redis_delete(redis, key)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("OAuth state consume failed: %s", exc)
+        raise HTTPException(503, "OAuth state store unavailable") from exc
     if not entry:
         raise HTTPException(400, "Invalid or expired state parameter")
-    if entry["expires_at"] <= datetime.now(timezone.utc):
+    expires_at = entry.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if not isinstance(expires_at, datetime):
+        raise HTTPException(400, "Invalid or expired state parameter")
+    if expires_at <= datetime.now(timezone.utc):
         raise HTTPException(400, "Invalid or expired state parameter")
     return entry
 
@@ -235,7 +293,7 @@ async def initiate_oauth(
 
     nonce = secrets.token_urlsafe(16)
     state = f"{user.tenant_id}:{user.user_id}:{provider}:{nonce}"
-    _store_oauth_state(
+    await _store_oauth_state(
         request,
         state=state,
         tenant_id=user.tenant_id,
@@ -271,9 +329,10 @@ async def initiate_oauth(
 @router.get("/callback/{provider}")
 async def oauth_callback(
     provider: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
     code: str = Query(...),
     state: str = Query(""),
-    request: Request = None,
 ):
     """OAuth callback — exchanges authorization code for tokens."""
     # Parse and validate state parameter
@@ -286,7 +345,9 @@ async def oauth_callback(
         raise HTTPException(400, "State provider mismatch")
     if not tenant_id or not user_id or not nonce:
         raise HTTPException(400, "Incomplete state parameter")
-    issued_state = _consume_oauth_state(request, state)
+    if user.tenant_id != tenant_id or user.user_id != user_id:
+        raise HTTPException(403, "OAuth state does not belong to authenticated user")
+    issued_state = await _consume_oauth_state(request, state)
     if (
         issued_state["tenant_id"] != tenant_id
         or issued_state["user_id"] != user_id

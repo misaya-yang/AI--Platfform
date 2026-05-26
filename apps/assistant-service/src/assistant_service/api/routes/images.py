@@ -1021,8 +1021,20 @@ async def _load_artifact_bytes_owner_scoped(
             status_code=404,
             detail=f"artifact {artifact_id!r} not found",
         )
-    # NOTE: owner_scope check removed — artifact_id is a UUID (unguessable).
-    # Defense-in-depth via obscurity is sufficient for App-to-API flows.
+    raw_owner_scope = getattr(raw, "owner_scope", None)
+    if raw_owner_scope is not None:
+        owner_matches = raw_owner_scope == owner_scope
+    else:
+        owner_matches = (
+            user is not None
+            and getattr(raw, "tenant_id", None) == user.tenant_id
+            and getattr(raw, "user_id", None) == user.user_id
+        )
+    if not owner_matches:
+        raise HTTPException(
+            status_code=404,
+            detail=f"artifact {artifact_id!r} not found",
+        )
     try:
         content = await artifact_storage.download_artifact(raw.artifact_id)
     except Exception as exc:

@@ -173,6 +173,32 @@ async def test_B1_orphan_display_artifact_cannot_be_used_as_raw_reference():
         assert len(h.gemini.generate.mock_calls) == 0
 
 
+@pytest.mark.asyncio
+async def test_B2_cross_owner_reference_artifact_bytes_return_404():
+    """Any authenticated user who guesses another user's artifact UUID must
+    still be unable to load the raw bytes for edit/reference flows."""
+    user = _user()
+    with _Harness() as h:
+        raw = await h.storage.create_artifact(
+            session_id="other-sess", tenant_id="t1", user_id="other",
+            type="image", format="png", title="private", filename="p.png",
+            content=PNG_1X1, source="image_generation",
+            variant="raw", parent_artifact_id=None,
+            owner_scope="other_user",
+            width=1, height=1,
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            await images_module._load_artifact_bytes_owner_scoped(
+                h.storage,
+                raw.artifact_id,
+                owner_scope=user.user_id,
+                user=user,
+            )
+
+    assert exc.value.status_code == 404
+
+
 # ===========================================================================
 # C. Owner-scope forgery via control char in app_user_id
 # ===========================================================================

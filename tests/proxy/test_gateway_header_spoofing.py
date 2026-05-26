@@ -127,6 +127,18 @@ def test_service_auth_token_rejects_arbitrary_header_injection():
         raise AssertionError("arbitrary service_auth_token header injection was accepted")
 
 
+def test_service_auth_token_rejects_crlf_header_injection():
+    injector = ContextInjector(inject_user_info=False, inject_request_info=False)
+    context = RequestContext()
+
+    try:
+        injector.build_headers(context, service_auth_token="Bearer safe\r\nX-Evil: injected")
+    except ValueError as exc:
+        assert "service_auth_token" in str(exc)
+    else:
+        raise AssertionError("CRLF service_auth_token header injection was accepted")
+
+
 def test_client_forwarded_ip_headers_are_rebuilt_from_context():
     injector = ContextInjector(
         inject_user_info=False,

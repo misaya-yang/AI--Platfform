@@ -330,6 +330,8 @@ class ContextInjector:
 
         # 5. 服务内部认证 token
         if service_auth_token:
+            if "\r" in service_auth_token or "\n" in service_auth_token:
+                raise ValueError("service_auth_token must not contain CRLF characters")
             if service_auth_token.startswith("Bearer "):
                 headers["Authorization"] = service_auth_token
             elif ":" in service_auth_token:

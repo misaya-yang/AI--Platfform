@@ -12,17 +12,17 @@ This script:
 
 Usage:
     python scripts/backfill_hadith_chapters.py --dsn "postgresql://postgres:PASSWORD@HOST:5432/gateway"
-    python scripts/backfill_hadith_chapters.py --dry-run
+    PG_DSN="postgresql://..." python scripts/backfill_hadith_chapters.py --dry-run
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import logging
-import sys
+import os
 
-import httpx
 import asyncpg
+import httpx
 
 logger = logging.getLogger("backfill_chapters")
 
@@ -209,12 +209,15 @@ def main():
     p = argparse.ArgumentParser(description="Backfill hadith chapter_title from CDN")
     p.add_argument(
         "--dsn",
-        default="postgresql://postgres:HejazDB2026Secure@52.65.136.42:5432/gateway",
-        help="PostgreSQL DSN",
+        default=os.environ.get("PG_DSN"),
+        help="PostgreSQL DSN. Required unless PG_DSN is set.",
     )
     p.add_argument("--collections", default=",".join(COLLECTIONS))
     p.add_argument("--dry-run", action="store_true")
-    raise SystemExit(asyncio.run(run(p.parse_args())))
+    args = p.parse_args()
+    if not args.dsn:
+        p.error("--dsn is required unless PG_DSN is set")
+    raise SystemExit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

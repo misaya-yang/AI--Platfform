@@ -22,13 +22,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import sys
 import time
-from typing import Any
-
-import json
 
 import asyncpg
 from qdrant_client import AsyncQdrantClient
@@ -235,13 +233,17 @@ async def delete_v1_collection(qdrant_url: str):
 
 async def main():
     parser = argparse.ArgumentParser(description="Sync KB V2 Qdrant → PG segments")
-    parser.add_argument("--pg-dsn", default=os.getenv(
-        "PG_DSN", "postgresql://postgres:HejazDB2026Secure@127.0.0.1:5432/ai_gateway"
-    ))
+    parser.add_argument(
+        "--pg-dsn",
+        default=os.environ.get("PG_DSN"),
+        help="PostgreSQL DSN. Required unless PG_DSN is set.",
+    )
     parser.add_argument("--qdrant-url", default=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
     parser.add_argument("--dry-run", action="store_true", help="Only count, don't write")
     parser.add_argument("--delete-v1", action="store_true", help="Delete V1 Qdrant collection")
     args = parser.parse_args()
+    if not args.pg_dsn:
+        parser.error("--pg-dsn is required unless PG_DSN is set")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
