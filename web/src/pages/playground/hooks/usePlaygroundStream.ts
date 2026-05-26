@@ -1098,26 +1098,19 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                     failover_candidates: failoverEvent.failover_candidates,
                     cache_epoch: failoverEvent.cache_epoch,
                   });
-                  if (
-                    (status === "selected" || status === "exhausted") &&
-                    !shownFailoverNotices.has(noticeKey)
-                  ) {
+                  if (status === "selected") {
+                    continue;
+                  }
+                  if (status === "exhausted" && !shownFailoverNotices.has(noticeKey)) {
                     shownFailoverNotices.add(noticeKey);
-                    const content =
-                      status === "selected"
-                        ? t("playground.modelFailover.selected", {
-                            provider: providerId || t("playground.modelFailover.fallbackProvider"),
-                            model: modelId || t("playground.modelFailover.fallbackModel"),
-                          })
-                        : t("playground.modelFailover.exhausted");
                     setMessages((current) => [
                       ...current,
                       {
                         id: `model-failover-${Date.now()}-${shownFailoverNotices.size}`,
                         role: "assistant",
-                        content,
+                        content: t("playground.modelFailover.exhausted"),
                         createdAt: new Date().toISOString(),
-                        status: status === "selected" ? "completed" : "failed",
+                        status: "failed",
                         meta: {
                           type: "hejaz_model_failover_notice",
                           failover_status: status,
