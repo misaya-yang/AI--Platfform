@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { memo, useState, forwardRef } from "react";
 import { useTranslation } from "react-i18next";
-import { cn } from "@/lib/utils";
+import { cn, getSafePlaygroundAssistantContent } from "@/lib/utils";
 import { StreamOutput } from "@/components/StreamOutput";
 import type { ChatMessage } from "@/components/ChatWindow";
 import { MessageAvatar } from "./MessageAvatar";
@@ -70,7 +70,10 @@ export const ChatMessageItem = memo(
         !isUser && message.artifacts && message.artifacts.length > 0;
       const assistantDisplayContent = isUser
         ? message.content
-        : stripProcessSectionForDisplay(message.content || "");
+        : getSafePlaygroundAssistantContent(
+            stripProcessSectionForDisplay(message.content || ""),
+            t
+          );
       const hasVisibleAssistantText =
         assistantDisplayContent.trim().length > 0;
 

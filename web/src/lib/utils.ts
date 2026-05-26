@@ -72,24 +72,48 @@ function includesAny(text: string, keywords: string[]): boolean {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
+function extractErrorDetailValue(value: unknown, depth = 0): string {
+  if (depth > 4 || value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value !== "object") return "";
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["detail", "message", "error"]) {
+    const child = record[key];
+    const extracted = extractErrorDetailValue(child, depth + 1);
+    if (extracted) return extracted;
+  }
+
+  if (record.error_type || record.type || record.code) {
+    const message = extractErrorDetailValue(record.message, depth + 1);
+    if (message) return message;
+  }
+
+  return "";
+}
+
 function normalizeErrorDetail(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
 
   try {
-    const payload = JSON.parse(trimmed) as Record<string, unknown>;
-    const detail = payload.detail ?? payload.message ?? payload.error;
-    if (typeof detail === "string") {
-      return detail.trim();
-    }
-    if (detail != null) {
-      return JSON.stringify(detail);
-    }
+    const detail = extractErrorDetailValue(JSON.parse(trimmed));
+    if (detail) return detail;
   } catch {
     // Non-JSON text, keep original payload.
   }
 
   return trimmed;
+}
+
+function isInternalModelRuntimeError(text: string): boolean {
+  return includesAny(text, [
+    "runtime model call failed",
+    "failover_status",
+    "provider_unavailable",
+    "notimplementederror",
+    "runtime model override failed",
+  ]);
 }
 
 function extractStatus(error: unknown, raw: string): number | undefined {
@@ -125,6 +149,24 @@ export function getPlaygroundErrorMessage(error: unknown, t: TFunction): string 
   const status = extractStatus(error, raw);
   const normalized = normalizeErrorDetail(raw);
   const text = `${raw}\n${normalized}`.toLowerCase();
+
+  if (isInternalModelRuntimeError(text)) {
+    if (includesAny(text, ["failover_status=exhausted", "status=exhausted"])) {
+      return t("playground.errors.modelFallbackExhausted");
+    }
+    return t("playground.errors.modelProviderUnavailable");
+  }
+
+  if (
+    includesAny(text, [
+      "billing account",
+      "insufficient credits",
+      "insufficient balance",
+      "spending limit",
+    ])
+  ) {
+    return t("playground.errors.modelQuotaExhausted");
+  }
 
   if (status === 401 || includesAny(text, ["unauthorized", "auth", "token expired"])) {
     return t("playground.errors.authExpired");
@@ -191,4 +233,12 @@ export function getPlaygroundErrorMessage(error: unknown, t: TFunction): string 
   }
 
   return t("playground.errors.unknown");
+}
+
+export function getSafePlaygroundAssistantContent(content: string, t: TFunction): string {
+  if (!content || typeof content !== "string") return content;
+  const normalized = normalizeErrorDetail(content);
+  const text = `${content}\n${normalized}`.toLowerCase();
+  if (!isInternalModelRuntimeError(text)) return content;
+  return getPlaygroundErrorMessage(normalized || content, t);
 }
