@@ -110,6 +110,91 @@ def _get_capacity_resolver(request: Request) -> CapacityResolver:
     return resolver
 
 
+def _find_service_provider_id(service) -> str | None:
+    """Best-effort provider hint for service-specific capacity visibility."""
+    candidates = [
+        getattr(service, "connector_config", None),
+        getattr(service, "metadata", None),
+    ]
+    for source in candidates:
+        if not isinstance(source, dict):
+            continue
+        override = source.get("model_override")
+        if isinstance(override, dict) and override.get("provider_id"):
+            return str(override["provider_id"])
+        for key in ("default_provider", "provider", "provider_id", "llm_provider", "vendor"):
+            value = source.get(key)
+            if value:
+                return str(value)
+    return None
+
+
+async def _resolve_service_capacity_status(
+    *,
+    request: Request,
+    service,
+    service_id: str,
+    service_config,
+) -> dict:
+    capacity = getattr(service_config, "capacity", None)
+    configured_capacity = {
+        "upstream_group": getattr(capacity, "upstream_group", None),
+        "concurrency_limit": getattr(capacity, "concurrency_limit", None),
+        "queue_max": getattr(capacity, "queue_max", None),
+        "queue_timeout_ms": getattr(capacity, "queue_timeout_ms", None),
+    }
+
+    provider_id = _find_service_provider_id(service)
+    proxy_loader = getattr(request.app.state, "proxy_config_loader", None)
+    proxy_config = None
+    if proxy_loader is not None and hasattr(proxy_loader, "get_config"):
+        try:
+            proxy_config = await proxy_loader.get_config(service_id)
+        except Exception:
+            proxy_config = None
+
+    if proxy_config is not None:
+        configured_capacity = getattr(proxy_config, "capacity_config", None) or configured_capacity
+        provider_id = (
+            (getattr(proxy_config, "model_override", None) or {}).get("provider_id")
+            if isinstance(getattr(proxy_config, "model_override", None), dict)
+            else None
+        ) or getattr(proxy_config, "default_provider", None) or provider_id
+
+    capacity_resolver = _get_capacity_resolver(request)
+    budgets = await capacity_resolver.resolve(
+        tenant_id="default",
+        service_id=service_id,
+        request_class="stream",
+        upstream_group=configured_capacity.get("upstream_group"),
+        provider_id=provider_id,
+        service_config={"capacity": configured_capacity},
+    )
+
+    transparent_proxy = getattr(request.app.state, "transparent_proxy", None)
+    admission = getattr(transparent_proxy, "admission_controller", None)
+    snapshot = admission.snapshot() if admission is not None else {}
+
+    rows = []
+    for budget in budgets:
+        usage = snapshot.get(budget.key, {})
+        rows.append(
+            budget.to_status(
+                inflight=int(usage.get("inflight", 0) or 0),
+                queue_depth=int(usage.get("queue_depth", 0) or 0),
+            )
+        )
+
+    return {
+        "request_class": "stream",
+        "provider_id": provider_id,
+        "gateway_instance_id": getattr(admission, "gateway_instance_id", "gateway-1"),
+        "cluster_epoch": capacity_resolver.cluster_epoch,
+        "mode": capacity_resolver.mode,
+        "budgets": rows,
+    }
+
+
 def _sync_runtime_rate_limit_rules(request: Request) -> None:
     request.app.state.rate_limit_rules = _runtime_config.setdefault("rate_limits", [])
     _get_rate_policy_resolver(request).invalidate()
@@ -620,6 +705,12 @@ async def get_service_config(
 
     # 获取服务配置
     config = service.get_service_config()
+    capacity_status = await _resolve_service_capacity_status(
+        request=request,
+        service=service,
+        service_id=service_id,
+        service_config=config,
+    )
 
     return {
         "service_id": service_id,
@@ -670,6 +761,7 @@ async def get_service_config(
             "failure_threshold": service.failure_threshold,
             "recovery_timeout": service.recovery_timeout,
         },
+        "capacity_status": capacity_status,
     }
 
 

@@ -2793,6 +2793,7 @@
       "tabs": {
         "basic": "基础",
         "rateLimit": "限流",
+        "capacity": "容量",
         "auth": "鉴权",
         "cache": "缓存",
         "priority": "优先级",
@@ -2842,6 +2843,29 @@
         "strategySliding": "滑动窗口",
         "strategyToken": "令牌桶",
         "save": "保存限流配置"
+      },
+      "capacity": {
+        "title": "Admission 容量",
+        "description": "在请求进入 Agent upstream 前控制并发运行和排队。",
+        "notEnforced": "未强制",
+        "mode": "模式",
+        "inflight": "运行中",
+        "queueDepth": "队列",
+        "provider": "Provider",
+        "upstreamGroup": "上游分组",
+        "upstreamGroupHint": "应用到此服务的容量预算分组。",
+        "concurrencyLimit": "并发上限",
+        "concurrencyHint": "同时运行的最大请求数。留空使用默认预算。",
+        "queueMax": "队列上限",
+        "queueMaxHint": "并发满后的排队请求数。填 0 表示快速失败。",
+        "queueTimeout": "排队超时（毫秒）",
+        "queueTimeoutHint": "排队请求等待多久后返回 503。",
+        "effectiveBudgets": "实际生效预算",
+        "noBudgets": "此服务暂无容量预算上报。",
+        "shared": "共享",
+        "enforcedOn": "开启",
+        "enforcedOff": "关闭",
+        "save": "保存容量配置"
       },
       "auth": {
         "enable": "启用鉴权",

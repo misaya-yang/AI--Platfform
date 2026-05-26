@@ -70,6 +70,29 @@ interface ServiceConfig {
   };
 }
 
+interface CapacityBudgetStatus {
+  key: string;
+  limit: number;
+  queue_max: number;
+  queue_timeout_ms: number;
+  scope: string;
+  source: string;
+  source_status: string;
+  shared: boolean;
+  enforced: boolean;
+  inflight: number;
+  queue_depth: number;
+}
+
+interface ServiceCapacityStatus {
+  request_class: string;
+  provider_id?: string | null;
+  gateway_instance_id: string;
+  cluster_epoch: string;
+  mode: string;
+  budgets: CapacityBudgetStatus[];
+}
+
 interface ServiceConfigResponse {
   service_id: string;
   name: string;
@@ -81,6 +104,7 @@ interface ServiceConfigResponse {
     failure_threshold: number;
     recovery_timeout: number;
   };
+  capacity_status?: ServiceCapacityStatus;
 }
 
 const DEFAULT_MODEL_FAILOVER_PROVIDER_PRIORITY = [
@@ -204,8 +228,11 @@ export function ServiceConfigDialog({
   });
 
   const config = configQuery.data?.config;
+  const capacityStatus = configQuery.data?.capacity_status;
+  const capacityBudgets = capacityStatus?.budgets || [];
   const priorityEnforced = config?.priority?.enforced === true;
   const capacityEnforced = config?.capacity?.enforced !== false;
+  const upstreamBudget = capacityBudgets.find((budget) => budget.scope === "upstream");
   const serviceDetail: ServiceDetail | undefined = serviceQuery.data;
   const isLangGraphService = detectLangGraphService(serviceDetail);
 
@@ -787,9 +814,10 @@ export function ServiceConfigDialog({
           <div className="py-8 text-center text-muted-foreground">{t("common.loading")}</div>
         ) : (
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="flex flex-wrap gap-1 h-auto p-1 sm:grid sm:grid-cols-6">
+            <TabsList className="flex flex-wrap gap-1 h-auto p-1 sm:grid sm:grid-cols-7">
               <TabsTrigger value="basic" className="text-xs sm:text-sm">{t("services.configDialog.tabs.basic")}</TabsTrigger>
               <TabsTrigger value="rate_limit" className="text-xs sm:text-sm">{t("services.configDialog.tabs.rateLimit")}</TabsTrigger>
+              <TabsTrigger value="capacity" className="text-xs sm:text-sm">{t("services.configDialog.tabs.capacity", "Capacity")}</TabsTrigger>
               <TabsTrigger value="auth" className="text-xs sm:text-sm">{t("services.configDialog.tabs.auth")}</TabsTrigger>
               <TabsTrigger value="cache" className="text-xs sm:text-sm">{t("services.configDialog.tabs.cache")}</TabsTrigger>
               <TabsTrigger value="priority" className="text-xs sm:text-sm">{t("services.configDialog.tabs.priority")}</TabsTrigger>
@@ -1294,6 +1322,173 @@ export function ServiceConfigDialog({
               </div>
             </TabsContent>
 
+            {/* 容量配置 */}
+            <TabsContent value="capacity" className="space-y-4 pt-4">
+              <div className="rounded-lg border p-4 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <Label>{t("services.configDialog.capacity.title", "Admission Capacity")}</Label>
+                    <p className="text-xs text-muted-foreground">
+                      {t(
+                        "services.configDialog.capacity.description",
+                        "Controls in-flight runs and queueing before requests reach the agent upstream."
+                      )}
+                    </p>
+                  </div>
+                  <Badge variant={capacityEnforced ? "default" : "secondary"}>
+                    {capacityEnforced
+                      ? (config?.capacity?.source_status || "real")
+                      : t("services.configDialog.capacity.notEnforced", "not enforced")}
+                  </Badge>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.capacity.mode", "Mode")}</p>
+                    <p className="mt-1 font-mono text-sm">{capacityStatus?.mode || "single-node"}</p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.capacity.inflight", "In-flight")}</p>
+                    <p className="mt-1 font-mono text-sm">
+                      {upstreamBudget ? `${upstreamBudget.inflight}/${upstreamBudget.limit}` : "-"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.capacity.queueDepth", "Queue")}</p>
+                    <p className="mt-1 font-mono text-sm">
+                      {upstreamBudget ? `${upstreamBudget.queue_depth}/${upstreamBudget.queue_max}` : "-"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <p className="text-xs text-muted-foreground">{t("services.configDialog.capacity.provider", "Provider")}</p>
+                    <p className="mt-1 truncate font-mono text-sm">{capacityStatus?.provider_id || "-"}</p>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.capacity.upstreamGroup", "Upstream Group")}</Label>
+                    <Input
+                      value={capacityForm.upstream_group}
+                      disabled={!capacityEnforced}
+                      placeholder="imam_agent"
+                      onChange={(e) =>
+                        setCapacityForm({ ...capacityForm, upstream_group: e.target.value })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("services.configDialog.capacity.upstreamGroupHint", "Budget group applied to this service.")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.capacity.concurrencyLimit", "Concurrency Limit")}</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={capacityForm.concurrency_limit}
+                      disabled={!capacityEnforced}
+                      placeholder={String(upstreamBudget?.limit || "default")}
+                      onChange={(e) =>
+                        setCapacityForm({ ...capacityForm, concurrency_limit: e.target.value })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("services.configDialog.capacity.concurrencyHint", "Max simultaneous in-flight runs. Empty uses the default budget.")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.capacity.queueMax", "Queue Max")}</Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      value={capacityForm.queue_max}
+                      disabled={!capacityEnforced}
+                      onChange={(e) =>
+                        setCapacityForm({
+                          ...capacityForm,
+                          queue_max: parseInt(e.target.value) || 0,
+                        })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("services.configDialog.capacity.queueMaxHint", "Queued requests after concurrency is full. Use 0 to fail fast.")}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("services.configDialog.capacity.queueTimeout", "Queue Timeout (ms)")}</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      value={capacityForm.queue_timeout_ms}
+                      disabled={!capacityEnforced}
+                      onChange={(e) =>
+                        setCapacityForm({
+                          ...capacityForm,
+                          queue_timeout_ms: parseInt(e.target.value) || 3000,
+                        })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("services.configDialog.capacity.queueTimeoutHint", "How long a queued request may wait before 503.")}
+                    </p>
+                  </div>
+                </div>
+
+                <Separator />
+
+                <div className="space-y-2">
+                  <Label>{t("services.configDialog.capacity.effectiveBudgets", "Effective Budgets")}</Label>
+                  <div className="space-y-2">
+                    {capacityBudgets.map((budget) => (
+                      <div
+                        key={budget.key}
+                        className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate font-mono">{budget.key}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {budget.source} · {budget.source_status}
+                            {budget.shared
+                              ? ` · ${t("services.configDialog.capacity.shared", "shared")}`
+                              : ""}
+                          </p>
+                        </div>
+                        <span className="font-mono">
+                          {budget.inflight}/{budget.limit}
+                        </span>
+                        <span className="font-mono text-muted-foreground">
+                          q {budget.queue_depth}/{budget.queue_max}
+                        </span>
+                        <Badge variant={budget.enforced ? "default" : "secondary"}>
+                          {budget.enforced
+                            ? t("services.configDialog.capacity.enforcedOn", "on")
+                            : t("services.configDialog.capacity.enforcedOff", "off")}
+                        </Badge>
+                      </div>
+                    ))}
+                    {capacityBudgets.length === 0 && (
+                      <p className="rounded-md border bg-muted/20 p-3 text-sm text-muted-foreground">
+                        {t("services.configDialog.capacity.noBudgets", "No capacity budgets reported for this service.")}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button
+                  onClick={handleSaveCapacity}
+                  disabled={!capacityEnforced || updateMutation.isPending}
+                >
+                  {updateMutation.isPending
+                    ? t("common.saving")
+                    : t("services.configDialog.capacity.save", "Save Capacity")}
+                </Button>
+              </div>
+            </TabsContent>
+
             {/* 鉴权配置 */}
             <TabsContent value="auth" className="space-y-4 pt-4">
               <div className="rounded-lg border p-4 space-y-4">
@@ -1446,18 +1641,6 @@ export function ServiceConfigDialog({
                   </div>
                 )}
 
-                <div className="flex items-start justify-between gap-3 rounded-md border bg-muted/30 p-3">
-                  <div>
-                    <Label>{t("services.configDialog.priority.capacityStatus", "Capacity Status")}</Label>
-                    <p className="text-xs text-muted-foreground">
-                      {t("services.configDialog.priority.capacityHint", "Gateway admission applies this service's concurrency and queue budget before upstream calls.")}
-                    </p>
-                  </div>
-                  <Badge variant={capacityEnforced ? "default" : "secondary"}>
-                    {capacityEnforced ? (config?.capacity?.source_status || "real") : "not enforced"}
-                  </Badge>
-                </div>
-
                 <div className="space-y-2">
                   <Label>{t("services.configDialog.priority.level")}</Label>
                   <div className="flex items-center gap-4">
@@ -1481,52 +1664,6 @@ export function ServiceConfigDialog({
                     {t("services.configDialog.priority.levelHint")}
                   </p>
                 </div>
-
-                <Separator />
-
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label>{t("services.configDialog.priority.upstreamGroup", "Upstream Group")}</Label>
-                    <Input
-                      value={capacityForm.upstream_group}
-                      disabled={!capacityEnforced}
-                      placeholder="imam_agent"
-                      onChange={(e) =>
-                        setCapacityForm({ ...capacityForm, upstream_group: e.target.value })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("services.configDialog.priority.concurrencyLimit", "Concurrency")}</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      value={capacityForm.concurrency_limit}
-                      disabled={!capacityEnforced}
-                      placeholder="default"
-                      onChange={(e) =>
-                        setCapacityForm({ ...capacityForm, concurrency_limit: e.target.value })
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>{t("services.configDialog.priority.queueTimeout", "Queue Timeout")}</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      value={capacityForm.queue_timeout_ms}
-                      disabled={!capacityEnforced}
-                      onChange={(e) =>
-                        setCapacityForm({
-                          ...capacityForm,
-                          queue_timeout_ms: parseInt(e.target.value) || 3000,
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                <Separator />
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -1571,15 +1708,6 @@ export function ServiceConfigDialog({
                   disabled={!priorityEnforced || updateMutation.isPending}
                 >
                   {updateMutation.isPending ? t("common.saving") : t("services.configDialog.priority.save")}
-                </Button>
-                <Button
-                  onClick={handleSaveCapacity}
-                  disabled={!capacityEnforced || updateMutation.isPending}
-                  variant="outline"
-                >
-                  {updateMutation.isPending
-                    ? t("common.saving")
-                    : t("services.configDialog.priority.saveCapacity", "Save Capacity")}
                 </Button>
               </div>
             </TabsContent>

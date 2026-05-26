@@ -2793,6 +2793,7 @@
       "tabs": {
         "basic": "Basic",
         "rateLimit": "Rate Limit",
+        "capacity": "Capacity",
         "auth": "Auth",
         "cache": "Cache",
         "priority": "Priority",
@@ -2842,6 +2843,29 @@
         "strategySliding": "Sliding window",
         "strategyToken": "Token bucket",
         "save": "Save Rate Limit"
+      },
+      "capacity": {
+        "title": "Admission Capacity",
+        "description": "Controls in-flight runs and queueing before requests reach the agent upstream.",
+        "notEnforced": "not enforced",
+        "mode": "Mode",
+        "inflight": "In-flight",
+        "queueDepth": "Queue",
+        "provider": "Provider",
+        "upstreamGroup": "Upstream Group",
+        "upstreamGroupHint": "Budget group applied to this service.",
+        "concurrencyLimit": "Concurrency Limit",
+        "concurrencyHint": "Max simultaneous in-flight runs. Empty uses the default budget.",
+        "queueMax": "Queue Max",
+        "queueMaxHint": "Queued requests after concurrency is full. Use 0 to fail fast.",
+        "queueTimeout": "Queue Timeout (ms)",
+        "queueTimeoutHint": "How long a queued request may wait before 503.",
+        "effectiveBudgets": "Effective Budgets",
+        "noBudgets": "No capacity budgets reported for this service.",
+        "shared": "shared",
+        "enforcedOn": "on",
+        "enforcedOff": "off",
+        "save": "Save Capacity"
       },
       "auth": {
         "enable": "Enable Auth",

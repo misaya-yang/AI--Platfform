@@ -108,11 +108,20 @@ export interface ServicePriorityConfig {
   max_queue_size: number;
 }
 
+export interface ServiceCapacityConfig {
+  upstream_group?: string | null;
+  concurrency_limit?: number | null;
+  queue_max: number;
+  queue_timeout_ms: number;
+  enforced?: boolean;
+}
+
 export interface ServiceConfig {
   rate_limit: ServiceRateLimitConfig;
   auth: ServiceAuthConfig;
   cache: ServiceCacheConfig;
   priority: ServicePriorityConfig;
+  capacity?: ServiceCapacityConfig;
 }
 
 export interface ServiceModelOverride {

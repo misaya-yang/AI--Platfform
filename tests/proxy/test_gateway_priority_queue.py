@@ -8,7 +8,7 @@ import pytest
 from src.api.deps import AuthContext
 from src.api.v1.config import get_service_config
 from src.config.settings import Settings
-from src.models.service import ServiceDefinition
+from src.models.service import ServiceCapacityConfig, ServiceDefinition
 
 
 class _Registry:
@@ -21,12 +21,19 @@ class _Registry:
 
 @pytest.mark.asyncio
 async def test_service_config_marks_priority_not_enforced() -> None:
+    service = ServiceDefinition(service_id="imam", name="Imam")
+    service.get_service_config().capacity = ServiceCapacityConfig(
+        upstream_group="imam_agent",
+        concurrency_limit=3,
+        queue_max=0,
+        queue_timeout_ms=100,
+    )
     request = SimpleNamespace(
         state=SimpleNamespace(),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 settings=Settings(),
-                registry=_Registry(ServiceDefinition(service_id="imam", name="Imam")),
+                registry=_Registry(service),
             )
         ),
     )
@@ -42,6 +49,13 @@ async def test_service_config_marks_priority_not_enforced() -> None:
 
     assert response["config"]["priority"]["enforced"] is False
     assert response["config"]["priority"]["scheduler"] == "not_configured"
+    upstream = {
+        budget["key"]: budget
+        for budget in response["capacity_status"]["budgets"]
+    }["upstream.imam_agent"]
+    assert upstream["limit"] == 3
+    assert upstream["queue_max"] == 0
+    assert upstream["queue_timeout_ms"] == 100
 
 
 def test_priority_controls_are_disabled_when_backend_is_not_enforcing() -> None:
