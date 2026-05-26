@@ -772,10 +772,12 @@ async def update_service_config(
     await registry.storage.save(service)
     registry._cache[service_id] = service
 
-    # 如果数据库可用，持久化
+    # registry.storage.save already persists database-backed registries. Keep this
+    # hook only for legacy storage implementations that still expose it directly.
     db = getattr(request.app.state, "database", None)
-    if db and db.enabled:
-        await db.update_service_config(service_id, config)
+    update_service_config_fn = getattr(db, "update_service_config", None)
+    if db and getattr(db, "enabled", False) and update_service_config_fn:
+        await update_service_config_fn(service_id, config)
 
     after_config = body.model_dump(exclude_none=True)
     await record_config_change(

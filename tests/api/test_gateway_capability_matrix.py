@@ -14,6 +14,7 @@ from src.api.v1 import quota as quota_routes
 from src.api.v1 import usage as usage_routes
 from src.api.v1.config import (
     RateLimitRule,
+    ServiceCapacityConfigUpdate,
     ServiceConfigUpdate,
     ServicePriorityConfigUpdate,
     create_rate_limit,
@@ -38,6 +39,8 @@ def _request() -> SimpleNamespace:
     request.app.state.database = None
     request.app.state.redis = None
     request.state = SimpleNamespace(request_id="req-capability-matrix")
+    request.headers = {}
+    request.client = SimpleNamespace(host="127.0.0.1")
     return request
 
 
@@ -190,6 +193,40 @@ async def test_service_config_write_accepts_gateway_service_config_permission() 
 
     assert result["status"] == "success"
     assert service.get_service_config().priority.priority == 9
+
+
+@pytest.mark.asyncio
+async def test_service_capacity_config_update_uses_registry_persistence_without_legacy_db_method() -> None:
+    request = _request()
+    service = ServiceDefinition(service_id="svc-1", name="Service 1")
+    request.app.state.registry = SimpleNamespace(
+        get=AsyncMock(return_value=service),
+        storage=SimpleNamespace(save=AsyncMock()),
+        _cache={},
+    )
+    request.app.state.database = SimpleNamespace(
+        enabled=True,
+        record_audit_event=AsyncMock(),
+    )
+
+    result = await update_service_config(
+        service_id="svc-1",
+        body=ServiceConfigUpdate(
+            capacity=ServiceCapacityConfigUpdate(
+                upstream_group="imam_agent",
+                concurrency_limit=3,
+                queue_max=0,
+                queue_timeout_ms=1,
+            )
+        ),
+        request=request,
+        auth=_auth("console:services:edit"),
+    )
+
+    assert result["status"] == "success"
+    request.app.state.registry.storage.save.assert_awaited_once_with(service)
+    assert service.get_service_config().capacity.upstream_group == "imam_agent"
+    assert service.get_service_config().capacity.concurrency_limit == 3
 
 
 @pytest.mark.asyncio
