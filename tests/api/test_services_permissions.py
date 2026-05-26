@@ -77,6 +77,41 @@ async def test_list_services_accepts_manager_role() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_services_uses_remote_assistant_health(monkeypatch) -> None:
+    request = _make_request()
+    registry = SimpleNamespace(list=AsyncMock(return_value=[]))
+
+    async def fake_assistant_health():
+        return {
+            "status": "healthy",
+            "latency": 0.01,
+            "last_check": "2026-05-26T00:00:00",
+            "error": None,
+        }
+
+    monkeypatch.setattr("src.api.v1.services.get_assistant_health", fake_assistant_health)
+
+    result = await list_services(
+        request=request,
+        service_type=None,
+        tags=None,
+        registry=registry,
+        auth=AuthContext(user_id="manager_1", tenant_id="t1", roles=["manager"], permissions=[]),
+        user=UserContext(
+            user_id="manager_1",
+            tenant_id="t1",
+            tier="normal",
+            is_authenticated=True,
+            roles=["manager"],
+            ip="127.0.0.1",
+        ),
+    )
+
+    assistant = next(item for item in result if item.get("service_id") == "assistant")
+    assert assistant["status"] == "active"
+
+
+@pytest.mark.asyncio
 async def test_register_service_accepts_legacy_service_manage_alias() -> None:
     request = _make_request()
     registry = MagicMock()

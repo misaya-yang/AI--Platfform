@@ -5,6 +5,7 @@ Ensures sensitive health information is protected from unauthorized access.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -115,6 +116,29 @@ class TestHealthEndpointAuth:
             require_admin(mock_user)
 
         assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_services_health_uses_remote_assistant_health(self, monkeypatch):
+        """Extracted assistant-service should report healthy via its HTTP health endpoint."""
+        from src.api.v1 import health
+
+        async def fake_assistant_health():
+            return {
+                "status": "healthy",
+                "latency": 0.01,
+                "last_check": "2026-05-26T00:00:00",
+                "error": None,
+            }
+
+        monkeypatch.setattr(health, "get_assistant_health", fake_assistant_health)
+        monitor = SimpleNamespace(all_status=lambda: {})
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(assistant_service=None)))
+        user = MockUserContext(user_id="admin123", is_authenticated=True, roles=["admin"])
+
+        result = await health.all_services_health(request=request, monitor=monitor, user=user)
+
+        assert result["assistant"]["status"] == "healthy"
+        assert result["assistant"]["error"] is None
 
 
 class TestHealthEndpointInfoProtection:

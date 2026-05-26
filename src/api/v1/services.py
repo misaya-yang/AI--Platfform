@@ -28,6 +28,7 @@ from ...services.llm.model_failover import (
 )
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
+from ._assistant_status import get_assistant_health
 
 router = APIRouter()
 
@@ -814,7 +815,8 @@ async def list_services(
             user_policy=user_policy,
             is_admin=is_admin,
         ):
-            assistant_service = getattr(request.app.state, "assistant_service", None)
+            assistant_health = await get_assistant_health()
+            assistant_healthy = assistant_health.get("status") == "healthy"
             virtual_services.append(
                 {
                     "service_id": "assistant",
@@ -825,11 +827,12 @@ async def list_services(
                     "supported_modes": ["chat", "stream"],
                     "accepted_content_types": ["application/json"],
                     "output_content_types": ["application/json", "text/event-stream"],
-                    "status": "active" if assistant_service else "unavailable",
+                    "status": "active" if assistant_healthy else "unavailable",
                     "tags": ["builtin", "assistant", "rag", "tools"],
                     "metadata": {
                         "is_virtual": True,
                         "endpoint": "/api/v1/assistant",
+                        "health": assistant_health,
                         "features": [
                             "chat",
                             "stream",

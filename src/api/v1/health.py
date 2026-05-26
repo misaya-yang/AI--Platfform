@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from ai_gateway_core.logging import get_logger
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.logging import get_logger
 from ...services.registry.health_monitor import HealthMonitor
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import get_health_monitor, get_registry, get_user_context
+from ._assistant_status import get_assistant_health
 
 logger = get_logger(__name__)
 
@@ -77,14 +78,9 @@ async def all_services_health(
         for service_id, s in monitor.all_status().items()
     }
 
-    # 添加 AI 助手虚拟服务的健康状态
-    assistant_service = getattr(request.app.state, "assistant_service", None)
-    health_status["assistant"] = {
-        "status": "healthy" if assistant_service else "unavailable",
-        "latency": None,  # 内置服务无网络延迟
-        "last_check": datetime.utcnow().isoformat(),
-        "error": None if assistant_service else "Assistant service not initialized",
-    }
+    # 添加 AI 助手虚拟服务的健康状态。Assistant 已拆为独立容器，
+    # 这里必须检查远端 /health，不能再用旧的 in-process state。
+    health_status["assistant"] = await get_assistant_health()
 
     return health_status
 
@@ -103,14 +99,7 @@ async def service_health(
     require_admin(user)
     # 处理 AI 助手虚拟服务
     if service_id == "assistant":
-        assistant_service = getattr(request.app.state, "assistant_service", None)
-        return {
-            "service_id": "assistant",
-            "status": "healthy" if assistant_service else "unavailable",
-            "latency": None,
-            "last_check": datetime.utcnow().isoformat(),
-            "error": None if assistant_service else "Assistant service not initialized",
-        }
+        return {"service_id": "assistant", **await get_assistant_health()}
 
     # 处理数据库中的服务
     status = monitor.get_status(service_id)
