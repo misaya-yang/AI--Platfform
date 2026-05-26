@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, startTransition } from "react";
+import { useCallback, useMemo, useRef } from "react";
 
 import { invokeService } from "@/api/gateway";
 import { createSession, getSession, updateSession, addSessionMessage } from "@/api/sessions";
@@ -339,48 +339,46 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
             ? [...artifactsRef.current]
             : undefined;
 
-        startTransition(() => {
-          setMessages((m) => {
-            const next = [...m];
-            if (next[assistantIndex]) {
-              const messageId =
-                next[assistantIndex].id ||
-                createMessageId("assistant");
-              const createdAt =
-                next[assistantIndex].createdAt ||
-                new Date().toISOString();
-              const textParts = buildTextParts(
-                messageId,
-                content,
-                createdAt
-              );
-              next[assistantIndex] = {
-                ...next[assistantIndex],
-                id: messageId,
-                content,
-                createdAt,
-                parts: textParts,
-                status:
-                  overrides?.status ??
-                  (streamState.status === "failed"
-                    ? "failed"
-                    : streamState.status === "cancelled"
-                      ? "cancelled"
-                      : overrides?.isStreaming === false
-                        ? "completed"
-                        : "streaming"),
-                toolCalls,
-                isThinking: false,
-                isStreaming:
-                  overrides?.isStreaming ??
-                  streamState.status === "streaming",
-                timeline: currentTimeline,
-                artifacts: currentArtifacts,
-                ...overrides,
-              };
-            }
-            return next;
-          });
+        setMessages((m) => {
+          const next = [...m];
+          if (next[assistantIndex]) {
+            const messageId =
+              next[assistantIndex].id ||
+              createMessageId("assistant");
+            const createdAt =
+              next[assistantIndex].createdAt ||
+              new Date().toISOString();
+            const textParts = buildTextParts(
+              messageId,
+              content,
+              createdAt
+            );
+            next[assistantIndex] = {
+              ...next[assistantIndex],
+              id: messageId,
+              content,
+              createdAt,
+              parts: textParts,
+              status:
+                overrides?.status ??
+                (streamState.status === "failed"
+                  ? "failed"
+                  : streamState.status === "cancelled"
+                    ? "cancelled"
+                    : overrides?.isStreaming === false
+                      ? "completed"
+                      : "streaming"),
+              toolCalls,
+              isThinking: false,
+              isStreaming:
+                overrides?.isStreaming ??
+                streamState.status === "streaming",
+              timeline: currentTimeline,
+              artifacts: currentArtifacts,
+              ...overrides,
+            };
+          }
+          return next;
         });
       };
 
