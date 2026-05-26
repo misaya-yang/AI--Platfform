@@ -137,7 +137,7 @@ export interface ImageCompressionOptions {
   maxWidthOrHeight?: number;
   /** Initial quality 0-1 (default: 0.85, visually lossless) */
   initialQuality?: number;
-  /** Use Web Worker for non-blocking compression (default: true) */
+  /** Use Web Worker for non-blocking compression (default: false; production CSP blocks CDN worker fallbacks) */
   useWebWorker?: boolean;
 }
 
@@ -145,7 +145,7 @@ const DEFAULT_COMPRESSION_OPTIONS: Required<ImageCompressionOptions> = {
   maxSizeMB: 2,
   maxWidthOrHeight: 2048,
   initialQuality: 0.85,
-  useWebWorker: true,
+  useWebWorker: false,
 };
 
 /**
@@ -182,8 +182,7 @@ export async function compressImage(
 
     // Return as File with original name
     return new File([compressed], file.name, { type: compressed.type });
-  } catch (error) {
-    console.warn("Image compression failed, using original:", error);
+  } catch {
     return file;
   }
 }
