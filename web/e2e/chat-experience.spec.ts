@@ -615,7 +615,8 @@ test("playground renders native langgraph tool events without heavy assistant ca
       body: [
         'event: metadata\ndata: {"run_id":"pg-native-e2e"}\n\n',
         `event: messages\ndata: [{"content":[],"type":"AIMessageChunk","tool_call_chunks":[{"id":"${MOCK_PLAYGROUND_TOOL_ID}","name":"classify_query","index":0,"args":"{\\"query\\":"}],"usage_metadata":{"input_tokens":21,"output_tokens":4,"total_tokens":25}}]\n\n`,
-        'event: messages\ndata: [{"content":[],"type":"AIMessageChunk","tool_call_chunks":[{"index":0,"args":"\\"imam\\"}"}]}]\n\n',
+        'event: messages\ndata: [{"content":[],"type":"AIMessageChunk","tool_call_chunks":[{"index":0,"args":"\\"imam\\""}]}]\n\n',
+        'event: messages\ndata: [{"content":[],"type":"AIMessageChunk","tool_call_chunks":[{"index":0,"args":",\\"top_k\\":3}"}]}]\n\n',
         `event: messages/complete\ndata: [{"content":"router: imam","type":"tool","role":"tool","tool_call_id":"${MOCK_PLAYGROUND_TOOL_ID}","name":"classify_query","status":"success"}]\n\n`,
         'event: messages\ndata: [{"content":"Imam ","type":"AIMessageChunk","role":"assistant"}]\n\n',
         'event: messages\ndata: [{"content":"native ","type":"AIMessageChunk","role":"assistant"}]\n\n',
