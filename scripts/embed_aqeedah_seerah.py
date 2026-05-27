@@ -325,42 +325,42 @@ async def build_pdf_segments(
 
         if not page_texts:
             try:
-                doc = fitz.open(str(pdf_file))
+                doc_ctx = fitz.open(str(pdf_file))
             except Exception as exc:
                 log.error("  Failed to open %s: %s", pdf_file.name, exc)
                 continue
-            total_pages = len(doc)
+            with doc_ctx as doc:
+                total_pages = len(doc)
 
-            if vlm_ocr:
-                batch_size = 5 * len(vlm_ocr.api_keys)
-                for batch_start in range(0, total_pages, batch_size):
-                    batch_end = min(batch_start + batch_size, total_pages)
-                    tasks = []
-                    for pn in range(batch_start, batch_end):
-                        page = doc[pn]
-                        img_bytes = render_page_to_image(page)
-                        tasks.append((pn + 1, vlm_ocr.ocr_page(img_bytes)))
-                    results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
-                    for (pn, _), result in zip(tasks, results, strict=True):
-                        if isinstance(result, str) and result.strip():
-                            page_texts.append((pn, result))
-                        elif isinstance(result, Exception):
-                            log.warning("  Page %d OCR failed: %s", pn, result)
-                    if batch_end % 50 == 0 or batch_end == total_pages:
-                        log.info("    %s: OCR %d/%d pages (%d with text)",
-                                 pdf_file.name, batch_end, total_pages, len(page_texts))
-                    num_keys = len(vlm_ocr.api_keys)
-                    await asyncio.sleep(max(1, 4 // num_keys))
-                # Save cache
-                cache_data = [{"page": p, "text": t} for p, t in page_texts]
-                cache_file.write_text(json.dumps(cache_data, ensure_ascii=False))
-                log.info("  %s: cached %d pages", pdf_file.name, len(page_texts))
-            else:
-                for pn in range(total_pages):
-                    text = doc[pn].get_text("text")
-                    if text.strip():
-                        page_texts.append((pn + 1, text))
-            doc.close()
+                if vlm_ocr:
+                    batch_size = 5 * len(vlm_ocr.api_keys)
+                    for batch_start in range(0, total_pages, batch_size):
+                        batch_end = min(batch_start + batch_size, total_pages)
+                        tasks = []
+                        for pn in range(batch_start, batch_end):
+                            page = doc[pn]
+                            img_bytes = render_page_to_image(page)
+                            tasks.append((pn + 1, vlm_ocr.ocr_page(img_bytes)))
+                        results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+                        for (pn, _), result in zip(tasks, results, strict=True):
+                            if isinstance(result, str) and result.strip():
+                                page_texts.append((pn, result))
+                            elif isinstance(result, Exception):
+                                log.warning("  Page %d OCR failed: %s", pn, result)
+                        if batch_end % 50 == 0 or batch_end == total_pages:
+                            log.info("    %s: OCR %d/%d pages (%d with text)",
+                                     pdf_file.name, batch_end, total_pages, len(page_texts))
+                        num_keys = len(vlm_ocr.api_keys)
+                        await asyncio.sleep(max(1, 4 // num_keys))
+                    # Save cache
+                    cache_data = [{"page": p, "text": t} for p, t in page_texts]
+                    cache_file.write_text(json.dumps(cache_data, ensure_ascii=False))
+                    log.info("  %s: cached %d pages", pdf_file.name, len(page_texts))
+                else:
+                    for pn in range(total_pages):
+                        text = doc[pn].get_text("text")
+                        if text.strip():
+                            page_texts.append((pn + 1, text))
 
         if not page_texts:
             log.warning("  Empty PDF: %s", pdf_file.name)

@@ -124,9 +124,8 @@ function providerHasRuntimeCredentials(provider?: providersApi.Provider): boolea
 function normalizeUrl(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
-  if (/^https?:\/\/$/i.test(trimmed)) {
-    return trimmed;
-  }
+  // Only allow http(s) — reject javascript:, data:, ftp:, etc. (SSRF/XSS defense-in-depth)
+  if (!/^https?:\/\//i.test(trimmed)) return "";
   return trimmed.replace(/\/+$/, "");
 }
 

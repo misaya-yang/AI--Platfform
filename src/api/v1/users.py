@@ -352,10 +352,10 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Build update dict (exclude extra_permissions + service access fields as they are handled separately)
+    # Build update dict (exclude extra_permissions + service access + roles as they are handled separately)
     update_data = body.dict(
         exclude_unset=True,
-        exclude={"extra_permissions", "service_access_mode", "allowed_services", "denied_services"},
+        exclude={"extra_permissions", "service_access_mode", "allowed_services", "denied_services", "roles"},
     )
 
     # === Mass-Assignment Protection ===
