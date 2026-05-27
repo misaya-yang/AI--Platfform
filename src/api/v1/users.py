@@ -369,6 +369,12 @@ async def update_user(
             detail=f"Only admins can modify: {', '.join(sorted(admin_field_changes))}",
         )
 
+    if body.extra_permissions is not None and "admin" not in auth.roles:
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can modify extra permissions",
+        )
+
     service_policy_updated = (
         body.service_access_mode is not None
         or body.allowed_services is not None

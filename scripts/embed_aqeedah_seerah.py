@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-r"""Embed Aqeedah + Seerah PDFs into the active KB collection.
+r"""Embed Aqeedah + Seerah PDFs into an explicit KB collection.
 
 One-step pipeline: OCR -> chunk -> contextual-prefix -> embed+BM25 -> upsert.
-Target: kb_imam_v2_1024_ctx_gemini_embedding_2_preview (the live collection).
+Default collection: kb_imam_v2_1024_ctx_gemini_embedding_2_preview.
 
 Usage:
     GOOGLE_API_KEY=... SILICONFLOW_API_KEYS=... \
     python3 scripts/embed_aqeedah_seerah.py \
         --pdf-dir "/opt/deploy/islamic-pdfs/extracted/For Ai Imam/" \
+        --dataset-id imam-v2 \
+        --confirm-upsert kb_imam_v2_1024_ctx_gemini_embedding_2_preview \
         --vlm-ocr
     python3 scripts/embed_aqeedah_seerah.py --pdf-dir ./pdfs --dry-run
 """
@@ -37,7 +39,7 @@ logging.basicConfig(
 log = logging.getLogger("embed-aqeedah-seerah")
 
 # Constants
-COLLECTION = "kb_imam_v2_1024_ctx_gemini_embedding_2_preview"
+DEFAULT_COLLECTION = "kb_imam_v2_1024_ctx_gemini_embedding_2_preview"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
 EMBEDDING_DIM = 1024
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -268,6 +270,7 @@ async def build_pdf_segments(
     pdf_dir: str,
     vlm_ocr: VLMPageOCR | None,
     target_types: set[str] | None = None,
+    dataset_id: str | None = None,
 ) -> list[dict]:
     try:
         import fitz  # noqa: F401
@@ -299,6 +302,13 @@ async def build_pdf_segments(
             continue
 
         log.info("  Processing: %s -> %s", pdf_file.name, source_type)
+        try:
+            source_path = str(pdf_file.relative_to(pdf_path))
+        except ValueError:
+            source_path = pdf_file.name
+        document_id = str(
+            uuid.uuid5(_NS, f"document:{dataset_id or 'unscoped'}:{source_path}")
+        )
 
         # Check OCR cache
         cache_file = cache_dir / f"{pdf_file.stem}.json"
@@ -389,6 +399,10 @@ async def build_pdf_segments(
                 "authority_rank": 4,
                 "language": "en",
             }
+            if dataset_id:
+                seg_payload["dataset_id"] = dataset_id
+                seg_payload["document_id"] = document_id
+                seg_payload["source_reference"] = f"pdf://{source_path}#page={page_num}"
             if madhab:
                 seg_payload["madhab"] = madhab
 
@@ -462,13 +476,14 @@ async def run(args: argparse.Namespace) -> None:
     from qdrant_client.http import models as qm
 
     t_start = time.time()
+    collection = args.collection.strip()
 
     # Connect to Qdrant
     log.info("Connecting to Qdrant: %s", args.qdrant_url)
     qdrant = AsyncQdrantClient(url=args.qdrant_url, timeout=60)
 
-    info = await qdrant.get_collection(COLLECTION)
-    log.info("Target collection: %s (%d existing points)", COLLECTION, info.points_count)
+    info = await qdrant.get_collection(collection)
+    log.info("Target collection: %s (%d existing points)", collection, info.points_count)
 
     # Target source types
     target_types = {"aqeedah", "seerah"}
@@ -484,7 +499,12 @@ async def run(args: argparse.Namespace) -> None:
 
     # Build segments
     try:
-        segments = await build_pdf_segments(args.pdf_dir, vlm_ocr=vlm, target_types=target_types)
+        segments = await build_pdf_segments(
+            args.pdf_dir,
+            vlm_ocr=vlm,
+            target_types=target_types,
+            dataset_id=args.dataset_id.strip() or None,
+        )
     finally:
         if vlm:
             await vlm.close()
@@ -553,7 +573,7 @@ async def run(args: argparse.Namespace) -> None:
                 points.append(qm.PointStruct(id=pid, vector=vector, payload=payload))
 
             if points:
-                await qdrant.upsert(collection_name=COLLECTION, points=points)
+                await qdrant.upsert(collection_name=collection, points=points)
 
             total += len(batch)
             elapsed = time.time() - t_start
@@ -561,10 +581,10 @@ async def run(args: argparse.Namespace) -> None:
             log.info("  Embedded %d/%d (%.1f/s)", total, len(segments), rate)
 
     # Final stats
-    info = await qdrant.get_collection(COLLECTION)
+    info = await qdrant.get_collection(collection)
     elapsed = time.time() - t_start
     log.info("=== DONE ===")
-    log.info("  Collection: %s", COLLECTION)
+    log.info("  Collection: %s", collection)
     log.info("  New points: %d", total)
     log.info("  Total points: %d", info.points_count)
     log.info("  Elapsed: %.1fs", elapsed)
@@ -573,9 +593,46 @@ async def run(args: argparse.Namespace) -> None:
     await qdrant.close()
 
 
+def validate_args(args: argparse.Namespace) -> list[str]:
+    errors: list[str] = []
+
+    if not args.google_api_key and not args.dry_run:
+        errors.append("--google-api-key required (or GOOGLE_API_KEY env)")
+
+    if args.dry_run:
+        return errors
+
+    collection = (args.collection or "").strip()
+    if not collection:
+        errors.append("--collection is required for non-dry-run writes")
+
+    if not (args.dataset_id or "").strip():
+        errors.append("--dataset-id is required for non-dry-run writes")
+
+    if (args.confirm_upsert or "").strip() != collection:
+        errors.append("--confirm-upsert must exactly match --collection for non-dry-run writes")
+
+    return errors
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Embed Aqeedah + Seerah PDFs")
     p.add_argument("--qdrant-url", default=os.environ.get("QDRANT_URL", "http://127.0.0.1:6333"))
+    p.add_argument(
+        "--collection",
+        default=os.environ.get("QDRANT_COLLECTION", DEFAULT_COLLECTION),
+        help="Qdrant collection to write to",
+    )
+    p.add_argument(
+        "--dataset-id",
+        default=os.environ.get("KB_DATASET_ID", ""),
+        help="KB dataset id to stamp into each point payload",
+    )
+    p.add_argument(
+        "--confirm-upsert",
+        default="",
+        help="Must exactly match --collection for non-dry-run writes",
+    )
     p.add_argument("--google-api-key", default=os.environ.get("GOOGLE_API_KEY", ""))
     p.add_argument("--pdf-dir", required=True, help="Path to PDF directory to scan recursively")
     p.add_argument("--vlm-ocr", action="store_true", help="Use VLM OCR (DeepSeek-OCR via SiliconFlow)")
@@ -586,8 +643,10 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="Count segments without embedding")
     args = p.parse_args()
 
-    if not args.google_api_key and not args.dry_run:
-        log.error("--google-api-key required (or GOOGLE_API_KEY env)")
+    errors = validate_args(args)
+    if errors:
+        for error in errors:
+            log.error(error)
         sys.exit(1)
 
     asyncio.run(run(args))

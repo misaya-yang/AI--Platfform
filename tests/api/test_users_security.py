@@ -19,12 +19,24 @@ class _DB:
 
     def __init__(self) -> None:
         self.updated = False
+        self.extra_permissions_updated = False
 
     async def get_user(self, user_id: str) -> dict:
         return {"user_id": user_id, "metadata": {}}
 
     async def update_user(self, _user_id: str, _updates: dict) -> None:
         self.updated = True
+
+    async def get_user_extra_permissions(self, _user_id: str) -> list[dict]:
+        return []
+
+    async def update_user_extra_permissions(
+        self,
+        _user_id: str,
+        _permissions: list[str],
+        _granted_by: str,
+    ) -> None:
+        self.extra_permissions_updated = True
 
 
 def _request(db: _DB) -> SimpleNamespace:
@@ -52,3 +64,19 @@ async def test_non_admin_cannot_modify_user_service_access_policy():
 
     assert exc.value.status_code == 403
     assert db.updated is False
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_modify_user_extra_permissions():
+    db = _DB()
+
+    with pytest.raises(HTTPException) as exc:
+        await update_user(
+            user_id="target-user",
+            body=UserUpdate(extra_permissions=["admin:*"]),
+            request=_request(db),
+            auth=AuthContext(user_id="editor", roles=["user:edit"], is_authenticated=True),
+        )
+
+    assert exc.value.status_code == 403
+    assert db.extra_permissions_updated is False
