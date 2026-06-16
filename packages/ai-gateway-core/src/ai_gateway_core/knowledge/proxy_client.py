@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 KB_SERVICE_URL = os.getenv("KB_SERVICE_URL", "http://knowledge-service:8092")
 _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0)
+_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
 
 # Lazy singleton — constructed the first time a request is signed so
 # deployments without the env set fail loud on first call (and let
@@ -79,16 +80,30 @@ class KBProxyClient:
     when running in microservice mode.
     """
 
-    def __init__(self, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        timeout: httpx.Timeout | float | None = None,
+        limits: httpx.Limits | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.base_url = (base_url or KB_SERVICE_URL).rstrip("/")
+        self.timeout = _coerce_timeout(timeout) if timeout is not None else _timeout_from_env()
+        self.limits = limits or _limits_from_env()
+        self.transport = transport
         self._client: httpx.AsyncClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
+            transport = self.transport
+            if transport is None:
+                transport = httpx.AsyncHTTPTransport(retries=1)
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=_TIMEOUT,
-                transport=httpx.AsyncHTTPTransport(retries=1),
+                timeout=self.timeout,
+                limits=self.limits,
+                transport=transport,
             )
             # Attach OTel CLIENT-span instrumentation so KB hops appear
             # in the same trace tree as the inbound gateway request.
@@ -122,6 +137,14 @@ class KBProxyClient:
             headers["X-User-Id"] = getattr(user, "user_id", "") or ""
             headers["X-Tenant-Id"] = getattr(user, "tenant_id", "") or ""
             headers["X-User-Tier"] = getattr(user, "tier", "") or ""
+        try:
+            from ai_gateway_core.proxy.request_id_middleware import REQUEST_ID_CTX
+
+            request_id = REQUEST_ID_CTX.get()
+        except Exception:  # noqa: BLE001
+            request_id = ""
+        if request_id:
+            headers["X-Request-Id"] = request_id
         signer = _get_signer()
         if signer is not None:
             headers["X-Gateway-Secret"] = signer.sign()
@@ -161,7 +184,7 @@ class KBProxyClient:
         top_k: int = 5,
         mode: str = "hybrid",
         score_threshold: float = 0.0,
-        **kwargs: Any,
+        **_kwargs: Any,
     ) -> tuple[list[ProxyRetrieveResult], dict[str, Any]]:
         """Retrieve chunks from KB microservice.
 
@@ -212,6 +235,7 @@ class KBProxyClient:
         In proxy mode, the KB service handles auth via X-User-Id/X-Tenant-Id headers;
         we just verify the dataset exists.
         """
+        _ = required
         try:
             resp = await self._get_client().get(
                 f"/api/v1/knowledge/datasets/{dataset_id}",
@@ -222,3 +246,49 @@ class KBProxyClient:
             return {}
         except Exception:
             return {}
+
+
+def _coerce_timeout(timeout: httpx.Timeout | float | None) -> httpx.Timeout:
+    if timeout is None:
+        return _TIMEOUT
+    if isinstance(timeout, httpx.Timeout):
+        return timeout
+    return httpx.Timeout(timeout)
+
+
+def _timeout_from_env() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_get_float_env("KB_PROXY_CONNECT_TIMEOUT_SECONDS", _TIMEOUT.connect),
+        read=_get_float_env("KB_PROXY_READ_TIMEOUT_SECONDS", _TIMEOUT.read),
+        write=_get_float_env("KB_PROXY_WRITE_TIMEOUT_SECONDS", _TIMEOUT.write),
+        pool=_get_float_env("KB_PROXY_POOL_TIMEOUT_SECONDS", _TIMEOUT.pool),
+    )
+
+
+def _limits_from_env() -> httpx.Limits:
+    return httpx.Limits(
+        max_connections=_get_int_env("KB_PROXY_MAX_CONNECTIONS", 50),
+        max_keepalive_connections=_get_int_env("KB_PROXY_MAX_KEEPALIVE_CONNECTIONS", 10),
+    )
+
+
+def _get_float_env(key: str, default: float) -> float:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
+def _get_int_env(key: str, default: int) -> int:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default

@@ -19,6 +19,7 @@ from .gateway_secret import (
     InvalidGatewaySecret,
     ReplayStore,
 )
+from .gateway_secret_middleware import GatewaySecretAuthMiddleware
 
 
 @runtime_checkable
@@ -31,6 +32,7 @@ class UserContextLike(Protocol):
 
 __all__ = [
     "GatewaySecret",
+    "GatewaySecretAuthMiddleware",
     "InMemoryReplayStore",
     "InvalidGatewaySecret",
     "ReplayStore",
