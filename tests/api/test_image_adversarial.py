@@ -29,21 +29,13 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).parent))
-from test_image_redesign import (  # noqa: E402
-    GEMINI_MODEL,
-    PNG_1X1,
-    _Harness,
-    _make_request,
-    _registry_stub,
-    _user,
-)
-
+from ai_gateway_core.image.image_state import compute_owner_scope
 from assistant_service.api.routes import images as images_module
 from assistant_service.api.routes.images import (
     AsyncImageGenerationRequest,
@@ -53,8 +45,14 @@ from assistant_service.api.routes.images import (
     get_image_session_view,
     submit_image_generation,
 )
-from ai_gateway_core.image.image_state import compute_owner_scope
-
+from test_image_redesign import (  # noqa: E402
+    GEMINI_MODEL,
+    PNG_1X1,
+    _Harness,
+    _make_request,
+    _registry_stub,
+    _user,
+)
 
 # ===========================================================================
 # A. Wallet-critical: Postgres hiccup during idempotency claim
@@ -84,13 +82,15 @@ async def test_A1_record_idempotent_propagates_real_db_errors():
         def _explode(*args, **kwargs):
             raise pg_exc.ConnectionDoesNotExistError("simulated DB outage")
 
-        with patch.object(images_module, "record_idempotent", side_effect=_explode):
-            with patch.object(images_module, "get_session_manager", return_value=None):
-                with pytest.raises((HTTPException, pg_exc.ConnectionDoesNotExistError)) as exc:
-                    await submit_image_generation(
-                        body=body, request=_make_request(), user=user,
-                        model_registry=_registry_stub("google"),
-                    )
+        with (
+            patch.object(images_module, "record_idempotent", side_effect=_explode),
+            patch.object(images_module, "get_session_manager", return_value=None),
+            pytest.raises((HTTPException, pg_exc.ConnectionDoesNotExistError)),
+        ):
+            await submit_image_generation(
+                body=body, request=_make_request(), user=user,
+                model_registry=_registry_stub("google"),
+            )
 
     # The provider must NOT have been called — no spawned worker.
     assert len(h.gemini.generate.mock_calls) == 0, (
@@ -107,15 +107,17 @@ async def test_A2_inconsistent_state_refuses_run_rather_than_double_spend():
     body = AsyncImageGenerationRequest(
         prompt="x", model_id=GEMINI_MODEL, client_request_id="cri-A2",
     )
-    with _Harness() as h:
-        with patch.object(images_module, "record_idempotent", AsyncMock(return_value=False)):
-            with patch.object(images_module, "lookup_idempotent", AsyncMock(return_value=None)):
-                with patch.object(images_module, "get_session_manager", return_value=None):
-                    with pytest.raises(HTTPException) as exc:
-                        await submit_image_generation(
-                            body=body, request=_make_request(), user=user,
-                            model_registry=_registry_stub("google"),
-                        )
+    with (
+        _Harness() as h,
+        patch.object(images_module, "record_idempotent", AsyncMock(return_value=False)),
+        patch.object(images_module, "lookup_idempotent", AsyncMock(return_value=None)),
+        patch.object(images_module, "get_session_manager", return_value=None),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await submit_image_generation(
+            body=body, request=_make_request(), user=user,
+            model_registry=_registry_stub("google"),
+        )
     assert exc.value.status_code in (500, 503), (
         f"Expected 5xx for inconsistent idempotency state, got {exc.value.status_code}"
     )
@@ -226,11 +228,13 @@ def test_C1_compute_owner_scope_rejects_unit_separator_in_inputs():
         )
 
 
-def test_C2_user_context_header_parser_rejects_control_chars():
+@pytest.mark.asyncio
+async def test_C2_user_context_header_parser_rejects_control_chars():
     """The HTTP header parser must reject control chars BEFORE the route
     ever sees them — defense in depth."""
-    from assistant_service.auth.user_context import get_user_context
     from types import SimpleNamespace
+
+    from assistant_service.auth.user_context import get_user_context
 
     async def run(headers):
         req = SimpleNamespace(
@@ -243,11 +247,11 @@ def test_C2_user_context_header_parser_rejects_control_chars():
         return await get_user_context(req)
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.get_event_loop().run_until_complete(run({
+        await run({
             "X-User-Id": "u",
             "X-Tenant-Id": "t",
             "X-App-User-Id": "alice\x1Fadmin",  # ← attacker payload
-        }))
+        })
     assert exc.value.status_code == 400
 
 
@@ -272,7 +276,7 @@ async def test_D1_expected_parent_passes_at_submit_but_loses_cas_during_generati
     so the caller knows their output is a branch."""
     sid = "race-D1"
     user = _user()
-    with _Harness() as h:
+    with _Harness():
         # Turn 1 establishes latest=A
         r1 = await generate_image(
             body=ImageGenerationRequest(
@@ -288,8 +292,6 @@ async def test_D1_expected_parent_passes_at_submit_but_loses_cas_during_generati
         # We do this by patching advance_latest_artifact_cas to return False
         # (CAS fail) just for our turn, while leaving the session's latest
         # untouched (mimics another writer winning).
-        original_cas = h.state.advance_latest_artifact_cas
-
         async def _fake_cas_lose(pool, *, session_id, expected_parent, new_artifact_id):
             # Pretend someone else won — leave latest as-is
             return False
@@ -334,20 +336,19 @@ async def test_E1_concurrent_idempotent_submits_serialize_correctly():
         prompt="concurrent", model_id=GEMINI_MODEL,
         client_request_id="cri-E1",
     )
-    with _Harness() as h:
-        with patch.object(images_module, "get_session_manager", return_value=None):
-            results = await asyncio.gather(*[
-                submit_image_generation(
-                    body=body, request=_make_request(), user=user,
-                    model_registry=_registry_stub("google"),
-                )
-                for _ in range(5)
-            ], return_exceptions=False)
-            # Drain workers
-            await asyncio.gather(
-                *list(images_module._in_flight_workers),
-                return_exceptions=True,
+    with _Harness() as h, patch.object(images_module, "get_session_manager", return_value=None):
+        results = await asyncio.gather(*[
+            submit_image_generation(
+                body=body, request=_make_request(), user=user,
+                model_registry=_registry_stub("google"),
             )
+            for _ in range(5)
+        ], return_exceptions=False)
+        # Drain workers
+        await asyncio.gather(
+            *list(images_module._in_flight_workers),
+            return_exceptions=True,
+        )
 
     task_ids = {r.task_id for r in results}
     assert len(task_ids) == 1, f"5 concurrent submits → {len(task_ids)} task_ids (want 1)"
@@ -435,7 +436,7 @@ async def test_G1_cross_owner_download_url_returns_404():
                    app_user_id="alice", app_tenant_id="acme")
     user_b = _user(user_id="bob", tenant_id="acme",
                    app_user_id="bob", app_tenant_id="acme")
-    with _Harness() as h:
+    with _Harness():
         # User A creates an image
         ra = await generate_image(
             body=ImageGenerationRequest(
@@ -468,7 +469,7 @@ async def test_G2_image_sessions_view_cross_user_returns_404():
     sid = "legacy-G2"
     user_a = _user(user_id="alice", tenant_id="t1")
     user_b = _user(user_id="bob", tenant_id="t1")
-    with _Harness() as h:
+    with _Harness():
         # User A creates the session
         await generate_image(
             body=ImageGenerationRequest(

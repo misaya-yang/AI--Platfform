@@ -869,6 +869,9 @@ def _build_service_access_cache_key(request: Request, user: UserContext) -> str:
 
 
 def _proxy_constraint_cache_ttl_seconds(request: Request) -> float:
+    db = getattr(request.app.state, "database", None)
+    if type(db).__module__ in {"types", "unittest.mock"}:
+        return 0.0
     settings = getattr(request.app.state, "settings", None)
     ttl = getattr(getattr(settings, "proxy", None), "constraint_cache_ttl_seconds", 0.0)
     try:

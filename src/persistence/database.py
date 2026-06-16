@@ -13,5 +13,6 @@ gateway src/ keep working. New code should import from
 from __future__ import annotations
 
 from ai_gateway_core.persistence import HAS_ASYNCPG, DatabaseStorage
+from ai_gateway_core.persistence.database import build_service_query
 
-__all__ = ["DatabaseStorage", "HAS_ASYNCPG"]
+__all__ = ["DatabaseStorage", "HAS_ASYNCPG", "build_service_query"]

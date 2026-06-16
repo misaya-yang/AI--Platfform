@@ -265,7 +265,8 @@ async def test_list_children_normalizes_output():
 @pytest.mark.asyncio
 async def test_read_missing_action_is_rejected():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     res = await ConfluenceReadExecutor(c).execute(_read_req({}))
@@ -276,7 +277,8 @@ async def test_read_missing_action_is_rejected():
 @pytest.mark.asyncio
 async def test_read_action_read_page_requires_identifier():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     res = await ConfluenceReadExecutor(c).execute(
@@ -291,7 +293,8 @@ async def test_read_action_read_page_requires_identifier():
 async def test_read_action_read_page_via_url():
     """URL → page_id auto-resolution then fetches that page."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
@@ -317,7 +320,8 @@ async def test_read_action_read_page_via_url():
 @pytest.mark.asyncio
 async def test_read_action_read_page_bad_url():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     res = await ConfluenceReadExecutor(c).execute(
@@ -331,7 +335,8 @@ async def test_read_action_read_page_bad_url():
 @respx.mock
 async def test_read_action_list_children():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/100/child/page").mock(
         return_value=httpx.Response(
@@ -361,7 +366,8 @@ async def test_read_action_list_children():
 @pytest.mark.asyncio
 async def test_write_missing_action_is_rejected():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceWriteExecutor,
+        ConfluenceAPIClient,
+        ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     res = await ConfluenceWriteExecutor(c).execute(_write_req({}))
@@ -371,7 +377,8 @@ async def test_write_missing_action_is_rejected():
 @pytest.mark.asyncio
 async def test_write_find_replace_requires_all_params():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceWriteExecutor,
+        ConfluenceAPIClient,
+        ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     # missing replace
@@ -385,7 +392,8 @@ async def test_write_find_replace_requires_all_params():
 @respx.mock
 async def test_write_find_replace_end_to_end():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceWriteExecutor,
+        ConfluenceAPIClient,
+        ConfluenceWriteExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
         return_value=httpx.Response(
@@ -420,7 +428,8 @@ async def test_write_find_replace_refusal_surfaces_cleanly():
     """When the library raises ValueError for 0-match, executor turns it
     into a clean tool error (not an uncaught exception)."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceWriteExecutor,
+        ConfluenceAPIClient,
+        ConfluenceWriteExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/123").mock(
         return_value=httpx.Response(
@@ -446,14 +455,13 @@ async def test_write_find_replace_refusal_surfaces_cleanly():
 # ---------------------------------------------------------------------------
 
 
-def test_meta_tools_registered_via_register():
+@pytest.mark.asyncio
+async def test_meta_tools_registered_via_register():
     """register_confluence_tools keeps the 2 meta-tools in the global
     ToolRegistry (so execution dispatch works) AND claims them on the
     ConnectorRegistry so the agent loop can hide them from tenants
     without an active connection. Connector-pattern registration.
     """
-    import asyncio
-
     from assistant_service.core.tools.confluence_tool import register_confluence_tools
     from assistant_service.core.tools.connector_registry import (
         get_connector_registry,
@@ -484,18 +492,16 @@ def test_meta_tools_registered_via_register():
     assert "confluence" in connectors.list_connectors()
     assert {"confluence_read", "confluence_write"} <= connectors.connector_tool_names()
     req = ToolCallRequest(call_id="c", tool_name="probe", arguments={})
-    visible = asyncio.get_event_loop().run_until_complete(connectors.visible_tools(req))
+    visible = await connectors.visible_tools(req)
     visible_names = {t.name for t in visible}
     assert "confluence_read" in visible_names
     assert "confluence_write" in visible_names
 
 
-def test_db_backed_register_only_visible_when_tenant_connected():
+@pytest.mark.asyncio
+async def test_db_backed_register_only_visible_when_tenant_connected():
     """DB-backed registration: confluence_read/write show up only when the
     caller's tenant has an active row in ``confluence_connections``."""
-    import asyncio
-
-    from src.core.auth.user_resolver import UserContext
     from assistant_service.core.tools.confluence_tool import register_confluence_tools
     from assistant_service.core.tools.connector_registry import (
         get_connector_registry,
@@ -506,11 +512,14 @@ def test_db_backed_register_only_visible_when_tenant_connected():
         get_tool_registry,
     )
 
+    from src.core.auth.user_resolver import UserContext
+
     reset_connector_registry_for_tests()
 
     # Fake DB: tenantA has an active connection; tenantB has none.
     class _DB:
         async def list_confluence_connections(self, tenant_id=None, status=None, limit=1):
+            del status, limit
             if tenant_id == "tenantA":
                 return [{"domain": "a.atlassian.net", "email": "a@x.com", "api_token": "t"}]
             return []
@@ -522,20 +531,19 @@ def test_db_backed_register_only_visible_when_tenant_connected():
     assert "confluence_read" in {t.name for t in get_tool_registry().list_tools()}
 
     connectors = get_connector_registry()
-    loop = asyncio.get_event_loop()
 
     req_a = ToolCallRequest(
         call_id="a", tool_name="probe", arguments={},
         user=UserContext(user_id="u", tenant_id="tenantA"),
     )
-    visible_a = loop.run_until_complete(connectors.visible_tools(req_a))
+    visible_a = await connectors.visible_tools(req_a)
     assert {t.name for t in visible_a} >= {"confluence_read", "confluence_write"}
 
     req_b = ToolCallRequest(
         call_id="b", tool_name="probe", arguments={},
         user=UserContext(user_id="u", tenant_id="tenantB"),
     )
-    visible_b = loop.run_until_complete(connectors.visible_tools(req_b))
+    visible_b = await connectors.visible_tools(req_b)
     # tenantB sees NOTHING from the confluence connector.
     assert all(t.name not in {"confluence_read", "confluence_write"} for t in visible_b)
 
@@ -543,7 +551,8 @@ def test_db_backed_register_only_visible_when_tenant_connected():
 def test_meta_tool_action_enums_cover_all_old_operations():
     """Verifies the two meta tools between them expose all 11 old operations."""
     from assistant_service.core.tools.confluence_tool import (
-        CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
+        CONFLUENCE_READ_DEFINITION,
+        CONFLUENCE_WRITE_DEFINITION,
     )
 
     def _action_enum(td):
@@ -628,7 +637,8 @@ async def test_read_page_exposes_ancestors_and_parent_id():
     """After reading a page, the response must include parent_id so the
     model can create a sibling page at the same tree level."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(
@@ -667,7 +677,8 @@ async def test_read_page_no_ancestors_shows_homepage_hint():
     """For a space homepage (no ancestors), the formatter should explain
     why no parent is available so the model doesn't hallucinate one."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/1").mock(
         return_value=httpx.Response(
@@ -720,7 +731,8 @@ async def test_search_returns_parent_and_space_key():
     and space_key so the model can plan create-sibling / move_page without
     a second read_page per hit."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(
@@ -758,7 +770,8 @@ async def test_search_returns_parent_and_space_key():
 @respx.mock
 async def test_search_top_level_page_shows_no_parent():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
         return_value=httpx.Response(
@@ -914,7 +927,8 @@ async def test_move_page_rejects_self_parent():
 @pytest.mark.asyncio
 async def test_write_action_move_page_needs_both_ids():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceWriteExecutor,
+        ConfluenceAPIClient,
+        ConfluenceWriteExecutor,
     )
     c = ConfluenceAPIClient("ex.atlassian.net", "u@x.com", "tok")
     res = await ConfluenceWriteExecutor(c).execute(
@@ -953,7 +967,8 @@ def test_classify_http_errors_distinguishes_401_403_404_409():
 @respx.mock
 async def test_read_404_surfaces_distinct_message():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/99999").mock(
         return_value=httpx.Response(404, text="not found")
@@ -971,7 +986,8 @@ async def test_read_404_surfaces_distinct_message():
 @respx.mock
 async def test_read_401_distinct_auth_message():
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/42").mock(
         return_value=httpx.Response(401, text="unauthorized")
@@ -1175,7 +1191,8 @@ async def test_search_executor_surfaces_cql_to_model():
     """The formatter must include the CQL used and the diagnostic hint in
     the text the model sees — that's the whole agentic point."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
 
     respx.get("https://ex.atlassian.net/wiki/rest/api/content/search").mock(
@@ -1238,6 +1255,7 @@ class _FakeDB:
     async def list_confluence_connections(
         self, tenant_id: str | None = None, status: str | None = None, limit: int = 100
     ):
+        del status, limit
         if tenant_id is None:
             return [r for rows in self._rows.values() for r in rows]
         return self._rows.get(tenant_id, [])
@@ -1246,6 +1264,7 @@ class _FakeDB:
 def _build_user_request(tenant_id: str, action: str, **args):
     """ToolCallRequest with a UserContext carrying the given tenant_id."""
     from assistant_service.core.tools.tool_registry import ToolCallRequest
+
     from src.core.auth.user_resolver import UserContext
     user = UserContext(user_id="u", tenant_id=tenant_id)
     return ToolCallRequest(
@@ -1323,7 +1342,8 @@ async def test_static_client_fallback_still_works_for_tests():
     keep working — the static client is used when no tenant_id is on the
     request OR when the DB has no row."""
     from assistant_service.core.tools.confluence_tool import (
-        ConfluenceAPIClient, ConfluenceReadExecutor,
+        ConfluenceAPIClient,
+        ConfluenceReadExecutor,
     )
     respx.get("https://legacy.atlassian.net/wiki/api/v2/spaces").mock(
         return_value=httpx.Response(200, json={"results": []})
@@ -1451,8 +1471,10 @@ def test_meta_tool_schemas_are_smaller_than_old_eight():
     """The whole point of the refactor — 2 tool schemas must be materially
     smaller than the 8 old ones would have been."""
     import json
+
     from assistant_service.core.tools.confluence_tool import (
-        CONFLUENCE_READ_DEFINITION, CONFLUENCE_WRITE_DEFINITION,
+        CONFLUENCE_READ_DEFINITION,
+        CONFLUENCE_WRITE_DEFINITION,
     )
     read_schema = json.dumps(CONFLUENCE_READ_DEFINITION.to_openai_schema(compact=True))
     write_schema = json.dumps(CONFLUENCE_WRITE_DEFINITION.to_openai_schema(compact=True))

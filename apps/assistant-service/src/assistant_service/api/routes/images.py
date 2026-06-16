@@ -1022,7 +1022,7 @@ async def _load_artifact_bytes_owner_scoped(
             detail=f"artifact {artifact_id!r} not found",
         )
     raw_owner_scope = getattr(raw, "owner_scope", None)
-    if raw_owner_scope is not None:
+    if isinstance(raw_owner_scope, str) and raw_owner_scope:
         owner_matches = raw_owner_scope == owner_scope
     else:
         owner_matches = (
@@ -1442,6 +1442,20 @@ def _resolve_owner_scope_from_user(user: UserContext) -> str:
         app_tenant_id=user.app_tenant_id,
         app_user_id=user.app_user_id,
     )
+
+
+def _task_is_visible_to_user(task: dict[str, Any], user: UserContext) -> bool:
+    """Return True when task ownership can be proven for this caller."""
+    task_owner_scope = task.get("owner_scope")
+    if isinstance(task_owner_scope, str) and task_owner_scope:
+        return task_owner_scope == _resolve_owner_scope_from_user(user)
+
+    owner_tenant_id = task.get("owner_tenant_id")
+    owner_user_id = task.get("owner_user_id")
+    if owner_tenant_id or owner_user_id:
+        return owner_tenant_id == user.tenant_id and owner_user_id == user.user_id
+
+    return False
 
 
 async def _check_idempotency(
@@ -2991,7 +3005,9 @@ async def get_image_task_status(
             if not task:
                 turn = await get_turn_by_task(pool, task_id)
                 if turn:
-                # Build a synthetic task dict from the turn row
+                    if turn.get("owner_scope") != _resolve_owner_scope_from_user(user):
+                        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+                    # Build a synthetic task dict from the turn row
                     images: list[AsyncImageArtifact] = []
                     output_id = turn.get("output_artifact_id")
                     if output_id:
@@ -3040,6 +3056,8 @@ async def get_image_task_status(
                     )
         if not task:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    if not _task_is_visible_to_user(task, user):
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     images = [
         AsyncImageArtifact(
             artifact_id=img.get("artifact_id"),

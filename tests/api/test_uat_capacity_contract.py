@@ -12,6 +12,7 @@ from src.proxy.transparent_proxy import ProxyRequest, TransparentProxy
 
 @pytest.mark.asyncio
 async def test_three_of_four_no_model_cost_requests_admit_with_capacity_headers(monkeypatch):
+    monkeypatch.setenv("ADMISSION_TENANT_SHARE_RATIO", "1.0")
     config = ProxyServiceConfig(
         service_id="local-2024-agent",
         service_name="LangGraph Agent",

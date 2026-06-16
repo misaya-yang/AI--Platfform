@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sys
+from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
-
 from assistant_service.api.routes import images as images_module
 from assistant_service.api.routes.images import (
     AsyncImageGenerationRequest,
@@ -37,19 +37,16 @@ from assistant_service.api.routes.images import (
     get_image_task_status,
     submit_image_generation,
 )
+from fastapi import HTTPException
 
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from test_image_redesign import (  # noqa: E402
     GEMINI_MODEL,
-    PNG_1X1,
     _Harness,
     _make_request,
     _registry_stub,
     _user,
 )
-
 
 GEMINI = GEMINI_MODEL
 
@@ -159,7 +156,6 @@ async def test_journey_full_session_edit_with_branch_and_resign():
             request=_make_request(), user=user,
             model_registry=_registry_stub("google"),
         )
-        a4_raw = r4.output_artifact_id
         # allow_branch=True → latest does NOT move
         assert h.state.sessions[sid]["latest_artifact_id"] == a3_raw
         assert r4.latest_advanced is False
@@ -302,8 +298,6 @@ async def test_journey_concurrent_edits_one_advances_other_branches():
 @pytest.mark.asyncio
 async def test_journey_cross_app_user_isolation():
     # Two end-users behind the same Java backend
-    # NOTE: owner_scope checks removed — any user with the artifact_id / session_id
-    # can access (UUID is unguessable, defense-in-depth via obscurity).
     user_app_alice = _user(app_user_id="alice", app_tenant_id="acme")
     user_app_bob = _user(app_user_id="bob", app_tenant_id="acme")
     user_legacy = _user()  # no app_* headers
@@ -312,7 +306,7 @@ async def test_journey_cross_app_user_isolation():
     sid_b = "bob-session"
     sid_legacy = "legacy-session"
 
-    with _Harness() as h:
+    with _Harness():
         # Alice creates an image
         ra = await generate_image(
             body=ImageGenerationRequest(
@@ -335,19 +329,21 @@ async def test_journey_cross_app_user_isolation():
         )
         legacy_artifact = rl.output_artifact_id
 
-        # Bob (different app_user_id) CAN access Alice's artifact
-        bob_view = await get_artifact_download_url(
-            artifact_id=a_artifact, request=_make_request(), user=user_app_bob,
-            variant="display", expires_in=3600,
-        )
-        assert bob_view.artifact_id == a_artifact
+        # Bob (different app_user_id) cannot access Alice's artifact.
+        with pytest.raises(HTTPException) as exc:
+            await get_artifact_download_url(
+                artifact_id=a_artifact, request=_make_request(), user=user_app_bob,
+                variant="display", expires_in=3600,
+            )
+        assert exc.value.status_code == 404
 
-        # Bob CAN list Alice's session
-        sess_view = await get_image_session_view(
-            session_id=sid_a, request=_make_request(), user=user_app_bob,
-            limit=10, cursor=None, include_urls=False,
-        )
-        assert sess_view.session_id == sid_a
+        # Bob cannot list Alice's session either.
+        with pytest.raises(HTTPException) as exc:
+            await get_image_session_view(
+                session_id=sid_a, request=_make_request(), user=user_app_bob,
+                limit=10, cursor=None, include_urls=False,
+            )
+        assert exc.value.status_code == 404
 
         # Alice CAN access her own
         own = await get_artifact_download_url(
@@ -363,12 +359,13 @@ async def test_journey_cross_app_user_isolation():
         )
         assert own_legacy.artifact_id == legacy_artifact
 
-        # Legacy CAN also read Alice's (owner_scope checks removed)
-        legacy_view = await get_artifact_download_url(
-            artifact_id=a_artifact, request=_make_request(), user=user_legacy,
-            variant="display", expires_in=3600,
-        )
-        assert legacy_view.artifact_id == a_artifact
+        # Legacy identity is a different owner_scope and cannot read Alice's.
+        with pytest.raises(HTTPException) as exc:
+            await get_artifact_download_url(
+                artifact_id=a_artifact, request=_make_request(), user=user_legacy,
+                variant="display", expires_in=3600,
+            )
+        assert exc.value.status_code == 404
 
         # Bob's empty session → 404 (session never created, not an ownership issue)
         with pytest.raises(HTTPException) as exc:
@@ -401,7 +398,7 @@ async def test_journey_async_submit_poll_then_resign_after_ttl():
         add_watermark=True,
     )
 
-    with _Harness() as h:
+    with _Harness():
         from unittest.mock import patch
         with patch.object(images_module, "get_session_manager", return_value=None):
             submit_resp = await submit_image_generation(
@@ -416,8 +413,6 @@ async def test_journey_async_submit_poll_then_resign_after_ttl():
         )
         assert poll_resp.status == "completed"
         assert poll_resp.images, "completed task must have images"
-        artifact_id = poll_resp.images[0].artifact_id
-        first_url = poll_resp.images[0].url
 
         # Simulate Redis/dict expiry — clear in-memory task store
         images_module._image_tasks.clear()

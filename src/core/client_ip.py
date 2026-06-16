@@ -102,7 +102,8 @@ def get_client_ip(
 
 
 def get_client_ip_from_request(request: Request) -> str:
-    direct_client_host = request.client.host if request.client else None
+    client = getattr(request, "client", None)
+    direct_client_host = client.host if client else None
     return get_client_ip(request.headers, direct_client_host)
 
 

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
+from assistant_service.core.docgen.service import _DEFAULT_SKILL_PATHS
 from assistant_service.core.docgen.skills import (
     SkillLoader,
     SkillRegistry,
@@ -13,8 +10,7 @@ from assistant_service.core.docgen.skills import (
 )
 from assistant_service.core.docgen.skills.router import Intent
 
-
-_SKILLS_DIR = Path(__file__).resolve().parents[3] / "src/services/assistant/skills"
+_SKILLS_DIR = _DEFAULT_SKILL_PATHS[0]
 
 
 def _registry() -> SkillRegistry:
