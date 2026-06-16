@@ -258,7 +258,7 @@ ON CONFLICT (role_name, permission_code) DO NOTHING;
 -- ============================================================
 -- 9. Create local bootstrap admin user
 -- Local initial password: ChangeMe-Admin-2026! (bcrypt hash with cost factor 12)
--- Change it immediately after first login.
+-- Rotate it immediately for shared or non-local deployments.
 -- ============================================================
 INSERT INTO users (
     user_id,
@@ -285,7 +285,7 @@ INSERT INTO users (
     ARRAY['admin:*']::VARCHAR(100)[],
     'active',
     '$2b$12$3UfCsRE9RsU68qKAX/bgzObJODrSOFdvKi7RLO6.8Xnli25qoU/N2',
-    TRUE,
+    FALSE,
     TRUE,
     'system'
 ) ON CONFLICT (user_id) DO UPDATE SET

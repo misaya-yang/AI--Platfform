@@ -73,9 +73,8 @@ make quickstart
 - Gateway readiness: `http://localhost:8080/health/ready`
 
 The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
-The account is forced to change password on first login. For non-local deployments,
-change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own administrator, and rotate the
-bootstrap password immediately.
+For non-local deployments, change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own
+administrator, and rotate the bootstrap password immediately.
 
 ## Validation Commands
 

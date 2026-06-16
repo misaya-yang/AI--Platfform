@@ -17,7 +17,10 @@ function lazyNamed<TModule, TKey extends keyof TModule>(
 const LoginPage = lazyNamed(() => import("@/pages/Login"), "LoginPage");
 const SharePage = lazyNamed(() => import("@/pages/SharePage"), "SharePage");
 const QuizPage = lazyNamed(() => import("@/pages/QuizPage"), "QuizPage");
-const EnterpriseDashboard = lazyNamed(() => import("@/pages/dashboard"), "EnterpriseDashboard");
+const EnterpriseDashboard = lazyNamed(
+  () => import("@/pages/dashboard/index"),
+  "EnterpriseDashboard"
+);
 const ServicesPage = lazyNamed(() => import("@/pages/Services"), "ServicesPage");
 const PlaygroundPage = lazyNamed(() => import("@/pages/playground"), "PlaygroundPage");
 const TasksPage = lazyNamed(() => import("@/pages/tasks"), "TasksPage");
