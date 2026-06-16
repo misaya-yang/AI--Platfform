@@ -142,6 +142,35 @@ async def test_google_discovery_skips_unknown_models_until_catalog_trusts_them()
 
 
 @pytest.mark.asyncio
+async def test_sync_without_discovery_uses_trusted_catalog_only() -> None:
+    provider_service = FakeProviderService(
+        {
+            "provider_id": "google",
+            "api_type": "google",
+            "base_url": "https://generativelanguage.googleapis.com",
+        }
+    )
+    model_service = FakeModelService()
+    http_client = FakeHTTPClient(FakeHTTPResponse(500, {"models": []}))
+    sync_service = ModelCatalogSyncService(
+        provider_service,  # type: ignore[arg-type]
+        model_service,  # type: ignore[arg-type]
+        http_client=http_client,  # type: ignore[arg-type]
+    )
+
+    result = await sync_service.sync_provider_models(
+        tenant_id="tenant-a",
+        provider_id="google",
+        discover=False,
+    )
+
+    assert any(item["model_id"] == "gemini-3.5-flash" for item in result["created_models"])
+    assert result["skipped_models"] == []
+    assert result["discovery_warnings"] == []
+    assert http_client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_model_catalog_upsert_preserves_existing_disabled_state() -> None:
     db = MagicMock()
     existing = {

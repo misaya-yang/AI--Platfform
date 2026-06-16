@@ -1172,6 +1172,34 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         except Exception as e:
             logger.warning(f"Failed to load providers from database: {e}")
 
+    model_service = getattr(app.state, "model_service", None)
+    if provider_service and model_service and configured_providers:
+        from .services.llm.model_catalog_sync import ModelCatalogSyncService
+
+        sync_service = ModelCatalogSyncService(provider_service, model_service)
+        for provider_id in sorted(set(configured_providers)):
+            try:
+                result = await sync_service.sync_provider_models(
+                    tenant_id=tenant_id,
+                    provider_id=provider_id,
+                    discover=False,
+                )
+                created = len(result.get("created_models", []))
+                updated = len(result.get("updated_models", []))
+                if created or updated:
+                    logger.info(
+                        "Synced startup model catalog provider_id=%s created=%s updated=%s",
+                        provider_id,
+                        created,
+                        updated,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to sync startup model catalog for provider %s: %s",
+                    provider_id,
+                    e,
+                )
+
     # Get KB service if available
     kb_service = getattr(app.state, "knowledge_service", None)
 
@@ -1201,7 +1229,6 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # ModelService + ProviderService for the 3 routes that still need LLM
     # metadata (chat-stream permission check, /health/providers, model
     # CRUD). The full ModelRegistry lives in assistant-service.
-    model_service = getattr(app.state, "model_service", None)
     provider_service = getattr(app.state, "provider_service", None)
     if model_service and provider_service:
         from .services.llm.gateway_model_meta import GatewayModelMeta

@@ -37,6 +37,7 @@ class ModelCatalogSyncService:
         *,
         tenant_id: str,
         provider_id: str,
+        discover: bool = True,
     ) -> dict[str, Any]:
         provider = await self.provider_service.get_provider(tenant_id, provider_id)
         if not provider:
@@ -63,11 +64,13 @@ class ModelCatalogSyncService:
         skipped_models: list[dict[str, str]] = []
         discovery_warnings: list[str] = []
 
-        discovered = await self._discover_models(
-            tenant_id=tenant_id,
-            provider=provider,
-            template=template,
-        )
+        discovered: list[dict[str, Any]] = []
+        if discover:
+            discovered = await self._discover_models(
+                tenant_id=tenant_id,
+                provider=provider,
+                template=template,
+            )
         for item in discovered:
             model_id = item.get("model_id")
             if not model_id:
@@ -85,7 +88,7 @@ class ModelCatalogSyncService:
                 item,
             )
 
-        if template.discovery_strategy in {
+        if discover and template.discovery_strategy in {
             "google_ai_studio_models_list",
             "vertex_best_effort",
         } and not discovered:
