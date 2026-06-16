@@ -33,16 +33,10 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
-
-if TYPE_CHECKING:
-    from ai_gateway_core.knowledge import KnowledgeClientLike
-    from ai_gateway_core.session import SessionManagerLike
-    from .memory_service import MemoryService
-
-from cachetools import TTLCache
 from ai_gateway_core.auth import UserContext
+from ai_gateway_core.enums import RAGMode
 from ai_gateway_core.exceptions import PermissionDeniedError
+from ai_gateway_core.logging import get_logger
 from ai_gateway_core.metrics import (
     NoOpRealtimeMetrics,
     NoOpUsageRecorder,
@@ -55,26 +49,15 @@ from ai_gateway_core.storage import (
     NoOpArtifactStorage,
     NoOpFileStorage,
 )
-# Module-level NoOp singletons used as DI defaults. These are safe to share —
-# they hold no mutable state and every method is a silent no-op.
-_DEFAULT_NOOP_USAGE_RECORDER: UsageRecorderLike = NoOpUsageRecorder()
-_DEFAULT_NOOP_REALTIME_METRICS: RealtimeMetricsLike = NoOpRealtimeMetrics()
-_DEFAULT_NOOP_ARTIFACT_STORAGE: ArtifactStorageLike = NoOpArtifactStorage()
-_DEFAULT_NOOP_FILE_STORAGE: FileStorageLike = NoOpFileStorage()
+from cachetools import TTLCache
+
 from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
-from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
-from .rag.context_engine import ContextEngine, ContextStructure
-from .rag.context_manager import ContextConfig, get_context_manager
-from .quality.domain_policies import DomainPolicy, DomainPolicyResolver
-from .files.file_processor import ProcessedFiles, create_file_processor
-from .quality.guardrails import (
-    DocumentType,
-    QualityGuardrails,
-    ToolCallValidation,
-    ToolConstraintValidator,
-    ValidationResult,
+from .content.structured_output import (
+    OutputFormat,
+    OutputGuardrail,
 )
+from .files.file_processor import ProcessedFiles, create_file_processor
 from .models.model_registry import ChatMessage, ModelProvider, ModelRegistry
 from .prompts.system_prompt_v2 import (
     build_system_prompt_v2,
@@ -84,6 +67,17 @@ from .prompts.system_prompt_v2 import (
     inject_user_preferences,
     inject_web_context,
 )
+from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
+from .quality.domain_policies import DomainPolicy, DomainPolicyResolver
+from .quality.guardrails import (
+    DocumentType,
+    QualityGuardrails,
+    ToolCallValidation,
+    ToolConstraintValidator,
+    ValidationResult,
+)
+from .rag.context_engine import ContextEngine, ContextStructure
+from .rag.context_manager import ContextConfig, get_context_manager
 from .rag.rag_metrics import (
     Citation,
     RAGMetrics,
@@ -93,24 +87,30 @@ from .rag.scenario_analyzer import (
     ScenarioDetectionResult,
     create_scenario_analyzer,
 )
-from .content.structured_output import (
-    OutputFormat,
-    OutputGuardrail,
-)
 from .tasks.task_planner import TaskPlanner
-from .tool_orchestrator import ToolOrchestrator
+from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .working_memory import WorkingMemory
 
+if TYPE_CHECKING:
+    from ai_gateway_core.knowledge import KnowledgeClientLike
+    from ai_gateway_core.session import SessionManagerLike
+
+    from .memory_service import MemoryService
+
 logger = get_logger(__name__)
-
-
-from ai_gateway_core.enums import RAGMode  # noqa: E402 — re-export for AS-internal sites
 
 # ``RAGMode`` is now defined in ``ai_gateway_core.enums`` so gateway routes
 # (assistant.py) can import the enum without pulling in ``assistant_service``.
 # Kept as a local re-export until AS-internal imports migrate to the shared
 # module directly.
+
+# Module-level NoOp singletons used as DI defaults. These are safe to share:
+# they hold no mutable state and every method is a silent no-op.
+_DEFAULT_NOOP_USAGE_RECORDER: UsageRecorderLike = NoOpUsageRecorder()
+_DEFAULT_NOOP_REALTIME_METRICS: RealtimeMetricsLike = NoOpRealtimeMetrics()
+_DEFAULT_NOOP_ARTIFACT_STORAGE: ArtifactStorageLike = NoOpArtifactStorage()
+_DEFAULT_NOOP_FILE_STORAGE: FileStorageLike = NoOpFileStorage()
 
 
 class StreamEventType(str, Enum):
@@ -595,7 +595,7 @@ Please use this web search context to inform your response when relevant."""
     def __init__(
         self,
         model_registry: ModelRegistry,
-        kb_service: "KnowledgeClientLike | None" = None,
+        kb_service: KnowledgeClientLike | None = None,
         session_manager: SessionManagerLike | None = None,
         context_config: ContextConfig | None = None,
         enable_rag_evaluation: bool = True,
@@ -741,6 +741,117 @@ Please use this web search context to inform your response when relevant."""
             database=db,
             enabled=gateway_enabled,
         )
+
+    @property
+    def task_planner(self) -> TaskPlanner:
+        if self._task_planner is None:
+            self._task_planner = TaskPlanner()
+        return self._task_planner
+
+    def get_tool_orchestrator(self, max_parallel: int = 5) -> ToolOrchestrator:
+        if self._tool_orchestrator is None:
+            from .tools import get_tool_registry
+
+            self._tool_orchestrator = ToolOrchestrator(
+                tool_registry=get_tool_registry(),
+                max_parallel=max_parallel,
+            )
+        return self._tool_orchestrator
+
+    async def _execute_with_planning(
+        self,
+        user: UserContext,
+        session_id: str,
+        message: str,
+        config: AssistantConfig,
+        history: list[dict[str, str]] | None = None,
+        retrieved_contexts: list[RetrievedContext] | None = None,
+    ) -> AsyncIterator[AssistantStreamEvent]:
+        del history, retrieved_contexts
+        working_memory = self.get_working_memory(session_id)
+        working_memory.set_goal(message)
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+            data={"session_id": session_id, "goal": message},
+        )
+
+        try:
+            from .tools import get_tool_registry
+
+            registry = get_tool_registry()
+            list_tools = getattr(registry, "list_tools", None)
+            available_tools = list_tools() if callable(list_tools) else []
+            plan = await self.task_planner.create_plan(
+                user_request=message,
+                available_tools=available_tools,
+                context={"session_id": session_id, "user_id": user.user_id},
+                use_llm=False,
+            )
+        except Exception as exc:
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.ERROR.value,
+                data={"message": str(exc)},
+            )
+            return
+
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.TASK_PLANNING.value,
+            data=plan.to_dict(),
+        )
+
+        if config.confirm_plan:
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.STATUS.value,
+                data={
+                    "message": "Please confirm this plan before execution",
+                    "requires_confirmation": True,
+                },
+            )
+            return
+
+        results: list[ToolExecutionResult] = []
+        if plan.tasks:
+            orchestrator = self.get_tool_orchestrator(max_parallel=config.max_parallel_tools)
+            async for result in orchestrator.execute_plan(plan, working_memory):
+                results.append(result)
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
+                    data={
+                        "session_id": session_id,
+                        "task_id": result.task_id,
+                        "success": result.success,
+                    },
+                )
+
+        formatted = self._format_execution_results(results)
+        if formatted:
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data=formatted,
+            )
+        yield AssistantStreamEvent(
+            event_type=StreamEventType.DONE.value,
+            data={"session_id": session_id, "planned_tasks": len(plan.tasks)},
+        )
+
+    @staticmethod
+    def _format_execution_results(results: list[ToolExecutionResult]) -> str:
+        if not results:
+            return ""
+        lines = ["## Task Execution Results"]
+        for result in results:
+            status = "SUCCESS" if result.success else "FAILED"
+            lines.append(f"\n### {result.task_id} ({status})")
+            lines.append(f"- Tool: {result.tool}")
+            lines.append(f"- Duration: {result.duration_ms:.1f}ms")
+            if result.success:
+                value = str(result.result)
+                if len(value) > 500:
+                    value = value[:500].rstrip() + "..."
+                lines.append(f"- Result: {value}")
+            elif result.error:
+                lines.append(f"- Error: {result.error}")
+        return "\n".join(lines)
 
     def validate_generated_content(
         self,
@@ -1004,6 +1115,50 @@ Please use this web search context to inform your response when relevant."""
             )
             existing = (config.system_prompt or "").strip()
             config.system_prompt = f"{existing}\n\n{correction_ctx}" if existing else correction_ctx
+
+        if not config.use_agent_loop:
+            if config.enable_task_planning:
+                async for event in self._execute_with_planning(
+                    user=user,
+                    session_id=session_id,
+                    message=message,
+                    config=config,
+                    history=history,
+                    retrieved_contexts=[],
+                ):
+                    yield event
+                return
+
+            result = await self.chat(
+                user=user,
+                session_id=session_id,
+                message=message,
+                config=config,
+                history=history,
+                persist_messages=persist_messages,
+            )
+            for ctx in result.get("contexts", []):
+                yield AssistantStreamEvent(
+                    event_type=StreamEventType.CONTEXT_RETRIEVED.value,
+                    data=ctx,
+                )
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.TEXT_DELTA.value,
+                data=result.get("content", ""),
+            )
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.USAGE.value,
+                data=result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
+            )
+            yield AssistantStreamEvent(
+                event_type=StreamEventType.DONE.value,
+                data={
+                    "session_id": session_id,
+                    "duration_ms": result.get("duration_ms", 0),
+                    "total_length": len(result.get("content", "")),
+                },
+            )
+            return
 
         # ========== Agent Loop (only execution path) ==========
         # The legacy 8-step ReAct pipeline that lived below this point has

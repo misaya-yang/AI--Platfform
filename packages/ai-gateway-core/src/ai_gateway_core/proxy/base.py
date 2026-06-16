@@ -19,8 +19,11 @@ counter for multi-worker deployments.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +33,8 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.responses import Response
+
+from ai_gateway_core.comm.retry import RetryBudget, RetryPolicy
 
 from .route_pattern import extract_route_pattern
 
@@ -75,11 +80,13 @@ class InMemoryCounter:
     to a Redis-backed store for multi-worker deployments.
     """
 
-    __slots__ = ("_fails", "_probe_in_flight", "_lock")
+    __slots__ = ("_fails", "_probe_in_flight", "_probe_started_at", "_opened_at", "_lock")
 
     def __init__(self) -> None:
         self._fails = 0
         self._probe_in_flight = False
+        self._probe_started_at = 0.0
+        self._opened_at = 0.0
         self._lock = threading.Lock()
 
     def get(self) -> tuple[int, bool]:
@@ -89,17 +96,124 @@ class InMemoryCounter:
     def set_probe(self, in_flight: bool) -> None:
         with self._lock:
             self._probe_in_flight = in_flight
+            self._probe_started_at = time.monotonic() if in_flight else 0.0
 
     def on_success(self) -> None:
         with self._lock:
             self._fails = 0
             self._probe_in_flight = False
+            self._probe_started_at = 0.0
+            self._opened_at = 0.0
 
     def on_failure(self) -> int:
         with self._lock:
             self._fails += 1
             self._probe_in_flight = False
+            self._probe_started_at = 0.0
             return self._fails
+
+    def probe_started_at(self) -> float:
+        with self._lock:
+            return self._probe_started_at
+
+    def opened_at(self) -> float:
+        with self._lock:
+            return self._opened_at
+
+    def set_opened_at(self, opened_at: float) -> None:
+        with self._lock:
+            if self._opened_at <= 0:
+                self._opened_at = opened_at
+
+
+class RedisCounterStore:
+    """Redis-backed circuit-breaker state store.
+
+    The store keeps the same sync ``CounterStore`` contract as
+    ``InMemoryCounter`` so it can be swapped in without changing breaker logic.
+    """
+
+    def __init__(self, redis_client, *, key: str, ttl_seconds: int = 300) -> None:
+        self._redis = redis_client
+        self._key = key
+        self._ttl_seconds = ttl_seconds
+
+    @classmethod
+    def from_url(
+        cls,
+        redis_url: str,
+        *,
+        key: str,
+        ttl_seconds: int = 300,
+    ) -> RedisCounterStore:
+        try:
+            import redis
+        except ImportError as exc:  # pragma: no cover - dependency declared by package
+            raise RuntimeError("redis package is required for RedisCounterStore") from exc
+        return cls(
+            redis.Redis.from_url(redis_url, decode_responses=True),
+            key=key,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def get(self) -> tuple[int, bool]:
+        try:
+            data = self._redis.hgetall(self._key) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis counter store unavailable") from exc
+        fails = int(_redis_value(data.get("fails"), "0") or "0")
+        probe = (_redis_value(data.get("probe_in_flight"), "0") or "0") == "1"
+        return fails, probe
+
+    def set_probe(self, in_flight: bool) -> None:
+        try:
+            self._redis.hset(
+                self._key,
+                mapping={
+                    "probe_in_flight": "1" if in_flight else "0",
+                    "probe_started_at": str(time.monotonic() if in_flight else 0.0),
+                },
+            )
+            self._redis.expire(self._key, self._ttl_seconds)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis counter store unavailable") from exc
+
+    def on_success(self) -> None:
+        try:
+            self._redis.delete(self._key)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis counter store unavailable") from exc
+
+    def on_failure(self) -> int:
+        try:
+            new_value = int(self._redis.hincrby(self._key, "fails", 1))
+            self._redis.hset(
+                self._key,
+                mapping={
+                    "probe_in_flight": "0",
+                    "probe_started_at": "0",
+                },
+            )
+            self._redis.expire(self._key, self._ttl_seconds)
+            return new_value
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis counter store unavailable") from exc
+
+    def probe_started_at(self) -> float:
+        data = self._redis.hgetall(self._key) or {}
+        return float(_redis_value(data.get("probe_started_at"), "0") or "0")
+
+    def opened_at(self) -> float:
+        data = self._redis.hgetall(self._key) or {}
+        return float(_redis_value(data.get("opened_at"), "0") or "0")
+
+    def set_opened_at(self, opened_at: float) -> None:
+        try:
+            if self.opened_at() <= 0:
+                self._redis.hset(self._key, mapping={"opened_at": str(opened_at)})
+                self._redis.expire(self._key, self._ttl_seconds)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis counter store unavailable") from exc
 
 
 @dataclass
@@ -119,6 +233,12 @@ class CircuitBreaker:
     name: str
     threshold: int = 3
     store: CounterStore = field(default_factory=InMemoryCounter)
+    recovery_timeout: float = field(
+        default_factory=lambda: _get_float_env(
+            "SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS",
+            30.0,
+        )
+    )
 
     def gate(self) -> None:
         """Allow or block the incoming request.
@@ -130,6 +250,14 @@ class CircuitBreaker:
         if fails < self.threshold:
             return
         if probe:
+            started_at = _store_float(self.store, "probe_started_at")
+            if (
+                self.recovery_timeout > 0
+                and started_at > 0
+                and time.monotonic() - started_at >= self.recovery_timeout
+            ):
+                self.store.set_probe(True)
+                return
             raise HTTPException(
                 status_code=503,
                 detail=f"{self.name} recovering — probe in flight",
@@ -148,6 +276,8 @@ class CircuitBreaker:
             self.store.on_success()
         elif status_code >= 500:
             new_fails = self.store.on_failure()
+            if new_fails >= self.threshold:
+                _set_store_opened_at(self.store, time.monotonic())
             if new_fails == self.threshold:
                 logger.warning(
                     "%s circuit breaker OPEN after %d failures",
@@ -163,6 +293,8 @@ class CircuitBreaker:
     def on_failure(self) -> None:
         """Transport/stream failure (connect error, timeout, mid-stream abort)."""
         new_fails = self.store.on_failure()
+        if new_fails >= self.threshold:
+            _set_store_opened_at(self.store, time.monotonic())
         if new_fails == self.threshold:
             logger.warning(
                 "%s circuit breaker OPEN after %d failures",
@@ -232,11 +364,15 @@ class ServiceProxyConfig:
             max_connections=50, max_keepalive_connections=10
         )
     )
-    breaker_threshold: int = 3
+    breaker_threshold: int = field(
+        default_factory=lambda: _get_int_env("SERVICE_BREAKER_THRESHOLD", 3)
+    )
     buffer_threshold_bytes: int = 256 * 1024
     strip_req: frozenset[str] = _DEFAULT_STRIP_REQ
     strip_resp: frozenset[str] = _DEFAULT_STRIP_RESP
     injected_identity_headers: frozenset[str] = _DEFAULT_INJECTED_IDENTITY_HEADERS
+    retry_policy: RetryPolicy = field(default_factory=lambda: _retry_policy_from_env())
+    retry_budget: RetryBudget = field(default_factory=lambda: _retry_budget_from_env())
 
 
 class ServiceProxy:
@@ -267,7 +403,7 @@ class ServiceProxy:
         config: ServiceProxyConfig,
         *,
         breaker: CircuitBreaker | None = None,
-        signer: Callable[[Request], tuple[str, str] | None] | None = None,
+        signer: Callable[..., tuple[str, str] | None] | None = None,
     ) -> None:
         """
         Parameters
@@ -292,7 +428,9 @@ class ServiceProxy:
         # ``_breaker_for`` yet. Per-route breakers in ``self._breakers``
         # are the hot-path keying.
         self._global_breaker = breaker or CircuitBreaker(
-            name=config.name, threshold=config.breaker_threshold
+            name=config.name,
+            threshold=config.breaker_threshold,
+            store=_counter_store_for(config.name),
         )
         # Lazily-populated per-route breakers, keyed by canonical
         # route pattern (output of ``extract_route_pattern``). Created
@@ -335,6 +473,7 @@ class ServiceProxy:
             cb = CircuitBreaker(
                 name=f"{self._cfg.name}:{route_pattern}",
                 threshold=self._cfg.breaker_threshold,
+                store=_counter_store_for(f"{self._cfg.name}:{route_pattern}"),
             )
             self._breakers[route_pattern] = cb
             return cb
@@ -383,8 +522,6 @@ class ServiceProxy:
         if request.url.query:
             url = f"{upstream_path}?{request.url.query}"
 
-        headers = self._build_headers(request, user_headers)
-
         # Body caching — audit H-1. If the inbound request carries a
         # body (POST/PUT/PATCH/DELETE) and the caller didn't pre-read,
         # pre-read it here so the retry branch below can replay the
@@ -397,37 +534,65 @@ class ServiceProxy:
         if body is None and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             body = await request.body()
 
-        prefix = error_prefix or self._cfg.name
+        headers = self._build_headers(
+            request,
+            user_headers,
+            upstream_path=upstream_path,
+            body=body,
+        )
 
-        try:
-            return await self._do(request, url, headers, body, breaker)
-        except (
-            httpx.ConnectError,
-            httpx.RemoteProtocolError,
-            httpx.PoolTimeout,
-        ) as exc:
-            logger.warning(
-                "%s proxy connection error, resetting client: %s",
-                self._cfg.name,
-                exc,
-            )
-            await self._reset_client()
+        prefix = error_prefix or self._cfg.name
+        policy = self._cfg.retry_policy
+        budget = self._cfg.retry_budget
+        budget.record_original()
+        method = request.method.upper()
+        body_replayable = body is not None
+        idempotency_key = any(k.lower() == "idempotency-key" for k in headers)
+        attempt = 1
+
+        while True:
             try:
                 return await self._do(request, url, headers, body, breaker)
-            except Exception as e:
-                # Count exactly once for this external request.
+            except (
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+                httpx.PoolTimeout,
+            ) as exc:
+                can_retry = (
+                    attempt < policy.max_attempts
+                    and policy.can_retry_exception(
+                        exc,
+                        method=method,
+                        body_replayable=body_replayable,
+                        idempotency_key=idempotency_key,
+                    )
+                    and budget.try_acquire_retry()
+                )
+                logger.warning(
+                    "%s proxy connection error%s: %s",
+                    self._cfg.name,
+                    ", retrying" if can_retry else "",
+                    exc,
+                )
+                await self._reset_client()
+                if can_retry:
+                    delay = policy.delay_seconds(attempt)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
                 breaker.on_failure()
-                raise HTTPException(502, f"{prefix} unavailable") from e
-        except httpx.TimeoutException as exc:
-            breaker.on_failure()
-            raise HTTPException(504, f"{prefix} timeout") from exc
-        except HTTPException:
-            # Propagate upstream-produced HTTPExceptions without treating
-            # them as transport failures.
-            raise
-        except Exception as exc:
-            breaker.on_failure()
-            raise HTTPException(502, f"{prefix} error") from exc
+                raise HTTPException(502, f"{prefix} unavailable") from exc
+            except httpx.TimeoutException as exc:
+                breaker.on_failure()
+                raise HTTPException(504, f"{prefix} timeout") from exc
+            except HTTPException:
+                # Propagate upstream-produced HTTPExceptions without treating
+                # them as transport failures.
+                raise
+            except Exception as exc:
+                breaker.on_failure()
+                raise HTTPException(502, f"{prefix} error") from exc
 
     async def aclose(self) -> None:
         await self._reset_client()
@@ -443,7 +608,7 @@ class ServiceProxy:
                     base_url=self._cfg.base_url,
                     timeout=self._cfg.timeout,
                     limits=self._cfg.limits,
-                    transport=httpx.AsyncHTTPTransport(retries=2),
+                    transport=httpx.AsyncHTTPTransport(retries=0),
                 )
                 # Attach OTel CLIENT-span instrumentation so outbound
                 # gateway → microservice hops show up in the trace tree.
@@ -467,13 +632,16 @@ class ServiceProxy:
         async with self._client_lock:
             old, self._client = self._client, None
         if old is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await old.aclose()
-            except Exception:  # noqa: BLE001
-                pass
 
     def _build_headers(
-        self, request: Request, user_headers: dict[str, str]
+        self,
+        request: Request,
+        user_headers: dict[str, str],
+        *,
+        upstream_path: str,
+        body: bytes | None,
     ) -> dict[str, str]:
         strip = self._cfg.strip_req
         out = {k: v for k, v in request.headers.items() if k.lower() not in strip}
@@ -507,7 +675,10 @@ class ServiceProxy:
             out["tracestate"] = tracestate
 
         if self._signer is not None:
-            sig = self._signer(request)
+            try:
+                sig = self._signer(request, upstream_path=upstream_path, body=body)
+            except TypeError:
+                sig = self._signer(request)
             if sig is not None:
                 name, value = sig
                 out[name] = value
@@ -595,7 +766,90 @@ __all__ = [
     "CircuitBreakerState",
     "CounterStore",
     "InMemoryCounter",
+    "RedisCounterStore",
     "ProxyError",
     "ServiceProxy",
     "ServiceProxyConfig",
 ]
+
+
+def _redis_value(value, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+def _counter_store_for(name: str) -> CounterStore:
+    backend = os.getenv("INTERNAL_COMM_STATE_BACKEND", "memory").strip().lower()
+    if backend == "redis":
+        redis_url = os.getenv("INTERNAL_COMM_REDIS_URL", "").strip()
+        if not redis_url:
+            logger.warning(
+                "INTERNAL_COMM_STATE_BACKEND=redis but INTERNAL_COMM_REDIS_URL is unset; "
+                "falling back to in-memory circuit breaker state"
+            )
+            return InMemoryCounter()
+        safe_name = name.replace(" ", "_").replace("/", ":")
+        return RedisCounterStore.from_url(
+            redis_url,
+            key=f"ai-gateway:internal:breaker:{safe_name}",
+        )
+    return InMemoryCounter()
+
+
+def _store_float(store: CounterStore, method_name: str) -> float:
+    method = getattr(store, method_name, None)
+    if not callable(method):
+        return 0.0
+    try:
+        return float(method() or 0.0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _set_store_opened_at(store: CounterStore, opened_at: float) -> None:
+    method = getattr(store, "set_opened_at", None)
+    if not callable(method):
+        return
+    try:
+        method(opened_at)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to set circuit breaker opened_at", exc_info=True)
+
+
+def _get_int_env(key: str, default: int) -> int:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
+def _get_float_env(key: str, default: float) -> float:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
+def _retry_policy_from_env() -> RetryPolicy:
+    return RetryPolicy(
+        max_attempts=_get_int_env("SERVICE_RETRY_MAX_ATTEMPTS", 2),
+        base_delay_ms=_get_int_env("SERVICE_RETRY_BASE_DELAY_MS", 50),
+        max_delay_ms=_get_int_env("SERVICE_RETRY_MAX_DELAY_MS", 500),
+    )
+
+
+def _retry_budget_from_env() -> RetryBudget:
+    return RetryBudget(
+        budget_ratio=_get_float_env("SERVICE_RETRY_BUDGET_RATIO", 0.1),
+    )

@@ -121,7 +121,12 @@ def test_proxy_injects_gateway_request_id_when_client_didnt_send_one():
     request.headers = {"content-type": "application/json"}  # NO X-Request-Id
     request.state = SimpleNamespace(request_id="gw-generated-uuid-1234")
 
-    headers = proxy._build_headers(request, user_headers={"X-User-Id": "u1"})
+    headers = proxy._build_headers(
+        request,
+        user_headers={"X-User-Id": "u1"},
+        upstream_path="/probe",
+        body=b"",
+    )
 
     # Case-insensitive lookup since dict-keys preserve case
     keys_lower = {k.lower(): v for k, v in headers.items()}
@@ -142,7 +147,12 @@ def test_proxy_preserves_inbound_request_id_when_client_sent_one():
     }
     request.state = SimpleNamespace(request_id="gw-generated-uuid-1234")
 
-    headers = proxy._build_headers(request, user_headers={"X-User-Id": "u1"})
+    headers = proxy._build_headers(
+        request,
+        user_headers={"X-User-Id": "u1"},
+        upstream_path="/probe",
+        body=b"",
+    )
 
     keys_lower = {k.lower(): v for k, v in headers.items()}
     # Inbound wins because request.headers is copied first
@@ -161,7 +171,12 @@ def test_proxy_no_request_id_when_neither_inbound_nor_state():
     # truthy via spec-less Mock; explicitly set to None:
     request.state = SimpleNamespace()  # no request_id attr at all
 
-    headers = proxy._build_headers(request, user_headers={"X-User-Id": "u1"})
+    headers = proxy._build_headers(
+        request,
+        user_headers={"X-User-Id": "u1"},
+        upstream_path="/probe",
+        body=b"",
+    )
 
     keys_lower = {k.lower(): v for k, v in headers.items()}
     assert "x-request-id" not in keys_lower

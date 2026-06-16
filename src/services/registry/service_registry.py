@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ import yaml
 from ai_gateway_core.enums import ConnectorType, ContentType, InvocationMode, ServiceType
 from ai_gateway_core.exceptions import AdapterNotFoundError, ValidationFailedError
 
-from ...adapters.base import ProtocolAdapter
+from ...adapters.base import BulkheadAdapter, ProtocolAdapter
 from ...models.service import (
     ServiceAuthConfig,
     ServiceCacheConfig,
@@ -134,8 +135,29 @@ class ServiceRegistry:
         if not adapter_class:
             raise AdapterNotFoundError(adapter_type)
         adapter = adapter_class(service)
+        adapter = self._wrap_adapter_bulkhead(service, adapter, adapter_type)
         self._adapter_cache[cache_key] = adapter
         return adapter
+
+    def _wrap_adapter_bulkhead(
+        self,
+        service: ServiceDefinition,
+        adapter: ProtocolAdapter,
+        adapter_type: str,
+    ):
+        metadata = service.metadata or {}
+        bulkhead = metadata.get("bulkhead") if isinstance(metadata.get("bulkhead"), dict) else {}
+        limit = bulkhead.get("concurrency_limit")
+        queue_timeout = bulkhead.get("queue_timeout_seconds", 1.0)
+        if limit is None:
+            limit = _adapter_bulkhead_limit_from_env(adapter_type)
+        if limit is None:
+            return adapter
+        return BulkheadAdapter(
+            adapter,
+            concurrency_limit=int(limit),
+            queue_timeout_seconds=float(queue_timeout),
+        )
 
     def _validate_service(self, service: ServiceDefinition) -> None:
         if not service.service_id:
@@ -231,3 +253,21 @@ class ServiceRegistry:
             async_config=data.get("async_config"),
             service_config=service_config,
         )
+
+
+def _adapter_bulkhead_limit_from_env(adapter_type: str) -> int | None:
+    raw = os.getenv("ADAPTER_BULKHEAD_LIMITS", "").strip()
+    if not raw:
+        return None
+    for item in raw.split(","):
+        if ":" not in item:
+            continue
+        name, value = item.split(":", 1)
+        if name.strip() != adapter_type:
+            continue
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None

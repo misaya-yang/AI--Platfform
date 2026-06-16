@@ -133,6 +133,7 @@ database = [
     { name = "redis" },
 ]
 dev = [
+    { name = "fakeredis" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -166,6 +167,7 @@ storage = [
     { name = "oss2" },
 ]
 test = [
+    { name = "fakeredis" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -186,6 +188,8 @@ requires-dist = [
     { name = "dashscope", marker = "extra == 'knowledge'", specifier = ">=1.25.0" },
     { name = "docker", marker = "extra == 'sandbox'", specifier = ">=7.0.0" },
     { name = "email-validator", specifier = ">=2.1.0" },
+    { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.32.0" },
+    { name = "fakeredis", marker = "extra == 'test'", specifier = ">=2.32.0" },
     { name = "fastapi", specifier = ">=0.124.0" },
     { name = "grpcio", marker = "extra == 'grpc'", specifier = ">=1.76.0" },
     { name = "httpx", specifier = ">=0.28.0" },

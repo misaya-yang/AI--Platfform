@@ -47,10 +47,23 @@ def _build_signer() -> GatewaySecret | None:
 _signer = _build_signer()
 
 
-def _sign_request(_request: Request) -> tuple[str, str] | None:
+def _sign_request(
+    request: Request,
+    *,
+    upstream_path: str = "",
+    body: bytes | None = None,
+) -> tuple[str, str] | None:
     if _signer is None:
         return None
-    return (_signer.header_name, _signer.sign())
+    return (
+        _signer.header_name,
+        _signer.sign(
+            method=request.method,
+            path=upstream_path or request.url.path,
+            query=request.url.query,
+            body=body,
+        ),
+    )
 
 
 _proxy = ServiceProxy(

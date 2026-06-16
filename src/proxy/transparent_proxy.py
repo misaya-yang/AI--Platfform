@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 import time
@@ -24,7 +25,11 @@ from typing import Any
 import httpx
 from ai_gateway_core.logging import get_logger
 
-from ..core.gateway.admission import CapacityAdmissionController, CapacityRejected
+from ..core.gateway.admission import (
+    AdaptiveLoadShedder,
+    CapacityAdmissionController,
+    CapacityRejected,
+)
 from ..core.gateway.capacity import CapacityResolver, service_upstream_group
 from ..services.metrics.observability import (
     classify_error_type,
@@ -204,10 +209,11 @@ class TransparentProxy:
         self.capacity_resolver = capacity_resolver or CapacityResolver()
         self.admission_controller = admission_controller or CapacityAdmissionController(
             redis_client=getattr(config_loader, "redis", None),
+            load_shedder=_load_shedder_from_env(),
         )
 
         # HTTP 客户端池（按服务维护）
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[tuple[str, str], httpx.AsyncClient] = {}
         self._client_lock = asyncio.Lock()
 
         # 负载均衡状态
@@ -224,9 +230,14 @@ class TransparentProxy:
         self._clients.clear()
         logger.info("Transparent proxy closed")
 
-    async def _get_client(self, config: ProxyServiceConfig) -> httpx.AsyncClient:
+    async def _get_client(
+        self,
+        config: ProxyServiceConfig,
+        *,
+        slot_kind: str = "default",
+    ) -> httpx.AsyncClient:
         """获取或创建 HTTP 客户端"""
-        client_key = config.service_id
+        client_key = (config.service_id, slot_kind)
 
         if client_key not in self._clients:
             async with self._client_lock:
@@ -237,8 +248,14 @@ class TransparentProxy:
                         write=config.timeout_write,
                         pool=config.timeout_pool,
                     )
+                    max_connections = config.max_connections or self.client_max_connections
+                    if slot_kind == "stream":
+                        max_connections = (
+                            config.streaming_max_connections
+                            or _get_int_env("SERVICE_STREAMING_MAX_CONNECTIONS", 16)
+                        )
                     limits = httpx.Limits(
-                        max_connections=config.max_connections or self.client_max_connections,
+                        max_connections=max_connections,
                         max_keepalive_connections=(
                             config.max_keepalive_connections
                             or self.client_max_keepalive_connections
@@ -425,7 +442,7 @@ class TransparentProxy:
         return await self._refresh_service_availability(config)
 
     async def _refresh_service_availability(self, config: ProxyServiceConfig) -> dict[str, Any]:
-        client = await self._get_client(config)
+        client = await self._get_client(config, slot_kind="default")
         healthy_urls: list[str] = []
         failures: list[str] = []
 
@@ -623,9 +640,9 @@ class TransparentProxy:
         t_headers_done = time.perf_counter()
 
         # 5. 获取 HTTP 客户端
-        client = await self._get_client(config)
-        t_client_done = time.perf_counter()
         slot_kind = self._resolve_slot_kind(request)
+        client = await self._get_client(config, slot_kind=slot_kind)
+        t_client_done = time.perf_counter()
         capacity_lease = None
         try:
             capacity_lease = await self._acquire_capacity_lease(
@@ -1665,3 +1682,34 @@ class TransparentProxy:
         for config in await self.config_loader.list_services():
             snapshots[config.service_id] = await self._refresh_service_availability(config)
         return snapshots
+
+
+def _get_int_env(key: str, default: int) -> int:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
+def _get_float_env(key: str, default: float) -> float:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", key, raw, default)
+        return default
+
+
+def _load_shedder_from_env() -> AdaptiveLoadShedder:
+    return AdaptiveLoadShedder(
+        window_seconds=_get_float_env("ADAPTIVE_LOAD_SHEDDING_WINDOW_SECONDS", 30.0),
+        low_threshold_ms=_get_float_env("ADAPTIVE_LOAD_SHEDDING_LOW_THRESHOLD_MS", 5_000.0),
+        normal_threshold_ms=_get_float_env("ADAPTIVE_LOAD_SHEDDING_NORMAL_THRESHOLD_MS", 10_000.0),
+        high_threshold_ms=_get_float_env("ADAPTIVE_LOAD_SHEDDING_HIGH_THRESHOLD_MS", 20_000.0),
+    )

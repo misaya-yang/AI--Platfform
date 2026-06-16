@@ -427,6 +427,23 @@ async def _list_assistant_session_summaries(session_manager, user: UserContext, 
     )
 
 
+async def _list_assistant_sessions(session_manager, user: UserContext, limit: int):
+    """Backward-compatible full session listing for assistant sessions."""
+    sessions = []
+    for service_id in ("__builtin_assistant__", "assistant"):
+        sessions.extend(
+            await session_manager.list_sessions(
+                user_id=user.user_id,
+                tenant_id=user.tenant_id,
+                service_id=service_id,
+                limit=limit,
+                status="active",
+            )
+        )
+    sessions.sort(key=lambda item: getattr(item, "updated_at", None), reverse=True)
+    return sessions[:limit]
+
+
 @router.post("/sessions", response_model=SessionResponse)
 async def create_session(
     body: SessionCreateRequest = None,

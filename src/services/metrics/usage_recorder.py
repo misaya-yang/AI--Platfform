@@ -8,6 +8,7 @@ from __future__ import annotations
 from ai_gateway_core.metrics.usage_recorder import (
     UsageRecord,
     UsageRecorder,
+    group_records_by_hour,
     get_usage_recorder,
     init_usage_recorder,
 )
@@ -15,6 +16,7 @@ from ai_gateway_core.metrics.usage_recorder import (
 __all__ = [
     "UsageRecord",
     "UsageRecorder",
+    "group_records_by_hour",
     "get_usage_recorder",
     "init_usage_recorder",
 ]

@@ -17,13 +17,12 @@ import time
 from unittest.mock import patch
 
 import pytest
-
 from ai_gateway_core.auth.gateway_secret import (
     GatewaySecret,
     InMemoryReplayStore,
     InvalidGatewaySecret,
+    RedisReplayStore,
 )
-
 
 SECRET = "0" * 32  # 32 hex-chars, passes the min-length guard
 OTHER = "1" * 32
@@ -155,3 +154,111 @@ def test_forged_header_does_not_poison_replay_store() -> None:
     legit_signer = GatewaySecret(secret=SECRET, replay_store=InMemoryReplayStore())
     legit_header = legit_signer.sign(request_id="hot-rid")
     assert verifier.verify(legit_header) == "hot-rid"
+
+
+def test_v2_signature_binds_method_path_query_and_body() -> None:
+    signer = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        key_id="local",
+        keys={"local": SECRET},
+        replay_store=InMemoryReplayStore(),
+    )
+    verifier = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        key_id="local",
+        keys={"local": SECRET},
+        replay_store=InMemoryReplayStore(),
+    )
+
+    body = b'{"query":"hello"}'
+    header = signer.sign(
+        request_id="bound-request",
+        method="POST",
+        path="/api/v1/knowledge/datasets/demo/retrieve",
+        query="top_k=5",
+        body=body,
+    )
+
+    assert (
+        verifier.verify(
+            header,
+            method="POST",
+            path="/api/v1/knowledge/datasets/demo/retrieve",
+            query="top_k=5",
+            body=body,
+        )
+        == "bound-request"
+    )
+
+    with pytest.raises(InvalidGatewaySecret, match="signature"):
+        verifier.verify(
+            header,
+            method="POST",
+            path="/api/v1/assistant/chat/stream",
+            query="top_k=5",
+            body=body,
+        )
+
+
+def test_v2_signature_uses_key_id_for_rotation() -> None:
+    keys = {"previous": OTHER, "active": SECRET}
+    signer = GatewaySecret(
+        secret=SECRET,
+        version="v2",
+        key_id="active",
+        keys=keys,
+        replay_store=InMemoryReplayStore(),
+    )
+    verifier = GatewaySecret(
+        secret=OTHER,
+        version="v2",
+        key_id="previous",
+        keys=keys,
+        replay_store=InMemoryReplayStore(),
+    )
+
+    header = signer.sign(
+        request_id="rotated",
+        method="GET",
+        path="/health/ready",
+        query="",
+        body=b"",
+    )
+
+    assert (
+        verifier.verify(
+            header,
+            method="GET",
+            path="/health/ready",
+            query="",
+            body=b"",
+        )
+        == "rotated"
+    )
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+        self.calls: list[tuple[str, int | None]] = []
+
+    def set(self, key: str, value: str, *, nx: bool = False, px: int | None = None):
+        self.calls.append((key, px))
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+
+def test_redis_replay_store_uses_atomic_set_nx_with_ttl() -> None:
+    redis = _FakeRedis()
+    store = RedisReplayStore(redis, prefix="test:replay")
+
+    assert store.seen_or_record("rid-1", ttl_ms=12_000) is False
+    assert store.seen_or_record("rid-1", ttl_ms=12_000) is True
+    assert redis.calls == [
+        ("test:replay:rid-1", 12_000),
+        ("test:replay:rid-1", 12_000),
+    ]

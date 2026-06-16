@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 import threading
 import time
@@ -102,6 +103,47 @@ class InMemoryReplayStore:
             self._seen.pop(rid, None)
 
 
+class RedisReplayStore:
+    """Redis-backed replay store for multi-worker / multi-replica services.
+
+    The operation is a single ``SET key value NX PX ttl`` call, so two workers
+    racing on the same request id share one replay decision.
+    """
+
+    def __init__(
+        self,
+        redis_client,
+        *,
+        prefix: str = "ai-gateway:internal:replay",
+    ) -> None:
+        self._redis = redis_client
+        self._prefix = prefix.rstrip(":")
+
+    @classmethod
+    def from_url(
+        cls,
+        redis_url: str,
+        *,
+        prefix: str = "ai-gateway:internal:replay",
+    ) -> RedisReplayStore:
+        try:
+            import redis
+        except ImportError as exc:  # pragma: no cover - dependency declared by package
+            raise RuntimeError("redis package is required for RedisReplayStore") from exc
+        return cls(
+            redis.Redis.from_url(redis_url, decode_responses=True),
+            prefix=prefix,
+        )
+
+    def seen_or_record(self, request_id: str, ttl_ms: int) -> bool:
+        key = f"{self._prefix}:{request_id}"
+        try:
+            recorded = self._redis.set(key, "1", nx=True, px=ttl_ms)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("redis replay store unavailable") from exc
+        return not bool(recorded)
+
+
 @dataclass
 class GatewaySecret:
     """Bi-directional HMAC ``X-Gateway-Secret`` handler.
@@ -115,27 +157,90 @@ class GatewaySecret:
     replay_ttl_ms: int = _DEFAULT_REPLAY_TTL_MS
     replay_store: ReplayStore | None = None
     header_name: str = "X-Gateway-Secret"
+    version: str | None = None
+    key_id: str | None = None
+    keys: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not self.secret or len(self.secret) < 16:
             raise ValueError(
                 "GATEWAY_ASSISTANT_SHARED_SECRET must be at least 16 chars"
             )
+        self.version = (
+            self.version or os.getenv("INTERNAL_AUTH_VERSION", "v1")
+        ).strip().lower()
+        if self.version not in {"v1", "v2"}:
+            raise ValueError("INTERNAL_AUTH_VERSION must be 'v1' or 'v2'")
+
+        env_keys = _parse_internal_auth_keys(os.getenv("INTERNAL_AUTH_KEYS", ""))
+        if self.keys is None:
+            self.keys = env_keys or {}
+        self.key_id = (
+            self.key_id
+            or os.getenv("INTERNAL_AUTH_ACTIVE_KEY_ID", "").strip()
+            or "local"
+        )
+        if not self.keys:
+            self.keys = {self.key_id: self.secret}
+        elif self.key_id not in self.keys:
+            # Keep startup deterministic: if the active id is wrong, fall back
+            # to the first configured key rather than signing unverifiable
+            # headers with the legacy single-secret value.
+            self.key_id = next(iter(self.keys))
+
+        for kid, value in self.keys.items():
+            if not kid or ":" in kid:
+                raise ValueError(
+                    "internal auth key ids must be non-empty and colon-free"
+                )
+            if not value or len(value) < 16:
+                raise ValueError("internal auth secrets must be at least 16 chars")
+
         if self.replay_store is None:
-            self.replay_store = InMemoryReplayStore()
+            self.replay_store = _default_replay_store()
 
     # ----- sign -----
 
-    def sign(self, request_id: str | None = None) -> str:
+    def sign(
+        self,
+        request_id: str | None = None,
+        *,
+        method: str | None = None,
+        path: str | None = None,
+        query: str | None = "",
+        body: bytes | str | None = None,
+    ) -> str:
         """Produce a fresh header value. ``request_id`` auto-generated if omitted."""
         rid = request_id or secrets.token_hex(16)
         ts = str(_epoch_ms())
+        if self.version == "v2":
+            kid = self.key_id or "local"
+            body_hash = _body_sha256(body)
+            sig = self._hmac_v2(
+                key_id=kid,
+                request_id=rid,
+                ts=ts,
+                method=method or "",
+                path=path or "",
+                query=query or "",
+                body_hash=body_hash,
+            )
+            return f"v2:{kid}:{rid}:{ts}:{body_hash}:{sig}"
+
         sig = self._hmac(rid, ts)
         return f"{_SIG_PREFIX}:{rid}:{ts}:{sig}"
 
     # ----- verify -----
 
-    def verify(self, header_value: str | None) -> str:
+    def verify(
+        self,
+        header_value: str | None,
+        *,
+        method: str | None = None,
+        path: str | None = None,
+        query: str | None = "",
+        body: bytes | str | None = None,
+    ) -> str:
         """Verify ``header_value``. Returns the ``request_id`` on success.
 
         Raises ``InvalidGatewaySecret`` for any failure mode. The middleware
@@ -145,6 +250,16 @@ class GatewaySecret:
             raise InvalidGatewaySecret("missing header")
 
         parts = header_value.split(":")
+        if not parts:
+            raise InvalidGatewaySecret("malformed header")
+        if parts[0] == "v2":
+            return self._verify_v2(
+                parts,
+                method=method or "",
+                path=path or "",
+                query=query or "",
+                body=body,
+            )
         if len(parts) != 4 or parts[0] != _SIG_PREFIX:
             raise InvalidGatewaySecret("malformed header")
 
@@ -166,7 +281,11 @@ class GatewaySecret:
         # a forged header can't populate the seen set and DoS legit
         # request_ids.
         assert self.replay_store is not None  # post_init ensures this
-        if self.replay_store.seen_or_record(rid, self.replay_ttl_ms):
+        try:
+            replayed = self.replay_store.seen_or_record(rid, self.replay_ttl_ms)
+        except Exception as exc:  # noqa: BLE001
+            raise InvalidGatewaySecret("replay store unavailable") from exc
+        if replayed:
             raise InvalidGatewaySecret("replay detected")
 
         return rid
@@ -176,9 +295,84 @@ class GatewaySecret:
     def _hmac(self, request_id: str, ts: str) -> str:
         mac = hmac.new(
             self.secret.encode("utf-8"),
-            f"{request_id}:{ts}".encode("utf-8"),
+            f"{request_id}:{ts}".encode(),
             sha256,
         )
+        return mac.hexdigest()
+
+    def _verify_v2(
+        self,
+        parts: list[str],
+        *,
+        method: str,
+        path: str,
+        query: str,
+        body: bytes | str | None,
+    ) -> str:
+        if len(parts) != 6:
+            raise InvalidGatewaySecret("malformed header")
+        _, key_id, rid, ts_str, body_hash, sig = parts
+        try:
+            ts = int(ts_str)
+        except ValueError as e:
+            raise InvalidGatewaySecret("bad timestamp") from e
+
+        now = _epoch_ms()
+        if abs(now - ts) > self.max_skew_ms:
+            raise InvalidGatewaySecret("timestamp skew")
+
+        expected_body_hash = _body_sha256(body)
+        if not hmac.compare_digest(expected_body_hash, body_hash):
+            raise InvalidGatewaySecret("body hash mismatch")
+
+        expected = self._hmac_v2(
+            key_id=key_id,
+            request_id=rid,
+            ts=ts_str,
+            method=method,
+            path=path,
+            query=query,
+            body_hash=body_hash,
+        )
+        if not hmac.compare_digest(expected, sig):
+            raise InvalidGatewaySecret("signature mismatch")
+
+        assert self.replay_store is not None
+        try:
+            replayed = self.replay_store.seen_or_record(rid, self.replay_ttl_ms)
+        except Exception as exc:  # noqa: BLE001
+            raise InvalidGatewaySecret("replay store unavailable") from exc
+        if replayed:
+            raise InvalidGatewaySecret("replay detected")
+        return rid
+
+    def _hmac_v2(
+        self,
+        *,
+        key_id: str,
+        request_id: str,
+        ts: str,
+        method: str,
+        path: str,
+        query: str,
+        body_hash: str,
+    ) -> str:
+        keys = self.keys or {}
+        secret = keys.get(key_id)
+        if not secret:
+            raise InvalidGatewaySecret("unknown key id")
+        canonical = "\n".join(
+            [
+                method.upper(),
+                path,
+                query,
+                body_hash,
+                request_id,
+                ts,
+                key_id,
+            ]
+        )
+        mac = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), sha256)
         return mac.hexdigest()
 
 
@@ -186,9 +380,48 @@ def _epoch_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _body_sha256(body: bytes | str | None) -> str:
+    if body is None:
+        data = b""
+    elif isinstance(body, str):
+        data = body.encode("utf-8")
+    else:
+        data = body
+    return sha256(data).hexdigest()
+
+
+def _parse_internal_auth_keys(raw: str) -> dict[str, str]:
+    keys: dict[str, str] = {}
+    for item in (raw or "").split(","):
+        item = item.strip()
+        if not item or ":" not in item:
+            continue
+        key_id, secret = item.split(":", 1)
+        key_id = key_id.strip()
+        secret = secret.strip()
+        if key_id and secret:
+            keys[key_id] = secret
+    return keys
+
+
+def _default_replay_store() -> ReplayStore:
+    backend = os.getenv("INTERNAL_COMM_STATE_BACKEND", "memory").strip().lower()
+    if backend == "redis":
+        redis_url = os.getenv("INTERNAL_COMM_REDIS_URL", "").strip()
+        if not redis_url:
+            logger.warning(
+                "INTERNAL_COMM_STATE_BACKEND=redis but INTERNAL_COMM_REDIS_URL is unset; "
+                "falling back to in-memory replay store"
+            )
+            return InMemoryReplayStore()
+        return RedisReplayStore.from_url(redis_url)
+    return InMemoryReplayStore()
+
+
 __all__ = [
     "GatewaySecret",
     "InvalidGatewaySecret",
     "InMemoryReplayStore",
+    "RedisReplayStore",
     "ReplayStore",
 ]

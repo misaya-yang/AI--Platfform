@@ -12,8 +12,6 @@ This covers:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from src.core.auth.user_resolver import UserContext
 from assistant_service.core.assistant_service import (
     AssistantConfig,
     AssistantService,
@@ -26,6 +24,8 @@ from assistant_service.core.tool_orchestrator import (
     ToolExecutionResult,
     ToolOrchestrator,
 )
+
+from src.core.auth.user_resolver import UserContext
 
 # =============================================================================
 # Fixtures
@@ -86,16 +86,17 @@ def assistant_service(mock_model_registry, mock_context_manager):
     """Create an AssistantService instance for testing."""
     with patch("assistant_service.core.assistant_service.get_context_manager") as mock_get_ctx:
         mock_get_ctx.return_value = mock_context_manager
-        with patch("assistant_service.core.assistant_service.get_rag_evaluator"):
-            with patch("assistant_service.core.assistant_service.get_artifact_storage"):
-                with patch("assistant_service.core.assistant_service.create_file_processor"):
-                    service = AssistantService(
-                        model_registry=mock_model_registry,
-                        kb_service=None,
-                        session_manager=None,
-                        enable_rag_evaluation=False,
-                    )
-                    return service
+        with patch("assistant_service.core.assistant_service.get_rag_evaluator"), patch(
+            "assistant_service.core.assistant_service.get_artifact_storage",
+            create=True,
+        ), patch("assistant_service.core.assistant_service.create_file_processor"):
+            service = AssistantService(
+                model_registry=mock_model_registry,
+                kb_service=None,
+                session_manager=None,
+                enable_rag_evaluation=False,
+            )
+            return service
 
 
 # =============================================================================
@@ -160,15 +161,20 @@ class TestAssistantServiceProperties:
         """Test that injected task planner is used."""
         custom_planner = TaskPlanner()
 
-        with patch("assistant_service.core.assistant_service.get_context_manager"):
-            with patch("assistant_service.core.assistant_service.get_rag_evaluator"):
-                with patch("assistant_service.core.assistant_service.get_artifact_storage"):
-                    with patch("assistant_service.core.assistant_service.create_file_processor"):
-                        service = AssistantService(
-                            model_registry=mock_model_registry,
-                            task_planner=custom_planner,
-                            enable_rag_evaluation=False,
-                        )
+        with (
+            patch("assistant_service.core.assistant_service.get_context_manager"),
+            patch("assistant_service.core.assistant_service.get_rag_evaluator"),
+            patch(
+                "assistant_service.core.assistant_service.get_artifact_storage",
+                create=True,
+            ),
+            patch("assistant_service.core.assistant_service.create_file_processor"),
+        ):
+            service = AssistantService(
+                model_registry=mock_model_registry,
+                task_planner=custom_planner,
+                enable_rag_evaluation=False,
+            )
 
         assert service._task_planner is custom_planner
         assert service.task_planner is custom_planner

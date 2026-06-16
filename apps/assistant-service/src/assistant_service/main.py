@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from ai_gateway_core.logging import configure_structured_logging
 
@@ -486,6 +487,26 @@ from ai_gateway_core.proxy import RequestIDMiddleware  # noqa: E402
 
 app.add_middleware(RequestIDMiddleware)
 
+from ai_gateway_core.comm import IdempotencyMiddleware, InMemoryIdempotencyStore, RedisIdempotencyStore  # noqa: E402
+
+
+def _idempotency_store_from_env():
+    backend = os.environ.get("INTERNAL_IDEMPOTENCY_BACKEND", "memory").strip().lower()
+    if backend == "redis":
+        redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL") or os.environ.get("REDIS_URL", "")
+        if redis_url:
+            import redis.asyncio as aioredis
+
+            return RedisIdempotencyStore(aioredis.from_url(redis_url, decode_responses=False))
+    return InMemoryIdempotencyStore()
+
+
+app.add_middleware(
+    IdempotencyMiddleware,
+    store=_idempotency_store_from_env(),
+    ttl_seconds=int(os.environ.get("INTERNAL_IDEMPOTENCY_TTL_SECONDS", "86400")),
+)
+
 # Phase 5a: reject traffic without a valid ``X-Gateway-Secret``. Closes
 # Audit Finding H-4 (sibling-container SSRF → user impersonation). Skipped
 # entirely when the secret env var is unset (local dev); in prod compose
@@ -527,6 +548,40 @@ elif not settings.app.allow_anonymous:
 async def health():
     ready = getattr(app.state, "_ready", False)
     return {"status": "ok" if ready else "starting", "service": "assistant", "version": "0.1.0"}
+
+
+@app.get("/health/live")
+async def health_live():
+    return {"status": "alive", "service": "assistant"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    from ai_gateway_core.proxy.drain import DRAIN
+
+    ready = bool(getattr(app.state, "_ready", False)) and not DRAIN.draining
+    checks = {
+        "startup": "ready" if getattr(app.state, "_ready", False) else "starting",
+        "drain": "draining" if DRAIN.draining else "accepting",
+        "database": (
+            "healthy"
+            if getattr(app.state, "database", None) is not None
+            else "not_configured"
+        ),
+        "kb_proxy": (
+            "configured"
+            if getattr(app.state, "kb_proxy", None) is not None
+            else "not_configured"
+        ),
+    }
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "service": "assistant",
+            "checks": checks,
+        },
+    )
 
 
 @app.middleware("http")

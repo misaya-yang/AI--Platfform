@@ -230,6 +230,20 @@ class TestTransparentProxy:
         assert stream_sem is not default_sem
 
     @pytest.mark.asyncio
+    async def test_stream_clients_are_isolated_from_default_clients(
+        self, transparent_proxy, proxy_config
+    ):
+        stream_client = await transparent_proxy._get_client(proxy_config, slot_kind="stream")
+        default_client = await transparent_proxy._get_client(proxy_config, slot_kind="default")
+
+        try:
+            assert stream_client is not default_client
+            assert ("langgraph_001", "stream") in transparent_proxy._clients
+            assert ("langgraph_001", "default") in transparent_proxy._clients
+        finally:
+            await transparent_proxy.close()
+
+    @pytest.mark.asyncio
     async def test_queue_timeout_raises_when_slot_is_exhausted(
         self, transparent_proxy, proxy_config
     ):

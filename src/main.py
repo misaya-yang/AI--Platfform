@@ -154,6 +154,10 @@ def create_app() -> FastAPI:
     # 这是解决首 token 延迟问题的关键
 
     # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
+    from ai_gateway_core.proxy.version_middleware import APIVersionMiddleware
+    app.add_middleware(APIVersionMiddleware)
+
+    # Stable anonymous identity for guest users (cookie/header) - 纯 ASGI
     anon_config = StreamingAnonymousConfig(
         enabled=getattr(settings.anonymous, "enabled", True),
         header_name=getattr(settings.anonymous, "header_name", "X-AG-Anonymous-Id"),

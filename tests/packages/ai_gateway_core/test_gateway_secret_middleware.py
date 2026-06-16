@@ -4,6 +4,11 @@ from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.auth.gateway_secret_middleware import GatewaySecretAuthMiddleware
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+
+class Payload(BaseModel):
+    query: str
 
 
 def _app(*, allow_anonymous: bool = False) -> tuple[FastAPI, GatewaySecret]:
@@ -66,3 +71,49 @@ def test_gateway_secret_middleware_allows_unsigned_dev_when_enabled() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "accepted"}
+
+
+def test_gateway_secret_middleware_v2_verifies_and_replays_request_body() -> None:
+    secret = GatewaySecret(
+        secret="shared-secret-for-tests",
+        version="v2",
+        key_id="local",
+        keys={"local": "shared-secret-for-tests"},
+    )
+    verifier = GatewaySecret(
+        secret="shared-secret-for-tests",
+        version="v2",
+        key_id="local",
+        keys={"local": "shared-secret-for-tests"},
+    )
+    app = FastAPI()
+    app.add_middleware(
+        GatewaySecretAuthMiddleware,
+        gateway_secret=verifier,
+        allow_anonymous=False,
+    )
+
+    @app.post("/protected")
+    async def protected(payload: Payload):
+        return {"query": payload.query}
+
+    body = b'{"query":"hello"}'
+    header = secret.sign(
+        request_id="middleware-v2",
+        method="POST",
+        path="/protected",
+        query="",
+        body=body,
+    )
+
+    response = TestClient(app).post(
+        "/protected",
+        content=body,
+        headers={
+            secret.header_name: header,
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"query": "hello"}

@@ -27,6 +27,95 @@ def _budget(
 
 
 @pytest.mark.asyncio
+async def test_tenant_bulkhead_rejects_one_tenant_without_exhausting_global_capacity():
+    controller = CapacityAdmissionController(per_tenant_default_share=0.5)
+    budget = _budget(key="upstream.langgraph_agent", limit=4, queue_max=0)
+
+    first = await controller.acquire(
+        budgets=[budget],
+        tenant_id="tenant-a",
+        user_id="user-a",
+        service_id="local-2024-agent",
+        request_class="sync",
+        request_id="req-1",
+    )
+    second = await controller.acquire(
+        budgets=[budget],
+        tenant_id="tenant-a",
+        user_id="user-b",
+        service_id="local-2024-agent",
+        request_class="sync",
+        request_id="req-2",
+    )
+
+    with pytest.raises(CapacityRejected) as exc_info:
+        await controller.acquire(
+            budgets=[budget],
+            tenant_id="tenant-a",
+            user_id="user-c",
+            service_id="local-2024-agent",
+            request_class="sync",
+            request_id="req-3",
+        )
+
+    rejection = exc_info.value
+    assert rejection.status_code == 429
+    assert rejection.code == "GATEWAY_TENANT_CAPACITY_EXHAUSTED"
+    assert rejection.headers["X-RateLimit-Remaining"] == "0"
+    assert rejection.headers["X-Gateway-Tenant-Id"] == "tenant-a"
+
+    other_tenant = await controller.acquire(
+        budgets=[budget],
+        tenant_id="tenant-b",
+        user_id="user-z",
+        service_id="local-2024-agent",
+        request_class="sync",
+        request_id="req-4",
+    )
+
+    await other_tenant.release()
+    await second.release()
+    await first.release()
+
+
+@pytest.mark.asyncio
+async def test_adaptive_load_shedder_rejects_normal_priority_when_p99_is_high():
+    from src.core.gateway.admission import AdaptiveLoadShedder
+
+    shedder = AdaptiveLoadShedder(window_seconds=30, normal_threshold_ms=10_000)
+    for _ in range(20):
+        shedder.record_latency(12_000)
+
+    rejection = shedder.maybe_reject(
+        service_id="assistant-service",
+        request_class="sync",
+        priority=2,
+    )
+
+    assert rejection is not None
+    assert rejection.status_code == 503
+    assert rejection.code == "GATEWAY_LOAD_SHED"
+    assert rejection.headers["Retry-After"] == "1"
+
+
+def test_adaptive_load_shedder_never_rejects_critical_priority():
+    from src.core.gateway.admission import AdaptiveLoadShedder
+
+    shedder = AdaptiveLoadShedder(window_seconds=30, normal_threshold_ms=10_000)
+    for _ in range(20):
+        shedder.record_latency(60_000)
+
+    assert (
+        shedder.maybe_reject(
+            service_id="gateway",
+            request_class="health",
+            priority=0,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_second_request_waits_until_capacity_is_released():
     controller = CapacityAdmissionController()
     budget = _budget(limit=1, queue_max=1, queue_timeout_ms=500)

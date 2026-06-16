@@ -671,6 +671,7 @@ class TaskPlanner:
     # Tool to TaskType mapping for automatic type inference
     TOOL_TYPE_MAPPING: dict[str, TaskType] = {
         "kb_search": TaskType.RETRIEVE,
+        "web_search": TaskType.RETRIEVE,
         "database_query": TaskType.RETRIEVE,
         "generate_text": TaskType.GENERATE,
         "generate_document": TaskType.GENERATE,
@@ -849,7 +850,7 @@ class TaskPlanner:
 
         return best_intent, strategy, metadata
 
-    def _select_strategy(self, intent: IntentType, user_request: str) -> TaskStrategy:
+    def _select_strategy(self, intent: IntentType, _user_request: str) -> TaskStrategy:
         """
         Select execution strategy based on intent and request complexity.
 
@@ -921,7 +922,7 @@ class TaskPlanner:
         self,
         user_request: str,
         available_tools: list[str],
-        context: dict[str, Any],
+        _context: dict[str, Any],
         pattern: WorkflowPattern | None,
     ) -> list[PlannedTask]:
         """
@@ -943,7 +944,7 @@ class TaskPlanner:
 
         if pattern:
             # Apply pattern template
-            tasks = self._apply_pattern_template(pattern, user_request, available_tools, context)
+            tasks = self._apply_pattern_template(pattern, user_request, available_tools, _context)
         else:
             # Default: single retrieval task if no pattern matches
             if "kb_search" in available_tools:
@@ -977,7 +978,7 @@ class TaskPlanner:
         pattern: WorkflowPattern,
         user_request: str,
         available_tools: list[str],
-        context: dict[str, Any],
+        _context: dict[str, Any],
     ) -> list[PlannedTask]:
         """
         Apply a workflow pattern template to generate tasks.

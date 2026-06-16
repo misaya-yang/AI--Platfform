@@ -18,7 +18,6 @@ import json
 import logging
 
 import pytest
-
 from ai_gateway_core.logging import (
     ContextFilter,
     LogContext,

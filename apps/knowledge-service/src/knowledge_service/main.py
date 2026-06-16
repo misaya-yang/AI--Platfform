@@ -334,10 +334,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning("knowledge_service_init_partial", error=str(e))
             # Service still boots — retrieve endpoint works, upload may not until init completes
 
+        app.state._ready = True
         logger.info("knowledge_service_ready")
         yield
 
         # --- shutdown ---
+        app.state._ready = False
         logger.info("knowledge_service_shutting_down")
         # Wait for in-flight requests (retrieval, QA, document upload) to
         # finish before stopping the worker / closing pools. ``DrainMiddleware``
@@ -414,6 +416,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(RequestIDMiddleware)
 
+    from ai_gateway_core.comm import IdempotencyMiddleware, InMemoryIdempotencyStore, RedisIdempotencyStore
+
+    def _idempotency_store_from_env():
+        backend = os.environ.get("INTERNAL_IDEMPOTENCY_BACKEND", "memory").strip().lower()
+        if backend == "redis":
+            redis_url = os.environ.get("INTERNAL_COMM_REDIS_URL") or os.environ.get("REDIS_URL", "")
+            if redis_url:
+                import redis.asyncio as aioredis
+
+                return RedisIdempotencyStore(aioredis.from_url(redis_url, decode_responses=False))
+        return InMemoryIdempotencyStore()
+
+    app.add_middleware(
+        IdempotencyMiddleware,
+        store=_idempotency_store_from_env(),
+        ttl_seconds=int(os.environ.get("INTERNAL_IDEMPOTENCY_TTL_SECONDS", "86400")),
+    )
+
     # --- Phase K5c: Gateway HMAC verification (closes Polaris #6-KB) ---
     # Reject requests that didn't pass through the gateway signer. Sibling
     # containers on the Docker bridge network previously could craft
@@ -465,6 +485,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["Health"])
     async def health(request: Request) -> dict[str, str]:
         return {"status": "ok", "service": "knowledge-service"}
+
+    @app.get("/health/live", tags=["Health"])
+    async def health_live() -> dict[str, str]:
+        return {"status": "alive", "service": "knowledge-service"}
+
+    @app.get("/health/ready", tags=["Health"])
+    async def health_ready(request: Request):
+        from ai_gateway_core.proxy.drain import DRAIN
+
+        startup_ready = bool(getattr(request.app.state, "_ready", False))
+        db_ready = getattr(request.app.state, "db", None) is not None
+        qdrant_ready = getattr(request.app.state, "qdrant", None) is not None
+        ready = startup_ready and db_ready and qdrant_ready and not DRAIN.draining
+        checks = {
+            "startup": "ready" if startup_ready else "starting",
+            "database": "healthy" if db_ready else "not_connected",
+            "qdrant": "healthy" if qdrant_ready else "not_connected",
+            "drain": "draining" if DRAIN.draining else "accepting",
+        }
+        return ORJSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "not_ready",
+                "service": "knowledge-service",
+                "checks": checks,
+            },
+        )
 
     # --- API routes ---
     # Try full 51-endpoint router first; fall back to placeholder if imports fail

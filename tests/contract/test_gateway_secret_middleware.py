@@ -7,15 +7,12 @@ rejection logic so CI catches regressions without Docker.
 """
 from __future__ import annotations
 
-import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from ai_gateway_core.auth.gateway_secret import (
     GatewaySecret,
     InMemoryReplayStore,
 )
-
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 SECRET = "0123456789abcdef0123456789abcdef"
 

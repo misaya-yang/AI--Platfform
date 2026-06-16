@@ -29,6 +29,12 @@ from assistant_service.core.code_executor import (
     get_code_executor,
 )
 
+
+@pytest.fixture(autouse=True)
+def _sandbox_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("SANDBOX_WORKSPACE", str(tmp_path / "sandbox-workspace"))
+
+
 # =============================================================================
 # Data Class Tests
 # =============================================================================
@@ -58,7 +64,7 @@ class TestCodeExecutionConfig:
         assert config.cpu_limit == 0.5
         assert config.timeout_seconds == 30
         assert config.network_disabled is True
-        assert config.image == "python:3.11-slim"
+        assert config.image == "python:3.12-slim"
         assert config.workspace_path == "/workspace"
         assert config.input_path == "/workspace/input"
         assert config.output_path == "/workspace/output"

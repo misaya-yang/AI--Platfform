@@ -101,6 +101,36 @@ groups:
           summary: "High memory usage"
           description: "Memory usage is {{ $value | printf \"%.1f\" }}%"
 
+  - name: event_bus_alerts
+    interval: 30s
+    rules:
+      - alert: HighDLQDepth
+        expr: event_dlq_depth > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High event DLQ depth"
+          description: "Event DLQ depth is {{ $value | printf \"%.0f\" }} (threshold: 100)"
+
+      - alert: CriticalDLQDepth
+        expr: event_dlq_depth > 1000
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical event DLQ depth"
+          description: "Event DLQ depth is {{ $value | printf \"%.0f\" }} (threshold: 1000)"
+
+      - alert: EventConsumerLag
+        expr: event_consumer_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event consumer lag is high"
+          description: "Consumer lag is {{ $value | printf \"%.0f\" }} messages"
+
   - name: langgraph_alerts
     interval: 30s
     rules:

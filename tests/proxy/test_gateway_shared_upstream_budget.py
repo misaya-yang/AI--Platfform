@@ -59,11 +59,13 @@ async def test_two_gateway_instances_share_one_upstream_redis_budget():
         redis_client=redis,
         gateway_instance_id="gw-a",
         cluster_epoch="uat-2026-05",
+        per_tenant_default_share=1.0,
     )
     second_gateway = CapacityAdmissionController(
         redis_client=redis,
         gateway_instance_id="gw-b",
         cluster_epoch="uat-2026-05",
+        per_tenant_default_share=1.0,
     )
     budget = _shared_budget()
 
@@ -106,10 +108,107 @@ async def test_two_gateway_instances_share_one_upstream_redis_budget():
 
 
 @pytest.mark.asyncio
+async def test_upstream_redis_budget_is_shared_across_tenants():
+    redis = FakeRedisBudget()
+    first_gateway = CapacityAdmissionController(
+        redis_client=redis,
+        gateway_instance_id="gw-a",
+        cluster_epoch="uat-2026-05",
+        per_tenant_default_share=1.0,
+    )
+    second_gateway = CapacityAdmissionController(
+        redis_client=redis,
+        gateway_instance_id="gw-b",
+        cluster_epoch="uat-2026-05",
+        per_tenant_default_share=1.0,
+    )
+    budget = _shared_budget()
+
+    leases = []
+    for index in range(4):
+        controller = first_gateway if index % 2 == 0 else second_gateway
+        leases.append(
+            await controller.acquire(
+                budgets=[budget],
+                tenant_id=f"tenant-{index}",
+                user_id=f"user-{index}",
+                service_id="local-2024-agent",
+                request_class="sync",
+                request_id=f"req-{index}",
+            )
+        )
+
+    with pytest.raises(CapacityRejected):
+        await second_gateway.acquire(
+            budgets=[budget],
+            tenant_id="tenant-over",
+            user_id="user-over",
+            service_id="local-2024-agent",
+            request_class="sync",
+            request_id="req-over",
+        )
+
+    for lease in leases:
+        await lease.release()
+
+
+@pytest.mark.asyncio
+async def test_two_gateway_instances_share_one_tenant_redis_budget():
+    redis = FakeRedisBudget()
+    first_gateway = CapacityAdmissionController(
+        redis_client=redis,
+        gateway_instance_id="gw-a",
+        cluster_epoch="uat-2026-05",
+        per_tenant_default_share=0.5,
+    )
+    second_gateway = CapacityAdmissionController(
+        redis_client=redis,
+        gateway_instance_id="gw-b",
+        cluster_epoch="uat-2026-05",
+        per_tenant_default_share=0.5,
+    )
+    budget = _shared_budget()
+
+    first = await first_gateway.acquire(
+        budgets=[budget],
+        tenant_id="tenant-a",
+        user_id="user-1",
+        service_id="local-2024-agent",
+        request_class="sync",
+        request_id="req-1",
+    )
+    second = await second_gateway.acquire(
+        budgets=[budget],
+        tenant_id="tenant-a",
+        user_id="user-2",
+        service_id="local-2024-agent",
+        request_class="sync",
+        request_id="req-2",
+    )
+
+    with pytest.raises(CapacityRejected) as exc_info:
+        await first_gateway.acquire(
+            budgets=[budget],
+            tenant_id="tenant-a",
+            user_id="user-over",
+            service_id="local-2024-agent",
+            request_class="sync",
+            request_id="req-over",
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.code == "GATEWAY_TENANT_CAPACITY_EXHAUSTED"
+
+    await second.release()
+    await first.release()
+
+
+@pytest.mark.asyncio
 async def test_redis_unavailable_fails_closed_for_shared_sync_budget():
     controller = CapacityAdmissionController(
         redis_client=FakeRedisBudget(fail=True),
         gateway_instance_id="gw-a",
+        per_tenant_default_share=1.0,
     )
 
     with pytest.raises(CapacityRejected) as exc_info:

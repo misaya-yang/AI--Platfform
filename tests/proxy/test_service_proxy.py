@@ -10,14 +10,14 @@ Locks the semantics audited as Findings M-1..M-5:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import httpx
 import pytest
-
 from ai_gateway_core.proxy.base import (
     CircuitBreaker,
     CircuitBreakerState,
     InMemoryCounter,
+    ServiceProxy,
+    ServiceProxyConfig,
 )
 
 
@@ -121,6 +121,49 @@ def test_breaker_custom_threshold() -> None:
     assert cb.state == CircuitBreakerState.CLOSED
     cb.on_failure()
     assert cb.state == CircuitBreakerState.OPEN
+
+
+def test_breaker_recovery_timeout_allows_new_probe_after_stale_probe_slot(
+    monkeypatch,
+) -> None:
+    now = 1_000.0
+    monkeypatch.setattr("ai_gateway_core.proxy.base.time.monotonic", lambda: now)
+    cb = CircuitBreaker(name="test", threshold=2, recovery_timeout=30)
+    cb.on_failure()
+    cb.on_failure()
+    cb.gate()
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        cb.gate()
+
+    now = 1_031.0
+    cb.gate()
+    cb.on_response(200)
+    assert cb.state == CircuitBreakerState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_service_proxy_disables_httpx_transport_retries(monkeypatch) -> None:
+    captured_retries: list[int] = []
+
+    def fake_transport(*, retries: int = 0, **_kwargs):
+        captured_retries.append(retries)
+        return httpx.MockTransport(lambda _request: httpx.Response(200))
+
+    monkeypatch.setattr(
+        "ai_gateway_core.proxy.base.httpx.AsyncHTTPTransport",
+        fake_transport,
+    )
+    proxy = ServiceProxy(ServiceProxyConfig(name="test", base_url="http://upstream"))
+
+    try:
+        await proxy._get_client()
+    finally:
+        await proxy.aclose()
+
+    assert captured_retries == [0]
 
 
 # --- strip / inject header contract ---

@@ -29,6 +29,36 @@ class SessionMessageCreate(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+async def _list_assistant_sessions_for_service_id(
+    session_manager: SessionManager,
+    user: UserContext,
+    *,
+    limit: int,
+    service_id: str,
+):
+    """Backward-compatible assistant session listing helper."""
+    if service_id != "__builtin_assistant__":
+        return await session_manager.list_sessions(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            service_id=service_id,
+            limit=limit,
+            status="active",
+        )
+
+    sessions = await session_manager.list_sessions(
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        service_id=None,
+        limit=limit,
+        status="active",
+    )
+    allowed = {"__builtin_assistant__", "assistant", None, ""}
+    filtered = [session for session in sessions if getattr(session, "service_id", None) in allowed]
+    filtered.sort(key=lambda item: getattr(item, "updated_at", None), reverse=True)
+    return filtered[:limit]
+
+
 @router.get("/sessions")
 async def list_sessions(
     service_id: str | None = Query(default=None),

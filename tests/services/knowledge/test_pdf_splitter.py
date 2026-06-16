@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 import pytest
-
 from knowledge_service.services.knowledge.pdf_splitter import PDFSplitter, SplitResult
+
+
+def _fitz_or_skip():
+    try:
+        import pymupdf as fitz
+    except Exception as pymupdf_exc:  # noqa: BLE001
+        try:
+            import fitz
+        except Exception as fitz_exc:  # noqa: BLE001
+            pytest.skip(f"PyMuPDF is not loadable in this environment: {fitz_exc or pymupdf_exc}")
+    return fitz
 
 
 @pytest.fixture
@@ -53,10 +59,7 @@ class TestPDFSplitter:
         """Files smaller than max_size should return original path unchanged."""
         pdf_path = tmp_path / "small.pdf"
         # Create a minimal valid PDF
-        try:
-            import pymupdf as fitz
-        except ImportError:
-            import fitz
+        fitz = _fitz_or_skip()
 
         doc = fitz.open()
         page = doc.new_page()
@@ -73,10 +76,7 @@ class TestPDFSplitter:
 
     def test_split_produces_multiple_parts(self, tmp_path):
         """A large-enough PDF should be split into multiple parts."""
-        try:
-            import pymupdf as fitz
-        except ImportError:
-            import fitz
+        fitz = _fitz_or_skip()
 
         # Create a multi-page PDF with enough content to exceed small limit
         pdf_path = tmp_path / "big.pdf"
@@ -109,10 +109,7 @@ class TestPDFSplitter:
 
     def test_split_empty_pdf(self, tmp_path):
         """An empty PDF (1 blank page) should return single result."""
-        try:
-            import pymupdf as fitz
-        except ImportError:
-            import fitz
+        fitz = _fitz_or_skip()
 
         pdf_path = tmp_path / "empty.pdf"
         doc = fitz.open()
@@ -126,10 +123,7 @@ class TestPDFSplitter:
 
     def test_split_single_page_pdf(self, tmp_path):
         """A single-page PDF should not be split even if large."""
-        try:
-            import pymupdf as fitz
-        except ImportError:
-            import fitz
+        fitz = _fitz_or_skip()
 
         pdf_path = tmp_path / "single.pdf"
         doc = fitz.open()
@@ -145,10 +139,7 @@ class TestPDFSplitter:
 
     def test_part_indices_sequential(self, tmp_path):
         """Part indices should be sequential starting from 0."""
-        try:
-            import pymupdf as fitz
-        except ImportError:
-            import fitz
+        fitz = _fitz_or_skip()
 
         pdf_path = tmp_path / "multi.pdf"
         doc = fitz.open()

@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 
-from fastapi import Request
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.datastructures import Headers
 
 from .gateway_secret import GatewaySecret, InvalidGatewaySecret
 
@@ -20,7 +17,7 @@ UNAUTHORIZED_BODY = {
 }
 
 
-class GatewaySecretAuthMiddleware(BaseHTTPMiddleware):
+class GatewaySecretAuthMiddleware:
     """Verify ``X-Gateway-Secret`` on every non-probe request.
 
     The same middleware protects assistant-service and knowledge-service so
@@ -28,7 +25,9 @@ class GatewaySecretAuthMiddleware(BaseHTTPMiddleware):
     paths, or replay-verification behavior.
     """
 
-    _SAFE_PATHS: frozenset[str] = frozenset({"/health", "/metrics"})
+    _SAFE_PATHS: frozenset[str] = frozenset(
+        {"/health", "/health/live", "/health/ready", "/metrics"}
+    )
 
     def __init__(
         self,
@@ -37,39 +36,88 @@ class GatewaySecretAuthMiddleware(BaseHTTPMiddleware):
         gateway_secret: GatewaySecret,
         allow_anonymous: bool = False,
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self._gateway_secret = gateway_secret
         self._allow_anonymous = allow_anonymous
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        if request.url.path in self._SAFE_PATHS:
-            return await call_next(request)
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        header = request.headers.get(self._gateway_secret.header_name)
+        path = scope.get("path", "")
+        if path in self._SAFE_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        header = headers.get(self._gateway_secret.header_name)
         if header is None:
             if self._allow_anonymous:
-                return await call_next(request)
-            return _unauthorized()
+                await self.app(scope, receive, send)
+                return
+            await _unauthorized()(scope, receive, send)
+            return
 
+        replay_receive = receive
         try:
-            self._gateway_secret.verify(header)
+            body = None
+            if header.startswith("v2:"):
+                body = await _read_body(receive)
+                replay_receive = _make_replay_receive(body)
+            self._gateway_secret.verify(
+                header,
+                method=scope.get("method", ""),
+                path=path,
+                query=_query_string(scope),
+                body=body,
+            )
         except InvalidGatewaySecret as exc:
             logger.warning(
                 "gateway-secret verification failed: %s path=%s",
                 exc,
-                request.url.path,
+                path,
             )
-            return _unauthorized()
+            await _unauthorized()(scope, receive, send)
+            return
 
-        return await call_next(request)
+        await self.app(scope, replay_receive, send)
 
 
 def _unauthorized() -> JSONResponse:
     return JSONResponse(status_code=401, content=UNAUTHORIZED_BODY)
+
+
+async def _read_body(receive) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            break
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+    return b"".join(chunks)
+
+
+def _make_replay_receive(body: bytes):
+    sent = False
+
+    async def receive() -> dict:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return receive
+
+
+def _query_string(scope) -> str:
+    raw = scope.get("query_string", b"")
+    if isinstance(raw, bytes):
+        return raw.decode("latin-1")
+    return str(raw)
 
 
 __all__ = ["GatewaySecretAuthMiddleware", "UNAUTHORIZED_BODY"]

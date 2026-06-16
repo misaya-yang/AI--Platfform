@@ -77,6 +77,7 @@ class ProxyServiceConfig:
     concurrency_queue_timeout: float | None = None
     capacity_config: dict[str, Any] = field(default_factory=dict)
     max_connections: int | None = None
+    streaming_max_connections: int | None = None
     max_keepalive_connections: int | None = None
     keepalive_expiry: float | None = None
     health_check_timeout: float = 5.0
@@ -330,6 +331,10 @@ class ProxyConfigLoader:
             ),
             capacity_config=capacity_config,
             max_connections=proxy_runtime.get("max_connections", connector_config.get("max_connections")),
+            streaming_max_connections=proxy_runtime.get(
+                "streaming_max_connections",
+                connector_config.get("streaming_max_connections"),
+            ),
             max_keepalive_connections=proxy_runtime.get(
                 "max_keepalive_connections",
                 connector_config.get("max_keepalive_connections"),

@@ -144,6 +144,39 @@ The compose file wires services through Docker DNS names:
 
 Gateway-to-assistant and gateway-to-knowledge requests are protected by `GATEWAY_ASSISTANT_SHARED_SECRET` HMAC verification. Use the same value across gateway, assistant service, and knowledge service.
 
+Core service-to-service calls use the shared `ai-gateway-core` communication layer:
+
+- Gateway proxy routes use `ServiceProxy` for request-id/trace propagation, header stripping, HMAC signing, SSE pass-through, bounded timeouts, retry budget, and per-route circuit breaking.
+- Assistant-to-knowledge calls use `KBProxyClient`, backed by the same outbound client primitives.
+- `src/proxy/transparent_proxy.py` remains for external or dynamically registered proxy targets; do not add new core gateway-to-service hops there.
+- Internal clients apply bounded retry, optional token-bucket service limits, automatic idempotency keys for replay-safe non-GET calls, and low-cardinality service-call metrics.
+- Admission control separates global, per-tenant, streaming, and adapter-level capacity so one tenant, long SSE stream, or failed AI backend cannot consume all service slots.
+
+Local quickstart keeps `INTERNAL_AUTH_VERSION=v1` and `INTERNAL_COMM_STATE_BACKEND=memory`. For multi-worker or multi-replica deployments, set:
+
+```env
+INTERNAL_COMM_STATE_BACKEND=redis
+INTERNAL_COMM_REDIS_URL=redis://:<password>@redis:6379/3
+INTERNAL_AUTH_VERSION=v2
+INTERNAL_AUTH_ACTIVE_KEY_ID=local
+INTERNAL_AUTH_KEYS=local:<32-byte-secret>,previous:<old-secret>
+INTERNAL_IDEMPOTENCY_BACKEND=redis
+```
+
+`v2` signs the canonical method, path, query, body hash, request id, timestamp, and key id. That prevents a valid internal signature from being replayed across a different route. Redis state is recommended when `knowledge-service` or any protected service runs with more than one worker, because in-memory replay and breaker state is process-local.
+
+Useful communication controls:
+
+```env
+INTERNAL_SERVICE_RATE_LIMITS=knowledge-service=100:100,assistant-service=50:50
+SERVICE_STREAMING_MAX_CONNECTIONS=16
+ADMISSION_TENANT_SHARE_RATIO=0.2
+SERVICE_BREAKER_RECOVERY_TIMEOUT_SECONDS=30
+ADAPTER_BULKHEAD_LIMITS=langgraph:8,openai:16,comfyui:4
+```
+
+Keep local quickstart on memory-backed idempotency and replay state. Use Redis-backed state for multi-worker or multi-replica deployments.
+
 The CORS env values used by compose are JSON array strings:
 
 ```env
@@ -228,6 +261,23 @@ Common causes:
 - PostgreSQL password was changed after the first volume initialization.
 - Qdrant is running with old vectors from a different embedding dimension.
 - `FRONTEND_PORT`, `GATEWAY_PORT`, `POSTGRES_PORT`, `REDIS_PORT`, or `QDRANT_HTTP_PORT` conflicts with another local process.
+
+Microservice communication checks:
+
+```bash
+curl -fsS http://localhost:8080/health/ready
+curl -fsS http://localhost:8092/health/ready
+docker compose exec gateway printenv INTERNAL_AUTH_VERSION INTERNAL_COMM_STATE_BACKEND
+```
+
+- `401 AUTH_DENIED` between services: confirm gateway, assistant-service, and knowledge-service have the same `GATEWAY_ASSISTANT_SHARED_SECRET`; if `INTERNAL_AUTH_VERSION=v2`, confirm `INTERNAL_AUTH_KEYS` and `INTERNAL_AUTH_ACTIVE_KEY_ID` match.
+- `429 Rate limit exceeded`: check local quickstart rate-limit env values and whether assistant chat is hitting `RATE_LIMIT_ASSISTANT_CHAT_LIMIT`.
+- `429 GATEWAY_TENANT_CAPACITY_EXHAUSTED`: a single tenant reached its per-tenant admission share; adjust `ADMISSION_TENANT_SHARE_RATIO` or the service capacity config.
+- `502` or `504`: check downstream service logs first, then `ASSISTANT_SERVICE_URL`, `KB_SERVICE_URL`, timeout env, and whether a circuit breaker is open after repeated failures.
+- `503 GATEWAY_LOAD_SHED`: adaptive load shedding is active because recent p99 latency exceeded the configured threshold.
+- Duplicate POST response: check `Idempotency-Key`; internal clients generate a per-request key for non-GET service calls and reuse it only across retries of that same logical request. Services replay cached non-streaming responses for repeated keys.
+- SSE starts then stops: inspect assistant-service logs with the same `X-Request-Id`; streaming requests are not retried after bytes are emitted.
+- KB retrieval timeout: check knowledge-service health, Qdrant health, embedding provider key/quota, and `KB_PROXY_READ_TIMEOUT_SECONDS`.
 
 ## Identity and Sessions
 

@@ -24,6 +24,12 @@ from typing import Any
 import httpx
 
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
+from ai_gateway_core.comm.client import (
+    InternalServiceClient,
+    InternalServiceClientConfig,
+    InternalServiceHTTPError,
+)
+from ai_gateway_core.comm.retry import RetryPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +99,14 @@ class KBProxyClient:
         self.limits = limits or _limits_from_env()
         self.transport = transport
         self._client: httpx.AsyncClient | None = None
+        self._service_client: InternalServiceClient | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
+        """Compatibility accessor for tests that inspect httpx config."""
         if self._client is None or self._client.is_closed:
             transport = self.transport
             if transport is None:
-                transport = httpx.AsyncHTTPTransport(retries=1)
+                transport = httpx.AsyncHTTPTransport(retries=0)
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self.timeout,
@@ -120,40 +128,51 @@ class KBProxyClient:
                 )
         return self._client
 
+    def _get_service_client(self) -> InternalServiceClient:
+        if self._service_client is None:
+            self._service_client = InternalServiceClient(
+                InternalServiceClientConfig(
+                    name="knowledge-service",
+                    base_url=self.base_url,
+                    timeout=self.timeout,
+                    limits=self.limits,
+                    retry_policy=RetryPolicy(
+                        max_attempts=_get_int_env(
+                            "KB_PROXY_RETRY_MAX_ATTEMPTS",
+                            _get_int_env("SERVICE_RETRY_MAX_ATTEMPTS", 2),
+                        ),
+                        base_delay_ms=_get_int_env("SERVICE_RETRY_BASE_DELAY_MS", 50),
+                        max_delay_ms=_get_int_env("SERVICE_RETRY_MAX_DELAY_MS", 500),
+                    ),
+                    gateway_secret=_get_signer(),
+                ),
+                transport=self.transport,
+            )
+        return self._service_client
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
+        if self._service_client:
+            await self._service_client.close()
 
     def _user_headers(self, user: Any) -> dict[str, str]:
         """Build headers to pass user context to KB microservice.
 
-        Includes an HMAC ``X-Gateway-Secret`` header (signed with
-        ``GATEWAY_ASSISTANT_SHARED_SECRET``) so the KB service's
-        ``GatewaySecretAuthMiddleware`` accepts the request. Without
-        the header KB returns 401 once the middleware is active
-        (K5c prod deploy, 2026-04-24)."""
+        The shared ``InternalServiceClient`` adds request-id propagation and
+        HMAC signing. This method only owns trusted user context.
+        """
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if user:
             headers["X-User-Id"] = getattr(user, "user_id", "") or ""
             headers["X-Tenant-Id"] = getattr(user, "tenant_id", "") or ""
             headers["X-User-Tier"] = getattr(user, "tier", "") or ""
-        try:
-            from ai_gateway_core.proxy.request_id_middleware import REQUEST_ID_CTX
-
-            request_id = REQUEST_ID_CTX.get()
-        except Exception:  # noqa: BLE001
-            request_id = ""
-        if request_id:
-            headers["X-Request-Id"] = request_id
-        signer = _get_signer()
-        if signer is not None:
-            headers["X-Gateway-Secret"] = signer.sign()
         return headers
 
     async def health_check(self) -> bool:
         """Check if KB service is reachable."""
         try:
-            resp = await self._get_client().get("/health")
+            resp = await self._get_service_client().request("GET", "/health")
             return resp.status_code == 200
         except Exception:
             return False
@@ -161,17 +180,17 @@ class KBProxyClient:
     async def list_datasets(self, user: Any) -> list[dict[str, Any]]:
         """List datasets from KB microservice."""
         try:
-            resp = await self._get_client().get(
+            data = await self._get_service_client().request_json(
+                "GET",
                 "/api/v1/knowledge/datasets",
                 headers=self._user_headers(user),
             )
-            if resp.status_code != 200:
-                logger.warning(f"KB list_datasets failed: {resp.status_code}")
-                return []
-            data = resp.json()
             if isinstance(data, list):
                 return data
             return data.get("datasets", data.get("data", []))
+        except InternalServiceHTTPError as e:
+            logger.warning("KB list_datasets failed: %s", e.status_code)
+            return []
         except Exception as e:
             logger.warning(f"KB list_datasets error: {e}")
             return []
@@ -199,16 +218,12 @@ class KBProxyClient:
             payload["score_threshold"] = score_threshold
 
         try:
-            resp = await self._get_client().post(
+            data = await self._get_service_client().request_json(
+                "POST",
                 f"/api/v1/knowledge/{dataset_id}/retrieve",
                 json=payload,
                 headers=self._user_headers(user),
             )
-            if resp.status_code != 200:
-                logger.warning(f"KB retrieve failed for {dataset_id}: {resp.status_code}")
-                return [], {"error": f"HTTP {resp.status_code}"}
-
-            data = resp.json()
             results_raw = data.get("results", [])
             meta = data.get("metadata", {})
 
@@ -225,6 +240,9 @@ class KBProxyClient:
 
             return results, meta
 
+        except InternalServiceHTTPError as e:
+            logger.warning("KB retrieve failed for %s: %s", dataset_id, e.status_code)
+            return [], {"error": f"HTTP {e.status_code}"}
         except Exception as e:
             logger.warning(f"KB retrieve error for {dataset_id}: {e}")
             return [], {"error": str(e)}
@@ -237,13 +255,11 @@ class KBProxyClient:
         """
         _ = required
         try:
-            resp = await self._get_client().get(
+            return await self._get_service_client().request_json(
+                "GET",
                 f"/api/v1/knowledge/datasets/{dataset_id}",
                 headers=self._user_headers(user),
             )
-            if resp.status_code == 200:
-                return resp.json()
-            return {}
         except Exception:
             return {}
 
