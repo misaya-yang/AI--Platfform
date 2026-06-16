@@ -137,6 +137,21 @@ require_secret() {
     fi
 }
 
+require_secret_or_local_default() {
+    local key="$1"
+    local min_length="$2"
+    local local_default="$3"
+    local value
+    value="$(env_value "$key")"
+
+    if [ "$value" = "$local_default" ]; then
+        warn "$key uses the documented local bootstrap default; rotate it before shared or non-local deployments."
+        return
+    fi
+
+    require_secret "$key" "$min_length"
+}
+
 require_non_empty() {
     local key="$1"
     local value
@@ -266,7 +281,7 @@ validate_config() {
     require_secret REDIS_PASSWORD 8
     require_secret JWT_SECRET 32
     require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
-    require_secret DEFAULT_USER_PASSWORD 12
+    require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
     require_domain AUTH_ALLOWED_EMAIL_DOMAIN
 
     require_positive_int POSTGRES_PORT 5432
@@ -276,6 +291,13 @@ validate_config() {
     require_positive_int GATEWAY_PORT 8080
     require_positive_int FRONTEND_PORT 8081
     require_positive_int KNOWLEDGE_SERVICE_PORT 8092
+    require_positive_int RATE_LIMIT_IP_LIMIT 500
+    require_positive_int RATE_LIMIT_ANONYMOUS_LIMIT 200
+    require_positive_int RATE_LIMIT_NORMAL_LIMIT 300
+    require_positive_int RATE_LIMIT_PREMIUM_LIMIT 1000
+    require_positive_int RATE_LIMIT_ENTERPRISE_LIMIT 5000
+    require_positive_int RATE_LIMIT_ADMIN_LIMIT 10000
+    require_positive_int RATE_LIMIT_ASSISTANT_CHAT_LIMIT 240
 
     validate_ports
 

@@ -91,10 +91,12 @@ class MultiDimensionRateLimitConfig:
             "anonymous": TierLimit(
                 requests=_get_int_env("RATE_LIMIT_ANONYMOUS_LIMIT", 10), window=60
             ),
-            "normal": TierLimit(requests=60, window=60),
-            "premium": TierLimit(requests=300, window=60),
-            "enterprise": TierLimit(requests=1000, window=60),
-            "admin": TierLimit(requests=10000, window=60),
+            "normal": TierLimit(requests=_get_int_env("RATE_LIMIT_NORMAL_LIMIT", 60), window=60),
+            "premium": TierLimit(requests=_get_int_env("RATE_LIMIT_PREMIUM_LIMIT", 300), window=60),
+            "enterprise": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_ENTERPRISE_LIMIT", 1000), window=60
+            ),
+            "admin": TierLimit(requests=_get_int_env("RATE_LIMIT_ADMIN_LIMIT", 10000), window=60),
         }
     )
 
@@ -117,12 +119,25 @@ class MultiDimensionRateLimitConfig:
             "thread_create": TierLimit(requests=50, window=60),
             "store_write": TierLimit(requests=200, window=60),
             # Assistant heavy operations (per-user, sliding window)
-            "assistant_chat": TierLimit(requests=60, window=60),      # 60 chats/min/user
-            "quiz_generate": TierLimit(requests=10, window=60),       # 10 quizzes/min/user (DB writes)
-            "image_generate": TierLimit(requests=20, window=60),      # 20 images/min/user (GPU/VLM cost)
-            "file_upload": TierLimit(requests=30, window=60),         # 30 uploads/min/user
-            "code_execute": TierLimit(requests=30, window=60),        # 30 sandbox runs/min/user
-            "quiz_submit_public": TierLimit(requests=10, window=60),  # 10 public quiz submits/min/IP
+            "assistant_chat": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_ASSISTANT_CHAT_LIMIT", 60), window=60
+            ),
+            "quiz_generate": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_QUIZ_GENERATE_LIMIT", 10), window=60
+            ),
+            "image_generate": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_IMAGE_GENERATE_LIMIT", 20), window=60
+            ),
+            "file_upload": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_FILE_UPLOAD_LIMIT", 30), window=60
+            ),
+            "code_execute": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_CODE_EXECUTE_LIMIT", 30), window=60
+            ),
+            "quiz_submit_public": TierLimit(
+                requests=_get_int_env("RATE_LIMIT_QUIZ_SUBMIT_PUBLIC_LIMIT", 10),
+                window=60,
+            ),
         }
     )
 
@@ -153,6 +168,22 @@ class RateLimitContext:
             assistant_id=assistant_id,
             operation=operation,
         )
+
+
+def create_rate_limit_config(
+    user_tier_overrides: dict[str, TierLimit] | None = None,
+) -> MultiDimensionRateLimitConfig:
+    """Build rate-limit config without dropping default tiers.
+
+    Runtime settings may override selected tiers. They must merge into the
+    default env-aware config instead of replacing it, otherwise roles such as
+    admin silently fall back to the anonymous limit.
+    """
+
+    config = MultiDimensionRateLimitConfig()
+    if user_tier_overrides:
+        config.user_tier_limits.update(user_tier_overrides)
+    return config
 
 
 class MultiDimensionRateLimiter:

@@ -497,9 +497,9 @@ class Container:
         """创建多维度限流器 — always enabled for AOP enforcement"""
 
         from .core.gateway.multi_dimension_rate_limiter import (
-            MultiDimensionRateLimitConfig,
             MultiDimensionRateLimiter,
             TierLimit,
+            create_rate_limit_config,
         )
 
         tier_limits = {}
@@ -515,7 +515,7 @@ class Container:
         # MultiDimensionRateLimiter needs the native redis client, not the RedisStorage wrapper
         redis_client = redis.get_native_client() if redis else None
         return MultiDimensionRateLimiter(
-            config=MultiDimensionRateLimitConfig(user_tier_limits=tier_limits),
+            config=create_rate_limit_config(user_tier_overrides=tier_limits),
             redis_client=redis_client,
         )
 

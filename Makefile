@@ -26,6 +26,7 @@
 #   make dev-stop        停止开发容器
 #   make dev-reset       重置开发环境
 #   make dev-status      查看开发环境状态
+#   make dev-compose     使用源码挂载启动应用服务 (无需反复构建)
 #
 #   make help            显示此帮助
 # =============================================================================
@@ -33,6 +34,7 @@
 SHELL := /bin/bash
 SCRIPTS := scripts/new
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+DEV_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
 .DEFAULT_GOAL := help
 
@@ -114,7 +116,7 @@ backup-list:                ## 列出所有备份
 
 # -- Development Environment --------------------------------------------------
 
-.PHONY: dev-setup dev-start dev-stop dev-reset dev-status
+.PHONY: dev-setup dev-start dev-stop dev-reset dev-status dev-compose dev-compose-logs
 
 dev-setup:                  ## 一键搭建本地开发环境 (容器+数据库+迁移)
 	@bash $(SCRIPTS)/setup-dev.sh
@@ -130,6 +132,14 @@ dev-reset:                  ## 重置开发环境 (销毁并重建)
 
 dev-status:                 ## 查看开发环境状态
 	@bash $(SCRIPTS)/setup-dev.sh --status
+
+dev-compose:                ## 源码挂载启动应用服务 (首次 quickstart/build 后使用)
+	@bash $(SCRIPTS)/validate-env.sh --config-only
+	@$(DEV_COMPOSE) --env-file .env up -d --remove-orphans gateway assistant-service knowledge-service frontend
+	@echo "Development compose is running with backend source mounts and uvicorn reload."
+
+dev-compose-logs:           ## 查看源码挂载开发服务日志
+	@$(DEV_COMPOSE) --env-file .env logs -f gateway assistant-service knowledge-service frontend
 
 # -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
 

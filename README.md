@@ -47,7 +47,7 @@ Required values:
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
 - `AUTH_ALLOWED_EMAIL_DOMAIN`
-- `DEFAULT_USER_PASSWORD`
+- `DEFAULT_USER_PASSWORD` (the example value matches the local bootstrap admin; rotate it before shared or non-local deployments)
 - At least one chat key: `DASHSCOPE_CHAT_API_KEY`, `DASHSCOPE_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`
 - `KB_EMBEDDING_PROVIDER`: `gemini`, `dashscope`, or `siliconflow`
 - `KB_EMBEDDING_API_KEY`
@@ -73,8 +73,14 @@ make quickstart
 - Gateway readiness: `http://localhost:8080/health/ready`
 
 The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
+The validator allows that documented local bootstrap password but warns about it.
 For non-local deployments, change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own
 administrator, and rotate the bootstrap password immediately.
+
+The example env also sets generous localhost rate limits such as
+`RATE_LIMIT_IP_LIMIT`, `RATE_LIMIT_NORMAL_LIMIT`, and
+`RATE_LIMIT_ASSISTANT_CHAT_LIMIT` so first-run page loads and assistant testing
+do not trip 429s. Tighten them for shared or production deployments.
 
 ## Validation Commands
 
@@ -87,7 +93,24 @@ make status            # prints compose state and service health
 docker compose ps
 ```
 
-The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, and failed Qdrant/service health checks.
+The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, and failed Qdrant/service health checks. The documented local bootstrap admin password is accepted for quickstart and reported as a warning.
+
+## Development Without Rebuilding
+
+`make quickstart` builds the Docker images for the first local run. After that,
+backend code changes do not need a full image rebuild during development.
+
+Use source-mounted app services instead:
+
+```bash
+make dev-compose
+make dev-compose-logs
+```
+
+This uses `docker-compose.dev.yml` to bind-mount the gateway, assistant-service,
+knowledge-service, and shared core package source into the existing containers
+and runs the Python services with `uvicorn --reload`. Rebuild only when
+dependencies, Dockerfiles, or image-level system packages change.
 
 ## Release Notes
 
