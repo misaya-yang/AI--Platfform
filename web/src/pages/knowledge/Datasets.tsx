@@ -847,7 +847,7 @@ export function KnowledgeDatasetsPage() {
         }}
         onOk={handleDelete}
         confirmLoading={deleteSubmitting}
-        maskClosable={!deleteSubmitting}
+        mask={{ closable: !deleteSubmitting }}
         keyboard={!deleteSubmitting}
         okText={t("knowledge.datasets.deleteConfirm")}
         cancelText={t("common.cancel")}

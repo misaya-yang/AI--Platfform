@@ -42,6 +42,11 @@ export interface AuthState {
 
 const STORAGE_KEY = "agent-gateway-auth";
 
+type PersistedAuthState = Pick<
+  AuthState,
+  "token" | "user" | "isAuthenticated" | "forcePasswordChange" | "rememberMe"
+>;
+
 function normalizeUser(user: User | Partial<User> | null | undefined): User | null {
   if (!user) return null;
   return {
@@ -219,24 +224,38 @@ export const useAuthStore = create<AuthState>()(
     {
       name: STORAGE_KEY,
       storage: createJSONStorage(() => createDynamicStorage()),
-      partialize: (state) => ({
+      partialize: (state): PersistedAuthState => ({
+        token: state.token,
+        user: state.user,
+        isAuthenticated: state.isAuthenticated,
+        forcePasswordChange: state.forcePasswordChange,
         rememberMe: state.rememberMe,
       }),
       // Normalize data when loading from storage to handle old/corrupted data
       merge: (persistedState, currentState) => {
-        const persisted = persistedState as Partial<AuthState> | undefined;
+        const persisted = persistedState as Partial<PersistedAuthState> | undefined;
         if (!persisted) return currentState;
+
+        const token =
+          typeof persisted.token === "string" && persisted.token.length > 0
+            ? persisted.token
+            : null;
+        const user = normalizeUser(persisted.user);
+        const isAuthenticated = Boolean(token && persisted.isAuthenticated && user);
 
         return {
           ...currentState,
+          token,
+          user,
+          isAuthenticated,
+          forcePasswordChange: Boolean(token && persisted.forcePasswordChange),
           rememberMe: Boolean(persisted.rememberMe),
           hydrated: true,
-          sessionValidation: "validated",
+          sessionValidation: token ? "idle" : "validated",
         };
       },
       onRehydrateStorage: () => (state) => {
         state?.setHydrated(true);
-        state?.setSessionValidation("validated");
       },
     }
   )
