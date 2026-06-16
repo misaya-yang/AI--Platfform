@@ -2,9 +2,7 @@
  * Public Share Page — read-only conversation snapshot with artifacts.
  *
  * Accessible at /share/:shareId (no auth required).
- * Supports two share types:
- * 1. Conversation shares (new) — from /api/v1/assistant/shares/:code
- * 2. Legacy Playground shares — from /api/v1/islamic/wahda/share/:id
+ * Supports conversation shares from /api/v1/assistant/shares/:code.
  *
  * Phase 3 retheme: aligned to the single-accent (gold) palette shared with
  * the main /assistant surface. All hard-coded slate/gray/indigo/emerald/
@@ -59,39 +57,21 @@ interface ConversationShareData {
   expires_at: string | null;
 }
 
-interface LegacyShareData {
-  title: string;
-  messages: ShareMessage[];
-  message_count: number;
-  agent_name: string;
-  created_at: string;
-  expires_at: string | null;
-}
-
 // ── Component ────────────────────────────────────────────────────────
 
 export function SharePage() {
   const { shareId } = useParams<{ shareId: string }>();
   const [convShare, setConvShare] = useState<ConversationShareData | null>(null);
-  const [legacyShare, setLegacyShare] = useState<LegacyShareData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!shareId) return;
 
-    // Try conversation share first, then fall back to legacy
     fetch(`/api/v1/assistant/shares/${shareId}`)
       .then((resp) => {
         if (resp.ok) return resp.json().then((d: ConversationShareData) => setConvShare(d));
-        if (resp.status !== 404) throw new Error("Server error");
-        // 404 only: fall back to legacy Islamic Content share
-        return fetch(`/api/v1/islamic/wahda/share/${shareId}`)
-          .then((r) => {
-            if (!r.ok) throw new Error(r.status === 404 ? "Conversation not found or expired" : "Failed to load");
-            return r.json();
-          })
-          .then((d: LegacyShareData) => setLegacyShare(d));
+        throw new Error(resp.status === 404 ? "Conversation not found or expired" : "Failed to load");
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -105,7 +85,7 @@ export function SharePage() {
     );
   }
 
-  if (error || (!convShare && !legacyShare)) {
+  if (error || !convShare) {
     return (
       <div className="assistant-v2 min-h-screen flex items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
         <div className="text-center space-y-3 max-w-md px-6">
@@ -258,91 +238,6 @@ export function SharePage() {
             </p>
           )}
         </footer>
-      </div>
-    );
-  }
-
-  // ── Legacy Share (old Playground) ──────────────────────────────────
-
-  if (legacyShare) {
-    return (
-      <div className="assistant-v2 min-h-screen bg-[hsl(var(--assistant-canvas-bg))] text-[hsl(var(--assistant-text-primary))]">
-        <header className="sticky top-0 z-10 bg-[hsl(var(--assistant-canvas-bg)/0.85)] backdrop-blur-sm border-b border-[hsl(var(--assistant-border))]">
-          <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-full bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] flex items-center justify-center">
-                <svg
-                  className="w-3.5 h-3.5 text-[hsl(var(--assistant-text-secondary))]"
-                  fill="currentColor"
-                  viewBox="0 0 20 20"
-                  aria-hidden
-                >
-                  <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm0 14a6 6 0 110-12 6 6 0 010 12z" />
-                </svg>
-              </div>
-              <div>
-                <h1 className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))]">
-                  {legacyShare.agent_name}
-                </h1>
-                <p className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] mt-0.5">
-                  {legacyShare.message_count} messages
-                </p>
-              </div>
-            </div>
-            <time className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
-              {new Date(legacyShare.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
-            </time>
-          </div>
-        </header>
-        <div className="max-w-3xl mx-auto px-4 pt-6 pb-2">
-          <h2 className="text-[18px] font-semibold text-[hsl(var(--assistant-text-primary))] tracking-tight">
-            {legacyShare.title}
-          </h2>
-        </div>
-        <div className="max-w-3xl mx-auto px-4 py-4 space-y-5">
-          {legacyShare.messages.map((msg, i) => {
-            const isUser = msg.role === "user";
-            return (
-              <div
-                key={i}
-                className={`flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}
-              >
-                <div
-                  className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[11px] font-medium bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] text-[hsl(var(--assistant-text-secondary))]"
-                  aria-hidden
-                >
-                  {isUser ? "U" : "W"}
-                </div>
-                <div
-                  className={`max-w-[80%] min-w-0 ${
-                    isUser
-                      ? "bg-[hsl(var(--assistant-user-bubble))] text-[hsl(var(--assistant-text-primary))] rounded-[14px] rounded-tr-sm px-3.5 py-2"
-                      : "text-[hsl(var(--assistant-text-primary))]"
-                  }`}
-                >
-                  {isUser ? (
-                    <div className="text-[14px] leading-relaxed whitespace-pre-wrap break-words">
-                      {msg.content}
-                    </div>
-                  ) : (
-                    <div className="assistant-copy text-[14px] leading-relaxed prose prose-sm max-w-none">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div className="max-w-3xl mx-auto px-4 py-6 flex justify-center">
-          <a
-            href="/playground"
-            className="act-btn act-hover inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[13px] font-medium text-[hsl(var(--assistant-text-secondary))] hover:text-[hsl(var(--assistant-text-primary))]"
-          >
-            Continue this conversation
-            <ArrowRight className="w-[14px] h-[14px]" />
-          </a>
-        </div>
       </div>
     );
   }

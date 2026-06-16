@@ -5,8 +5,7 @@
 --
 -- Why: shared `public` schema = every service can read/write every table.
 -- After this migration, `gateway`/`assistant`/`knowledge` schemas exist with
--- explicit ownership. `islamic_content` is already a separate schema (legacy)
--- and stays as-is.
+-- explicit ownership.
 --
 -- Run order across files:
 --   _global/001_create_schemas.sql      ← this file: schemas + search_path

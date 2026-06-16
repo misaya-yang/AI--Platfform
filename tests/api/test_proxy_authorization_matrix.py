@@ -73,7 +73,7 @@ async def test_proxy_authorization_accepts_expected_roles(role: str) -> None:
     request = _make_request()
     await check_service_authorization(
         request=request,
-        service_name="imam",
+        service_name="agent",
         user=_make_user(role),
         auth=_make_auth(role),
     )
@@ -85,7 +85,7 @@ async def test_proxy_authorization_rejects_guest_without_capability() -> None:
     with pytest.raises(HTTPException) as exc:
         await check_service_authorization(
             request=request,
-            service_name="imam",
+            service_name="agent",
             user=_make_user("guest"),
             auth=_make_auth("guest"),
         )
@@ -104,7 +104,7 @@ async def test_proxy_authorization_respects_user_allowlist_policy() -> None:
     with pytest.raises(HTTPException) as exc:
         await check_service_authorization(
             request=request,
-            service_name="imam",
+            service_name="agent",
             user=_make_user("user"),
             auth=_make_auth("user"),
         )
@@ -117,11 +117,11 @@ async def test_proxy_authorization_user_allowlist_allows_matched_service() -> No
     request = _make_request()
     _enable_db_constraints(
         request,
-        user_policy={"mode": "allowlist", "allowed_services": ["imam"]},
+        user_policy={"mode": "allowlist", "allowed_services": ["agent"]},
     )
     await check_service_authorization(
         request=request,
-        service_name="imam",
+        service_name="agent",
         user=_make_user("user"),
         auth=_make_auth("user"),
     )
@@ -134,13 +134,13 @@ async def test_proxy_authorization_user_denylist_takes_precedence() -> None:
         request,
         user_policy={
             "mode": "all",
-            "denied_services": ["imam"],
+            "denied_services": ["agent"],
         },
     )
     with pytest.raises(HTTPException) as exc:
         await check_service_authorization(
             request=request,
-            service_name="imam",
+            service_name="agent",
             user=_make_user("user"),
             auth=_make_auth("user"),
         )
@@ -157,7 +157,7 @@ async def test_proxy_authorization_respects_api_key_allowed_services() -> None:
     with pytest.raises(HTTPException) as exc:
         await check_service_authorization(
             request=request,
-            service_name="imam",
+            service_name="agent",
             user=_make_user("user"),
             auth=_make_auth("user"),
         )

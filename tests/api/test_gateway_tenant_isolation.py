@@ -186,7 +186,7 @@ async def test_non_admin_cannot_read_another_users_quota(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_api_key_allowed_services_rejects_service_alias_outside_allowlist() -> None:
     request = _request()
-    request.state.api_key_info = {"allowed_services": ["imam"]}
+    request.state.api_key_info = {"allowed_services": ["agent"]}
 
     with pytest.raises(HTTPException) as exc:
         await check_service_authorization(
@@ -208,7 +208,7 @@ async def test_api_key_allowed_models_rejects_model_outside_allowlist() -> None:
     with pytest.raises(HTTPException) as exc:
         await _enforce_model_allowlist(
             request=request,
-            service_name="imam",
+            service_name="agent",
             user=_user(),
             auth=_auth(),
             model="qwen-plus",

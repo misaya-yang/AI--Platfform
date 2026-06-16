@@ -344,8 +344,6 @@ class RegistryToolInvoker(ToolInvoker):
         # Only idempotent tools are cacheable
         self._cacheable_prefixes = (
             "search_knowledge_base",
-            "mcp_halalmoney__get_", "mcp_halalmoney__check_",
-            "mcp_wahda__search_",
         )
 
     @staticmethod

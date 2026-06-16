@@ -101,14 +101,14 @@ def _model(
 
 def _definition(model_override: dict[str, Any]) -> dict[str, Any]:
     return {
-        "service_id": "imam-agent",
-        "name": "Imam Agent",
+        "service_id": "langgraph-agent",
+        "name": "Agent Agent",
         "service_type": "langgraph",
         "supported_modes": ["sync", "stream"],
         "connector_type": "http",
         "connector_config": {
-            "base_url": "http://imam-agent:8000",
-            "graph_id": "Imam",
+            "base_url": "http://langgraph-agent:8000",
+            "graph_id": "Agent",
             "model_override": model_override,
         },
         "accepted_content_types": ["text"],
@@ -221,10 +221,10 @@ async def test_register_service_stores_valid_override_without_secret():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
-    assert result == {"service_id": "imam-agent", "status": "registered"}
+    assert result == {"service_id": "langgraph-agent", "status": "registered"}
     assert model_override["enabled"] is True
     assert model_override["temperature"] == 0.3
     assert model_override["cache_epoch"] == 1
@@ -249,7 +249,7 @@ async def test_disabled_override_can_be_saved_without_provider_lookup():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
     assert model_override["enabled"] is False
@@ -277,12 +277,12 @@ async def test_update_service_rejects_failover_candidate_secret_fields():
 
     with pytest.raises(HTTPException) as exc:
         await update_service(
-            service_id="imam-agent",
+            service_id="langgraph-agent",
             request=request,
             patch={
                 "connector_config": {
-                    "base_url": "http://imam-agent:8000",
-                    "graph_id": "Imam",
+                    "base_url": "http://langgraph-agent:8000",
+                    "graph_id": "Agent",
                     "model_override": {
                         "enabled": True,
                         "provider_id": "dashscope-prod",
@@ -334,12 +334,12 @@ async def test_update_service_rejects_unknown_failover_model():
 
     with pytest.raises(HTTPException) as exc:
         await update_service(
-            service_id="imam-agent",
+            service_id="langgraph-agent",
             request=request,
             patch={
                 "connector_config": {
-                    "base_url": "http://imam-agent:8000",
-                    "graph_id": "Imam",
+                    "base_url": "http://langgraph-agent:8000",
+                    "graph_id": "Agent",
                     "model_override": {
                         "enabled": True,
                         "provider_id": "dashscope-prod",
@@ -409,12 +409,12 @@ async def test_update_service_auto_seeds_default_failover_candidates():
     )
 
     await update_service(
-        service_id="imam-agent",
+        service_id="langgraph-agent",
         request=request,
         patch={
             "connector_config": {
-                "base_url": "http://imam-agent:8000",
-                "graph_id": "Imam",
+                "base_url": "http://langgraph-agent:8000",
+                "graph_id": "Agent",
                 "model_override": {
                     "enabled": True,
                     "provider_id": "google-vertex",
@@ -426,7 +426,7 @@ async def test_update_service_auto_seeds_default_failover_candidates():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
     assert model_override["cache_epoch"] == 5
@@ -480,12 +480,12 @@ async def test_update_service_increments_cache_epoch_when_failover_order_changes
     )
 
     await update_service(
-        service_id="imam-agent",
+        service_id="langgraph-agent",
         request=request,
         patch={
             "connector_config": {
-                "base_url": "http://imam-agent:8000",
-                "graph_id": "Imam",
+                "base_url": "http://langgraph-agent:8000",
+                "graph_id": "Agent",
                 "model_override": {
                     "enabled": True,
                     "provider_id": "dashscope-prod",
@@ -504,7 +504,7 @@ async def test_update_service_increments_cache_epoch_when_failover_order_changes
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
     assert model_override["cache_epoch"] == 5
@@ -554,7 +554,7 @@ async def test_update_service_clamps_failover_attempts_to_reach_fallback():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
     assert model_override["failover"]["max_attempts"] == 2
@@ -586,7 +586,7 @@ async def test_disabled_failover_can_save_primary_only():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
     assert model_override["enabled"] is True
@@ -618,12 +618,12 @@ async def test_update_service_increments_cache_epoch_when_override_changes():
     )
 
     result = await update_service(
-        service_id="imam-agent",
+        service_id="langgraph-agent",
         request=request,
         patch={
             "connector_config": {
-                "base_url": "http://imam-agent:8000",
-                "graph_id": "Imam",
+                "base_url": "http://langgraph-agent:8000",
+                "graph_id": "Agent",
                 "model_override": {
                     "enabled": True,
                     "provider_id": "dashscope-prod",
@@ -635,9 +635,9 @@ async def test_update_service_increments_cache_epoch_when_override_changes():
         registry=registry,
         auth=_auth(),
     )
-    stored = await registry.get("imam-agent")
+    stored = await registry.get("langgraph-agent")
     model_override = stored.connector_config["model_override"]
 
-    assert result == {"status": "success", "service_id": "imam-agent"}
+    assert result == {"status": "success", "service_id": "langgraph-agent"}
     assert model_override["model_id"] == "qwen-new"
     assert model_override["cache_epoch"] == 5

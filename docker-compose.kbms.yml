@@ -1,32 +1,32 @@
 services:
   postgres:
     image: postgres:latest
-    container_name: my-pg
+    container_name: ai-gateway-kbms-postgres
     environment:
-      POSTGRES_PASSWORD: "111111"
-      POSTGRES_DB: "gateway"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-gateway}"
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg-data:/var/lib/postgresql/data
     restart: unless-stopped
 
   redis:
     image: redis:latest
-    container_name: my-redis
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "111111"]
+    container_name: ai-gateway-kbms-redis
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: my-qdrant
+    container_name: ai-gateway-kbms-qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped

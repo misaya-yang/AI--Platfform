@@ -20,7 +20,7 @@ async def test_default_uat_budgets_include_gateway_stream_upstream_and_provider(
     by_key = {budget.key: budget for budget in budgets}
     assert by_key["gateway.total_inflight"].limit == 64
     assert by_key["gateway.stream_inflight"].limit == 16
-    assert by_key["upstream.imam_agent"].limit == 4
+    assert by_key["upstream.langgraph_agent"].limit == 4
     assert by_key["provider.google_gemini"].limit == 4
     assert all(budget.enforced for budget in by_key.values())
 
@@ -37,7 +37,7 @@ async def test_service_capacity_override_controls_upstream_budget():
         provider_id=None,
         service_config={
             "capacity": {
-                "upstream_group": "imam_agent",
+                "upstream_group": "langgraph_agent",
                 "concurrency_limit": 3,
                 "queue_max": 0,
                 "queue_timeout_ms": 100,
@@ -45,7 +45,7 @@ async def test_service_capacity_override_controls_upstream_budget():
         },
     )
 
-    upstream = {budget.key: budget for budget in budgets}["upstream.imam_agent"]
+    upstream = {budget.key: budget for budget in budgets}["upstream.langgraph_agent"]
     assert upstream.limit == 3
     assert upstream.queue_max == 0
     assert upstream.queue_timeout_ms == 100
@@ -67,7 +67,7 @@ async def test_admin_reads_bypass_service_budget_but_not_gateway_process_budget(
 
     keys = {budget.key for budget in budgets}
     assert "gateway.total_inflight" in keys
-    assert "upstream.imam_agent" not in keys
+    assert "upstream.langgraph_agent" not in keys
 
 
 @pytest.mark.asyncio

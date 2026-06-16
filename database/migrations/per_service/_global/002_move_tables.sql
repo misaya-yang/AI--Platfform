@@ -16,9 +16,7 @@
 --   2. Tables not listed here stay in public — that's OK; they'll surface
 --      in the next migration as "decide where this lives".
 --
--- The `islamic_content` schema (quran/hadith/dua) is OWNED by the
--- islamic-content microservice (separate codebase, not in this repo).
--- We do NOT touch it.
+-- Tables not owned by gateway/assistant/knowledge stay untouched.
 -- =============================================================================
 
 -- (psql metacommand removed — asyncpg runs the file directly. The runner

@@ -78,7 +78,7 @@ ARABIC_STOPWORDS = frozenset(
         "يكونون",
         "قال",
         "قالوا",
-        # Common words in Islamic texts
+        # Common Arabic words
         "عليه",
         "وسلم",
         "صلى",

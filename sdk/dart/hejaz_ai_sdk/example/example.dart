@@ -14,7 +14,7 @@ void main() async {
   final ai = HejazAI(
     apiKey: 'gw_xxx', // Replace with your actual API key
     baseUrl: 'https://api.hejaz.com', // Or your gateway URL
-    tenantId: 'wahda', // Your tenant: wahda, halalmoney, etc.
+    tenantId: 'default', // Replace with your tenant identifier.
   );
 
   try {
@@ -23,7 +23,7 @@ void main() async {
     // ---------------------------------------------------------------------
     print('--- Non-streaming chat ---');
     final response = await ai.chat.send(
-      'What is Zakat?',
+      'Summarize the onboarding checklist',
       modelId: 'qwen3.6-plus',
       temperature: 0.7,
     );
@@ -41,7 +41,7 @@ void main() async {
     String? sessionId;
 
     await for (final event in ai.chat.stream(
-      'Explain the pillars of fasting in Islam',
+      'Explain our refund policy',
       sessionId: response.sessionId, // Continue same session
       temperature: 0.5,
     )) {
@@ -95,8 +95,8 @@ void main() async {
     // ---------------------------------------------------------------------
     print('--- Streaming with KB ---');
     await for (final event in ai.chat.stream(
-      'What are the conditions for a valid Wudu?',
-      kbDatasetIds: ['islamic_fiqh_v2'],
+      'Compare the free and enterprise plan limits.',
+      kbDatasetIds: ['product_docs_v1'],
       temperature: 0.3,
     )) {
       if (event.isText) {

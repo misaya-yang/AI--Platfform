@@ -30,8 +30,8 @@ def _user(*, tenant_id: str = "tenant-a", user_id: str = "user-a") -> UserContex
 
 def _service_config(*, enabled: bool = False) -> ProxyServiceConfig:
     return ProxyServiceConfig(
-        service_id="imam",
-        service_name="imam",
+        service_id="agent",
+        service_name="agent",
         upstream_url="http://localhost:2024",
         rate_limit_enabled=enabled,
         rate_limit_requests=5,
@@ -55,12 +55,12 @@ async def test_service_level_rule_overrides_global_defaults() -> None:
             ]
         ),
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(enabled=True),
     )
 
-    assert [policy.dimension for policy in policies] == ["service:imam"]
+    assert [policy.dimension for policy in policies] == ["service:agent"]
     assert policies[0].requests == 5
     assert "tenant-a" in policies[0].key
 
@@ -81,14 +81,14 @@ async def test_api_key_rule_applies_only_to_authenticated_key_hash() -> None:
     matching = await resolver.resolve(
         request=_request(rules=rules, api_key_hash="hash-a"),
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
     other = await resolver.resolve(
         request=_request(rules=rules, api_key_hash="hash-b"),
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
@@ -113,14 +113,14 @@ async def test_tenant_rule_applies_only_inside_that_tenant() -> None:
     matching = await resolver.resolve(
         request=_request(rules=rules),
         user=_user(tenant_id="tenant-a"),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
     other = await resolver.resolve(
         request=_request(rules=rules),
         user=_user(tenant_id="tenant-b"),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
@@ -145,7 +145,7 @@ async def test_disabled_rule_is_ignored() -> None:
             ]
         ),
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
@@ -162,7 +162,7 @@ async def test_rule_deletion_invalidates_runtime_policy_immediately() -> None:
     first = await resolver.resolve(
         request=request,
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
@@ -171,7 +171,7 @@ async def test_rule_deletion_invalidates_runtime_policy_immediately() -> None:
     second = await resolver.resolve(
         request=request,
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )
@@ -207,7 +207,7 @@ async def test_burst_only_increases_effective_limit_for_burst_strategies() -> No
             ]
         ),
         user=_user(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_service_config(),
     )

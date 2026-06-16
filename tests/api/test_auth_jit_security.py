@@ -43,7 +43,7 @@ async def test_login_does_not_jit_create_missing_user_with_default_password() ->
 
     with pytest.raises(HTTPException) as exc_info:
         await login(
-            LoginRequest(email="new.user@hejazfs.com.au", password=DEFAULT_PASSWORD),
+            LoginRequest(email="new.user@example.com", password=DEFAULT_PASSWORD),
             request,
             settings=SimpleNamespace(),
         )

@@ -22,7 +22,7 @@ echo "=== Health Checks ==="
 check_and_report() {
     local name="$1"
     local check_fn="$2"
-    printf "  %-12s " "$name:"
+    printf "  %-18s " "$name:"
     if $check_fn 2>/dev/null; then
         echo -e "${GREEN}Healthy${NC}"
     else
@@ -33,6 +33,9 @@ check_and_report() {
 check_and_report "PostgreSQL" check_postgres_health
 check_and_report "Redis" check_redis_health
 check_and_report "Qdrant" check_qdrant_health
+check_and_report "Knowledge" check_knowledge_health
+check_and_report "Assistant" check_assistant_health
+check_and_report "Docgen" check_docgen_health
 check_and_report "Gateway" check_gateway_health
 check_and_report "Frontend" check_frontend_health
 

@@ -1,1 +1,0 @@
-# Domain constants and errors.

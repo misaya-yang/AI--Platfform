@@ -1,7 +1,7 @@
 """Image generation callback service.
 
 Sends completed image generation results to an external callback URL.
-Used by downstream services (e.g. Wahda app) that prefer push over polling.
+Used by downstream services that prefer push over polling.
 
 Features a module-level HTTP client (connection pooling) and exponential
 backoff retry for transient 5xx / network errors.
@@ -47,7 +47,7 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
     Retries on 5xx or transport errors with exponential backoff. Stops
     immediately on 4xx (client error — retrying won't help).
 
-    Returns True only when the receiver returned ``{"code": 0}`` (Wahda contract).
+    Returns True only when the receiver returned ``{"code": 0}``.
 
     SSRF guard: ``callback_url`` is validated up-front via
     ``validate_callback_url`` (rejects private/loopback/link-local/non-http).

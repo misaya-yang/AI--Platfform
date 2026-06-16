@@ -35,10 +35,14 @@ COPY . .
 # Build arguments for environment variables
 ARG VITE_API_URL=
 ARG VITE_API_BASE_URL=
+ARG VITE_AUTH_EMAIL_DOMAIN=example.com
+ARG VITE_SUPPORT_EMAIL=admin@example.com
 
 # Set environment variables for build
 ENV VITE_API_URL=${VITE_API_URL}
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_AUTH_EMAIL_DOMAIN=${VITE_AUTH_EMAIL_DOMAIN}
+ENV VITE_SUPPORT_EMAIL=${VITE_SUPPORT_EMAIL}
 
 # Build the application
 RUN pnpm build

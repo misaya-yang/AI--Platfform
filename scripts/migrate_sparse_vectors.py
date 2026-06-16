@@ -5,7 +5,7 @@ Creates a new collection with dense + sparse config, copies all points
 with generated sparse vectors, then swaps via rename.
 
 Usage:
-    python3 scripts/migrate_sparse_vectors.py [--collection kb_imam_v2_1024] [--batch-size 100]
+    python3 scripts/migrate_sparse_vectors.py [--collection kb_default_1024] [--batch-size 100]
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ async def migrate(
 
 def main():
     parser = argparse.ArgumentParser(description="Migrate Qdrant collection to add BM25 sparse vectors")
-    parser.add_argument("--collection", default="kb_imam_v2_1024", help="Collection to migrate")
+    parser.add_argument("--collection", default="kb_default_1024", help="Collection to migrate")
     parser.add_argument("--qdrant-url", default=QDRANT_URL, help="Qdrant URL")
     parser.add_argument("--batch-size", type=int, default=100, help="Scroll batch size")
     parser.add_argument("--dry-run", action="store_true", help="Dry run (don't copy data)")

@@ -884,8 +884,6 @@ async def retrieve(
                 source_type_filter=payload.source_type_filter,
                 language_filter=payload.language_filter,
                 metadata_filter=payload.metadata_filter,
-                multi_query=payload.multi_query,
-                authority_sort=payload.authority_sort,
                 # Advanced multimodal parameters
                 image_search_enabled=payload.image_search_enabled,
                 vlm_rerank_weight=payload.vlm_rerank_weight,
@@ -922,11 +920,9 @@ async def retrieve(
                 source_type_filter=payload.source_type_filter,
                 language_filter=payload.language_filter,
                 metadata_filter=payload.metadata_filter,
-                multi_query=payload.multi_query,
-                authority_sort=payload.authority_sort,
             )
 
-        # Build response with multimodal + Islamic traceability fields
+        # Build response with multimodal and source traceability fields.
         return {
             "results": [
                 {
@@ -940,7 +936,7 @@ async def retrieve(
                     "image_url": getattr(r, "image_url", None),
                     "vlm_description": getattr(r, "vlm_description", None),
                     "associated_images": getattr(r, "associated_images", []),
-                    # Islamic knowledge traceability fields
+                    # Source traceability fields
                     "source_type": (r.metadata or {}).get("source_type"),
                     "citation_text": (r.metadata or {}).get("citation_text"),
                     "source_reference": (r.metadata or {}).get("source_reference", {}),
@@ -1014,8 +1010,6 @@ async def retrieve_batch(
             mmr_threshold=payload.mmr_threshold,
             source_type_filter=payload.source_type_filter,
             language_filter=payload.language_filter,
-            multi_query=payload.multi_query,
-            authority_sort=payload.authority_sort,
             include_images=payload.include_images,
             include_associated_images=payload.include_associated_images,
             max_parallel=payload.max_parallel,

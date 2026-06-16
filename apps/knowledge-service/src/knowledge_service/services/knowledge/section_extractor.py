@@ -1,7 +1,7 @@
 """
 Section Extractor for Strict Chapter Traceability
 
-This module provides enhanced section/chapter extraction for Imam-type datasets,
+This module provides enhanced section/chapter extraction for document datasets,
 ensuring every chunk has a traceable section_title in its metadata.
 
 When strict_section_traceability is enabled:
@@ -10,7 +10,7 @@ When strict_section_traceability is enabled:
 3. Inherits section titles for chunks within sections
 4. Ensures citation_text includes chapter/section information
 
-Supports both Arabic and English Islamic texts with specialized patterns.
+Supports Arabic, English, and Markdown section patterns.
 """
 
 from __future__ import annotations
@@ -42,16 +42,16 @@ class SectionExtractor:
     """
     Extracts document sections and enables strict section traceability.
 
-    Designed for Islamic/Imam-type texts with support for:
+    Designed for structured documents with support for:
     - Arabic chapter markers (باب, كتاب, فصل, etc.)
     - English chapter/section headings
     - Markdown-style headings
     - TOC (Table of Contents) parsing
     """
 
-    # Islamic text section patterns (Arabic)
+    # Arabic section patterns
     ARABIC_SECTION_PATTERNS = [
-        # باب (Chapter/Bab) - most common in Islamic texts
+        # باب (Chapter/Bab)
         (r"^\s*(?:باب)\s*[:：]?(?:\s+|$)\s*(.+?)(?:\n|$)", 1),
         # كتاب (Book/Kitab) - higher level
         (r"^\s*(?:كتاب)\s*[:：]?(?:\s+|$)\s*(.+?)(?:\n|$)", 0),
@@ -96,7 +96,7 @@ class SectionExtractor:
         Initialize section extractor.
 
         Args:
-            include_arabic: Enable Arabic Islamic text patterns
+            include_arabic: Enable Arabic section patterns
             include_english: Enable English section patterns
             include_markdown: Enable Markdown heading patterns
         """

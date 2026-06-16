@@ -70,10 +70,10 @@ export function useImamStream({
   onThreadId: (id: string) => void;
   authToken: string | null;
 }) {
-  const stream = useStream<ImamStreamState>({
+  const stream = useStream<AssistantStreamState>({
     // 通过我们的 Gateway proxy 连接 LangGraph
     apiUrl: `/api/v1/proxy/${serviceId}`,
-    assistantId: "imam",  // LangGraph assistant ID
+    assistantId: "assistant",  // LangGraph assistant ID
 
     // Thread 生命周期: null → 自动创建 → onThreadId 回调
     threadId,
@@ -150,7 +150,7 @@ export function useImamStream({
 ### Step 5: 测试验证
 
 1. 新建对话 → 确认 thread 自动创建 (TTFT < 5s)
-2. 发送 Islamic 问题 → 确认 streaming + tool calls 显示
+2. 发送产品文档问题 → 确认 streaming + tool calls 显示
 3. 多轮对话 → 确认上下文保持
 4. 切换历史对话 → 确认历史加载 (< 1s)
 5. 跑题拒绝 → 确认正确处理

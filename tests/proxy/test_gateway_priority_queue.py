@@ -21,9 +21,9 @@ class _Registry:
 
 @pytest.mark.asyncio
 async def test_service_config_marks_priority_not_enforced() -> None:
-    service = ServiceDefinition(service_id="imam", name="Imam")
+    service = ServiceDefinition(service_id="agent", name="Agent")
     service.get_service_config().capacity = ServiceCapacityConfig(
-        upstream_group="imam_agent",
+        upstream_group="langgraph_agent",
         concurrency_limit=3,
         queue_max=0,
         queue_timeout_ms=100,
@@ -45,14 +45,14 @@ async def test_service_config_marks_priority_not_enforced() -> None:
         is_authenticated=True,
     )
 
-    response = await get_service_config("imam", request=request, auth=auth)
+    response = await get_service_config("agent", request=request, auth=auth)
 
     assert response["config"]["priority"]["enforced"] is False
     assert response["config"]["priority"]["scheduler"] == "not_configured"
     upstream = {
         budget["key"]: budget
         for budget in response["capacity_status"]["budgets"]
-    }["upstream.imam_agent"]
+    }["upstream.langgraph_agent"]
     assert upstream["limit"] == 3
     assert upstream["queue_max"] == 0
     assert upstream["queue_timeout_ms"] == 100

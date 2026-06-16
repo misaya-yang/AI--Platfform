@@ -91,9 +91,6 @@ _TOOL_KEYWORDS["confluence_write"] = _CONFLUENCE_KEYWORDS + [
 
 # MCP server name → keywords that trigger inclusion
 _MCP_SERVER_KEYWORDS: dict[str, list[str]] = {
-    "wahda": ["wahda", "post", "message", "social", "社交", "帖子", "消息"],
-    "halalmoney": ["halal", "haram", "investment", "portfolio", "stock", "finance",
-                   "清真", "投资", "股票", "金融", "bitcoin", "btc", "aapl"],
     # docgen exposes a single ``generate_document`` tool that plans + renders
     # docx / pptx / xlsx / pdf via an isolated MCP server. Keywords cover the
     # common verbs and nouns users reach for when asking for a document —

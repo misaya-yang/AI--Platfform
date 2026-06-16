@@ -37,24 +37,6 @@ frontend:
     targetCPUUtilization: 60
 
 # -----------------------------------------------------------------------------
-# Islamic Content
-# -----------------------------------------------------------------------------
-islamicContent:
-  replicaCount: 2
-  autoscaling:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 8
-    targetCPUUtilization: 60
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: "2"
-      memory: 2Gi
-
-# -----------------------------------------------------------------------------
 # Use external managed services in production
 # -----------------------------------------------------------------------------
 postgresql:
@@ -90,7 +72,7 @@ langgraph:
     LANGSMITH_API_KEY: ""    # Set via --set langgraph.sharedEnv.LANGSMITH_API_KEY=...
     LANGGRAPH_CLOUD_LICENSE_KEY: ""
   agents:
-    imam:
+    assistant:
       enabled: true
       replicaCount: 2
       resources:

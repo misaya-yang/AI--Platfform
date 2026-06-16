@@ -20,15 +20,18 @@ API_BASE_URL = os.getenv("ASSISTANT_E2E_BASE_URL", "http://127.0.0.1:8080").rstr
 API_PREFIX = f"{API_BASE_URL}/api/v1"
 RUN_LIVE = os.getenv("RUN_ASSISTANT_API_E2E", "0") == "1"
 
-USER1_EMAIL = os.getenv("ASSISTANT_E2E_USER1_EMAIL", "assistant.e2e.user1@hejazfs.com.au")
-USER2_EMAIL = os.getenv("ASSISTANT_E2E_USER2_EMAIL", "assistant.e2e.user2@hejazfs.com.au")
-LOGIN_PASSWORD = os.getenv("ASSISTANT_E2E_PASSWORD", "111111")
+AUTH_EMAIL_DOMAIN = os.getenv("ASSISTANT_E2E_AUTH_EMAIL_DOMAIN", "example.com")
+USER1_EMAIL = os.getenv("ASSISTANT_E2E_USER1_EMAIL", f"assistant.e2e.user1@{AUTH_EMAIL_DOMAIN}")
+USER2_EMAIL = os.getenv("ASSISTANT_E2E_USER2_EMAIL", f"assistant.e2e.user2@{AUTH_EMAIL_DOMAIN}")
+LOGIN_PASSWORD = os.getenv("ASSISTANT_E2E_PASSWORD", "")
 MODEL_ID = os.getenv("ASSISTANT_E2E_MODEL_ID", "gemini-3-flash-preview")
 
 
 def _require_live() -> None:
     if not RUN_LIVE:
         pytest.skip("Set RUN_ASSISTANT_API_E2E=1 to run live API validation")
+    if not LOGIN_PASSWORD:
+        pytest.skip("Set ASSISTANT_E2E_PASSWORD to run live API validation")
 
 
 def _headers(token: str) -> dict[str, str]:

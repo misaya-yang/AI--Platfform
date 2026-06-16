@@ -2,7 +2,7 @@
 
 Generates one image per non-default style with the SAME subject prompt so
 the stylistic differences are easy to eyeball. Writes PNGs to
-/Users/misaya.yanghejazfs.com.au/Desktop/test/test_image named after each preset.
+STYLE_PRESET_OUT_DIR or tmp/image-styles named after each preset.
 
 Usage:
     python scripts/test_style_presets_e2e.py
@@ -34,7 +34,7 @@ from src.services.assistant.tools.style_presets import (
     compose_styled_prompt,
 )
 
-OUTPUT_DIR = Path("/Users/misaya.yanghejazfs.com.au/Desktop/test/test_image")
+OUTPUT_DIR = Path(os.getenv("STYLE_PRESET_OUT_DIR", REPO / "tmp/image-styles"))
 
 # Fixed subject — simple enough to render consistently, rich enough to show
 # stylistic differences (textures, lighting, composition, colour palette).

@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "Design-system-driven document generation (docx/pptx/xlsx/pdf) with pydantic IR + vision critic"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Hejaz", email = "dev@hejazfs.com.au" }]
-license = { text = "Proprietary" }
+authors = [{ name = "AI Gateway Maintainers", email = "maintainers@example.com" }]
+license = { text = "MIT" }
 dependencies = [
     "pydantic>=2.7",
     "python-pptx>=0.6",

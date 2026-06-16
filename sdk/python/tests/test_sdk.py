@@ -12,7 +12,7 @@ from ai_assistant import AssistantClient, StreamEvent
 from ai_assistant.models.events import EventType
 
 
-SERVER = os.environ.get("SDK_TEST_SERVER", "http://52.65.136.42:8080")
+SERVER = os.environ.get("SDK_TEST_SERVER", "http://127.0.0.1:8080")
 API_KEY = os.environ.get("SDK_TEST_API_KEY", "")
 
 

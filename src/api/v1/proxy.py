@@ -69,6 +69,15 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/proxy", tags=["Transparent Proxy"])
 
 
+def _normalize_domain_policy(value: Any) -> str:
+    policy = str(value or "").strip().lower()
+    if not policy or policy == "none":
+        return "none"
+    if len(policy) <= 64 and all(ch.isalnum() or ch in "._-" for ch in policy):
+        return policy
+    return "none"
+
+
 _SERVICE_ACCESS_CACHE: dict[
     str, tuple[float, list[tuple[str, list[str]]], ServiceAccessPolicy]
 ] = {}
@@ -389,8 +398,8 @@ def _inject_gateway_domain_policy_metadata(
         return body
 
     service_meta = service_config.metadata if isinstance(service_config.metadata, dict) else {}
-    domain_policy = str(service_meta.get("domain_policy") or "").strip().lower()
-    if domain_policy != "imam":
+    domain_policy = _normalize_domain_policy(service_meta.get("domain_policy"))
+    if domain_policy == "none":
         return body
 
     adapter_type = str(service_meta.get("adapter_type") or "").strip().lower()
@@ -411,7 +420,7 @@ def _inject_gateway_domain_policy_metadata(
     metadata_dict = dict(run_metadata) if isinstance(run_metadata, dict) else {}
     gateway_meta = metadata_dict.get("gateway")
     gateway_dict = dict(gateway_meta) if isinstance(gateway_meta, dict) else {}
-    gateway_dict.setdefault("domain_policy", "imam")
+    gateway_dict.setdefault("domain_policy", domain_policy)
     metadata_dict["gateway"] = gateway_dict
     updated_payload["metadata"] = metadata_dict
     return _encode_json_body(updated_payload)
@@ -1676,8 +1685,8 @@ async def list_proxy_services(
             proxy_mode = "transparent"
         if proxy_mode:
             safe_metadata["proxy_mode"] = proxy_mode
-        domain_policy = str(raw_metadata.get("domain_policy") or "").strip().lower()
-        if domain_policy in {"none", "imam"}:
+        domain_policy = _normalize_domain_policy(raw_metadata.get("domain_policy"))
+        if domain_policy != "none":
             safe_metadata["domain_policy"] = domain_policy
         ui_preferences = raw_metadata.get("ui_preferences")
         if isinstance(ui_preferences, dict):

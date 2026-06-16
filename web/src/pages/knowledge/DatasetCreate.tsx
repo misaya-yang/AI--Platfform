@@ -86,7 +86,6 @@ const CHUNKING_MODES: Array<{ id: ChunkingMode; nameKey: string; descKey: string
   { id: "heading", nameKey: "knowledge.create.chunkHeading", descKey: "knowledge.create.chunkHeadingDesc" },
   { id: "recursive", nameKey: "knowledge.create.chunkRecursive", descKey: "knowledge.create.chunkRecursiveDesc" },
   { id: "hierarchical", nameKey: "knowledge.create.chunkHierarchical", descKey: "knowledge.create.chunkHierarchicalDesc" },
-  { id: "islamic", nameKey: "knowledge.create.chunkIslamic", descKey: "knowledge.create.chunkIslamicDesc" },
 ];
 
 const EMBEDDING_MODELS = [
@@ -324,7 +323,6 @@ export default function DatasetCreatePage() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const lastNonIslamicModeRef = useRef<ChunkingMode>("automatic");
 
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -357,39 +355,12 @@ export default function DatasetCreatePage() {
   const [scoreThreshold, setScoreThreshold] = useState(0.2);
   const [maxRecall, setMaxRecall] = useState(5);
 
-  // Islamic Enhancements (opt-in per dataset)
-  const [islamicMultiQuery, setIslamicMultiQuery] = useState(false);
-  const [islamicCitation, setIslamicCitation] = useState(false);
-  const [islamicAuthoritySort, setIslamicAuthoritySort] = useState(false);
-  const [islamicMaxQueries, setIslamicMaxQueries] = useState(3);
-  const [islamicStrictTraceability, setIslamicStrictTraceability] = useState(false);
-
   // ============================================================
   // Handlers
   // ============================================================
-  const isIslamicChunking = chunkingMode === "islamic";
-
   const handleChunkingModeSelect = useCallback((mode: ChunkingMode) => {
-    if (mode !== "islamic") {
-      lastNonIslamicModeRef.current = mode;
-    }
     setChunkingMode(mode);
   }, []);
-
-  const handleIslamicChunkingToggle = useCallback((checked: boolean) => {
-    if (checked) {
-      if (chunkingMode !== "islamic") {
-        lastNonIslamicModeRef.current = chunkingMode;
-      }
-      setChunkingMode("islamic");
-      setIslamicCitation(true);
-      setIslamicAuthoritySort(true);
-      return;
-    }
-    if (chunkingMode === "islamic") {
-      setChunkingMode(lastNonIslamicModeRef.current || "automatic");
-    }
-  }, [chunkingMode]);
 
   const handleFilesSelect = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -473,10 +444,6 @@ export default function DatasetCreatePage() {
       // Parse embedding model
       const [provider, model] = embeddingModel.split(":");
       const embModel = EMBEDDING_MODELS.find((m) => m.provider === provider && m.model === model);
-      const enforceCitation = isIslamicChunking || islamicCitation;
-      const enforceAuthoritySort = isIslamicChunking || islamicAuthoritySort;
-      const strictTraceability = isIslamicChunking && islamicStrictTraceability;
-      const islamicEnabled = islamicMultiQuery || enforceCitation || enforceAuthoritySort || strictTraceability;
       const rerankProvider = rerankModel.startsWith("bge-") ? "bge" : "dashscope";
 
       // Create dataset
@@ -496,7 +463,6 @@ export default function DatasetCreatePage() {
             chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
             extract_metadata: metadataExtract,
             remove_extra_spaces: true,
-            ...(strictTraceability ? { strict_section_traceability: true } : {}),
           },
           retrieval: {
             mode: "hybrid",
@@ -507,15 +473,6 @@ export default function DatasetCreatePage() {
               provider: rerankProvider,
               model: rerankModel === "default" ? "gte-rerank" : rerankModel,
             },
-            ...(islamicEnabled && {
-              islamic: {
-                multi_query: islamicMultiQuery,
-                citation_format: enforceCitation,
-                authority_sort: enforceAuthoritySort,
-                strict_section_traceability: strictTraceability,
-                max_expanded_queries: islamicMaxQueries,
-              },
-            }),
           },
         },
       });
@@ -1098,9 +1055,6 @@ export default function DatasetCreatePage() {
                 chunk_size: maxChunkSize,
                 chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
                 remove_extra_spaces: true,
-                ...(isIslamicChunking && islamicStrictTraceability
-                  ? { strict_section_traceability: true }
-                  : {}),
               }}
             />
 
@@ -1156,149 +1110,6 @@ export default function DatasetCreatePage() {
                   </TooltipProvider>
                 </div>
                 <Switch checked={multiTurnRewrite} onCheckedChange={setMultiTurnRewrite} />
-              </div>
-            </div>
-
-            {/* Islamic Enhancements (opt-in) */}
-            <div className="space-y-4 pt-4 border-t">
-              <div className="flex items-center gap-2 mb-1">
-                <Label className="text-sm font-medium">{t("knowledge.create.islamicEnhancements")}</Label>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger>
-                      <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p className="max-w-xs">{t("knowledge.create.islamicEnhancementsHint")}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicChunking")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicChunkingHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch checked={isIslamicChunking} onCheckedChange={handleIslamicChunkingToggle} />
-              </div>
-
-              <div className={`flex items-center justify-between p-3 rounded-lg bg-card border ${isIslamicChunking ? "" : "opacity-50"}`}>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicStrictTraceability")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicStrictTraceabilityHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch
-                  checked={islamicStrictTraceability}
-                  onCheckedChange={setIslamicStrictTraceability}
-                  disabled={!isIslamicChunking}
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicMultiQuery")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicMultiQueryHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch checked={islamicMultiQuery} onCheckedChange={setIslamicMultiQuery} />
-              </div>
-
-              {islamicMultiQuery && (
-                <div className="ml-4 p-3 rounded-lg bg-muted/30 border border-dashed">
-                  <div className="flex items-center justify-between mb-2">
-                    <Label className="text-xs font-medium text-muted-foreground">{t("knowledge.create.islamicMaxQueries")}</Label>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="range"
-                      min={2}
-                      max={5}
-                      step={1}
-                      value={islamicMaxQueries}
-                      onChange={(e) => setIslamicMaxQueries(Number(e.target.value))}
-                      className="flex-1"
-                    />
-                    <span className="text-sm font-mono w-6 text-center">{islamicMaxQueries}</span>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicCitation")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicCitationHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch checked={islamicCitation} onCheckedChange={setIslamicCitation} disabled={isIslamicChunking} />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-card border">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicAuthoritySort")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicAuthoritySortHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch checked={islamicAuthoritySort} onCheckedChange={setIslamicAuthoritySort} disabled={isIslamicChunking} />
-              </div>
-
-              <div className="flex items-center justify-between p-3 rounded-lg bg-card border opacity-50">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-foreground/80">{t("knowledge.create.islamicContextualPrefix")}</span>
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <HelpCircle className="h-4 w-4 text-muted-foreground/70" />
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p className="max-w-xs">{t("knowledge.create.islamicContextualPrefixHint")}</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <Switch checked={false} disabled />
               </div>
             </div>
 

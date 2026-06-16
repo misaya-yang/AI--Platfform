@@ -61,7 +61,7 @@ async def test_second_request_waits_until_capacity_is_released():
 @pytest.mark.asyncio
 async def test_capacity_rejection_has_stable_503_headers_and_code():
     controller = CapacityAdmissionController()
-    budget = _budget(key="upstream.imam_agent", limit=1, queue_max=0)
+    budget = _budget(key="upstream.langgraph_agent", limit=1, queue_max=0)
 
     first = await controller.acquire(
         budgets=[budget],
@@ -85,7 +85,7 @@ async def test_capacity_rejection_has_stable_503_headers_and_code():
     rejection = exc_info.value
     assert rejection.status_code == 503
     assert rejection.code == "GATEWAY_CAPACITY_EXHAUSTED"
-    assert rejection.headers["X-Gateway-Capacity-Key"] == "upstream.imam_agent"
+    assert rejection.headers["X-Gateway-Capacity-Key"] == "upstream.langgraph_agent"
     assert "Retry-After" in rejection.headers
     assert "X-Gateway-Queue-Wait-Ms" in rejection.headers
 

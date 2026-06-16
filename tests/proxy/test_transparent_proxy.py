@@ -258,15 +258,15 @@ class TestTransparentProxy:
         """当 assistant_id 无效时，自动基于上游 graph 列表进行一次自愈重试。"""
         proxy_config.service_id = "local-2024-flash"
         proxy_config.service_name = "flash"
-        proxy_config.assistant_id = "Imam"
-        proxy_config.graph_id = "Imam"
+        proxy_config.assistant_id = "Agent"
+        proxy_config.graph_id = "Agent"
         mock_config_loader.get_config.return_value = proxy_config
 
         invalid_resp = MagicMock()
         invalid_resp.status_code = 422
         invalid_resp.headers = {"content-type": "application/json"}
         invalid_resp.content = (
-            b'{"detail":"Invalid assistant: \\"Imam\\". Must be either:\\n- A valid assistant UUID, '
+            b'{"detail":"Invalid assistant: \\"Agent\\". Must be either:\\n- A valid assistant UUID, '
             b'or\\n- One of the registered graphs: flash"}'
         )
 
@@ -338,7 +338,7 @@ class TestTransparentProxy:
                 },
             }
         ).encode("utf-8")
-        request_body = json.dumps({"assistant_id": "imam_asst_1"}).encode("utf-8")
+        request_body = json.dumps({"assistant_id": "agent_asst_1"}).encode("utf-8")
 
         recorder = AsyncMock()
         with patch("src.services.metrics.get_usage_recorder", return_value=recorder):
@@ -357,7 +357,7 @@ class TestTransparentProxy:
         recorder.record_usage.assert_awaited_once()
         kwargs = recorder.record_usage.await_args.kwargs
         assert kwargs["service_id"] == proxy_config.service_id
-        assert kwargs["assistant_id"] == "imam_asst_1"
+        assert kwargs["assistant_id"] == "agent_asst_1"
         assert kwargs["input_tokens"] == 7
         assert kwargs["output_tokens"] == 3
 

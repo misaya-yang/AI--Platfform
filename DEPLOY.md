@@ -1,219 +1,195 @@
-# Deploying AI Gateway
+# Deployment Guide
 
-This repo ships three kinds of containers. Before touching production, find which block you're changing and follow its rules.
+This guide covers Docker Compose deployment for the standalone AI Gateway project.
 
-- **[Block 1 — Gateway](#block-1-gateway)** — the monolithic FastAPI surface at `/api/*`. Rebuild on any change under `src/` or `config/`.
-- **[Block 2 — Microservices](#block-2-microservices)** — domain services under `apps/*` that the gateway proxies to. Each has its own Dockerfile and build rules.
-- **[Block 3 — MCP tool servers](#block-3-mcp-tool-servers)** — standalone tool providers under `packages/*` that the gateway connects to via `config/mcp_servers.yaml`. Adding one requires editing compose AND config together.
+For a first local run, start with `README.md`. Use this document when you want a repeatable deployment checklist for a server or shared environment.
 
-Server deployment specifics (SSH key, port map, known incidents) live in the memory file `reference_server_deployment.md`. Read that **first** whenever you're about to touch the live server.
+## Deployment Model
 
----
+The default stack contains:
 
-## TL;DR deploy sequence
+- `postgres`: primary relational database
+- `redis`: cache, sessions, and queues
+- `qdrant`: vector database for the knowledge base
+- `knowledge-service`: KB CRUD, ingestion, indexing, and retrieval
+- `assistant-service`: general AI assistant runtime
+- `mcp-docgen-server`: document-generation MCP tool server
+- `gateway`: public API, auth, proxy, sessions, and readiness
+- `frontend`: web console
 
-```bash
-# 0. local
-git push gitlab dev
+The gateway and frontend are the public entry points. Assistant service remains private to the Docker network. Infrastructure ports are bound to `127.0.0.1` by default.
 
-# 1. server — pull + rebuild the services your change touches
-ssh -i ~/Desktop/密钥/ai-test.pem ubuntu@52.65.136.42 "
-  cd /opt/deploy/ai-gateway && git pull origin dev &&
-  cd /opt/deploy            && docker compose build <services> &&
-                               docker compose up -d <services>
-"
+## Required Configuration
 
-# 2. server — verify
-ssh ... 'sudo systemctl is-active nginx'     # must be active
-ssh ... 'curl -sf http://127.0.0.1:8080/health'
-ssh ... 'cd /opt/deploy && docker compose ps'
-```
-
-The `<services>` list depends on what changed — see the matrix in each block below.
-
-Alternatively use `scripts/deploy.sh <services...>` which wraps all of the above plus pre- and post-deploy checks.
-
----
-
-## Block 1 — Gateway
-
-```
-src/                   ← code
-Dockerfile             ← at repo root
-docker-compose.yml     ← service name: `gateway`
-config/                ← mcp_servers.yaml, langgraph.yaml, …
-```
-
-**What it is.** The public `/api/*` surface and its in-process services (assistant loop, OpenClaw, model registry). Port `8080` (mapped to host `8080` — the only public port besides nginx and imam-agent).
-
-**When to rebuild.**
-
-| Changed | Rebuild |
-|---|---|
-| `src/` (any) | `gateway` |
-| `config/` (any) | `gateway` |
-| `src/services/assistant/` | `gateway` **+ `assistant-service`** |
-| `src/services/knowledge/` | `gateway` **+ `knowledge-service`** |
-
-**Gotcha.** The image does `COPY . .` at build time — whatever is on disk at build moment is baked in, regardless of git HEAD. Always check the server's working tree before rebuilding:
+Create a real `.env` from the example:
 
 ```bash
-ssh ... 'cd /opt/deploy/ai-gateway && git status --short'
+cp .env.example .env
 ```
 
-If there are uncommitted files (WIP from another session) and any of them are under `src/`/`config/`, stash them first or you'll ship an inconsistent image. See the `2026-04-20 settings.py` incident in memory.
+Never commit `.env`.
 
----
+Fill these required values:
 
-## Block 2 — Microservices
+- `POSTGRES_PASSWORD`
+- `REDIS_PASSWORD`
+- `JWT_SECRET`
+- `GATEWAY_ASSISTANT_SHARED_SECRET`
+- At least one chat provider key
+- `KB_EMBEDDING_PROVIDER`
+- `KB_EMBEDDING_API_KEY`
+- `KB_EMBEDDING_MODEL`
+- `KB_EMBEDDING_DIMENSION`
 
-```
-apps/
-├── assistant-service/       Dockerfile → internal :8093
-├── knowledge-service/       Dockerfile → internal :8092
-└── islamic-content-service/ Dockerfile → internal :8091
-```
+Generate local secrets with:
 
-**What they are.** Domain-specific HTTP services the gateway calls over the docker network. Not exposed publicly — only nginx/gateway ever talks to them.
-
-**Shared characteristic.** They `import` from `src/` (this repo's top-level package). So they have **two rebuild triggers**: changes in their own `apps/<svc>/` dir, and changes in the `src/services/<domain>/` modules they depend on.
-
-**When to rebuild.**
-
-| Changed | Rebuild |
-|---|---|
-| `apps/assistant-service/` | `assistant-service` |
-| `apps/knowledge-service/` | `knowledge-service` |
-| `apps/islamic-content-service/` | `islamic-content` |
-| `src/services/assistant/` | `assistant-service` + `gateway` |
-| `src/services/knowledge/` | `knowledge-service` + `gateway` |
-| `src/services/islamic_content/` | `islamic-content` + `gateway` |
-
-**Gotcha.** Build context for each microservice is the **repo root** (`context: .`), so their Dockerfiles `COPY src/ /app/src/` — not `COPY . /app/`. Keeps the image small, and means apps can share the same `src/` source tree.
-
-**Note on imam-agent.** It lives in a *separate* repo (`/opt/deploy/langgraph_projects/`), uses volume-mount hot-reload, and is updated by `scp` + `docker compose restart imam-agent`. Not part of this repo's deploy flow.
-
----
-
-## Block 3 — MCP tool servers
-
-```
-packages/
-└── mcp-docgen-server/
-    ├── pyproject.toml
-    ├── Dockerfile
-    └── src/{docgen,mcp_docgen_server}/
-```
-
-**What they are.** Standalone Python packages that wrap domain tools behind the MCP (Model Context Protocol) HTTP interface. The gateway's `MCPManager` reads `config/mcp_servers.yaml` at startup, connects to each, and registers their tools as `mcp_{server}__{tool_name}` (e.g. `mcp_docgen__generate_document`). Think of them as "plug-in tool libraries."
-
-**Why split them out?** Two reasons:
-1. **Dependencies** — docgen pulls in LibreOffice, CJK fonts, poppler. None of that should be in the gateway image.
-2. **Isolation** — the server's heavy/slow work doesn't contend with gateway request handling, and it can be restarted independently.
-
-**Adding a new MCP server.** Five touchpoints, **all required** (the 5th only when the server returns URLs the browser must reach):
-
-1. **Code** — `packages/<name>-mcp-server/` with `src/`, `pyproject.toml`, `Dockerfile`.
-   Copy the layout from `packages/mcp-docgen-server/`. Ensure the server speaks the simplified JSON-RPC-over-HTTP transport (`main_http()`) — the gateway client is **not** a full MCP streamable-HTTP client.
-
-2. **docker-compose.yml** (both local and server copy) — add a service:
-   ```yaml
-   <name>-mcp-server:
-     build: { context: ., dockerfile: packages/<name>-mcp-server/Dockerfile }
-     container_name: <name>-mcp-server
-     environment: { MCP_TRANSPORT: http, PORT: "<port>" }
-     ports:
-       # Include ONLY if the server returns browser-visible URLs (signed
-       # downloads). Loopback-only; nginx proxies public traffic here.
-       - "127.0.0.1:<port>:<port>"
-     networks:
-       ai-gateway-net:
-         aliases: [ <name>-mcp-server.internal ]   # ← SSRF guard requires .internal
-     healthcheck: { test: ["CMD", "curl", "-fsS", "http://127.0.0.1:<port>/health"] }
-   ```
-
-3. **config/mcp_servers.yaml** — add:
-   ```yaml
-   - name: <name>
-     url: http://<name>-mcp-server.internal:<port>
-     transport: http
-     enabled: true
-   ```
-
-4. **src/services/assistant/tools/tool_selector.py** — add keywords under `_MCP_SERVER_KEYWORDS` so the tool surfaces when relevant. Without this, the selector scores your tool 0 for messages that don't literally contain the server name, and it's invisible to the model.
-
-5. **(Conditional) nginx reverse-proxy for browser-visible URLs.** If the server returns signed URLs that a user will click (downloads, artifacts), wire nginx so those URLs actually resolve publicly. Four coordinated pieces:
-
-   - **nginx location** — edit `/etc/nginx/sites-enabled/<site>` on the server, adding:
-     ```nginx
-     location /<name>/ {
-         proxy_pass http://127.0.0.1:<port>;   # no trailing slash — preserve path prefix
-         proxy_set_header Host $host;
-         proxy_set_header X-Forwarded-Proto https;
-         proxy_read_timeout 60s;
-     }
-     ```
-     Back up first (`sudo cp ... .bak-$(date +%Y%m%d-%H%M)`), then `sudo nginx -t && sudo nginx -s reload`.
-   - **`<SERVER>_PUBLIC_URL` env** in compose — set to `https://<host>/<name>` so signed URLs carry the public prefix from the start.
-   - **Path-only signing** — the server's URL-signing must HMAC only the path (and tenant/expiry), not scheme+host. Otherwise the sign-side URL (public) and verify-side URL (internal, after nginx proxy) will disagree and every signature fails.
-   - **Dual-prefix routing** — the server should register routes for BOTH `/artifacts/{path:path}` (direct-access, local dev) and `/<name>/artifacts/{path:path}` (public-prefix, behind nginx). Since nginx preserves the path prefix (no trailing slash on `proxy_pass`), the container sees `/<name>/artifacts/...` and must match that path.
-
-   See `packages/mcp-docgen-server/src/mcp_docgen_server/server.py::main_http` for a worked example.
-
-**Rebuild rule.** An MCP package rebuild is independent of gateway/microservices:
-
-| Changed | Rebuild |
-|---|---|
-| `packages/<name>/` | `<name>-mcp-server` only |
-| `config/mcp_servers.yaml` | `gateway` (it's inside the gateway image) |
-| `src/services/assistant/tools/tool_selector.py` | `gateway` |
-
-**Gotchas.**
-
-- **Build context quirk.** On the production server, `docker-compose.yml` lives at `/opt/deploy/docker-compose.yml` and the repo is at `/opt/deploy/ai-gateway/`. So the MCP service's `context:` must be `./ai-gateway` (with `dockerfile: packages/<name>/Dockerfile`), **not** `./packages/<name>/`. The repo's local `docker-compose.yml` uses `context: .` because the local compose lives inside the repo — the two compose files **intentionally differ** on this line.
-
-- **`.internal` suffix is load-bearing.** The gateway's `MCPClient._validate_url` blocks `http://` to any hostname that isn't `.internal` / `.local` / literal localhost. Plain docker service names (e.g. `wahda-mcp`) fail the SSRF guard with `"refusing to send credentials over cleartext"`. Always use the network alias.
-
-- **Clean-image dep check.** `pip install -e .` picks up transitive deps from the dev environment that *won't* be in a fresh production image. See the `2026-04-22 PyYAML` incident. Before shipping a new MCP server, build the image on a machine that doesn't already have the project installed and verify it starts cleanly.
-
----
-
-## Two compose files, on purpose
-
-```
-/opt/deploy/docker-compose.yml            ← production, edited in place on server
-/opt/deploy/ai-gateway/docker-compose.yml ← repo copy, pulled by git
-```
-
-The production compose has been customized over time (hardcoded passwords, hot-reload volume for imam-agent, real port mapping). Don't `cp` the repo version over it — you'll lose those edits.
-
-**Rule of thumb.** Changes to Block 1/Block 2 services *usually* don't need compose edits; just `docker compose build <svc> && up -d <svc>`. Block 3 (MCP) changes **do** need compose edits, and those edits must be hand-applied to `/opt/deploy/docker-compose.yml` in addition to committing the repo version.
-
-Always back up before editing:
 ```bash
-cp /opt/deploy/docker-compose.yml /opt/deploy/docker-compose.yml.bak-$(date +%Y%m%d-%H%M)
+openssl rand -hex 32
 ```
 
----
+## Preflight
 
-## Pre-deploy checklist
+Run configuration validation before building:
 
-Use `scripts/deploy.sh` or do this by hand:
+```bash
+make validate-config
+```
 
-- [ ] Local branch clean, tests green (`pytest tests/`)
-- [ ] Pushed to `gitlab/dev` (not codeup — no key)
-- [ ] Identified which block(s) your change touches
-- [ ] Listed the services to rebuild from the matrices above
-- [ ] Checked server `git status` for WIP that could contaminate the build
-- [ ] If Block 3 changes: updated `/opt/deploy/docker-compose.yml` **and** backed it up
-- [ ] Nginx is active before starting (`sudo systemctl is-active nginx`)
+This checks:
 
-## Post-deploy verification
+- required secrets are present and not placeholders
+- chat and embedding keys are configured
+- provider names and ports are valid
+- host ports are not duplicated
+- CORS values are JSON arrays
+- Docker Compose interpolates successfully
 
-- [ ] `curl http://127.0.0.1:8080/health` returns `{"status":"healthy"}`
-- [ ] All containers show `healthy` in `docker compose ps`
-- [ ] Frontend still mapped `8081:80` (never `80:80`)
-- [ ] Nginx still active
-- [ ] (If MCP added) `curl http://127.0.0.1:8080/api/v1/assistant/mcp/servers` shows `connected: true`
-- [ ] (If MCP added) Gateway log shows `Registered tool: mcp_<server>__<tool>`
-- [ ] Smoke test the feature via the frontend
+The validator does not print secret values.
+
+## Start
+
+Build and start everything:
+
+```bash
+make quickstart
+```
+
+Equivalent lower-level command:
+
+```bash
+docker compose --env-file .env up -d --build --remove-orphans
+```
+
+Validate the running stack:
+
+```bash
+make validate
+make status
+```
+
+Expected public endpoints:
+
+- Frontend: `http://localhost:8081`
+- API docs: `http://localhost:8080/docs`
+- Gateway readiness: `http://localhost:8080/health/ready`
+
+## Update
+
+Pull or apply the new source, then rebuild:
+
+```bash
+make deploy-build
+```
+
+For app-only updates:
+
+```bash
+make deploy-app
+```
+
+For infrastructure-only startup:
+
+```bash
+make deploy-infra
+```
+
+## Stop and Reset
+
+Stop without deleting data:
+
+```bash
+make stop
+```
+
+Destructive local reset:
+
+```bash
+docker compose down -v --remove-orphans
+```
+
+Use the destructive reset only when you intentionally want to delete local PostgreSQL, Redis, Qdrant, KB, and artifact volumes.
+
+## Data Volumes
+
+Compose uses the fixed project name `ai-gateway`, so volume names are stable:
+
+- `ai-gateway_pg-data`
+- `ai-gateway_redis-data`
+- `ai-gateway_qdrant-data`
+- `ai-gateway_gateway-data`
+- `ai-gateway_kb-data`
+- `ai-gateway_docgen-artifacts`
+
+PostgreSQL initializes its password when the volume is first created. If you change `POSTGRES_PASSWORD` after first boot without resetting the volume, authentication can fail. For local development, reset volumes intentionally with `docker compose down -v --remove-orphans`.
+
+Qdrant collections are tied to embedding dimensions. If you change `KB_EMBEDDING_DIMENSION` or switch providers for an existing dataset, create new collections/datasets or reset Qdrant in local development.
+
+## Production Notes
+
+For production-like deployments:
+
+- Put a reverse proxy or load balancer in front of gateway/frontend.
+- Keep PostgreSQL, Redis, and Qdrant ports private.
+- Use strong generated values for all secrets.
+- Store `.env` in your secret-management system, not in Git.
+- Configure explicit CORS origins for your frontend domain.
+- Use S3-compatible storage by setting `GATEWAY_STORAGE__BACKEND=s3` and filling the S3 variables.
+- Monitor `/health/ready`; it checks DB, Redis, knowledge service, assistant service, and docgen.
+
+## Troubleshooting
+
+Config validation:
+
+```bash
+make validate-config
+```
+
+Runtime validation:
+
+```bash
+make validate
+```
+
+Service state:
+
+```bash
+make status
+docker compose --env-file .env ps
+```
+
+Logs:
+
+```bash
+docker compose --env-file .env logs --tail=200 gateway
+docker compose --env-file .env logs --tail=200 knowledge-service
+docker compose --env-file .env logs --tail=200 assistant-service
+docker compose --env-file .env logs --tail=200 qdrant
+```
+
+Common causes:
+
+- `.env` still contains `change_me_*` placeholders.
+- A chat model key is configured, but `KB_EMBEDDING_API_KEY` is missing.
+- Redis or PostgreSQL password was changed after volumes were initialized.
+- Qdrant contains vectors from a different embedding dimension.
+- A host port is already occupied.

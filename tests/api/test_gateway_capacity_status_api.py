@@ -26,7 +26,7 @@ async def test_config_status_reports_capacity_and_rate_limit_enforcement(
     assert data["rate_limiting"]["enforcement_source"] in {"settings", "runtime", "disabled"}
     assert data["capacity"]["mode"] == "single-node"
     assert data["capacity"]["gateway_instance_id"]
-    assert any(budget["key"] == "upstream.imam_agent" for budget in data["capacity"]["budgets"])
+    assert any(budget["key"] == "upstream.langgraph_agent" for budget in data["capacity"]["budgets"])
     assert all("source_status" in budget for budget in data["capacity"]["budgets"])
 
 

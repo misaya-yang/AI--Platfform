@@ -8,7 +8,7 @@ the subject-matter brief.
 Usage:
     python3 scripts/docgen_harness_ppt.py
 
-Writes to ``/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word``.
+Writes to ``DOCGEN_HARNESS_OUT_DIR`` or ``tmp/docgen/harness``.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from src.services.assistant.docgen.planners import Brief  # noqa: E402
 from src.services.assistant.docgen.pipeline import DocgenPipeline  # noqa: E402
 
 
-OUT_DIR = Path("/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word")
+OUT_DIR = Path(os.getenv("DOCGEN_HARNESS_OUT_DIR", REPO / "tmp/docgen/harness"))
 
 BRIEF_BODY = """
 # 2025 was Agents. 2026 is Agent Harnesses.
@@ -188,9 +188,10 @@ def _load_env(path: Path) -> None:
 
 
 async def main() -> int:
-    env_path = REPO / ".env"
+    env_path = Path(os.getenv("DOCGEN_ENV_FILE", REPO / ".env"))
     if not env_path.exists():
-        env_path = Path("/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env")
+        print(f"Missing env file: {env_path}", file=sys.stderr)
+        return 1
     _load_env(env_path)
     base = os.environ.get("LLM_BASE_URL")
     key = os.environ.get("LLM_API_KEY")

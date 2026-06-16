@@ -91,7 +91,7 @@ function FolderDialog({
               if (e.key === "Enter") handleConfirm();
               if (e.key === "Escape") handleClose();
             }}
-            placeholder={t("assistant.folderPlaceholder", "e.g. Islamic Research")}
+            placeholder={t("assistant.folderPlaceholder", "e.g. Product Research")}
             className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
             autoFocus
           />

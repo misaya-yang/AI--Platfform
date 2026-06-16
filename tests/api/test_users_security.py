@@ -57,7 +57,7 @@ async def test_non_admin_cannot_modify_user_service_access_policy():
     with pytest.raises(HTTPException) as exc:
         await update_user(
             user_id="target-user",
-            body=UserUpdate(service_access_mode="allowlist", allowed_services=["imam"]),
+            body=UserUpdate(service_access_mode="allowlist", allowed_services=["agent"]),
             request=_request(db),
             auth=AuthContext(user_id="editor", roles=["user:edit"], is_authenticated=True),
         )

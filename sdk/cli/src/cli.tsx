@@ -29,7 +29,7 @@ const cli = meow(
   Examples
     $ hejaz --api-key gw_xxx --base-url https://yang.misaya.online
     $ hejaz -k gw_xxx -m qwen3.6-plus
-    $ hejaz --kb islamic-knowledge,sales
+    $ hejaz --kb product-docs,sales
 `,
   {
     importMeta: import.meta,

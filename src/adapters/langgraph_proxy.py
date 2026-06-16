@@ -1601,8 +1601,8 @@ class LangGraphProxy:
         Inject domain policy metadata for downstream runtimes.
 
         Contract:
-        - If assistant metadata explicitly declares `domain_policy=imam`,
-          ensure run payload includes `metadata.gateway.domain_policy=imam`.
+        - If assistant metadata explicitly declares a domain policy,
+          ensure run payload includes `metadata.gateway.domain_policy`.
         - Do not overwrite caller-provided gateway domain policy.
         """
         merged_metadata = dict(metadata) if isinstance(metadata, dict) else {}
@@ -1620,11 +1620,16 @@ class LangGraphProxy:
             return merged_metadata or None
 
         assistant_domain_policy = str(assistant_meta.get("domain_policy") or "").strip().lower()
-        if assistant_domain_policy != "imam":
+        if (
+            not assistant_domain_policy
+            or assistant_domain_policy == "none"
+            or len(assistant_domain_policy) > 64
+            or not all(ch.isalnum() or ch in "._-" for ch in assistant_domain_policy)
+        ):
             return merged_metadata or None
 
         gateway_payload = dict(existing_gateway) if isinstance(existing_gateway, dict) else {}
-        gateway_payload["domain_policy"] = "imam"
+        gateway_payload["domain_policy"] = assistant_domain_policy
         merged_metadata["gateway"] = gateway_payload
         return merged_metadata
 

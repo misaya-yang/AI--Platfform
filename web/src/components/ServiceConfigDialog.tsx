@@ -935,7 +935,7 @@ export function ServiceConfigDialog({
                         <Label>{t("services.configDialog.basic.upstreamUrls")}</Label>
                         <Textarea
                           value={basicForm.upstream_urls_text}
-                          placeholder={"http://imam-agent-1:8000\nhttp://imam-agent-2:8000"}
+                          placeholder={"http://langgraph-agent-1:8000\nhttp://langgraph-agent-2:8000"}
                           rows={3}
                           onChange={(e) =>
                             setBasicForm({ ...basicForm, upstream_urls_text: e.target.value })
@@ -1463,7 +1463,7 @@ export function ServiceConfigDialog({
                     <Input
                       value={capacityForm.upstream_group}
                       disabled={!capacityEnforced}
-                      placeholder="imam_agent"
+                      placeholder="langgraph_agent"
                       onChange={(e) =>
                         setCapacityForm({ ...capacityForm, upstream_group: e.target.value })
                       }

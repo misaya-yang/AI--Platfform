@@ -277,7 +277,7 @@ class TestBillingInterceptor:
 
         processor = interceptor.create_stream_processor(
             request_id="req_updates_001",
-            service_id="imam_service",
+            service_id="agent_service",
             user_id="user_123",
             tenant_id="default",
         )
@@ -295,7 +295,7 @@ class TestBillingInterceptor:
         assert captured[0].input_tokens == 12
         assert captured[0].output_tokens == 8
         assert captured[0].total_tokens == 20
-        assert captured[0].service_id == "imam_service"
+        assert captured[0].service_id == "agent_service"
 
     @pytest.mark.asyncio
     async def test_stream_processor_finalize(self, billing_interceptor):
@@ -333,10 +333,10 @@ class TestBillingInterceptor:
 
         processor = interceptor.create_stream_processor(
             request_id="req_error_001",
-            service_id="imam_service",
+            service_id="agent_service",
             user_id="user_123",
             tenant_id="default",
-            assistant_id="assistant_imam",
+            assistant_id="assistant_agent",
             request_type="proxy_run_stream",
             model_hint="gemini-2.0-flash",
         )

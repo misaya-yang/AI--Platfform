@@ -302,8 +302,7 @@ class DatabaseStorage:
             await self._auto_apply_api_keys_migration()
             await self._auto_apply_assistant_memory_migration()
             await self._auto_apply_fts_migration()
-            await self._auto_apply_islamic_metadata_migration()
-            await self._auto_apply_islamic_canonical_storage_migration()
+            await self._auto_apply_source_metadata_migration()
             await self._auto_apply_openai_embedding_migration()
             await self._auto_apply_observability_governance_migration()
             await self._auto_apply_assistant_gateway_migration()
@@ -595,8 +594,8 @@ class DatabaseStorage:
             else:
                 logger.error(f"Failed to apply migration 028: {e}")
 
-    async def _auto_apply_islamic_metadata_migration(self) -> None:
-        """Add Islamic knowledge traceability columns to segments table."""
+    async def _auto_apply_source_metadata_migration(self) -> None:
+        """Add source traceability columns to segments table."""
         if not self._pool:
             return
         try:
@@ -627,53 +626,13 @@ class DatabaseStorage:
                         CREATE INDEX IF NOT EXISTS idx_segments_language ON segments(language);
                     """)
                 logger.info(
-                    "Applied Islamic metadata migration: added source_type, source_reference, citation_text, etc."
+                    "Applied source metadata migration: added source_type, source_reference, citation_text, etc."
                 )
         except Exception as e:
             if "already exists" in str(e).lower():
-                logger.info("Islamic metadata migration already applied")
+                logger.info("Source metadata migration already applied")
             else:
-                logger.error(f"Failed to apply Islamic metadata migration: {e}")
-
-    async def _islamic_canonical_storage_missing(self) -> bool:
-        """Check whether the canonical Islamic content tables are missing."""
-        if not self._pool:
-            return False
-        async with self._pool.acquire() as conn:
-            quran_chapters = await conn.fetchval("SELECT to_regclass('public.quran_chapters')")
-            source_sync_runs = await conn.fetchval("SELECT to_regclass('public.source_sync_runs')")
-            return quran_chapters is None or source_sync_runs is None
-
-    async def _auto_apply_islamic_canonical_storage_migration(self) -> None:
-        """Apply canonical Islamic content storage migration (040) when required."""
-        if not self._pool:
-            return
-        try:
-            missing = await self._islamic_canonical_storage_missing()
-        except Exception as exc:
-            logger.warning("Could not check Islamic canonical storage schema: %s", exc)
-            return
-        if not missing:
-            return
-
-        migration_path = (
-            Path(__file__).resolve().parent.parent.parent
-            / "database"
-            / "migrations"
-            / "040_islamic_canonical_storage.sql"
-        )
-        if not migration_path.exists():
-            logger.warning("Migration 040 not found: %s", migration_path)
-            return
-
-        try:
-            await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 040_islamic_canonical_storage.sql")
-        except Exception as exc:
-            if "already exists" in str(exc).lower():
-                logger.info("Migration 040 already applied")
-            else:
-                logger.error("Failed to apply migration 040: %s", exc)
+                logger.error(f"Failed to apply source metadata migration: {e}")
 
     async def _openai_embedding_needs_migration(self) -> bool:
         """Check whether OpenAI embedding migration is needed."""
@@ -2135,7 +2094,7 @@ class DatabaseStorage:
 
         rows = []
         for seg in segments:
-            # Extract Islamic metadata from segment metadata dict if present
+            # Extract source metadata from segment metadata dict if present.
             seg_meta = seg.get("metadata", {})
             if isinstance(seg_meta, str):
                 try:
@@ -2171,7 +2130,7 @@ class DatabaseStorage:
                     seg.get("created_by"),
                     # Content hash for incremental updates
                     seg.get("content_hash"),
-                    # Islamic knowledge traceability fields
+                    # Source traceability fields
                     seg.get("source_type") or seg_meta.get("source_type", "unknown"),
                     json.dumps(
                         seg.get("source_reference") or seg_meta.get("source_reference") or {}

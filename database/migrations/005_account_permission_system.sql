@@ -256,8 +256,9 @@ SELECT 'guest', unnest(ARRAY[
 ON CONFLICT (role_name, permission_code) DO NOTHING;
 
 -- ============================================================
--- 9. Create initial admin user
--- Password: 123456.dc (bcrypt hash with cost factor 12)
+-- 9. Create local bootstrap admin user
+-- Local initial password: ChangeMe-Admin-2026! (bcrypt hash with cost factor 12)
+-- Change it immediately after first login.
 -- ============================================================
 INSERT INTO users (
     user_id,
@@ -276,16 +277,15 @@ INSERT INTO users (
 ) VALUES (
     'admin',
     'admin',
-    'admin@hejazfs.com.au',
+    'admin@example.com',
     'System Administrator',
     'default',
     'admin',
     ARRAY['admin']::VARCHAR(50)[],
     ARRAY['admin:*']::VARCHAR(100)[],
     'active',
-    -- bcrypt hash of '123456.dc' with cost 12
-    '$2b$12$ORXIEYVft.OQ5v55S6WiFukZGEk.1QkB/fElA.0IMM5shEpBoyhWC',
-    FALSE,
+    '$2b$12$3UfCsRE9RsU68qKAX/bgzObJODrSOFdvKi7RLO6.8Xnli25qoU/N2',
+    TRUE,
     TRUE,
     'system'
 ) ON CONFLICT (user_id) DO UPDATE SET
@@ -315,7 +315,7 @@ COMMENT ON TABLE email_domain_config IS 'Allowed email domains for user registra
 
 -- Insert allowed domain
 INSERT INTO email_domain_config (domain, is_allowed, description)
-VALUES ('hejazfs.com.au', TRUE, 'Company internal email domain')
+VALUES ('example.com', TRUE, 'Default local development email domain')
 ON CONFLICT (domain) DO NOTHING;
 
 -- Trigger for updated_at

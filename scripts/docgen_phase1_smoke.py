@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -315,7 +316,7 @@ def _make_pdf_ir() -> PdfIR:
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-dir", type=Path, default=Path("/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word"))
+    parser.add_argument("--out-dir", type=Path, default=Path(os.getenv("DOCGEN_SMOKE_OUT_DIR", REPO / "tmp/docgen/smoke")))
     args = parser.parse_args()
 
     out_dir = args.out_dir

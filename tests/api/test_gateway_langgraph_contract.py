@@ -82,9 +82,9 @@ def _auth() -> AuthContext:
 def _service(model_override: dict[str, Any]) -> ProxyServiceConfig:
     return ProxyServiceConfig(
         service_id="local-2024-agent",
-        service_name="Sheikh Wahda",
-        upstream_url="http://imam-agent:8000",
-        graph_id="Imam",
+        service_name="LangGraph Agent",
+        upstream_url="http://langgraph-agent:8000",
+        graph_id="Agent",
         metadata={"adapter_type": "langgraph"},
         model_override=model_override,
     )

@@ -414,26 +414,26 @@ async def test_knowledge_service_down_isolation(
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — imam-agent down, AS + gateway survive
+# Test 3 — langgraph-agent down, AS + gateway survive
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_imam_agent_down_isolation(
+async def test_langgraph_agent_down_isolation(
     compose_stack: dict[str, Any],
     http: httpx.AsyncClient,
 ) -> None:
-    """imam-agent (LangGraph proxy upstream) down → gateway+AS healthy,
+    """langgraph-agent (LangGraph proxy upstream) down → gateway+AS healthy,
     /langgraph/threads returns 502/503 cleanly."""
     if compose_stack["live_stack"]:
         pytest.skip("INTEGRATION_USE_LIVE_STACK=true; skipping docker stop/start tests")
-    # imam-agent is deployed via Helm in prod — only present in some
+    # langgraph-agent is deployed via Helm in prod — only present in some
     # compose layouts. Skip cleanly when absent so this test never
     # blocks a deployment that does not run a local LangGraph instance.
-    if not _service_in_stack(compose_stack, "imam-agent"):
-        pytest.skip("imam-agent not in running compose stack (Helm-only deploy?)")
+    if not _service_in_stack(compose_stack, "langgraph-agent"):
+        pytest.skip("langgraph-agent not in running compose stack (Helm-only deploy?)")
 
-    with _ensure_started("imam-agent"):
-        _stop_service("imam-agent")
+    with _ensure_started("langgraph-agent"):
+        _stop_service("langgraph-agent")
 
         # 1. Gateway /health 200.
         gw_health = await _async_get(http, f"{_GATEWAY_URL}/health", timeout=_HEALTH_BUDGET)
@@ -447,7 +447,7 @@ async def test_imam_agent_down_isolation(
 
         # 3. /langgraph/threads returns 502/503 fast. Note the gateway
         # mounts the LangGraph proxy at /api/v1/langgraph — there is no
-        # /api/v1/imam prefix today (see src/api/v1/langgraph.py).
+        # /api/v1/agent prefix today (see src/api/v1/langgraph.py).
         threads_resp, threads_elapsed = await _measure_latency(
             lambda: _async_post(
                 http,
@@ -460,13 +460,13 @@ async def test_imam_agent_down_isolation(
             f"/langgraph/threads hung for {threads_elapsed:.2f}s"
         )
         assert threads_resp.status_code in {401, 403, 404, 502, 503}, (
-            f"unexpected status with imam-agent down: {threads_resp.status_code} "
+            f"unexpected status with langgraph-agent down: {threads_resp.status_code} "
             f"{threads_resp.text[:200]}"
         )
         assert threads_resp.status_code != 500
 
-        # 4. Restart imam-agent and verify recovery.
-        _start_service("imam-agent")
+        # 4. Restart langgraph-agent and verify recovery.
+        _start_service("langgraph-agent")
         recovered = await _wait_for_health(
             http, f"{_GATEWAY_URL}/health", timeout=_RESTART_HEALTHY_BUDGET
         )

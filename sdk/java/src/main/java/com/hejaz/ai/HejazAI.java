@@ -17,11 +17,11 @@ import java.time.Duration;
  * <pre>{@code
  * try (var ai = new HejazAI("gw_xxx")) {
  *     // Non-streaming
- *     ChatResponse resp = ai.chat().send("What is Zakat?").join();
+ *     ChatResponse resp = ai.chat().send("Summarize the onboarding checklist").join();
  *     System.out.println(resp.content());
  *
  *     // Streaming
- *     ai.chat().stream("Explain fasting", new StreamHandler() {
+ *     ai.chat().stream("Explain our refund policy", new StreamHandler() {
  *         @Override public void onText(String text) { System.out.print(text); }
  *         @Override public void onDone(ChatResponse r) { System.out.println("\nDone!"); }
  *     });
@@ -30,7 +30,7 @@ import java.time.Duration;
  *
  * <h2>Multi-tenant</h2>
  * <pre>{@code
- * var ai = new HejazAI("gw_xxx", "https://api.hejaz.com", "wahda");
+ * var ai = new HejazAI("gw_xxx", "https://api.hejaz.com", "default");
  * }</pre>
  *
  * <p>Implements {@link AutoCloseable} for use in try-with-resources blocks.

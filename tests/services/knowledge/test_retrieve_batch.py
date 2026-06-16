@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
+from knowledge_service.services.knowledge.retrieval_service import RetrievalService
 
 
 def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:
@@ -22,7 +22,7 @@ def _mock_result(query: str, metadata: dict | None = None) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_retrieve_batch_supports_per_query_overrides():
-    svc = object.__new__(KnowledgeService)
+    svc = object.__new__(RetrievalService)
 
     async def _require_dataset_access(user, dataset_id, required="viewer"):
         return {"dataset_id": dataset_id}
@@ -35,30 +35,30 @@ async def test_retrieve_batch_supports_per_query_overrides():
             "ok": True
         }
 
-    svc.require_dataset_access = _require_dataset_access
+    svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
     svc.retrieve = _retrieve
 
-    batch_results, meta = await svc.retrieve_batch(
+    batch_results, meta = await RetrievalService.retrieve_batch(
+        svc,
         user=SimpleNamespace(),
         dataset_id="kb_demo",
         queries=[
             {
-                "query": "ramadan fasting",
-                "source_type_filter": "quran",
-                "metadata_filter": {"madhab": "hanafi"},
-                "multi_query": True,
+                "query": "release rollback",
+                "source_type_filter": "runbook",
+                "metadata_filter": {"team": "platform"},
             },
-            "zakat rules",
+            "deployment health checks",
         ],
         top_k=4,
         max_parallel=2,
     )
 
     assert len(calls) == 2
-    assert calls[0]["source_type_filter"] == "quran"
-    assert calls[0]["metadata_filter"] == {"madhab": "hanafi"}
-    assert calls[0]["multi_query"] is True
-    assert calls[1]["query"] == "zakat rules"
+    assert calls[0]["source_type_filter"] == "runbook"
+    assert calls[0]["metadata_filter"] == {"team": "platform"}
+    assert {"query", "source_type_filter", "metadata_filter"}.issubset(calls[0])
+    assert calls[1]["query"] == "deployment health checks"
     assert batch_results[0]["meta"]["queue_wait_ms"] >= 0
     assert batch_results[0]["meta"]["retrieve_time_ms"] >= 0
     assert meta["total_queries"] == 2

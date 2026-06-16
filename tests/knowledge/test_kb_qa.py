@@ -5,9 +5,9 @@
 测试入库后的检索和问答功能。
 
 用法:
-    python test_kb_qa.py --dataset imam --query "marriage in Islam"
-    python test_kb_qa.py --dataset imam --test-file test_questions.txt
-    python test_kb_qa.py --dataset imam --interactive
+    python test_kb_qa.py --dataset agent --query "release rollback"
+    python test_kb_qa.py --dataset agent --test-file test_questions.txt
+    python test_kb_qa.py --dataset agent --interactive
 """
 
 import argparse

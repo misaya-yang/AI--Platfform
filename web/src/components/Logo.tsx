@@ -18,7 +18,7 @@ export function Logo({ collapsed }: { collapsed: boolean }) {
                         className="text-[15px] font-semibold text-foreground leading-none"
                         style={{ letterSpacing: "-0.2px" }}
                     >
-                        Hejaz AI
+                        AI Gateway
                     </span>
                 </div>
             )}

@@ -41,7 +41,7 @@ class FakeRedisBudget:
 
 def _shared_budget() -> CapacityBudget:
     return CapacityBudget(
-        key="upstream.imam_agent",
+        key="upstream.langgraph_agent",
         limit=4,
         queue_max=0,
         queue_timeout_ms=100,

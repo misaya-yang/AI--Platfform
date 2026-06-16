@@ -104,15 +104,15 @@ def reset_langgraph_adapter_control_plane():
 
 def _service(model_override: dict[str, Any] | None = None) -> ServiceDefinition:
     connector_config: dict[str, Any] = {
-        "base_url": "http://imam-agent:8000",
-        "graph_id": "Imam",
+        "base_url": "http://langgraph-agent:8000",
+        "graph_id": "Agent",
     }
     if model_override is not None:
         connector_config["model_override"] = model_override
 
     return ServiceDefinition(
-        service_id="imam-agent",
-        name="Imam Agent",
+        service_id="langgraph-agent",
+        name="Agent Agent",
         service_type=ServiceType.LANGGRAPH,
         supported_modes=[InvocationMode.SYNC, InvocationMode.STREAM],
         connector_type=ConnectorType.HTTP,
@@ -130,7 +130,7 @@ def _request(
 ) -> UnifiedRequest:
     return UnifiedRequest(
         request_id="req-1",
-        service_id="imam-agent",
+        service_id="langgraph-agent",
         inputs=[ContentItem(type=ContentType.TEXT, data="hello")],
         session_id="session-1",
         context=context,
@@ -292,13 +292,13 @@ async def test_service_register_invalidates_cached_adapter():
 
     updated = _service()
     updated.metadata = {"adapter_type": "dummy"}
-    updated.connector_config["base_url"] = "http://imam-agent-new:8000"
+    updated.connector_config["base_url"] = "http://langgraph-agent-new:8000"
     await registry.register(updated)
     second_adapter = registry.get_adapter(updated)
 
     try:
         assert second_adapter is not first_adapter
-        assert second_adapter.service.connector_config["base_url"] == "http://imam-agent-new:8000"
+        assert second_adapter.service.connector_config["base_url"] == "http://langgraph-agent-new:8000"
     finally:
         await first_adapter.connector.close()
         await second_adapter.connector.close()

@@ -269,8 +269,8 @@ class ChunkingManager:
                     pending_images,
                 )
 
-        # Merge tiny fragments for non-Islamic, non-fixed mode
-        if config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE):
+        # Merge tiny fragments for non-fixed mode.
+        if config.mode != ChunkingMode.FIXED_SIZE:
             normalized = merge_small_chunks(
                 normalized,
                 min_size=config.min_chunk_size,

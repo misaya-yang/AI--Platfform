@@ -164,7 +164,7 @@ async def login(
     """
     User login with email and password.
 
-    - Validates email domain (@hejazfs.com.au only)
+    - Validates the configured email domain
     - Checks account lock status
     - Verifies password
     - Returns JWT token and user info

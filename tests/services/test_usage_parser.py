@@ -50,10 +50,10 @@ def test_extract_token_usage_from_openai_shape():
 def test_extract_string_fields_from_nested_payload():
     payload = {
         "metadata": {"provider": "openai"},
-        "request": {"assistant_id": "asst_imam"},
+        "request": {"assistant_id": "asst_agent"},
         "response": {"model_name": "gpt-4.1-mini"},
     }
 
     assert extract_provider(payload) == "openai"
-    assert extract_assistant_id(payload) == "asst_imam"
+    assert extract_assistant_id(payload) == "asst_agent"
     assert extract_model(payload) == "gpt-4.1-mini"

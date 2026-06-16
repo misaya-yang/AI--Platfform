@@ -45,7 +45,8 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { setAuth, setLoading, isLoading } = useAuthStore();
-  const allowedDomain = "hejazfs.com.au";
+  const allowedDomain = import.meta.env.VITE_AUTH_EMAIL_DOMAIN || "example.com";
+  const supportEmail = import.meta.env.VITE_SUPPORT_EMAIL || `admin@${allowedDomain}`;
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -92,7 +93,7 @@ export function LoginPage() {
       content: (
         <div className="py-2">
           <p>{t("login.forgotPasswordModal.content")}</p>
-          <p className="mt-2 text-sm text-muted-foreground">{t("login.forgotPasswordModal.adminEmail", { email: "admin@hejazfs.com.au" })}</p>
+          <p className="mt-2 text-sm text-muted-foreground">{t("login.forgotPasswordModal.adminEmail", { email: supportEmail })}</p>
         </div>
       ),
       okText: t("login.forgotPasswordModal.ok"),
@@ -111,7 +112,7 @@ export function LoginPage() {
               <path d="M2 12l10 5 10-5" />
             </svg>
           </div>
-          <span className="font-semibold text-base text-foreground tracking-tight">Hejaz AI</span>
+          <span className="font-semibold text-base text-foreground tracking-tight">AI Gateway</span>
         </div>
 
         {/* Card */}

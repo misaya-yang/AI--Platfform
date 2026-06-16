@@ -265,16 +265,16 @@ class TestLangGraphRunMetadataInjection:
     """LangGraph Run metadata 注入测试"""
 
     def test_injects_gateway_domain_policy_from_assistant_metadata(self):
-        """assistant metadata 显式声明 imam 时注入 gateway.domain_policy。"""
+        """assistant metadata 显式声明 agent 时注入 gateway.domain_policy。"""
         from src.adapters.langgraph_proxy import LangGraphProxy
 
         merged = LangGraphProxy._inject_gateway_domain_policy_metadata(
             metadata=None,
-            assistant_payload={"metadata": {"domain_policy": "imam"}},
+            assistant_payload={"metadata": {"domain_policy": "agent"}},
         )
 
         assert isinstance(merged, dict)
-        assert merged["gateway"]["domain_policy"] == "imam"
+        assert merged["gateway"]["domain_policy"] == "agent"
 
     def test_keeps_existing_gateway_domain_policy(self):
         """调用方显式传入 gateway.domain_policy 时不覆盖。"""
@@ -282,7 +282,7 @@ class TestLangGraphRunMetadataInjection:
 
         merged = LangGraphProxy._inject_gateway_domain_policy_metadata(
             metadata={"gateway": {"domain_policy": "custom"}},
-            assistant_payload={"metadata": {"domain_policy": "imam"}},
+            assistant_payload={"metadata": {"domain_policy": "agent"}},
         )
 
         assert isinstance(merged, dict)

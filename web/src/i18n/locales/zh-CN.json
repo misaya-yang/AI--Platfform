@@ -1016,8 +1016,6 @@
       "chunkRecursiveDesc": "层级递归分割，先按段落再按句子，逐级细分直到达到目标长度",
       "chunkHierarchical": "父子切分",
       "chunkHierarchicalDesc": "创建大块（父块）和小块（子块）的层级结构，适合需要保留上下文的场景",
-      "chunkIslamic": "伊斯兰分块",
-      "chunkIslamicDesc": "面向古兰经、圣训、经注与教法的识别式分块，确保引用可追溯",
       "maxChunkSize": "最大分段长度",
       "chunkPreview": "分段预览",
       "testChunking": "测试分段效果",
@@ -1048,21 +1046,6 @@
         "fileTooLarge": "文件 \"{{name}}\" 超过大小限制 ({{limit}})",
         "duplicateFile": "文件 \"{{name}}\" 已添加"
       },
-      "islamicEnhancements": "伊斯兰增强功能",
-      "islamicEnhancementsHint": "伊斯兰知识库（AI Imam）专用可选功能。仅影响启用了此功能的数据集，对其他知识库零影响。",
-      "islamicChunking": "伊斯兰分块",
-      "islamicChunkingHint": "启用面向古兰经/圣训的分块策略，同时强制引用格式与权威排序。",
-      "islamicStrictTraceability": "严格章节可追溯",
-      "islamicStrictTraceabilityHint": "要求每个分块都包含章节标题并写入引用，建议用于 Imam 数据集。",
-      "islamicMultiQuery": "多查询扩展",
-      "islamicMultiQueryHint": "自动使用伊斯兰术语同义词和音译扩展查询（如 salah → prayer, صلاة），零 LLM 成本，提升阿拉伯语/英语双语内容的召回率。",
-      "islamicCitation": "引用格式化",
-      "islamicCitationHint": "为检索结果附加格式化的引用信息（如 古兰经 2:255, 布哈里圣训集 第1卷 第1条）。",
-      "islamicAuthoritySort": "权威排序",
-      "islamicAuthoritySortHint": "按伊斯兰权威等级排列结果：古兰经 > 圣训 > 经注 > 教法学 > 其他。",
-      "islamicContextualPrefix": "上下文前缀",
-      "islamicContextualPrefixHint": "在嵌入前为文本块添加结构化上下文前缀（如「此段落来自白格勒章」）。需要重新索引，即将推出。",
-      "islamicMaxQueries": "最大扩展查询数",
       "embeddingGemini001": "Google Gemini Embedding 001",
       "embeddingDashscopeV4": "DashScope Text Embedding v4",
       "embeddingDashscopeV3": "DashScope Text Embedding v3",
@@ -1317,8 +1300,7 @@
         "heading": "按标题切分",
         "hierarchical": "父子分块",
         "recursive": "递归切分",
-        "separator": "按符号切分",
-        "islamic": "伊斯兰文本切分"
+        "separator": "按符号切分"
       },
       "chunkModeShort": {
         "automatic": "自动",
@@ -1327,8 +1309,7 @@
         "heading": "标题",
         "hierarchical": "层级",
         "recursive": "递归",
-        "separator": "分隔",
-        "islamic": "伊斯兰"
+        "separator": "分隔"
       },
       "cannotLoadConfig": "无法加载配置",
       "retrievalMode": "检索模式",

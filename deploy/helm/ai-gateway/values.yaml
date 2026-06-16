@@ -77,34 +77,6 @@ frontend:
     targetCPUUtilization: 70
 
 # -----------------------------------------------------------------------------
-# Islamic Content Service
-# -----------------------------------------------------------------------------
-islamicContent:
-  enabled: true
-  replicaCount: 1
-  image:
-    repository: islamic-content-service
-    tag: latest
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
-  autoscaling:
-    enabled: true
-    minReplicas: 1
-    maxReplicas: 4
-    targetCPUUtilization: 70
-  env:
-    ISLAMIC_CONTENT_APP__HOST: "0.0.0.0"
-    ISLAMIC_CONTENT_APP__PORT: "8091"
-    ISLAMIC_CONTENT_DATABASE__SCHEMA: "islamic_content"
-    ISLAMIC_CONTENT_DATABASE__AUTO_MIGRATE: "true"
-    ISLAMIC_CONTENT_BOOTSTRAP__ON_START: "true"
-
-# -----------------------------------------------------------------------------
 # Knowledge Base Service
 # -----------------------------------------------------------------------------
 knowledgeService:
@@ -138,8 +110,8 @@ knowledgeService:
 # separate databases/db-numbers for isolation. Add new agents by adding
 # entries to the agents map below.
 #
-# Build:  langgraph build -t imam-agent:latest  (inside agents/Imam_agent/)
-# Scale:  --set langgraph.agents.imam.autoscaling.maxReplicas=8
+# Build:  langgraph build -t generic-assistant-agent:latest
+# Scale:  --set langgraph.agents.assistant.autoscaling.maxReplicas=8
 # -----------------------------------------------------------------------------
 langgraph:
   enabled: true
@@ -150,14 +122,14 @@ langgraph:
     LANGGRAPH_CLOUD_LICENSE_KEY: ""
 
   agents:
-    imam:
+    assistant:
       enabled: true
       image:
-        repository: imam-agent
+        repository: generic-assistant-agent
         tag: latest
       replicaCount: 1
       port: 8000
-      databaseName: langgraph_imam
+      databaseName: langgraph_assistant
       redisDb: "2"
       resources:
         requests:

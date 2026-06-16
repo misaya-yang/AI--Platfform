@@ -130,13 +130,6 @@ redis://:$(REDIS_PASSWORD)@{{ include "ai-gateway.redisHost" . }}:{{ include "ai
 {{- end }}
 
 {{/*
-Redis URL for Islamic Content (db 1)
-*/}}
-{{- define "ai-gateway.redisURLDB1" -}}
-redis://:$(REDIS_PASSWORD)@{{ include "ai-gateway.redisHost" . }}:{{ include "ai-gateway.redisPort" . }}/1
-{{- end }}
-
-{{/*
 Knowledge Service URL (internal)
 */}}
 {{- define "ai-gateway.knowledgeServiceUrl" -}}

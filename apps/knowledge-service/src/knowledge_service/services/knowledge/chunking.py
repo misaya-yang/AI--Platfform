@@ -150,7 +150,7 @@ class TokenCounter:
         - Average Arabic word = 3.0-3.5 tokens in GPT models (empirically validated)
 
         Calibration Notes (2025):
-        - Tested against tiktoken cl100k_base with Arabic Islamic texts
+        - Tested against tiktoken cl100k_base with Arabic texts
         - Short Arabic words (2-3 chars): ~2.5 tokens
         - Medium Arabic words (4-6 chars): ~3.2 tokens
         - Long Arabic words with prefixes/suffixes: ~4.0 tokens
@@ -428,7 +428,6 @@ class ChunkingMode(str, Enum):
     RECURSIVE = "recursive"  # 递归切分
     HIERARCHICAL = "hierarchical"  # 父子切分
     QA = "qa"  # QA对切分
-    ISLAMIC = "islamic"  # 伊斯兰文本切分
 
 
 class ContentType(str, Enum):
@@ -591,8 +590,8 @@ class ChunkingConfig:
     # Page markers (for page mode)
     page_marker: str = r"\f"  # Form feed or custom marker
 
-    # Strict Section Traceability (for Islamic/Imam-type datasets)
-    # When enabled, ensures every chunk has a section_title and includes it in citations
+    # Strict section traceability.
+    # When enabled, ensures every chunk has a section_title for downstream citations.
     strict_section_traceability: bool = False
 
     def __post_init__(self) -> None:
@@ -628,7 +627,6 @@ class ChunkingConfig:
             "hierarchical": ChunkingMode.HIERARCHICAL,
             "parent_child": ChunkingMode.HIERARCHICAL,
             "qa": ChunkingMode.QA,
-            "islamic": ChunkingMode.ISLAMIC,
         }
         mode = mode_map.get(mode_str, ChunkingMode.AUTOMATIC)
 
@@ -2386,17 +2384,6 @@ class AutomaticChunker(BaseChunker):
 
         self._apply_auto_defaults()
 
-        # Strategy 0: Auto-detect Islamic texts (Quran, Hadith, Fiqh, Tafseer)
-        # and delegate to the specialised IslamicTextChunker which preserves
-        # verse and narration boundaries.
-        try:
-            from .islamic_chunking import is_islamic_text, IslamicTextChunker
-
-            if is_islamic_text(text):
-                return IslamicTextChunker(self.config).chunk(text)
-        except Exception:
-            pass  # islamic_chunking module unavailable — continue normally
-
         # Analyze document characteristics
         has_images = any(re.search(p, text) for p in self.IMAGE_PATTERNS)
         has_heading_structure = self._has_heading_structure(text)
@@ -2506,11 +2493,6 @@ class AutomaticChunker(BaseChunker):
 
 def create_chunker(config: ChunkingConfig) -> BaseChunker:
     """Factory function to create appropriate chunker"""
-    if config.mode == ChunkingMode.ISLAMIC:
-        from .islamic_chunking import IslamicTextChunker
-
-        return IslamicTextChunker(config)
-
     chunker_map = {
         ChunkingMode.AUTOMATIC: AutomaticChunker,
         ChunkingMode.FIXED_SIZE: FixedSizeChunker,
@@ -2792,7 +2774,6 @@ def enforce_token_limits(
     max_tokens: int,
     *,
     min_tokens: int | None = None,
-    preserve_quran_verses: bool = True,
 ) -> list[Chunk]:
     """
     Enforce strict max token limits by splitting oversized chunks.
@@ -2806,11 +2787,6 @@ def enforce_token_limits(
     for chunk in chunks:
         # Skip non-text chunks
         if chunk.content_type != ContentType.TEXT:
-            normalized.append(chunk)
-            continue
-
-        # Preserve Quran verse integrity when requested
-        if preserve_quran_verses and chunk.metadata.get("islamic_source_type") == "quran":
             normalized.append(chunk)
             continue
 

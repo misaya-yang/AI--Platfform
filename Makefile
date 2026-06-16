@@ -6,6 +6,8 @@
 #   make deploy          部署全部服务 (构建+启动+迁移+健康检查)
 #   make deploy-build    部署并强制重新构建镜像
 #   make deploy-cn       使用国内镜像构建部署
+#   make validate-config 校验 .env 和 Compose 配置
+#   make validate        校验 .env、Compose 配置和运行时依赖
 #   make status          查看所有服务状态
 #   make logs            查看实时日志
 #   make stop            停止所有服务
@@ -36,16 +38,22 @@ COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compos
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: quickstart
+.PHONY: quickstart validate-config validate
 
 quickstart:                 ## 零配置一键部署 (首次使用)
-	@test -f .env || (echo "Missing .env. Create it from the deployment secret source before running quickstart." && exit 1)
-	@$(COMPOSE) up -d --build
+	@bash $(SCRIPTS)/validate-env.sh --config-only
+	@$(COMPOSE) --env-file .env up -d --build --remove-orphans
+	@bash $(SCRIPTS)/validate-env.sh --runtime
 	@echo ""
 	@echo "AI Gateway is starting..."
-	@echo "  Gateway:  http://localhost:8080"
-	@echo "  Frontend: http://localhost:80"
+	@bash -c 'source "$(SCRIPTS)/common.sh"; load_env; echo "  Gateway:  http://localhost:$${GATEWAY_PORT:-8080}"; echo "  Frontend: http://localhost:$${FRONTEND_PORT:-8081}"'
 	@echo "  Run 'make status' to check health."
+
+validate:                   ## 校验 .env、Compose 配置和运行时依赖
+	@bash $(SCRIPTS)/validate-env.sh --runtime
+
+validate-config:            ## 仅校验 .env 和 Compose 配置
+	@bash $(SCRIPTS)/validate-env.sh --config-only
 
 # -- Deployment ---------------------------------------------------------------
 
@@ -67,7 +75,7 @@ deploy-app:                 ## 仅部署应用 (gateway/frontend)
 	@bash $(SCRIPTS)/deploy.sh --app
 
 stop:                       ## 停止所有服务
-	@cd "$(shell pwd)" && $(COMPOSE) down
+	@cd "$(shell pwd)" && $(COMPOSE) stop
 
 restart:                    ## 重启所有服务
 	@cd "$(shell pwd)" && $(COMPOSE) restart
@@ -103,22 +111,6 @@ restore:                    ## 从最新备份恢复
 
 backup-list:                ## 列出所有备份
 	@bash $(SCRIPTS)/backup.sh --list
-
-# -- Islamic Content Service --------------------------------------------------
-
-.PHONY: ic-sync ic-sync-dua ic-sync-quran ic-logs
-
-ic-sync:                    ## 同步 Islamic Content 全量数据 (dua + quran)
-	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources quran,dua
-
-ic-sync-dua:                ## 仅同步 Dua 数据 (无需外部凭证)
-	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources dua
-
-ic-sync-quran:              ## 仅同步 Quran 数据 (需要凭证)
-	@$(COMPOSE) exec islamic-content python -m islamic_content_service.cli sync bootstrap --sources quran
-
-ic-logs:                    ## 查看 Islamic Content 服务日志
-	@$(COMPOSE) logs -f islamic-content
 
 # -- Development Environment --------------------------------------------------
 

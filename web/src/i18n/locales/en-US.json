@@ -1016,8 +1016,6 @@
       "chunkRecursiveDesc": "Hierarchical recursive splitting, first by paragraph then by sentence, progressively splitting until target length",
       "chunkHierarchical": "Parent-Child",
       "chunkHierarchicalDesc": "Creates a hierarchy of large chunks (parent) and small chunks (child), suitable for scenarios requiring context preservation",
-      "chunkIslamic": "Islamic",
-      "chunkIslamicDesc": "Islamic-aware chunking for Quran, Hadith, Tafsir, and Fiqh with citation traceability",
       "maxChunkSize": "Max Chunk Size",
       "chunkPreview": "Chunk Preview",
       "testChunking": "Test Chunking",
@@ -1048,21 +1046,6 @@
         "fileTooLarge": "File \"{{name}}\" exceeds size limit ({{limit}})",
         "duplicateFile": "File \"{{name}}\" has already been added"
       },
-      "islamicEnhancements": "Islamic Enhancements",
-      "islamicEnhancementsHint": "Optional features for Islamic knowledge bases (AI Imam). These only affect datasets where enabled — zero impact on other knowledge bases.",
-      "islamicChunking": "Islamic Chunking",
-      "islamicChunkingHint": "Enable Islamic-aware chunking that preserves Quran verses and Hadith narrations. This also enforces citation formatting and authority ordering.",
-      "islamicStrictTraceability": "Strict Section Traceability",
-      "islamicStrictTraceabilityHint": "Require every chunk to have a section title and include it in citations. Recommended for Imam datasets.",
-      "islamicMultiQuery": "Multi-Query Expansion",
-      "islamicMultiQueryHint": "Automatically expand queries with Islamic terminology synonyms and transliterations (e.g., salah → prayer, صلاة). Zero LLM cost, improves recall for bilingual Arabic/English content.",
-      "islamicCitation": "Citation Formatting",
-      "islamicCitationHint": "Attach formatted citations to retrieval results (e.g., Quran 2:255, Sahih Bukhari Book 1 Hadith 1).",
-      "islamicAuthoritySort": "Authority Sort",
-      "islamicAuthoritySortHint": "Sort results by Islamic authority order: Quran > Hadith > Tafseer > Fiqh > Others.",
-      "islamicContextualPrefix": "Contextual Prefix",
-      "islamicContextualPrefixHint": "Prepend structured context before embedding chunks (e.g., 'This passage is from Surah Al-Baqarah'). Requires re-indexing — coming soon.",
-      "islamicMaxQueries": "Max Expanded Queries",
       "embeddingGemini001": "Google Gemini Embedding 001",
       "embeddingDashscopeV4": "DashScope Text Embedding v4",
       "embeddingDashscopeV3": "DashScope Text Embedding v3",
@@ -1317,8 +1300,7 @@
         "heading": "Heading",
         "hierarchical": "Hierarchical",
         "recursive": "Recursive",
-        "separator": "Separator",
-        "islamic": "Islamic Text"
+        "separator": "Separator"
       },
       "chunkModeShort": {
         "automatic": "Auto",
@@ -1327,8 +1309,7 @@
         "heading": "Heading",
         "hierarchical": "Hierarchical",
         "recursive": "Recursive",
-        "separator": "Separator",
-        "islamic": "Islamic"
+        "separator": "Separator"
       },
       "cannotLoadConfig": "Unable to load configuration",
       "retrievalMode": "Retrieval Mode",

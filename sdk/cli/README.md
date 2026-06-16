@@ -38,7 +38,7 @@ hejaz
 
 # Use slash commands
 > /model gemini-3-flash-preview
-> /kb islamic-knowledge, sales
+> /kb product-docs, sales
 > /session new
 > /help
 

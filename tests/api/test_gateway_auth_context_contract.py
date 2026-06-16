@@ -63,7 +63,7 @@ def _request(headers: dict[str, str] | None = None, database=None, redis=None) -
     request = SimpleNamespace()
     request.headers = headers or {}
     request.client = SimpleNamespace(host="127.0.0.1")
-    request.url = SimpleNamespace(path="/api/v1/proxy/imam/assistants/search")
+    request.url = SimpleNamespace(path="/api/v1/proxy/agent/assistants/search")
     request.app = SimpleNamespace()
     request.app.state = SimpleNamespace(database=database, redis=redis)
     request.state = SimpleNamespace()

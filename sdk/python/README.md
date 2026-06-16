@@ -15,22 +15,22 @@ from ai_assistant import AssistantClient
 
 async with AssistantClient(api_key="your-key", base_url="https://api.hejaz.com") as client:
     # Simple chat
-    response = await client.chat.send("What is Zakat?")
+    response = await client.chat.send("Summarize the onboarding checklist")
     print(response.content)
 
     # Streaming
-    async for event in client.chat.stream("Explain fasting in Islam"):
+    async for event in client.chat.stream("Explain our refund policy"):
         if event.event_type == "text_delta":
             print(event.data, end="", flush=True)
 
     # Knowledge base search + chat
     response = await client.knowledge.ask(
-        "Compare the four madhabs on marriage rules",
-        dataset_ids=["islamic-knowledge"]
+        "Compare the free and enterprise plan limits",
+        dataset_ids=["product-docs"]
     )
 
     # Image generation
-    result = await client.images.generate("a beautiful mosque at sunset")
+    result = await client.images.generate("a clean dashboard hero image")
 ```
 
 ## Features

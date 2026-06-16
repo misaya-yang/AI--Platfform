@@ -222,16 +222,6 @@ class KnowledgeService:
         """Delegate to EmbeddingManager."""
         return self.embedding_manager.get_text_embedder(dataset, embedding_config)
 
-    def _build_islamic_dataset_defaults(self) -> dict[str, Any]:
-        return self.dataset_service._build_islamic_dataset_defaults()
-
-    @staticmethod
-    def _apply_islamic_dataset_defaults(
-        dataset_name: str, index_config: dict[str, Any], defaults: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        from .dataset_service import DatasetService
-        return DatasetService._apply_islamic_dataset_defaults(dataset_name, index_config, defaults)
-
     def _convert_structured_chunks(
         self,
         structured_chunks: list[dict[str, Any]],
@@ -433,8 +423,8 @@ class KnowledgeService:
                     pending_images,
                 )
 
-        # Merge tiny fragments for non-Islamic, non-fixed mode
-        if config.mode not in (ChunkingMode.ISLAMIC, ChunkingMode.FIXED_SIZE):
+        # Merge tiny fragments for non-fixed mode
+        if config.mode != ChunkingMode.FIXED_SIZE:
             normalized = merge_small_chunks(
                 normalized,
                 min_size=config.min_chunk_size,
@@ -766,8 +756,6 @@ class KnowledgeService:
         mmr: bool | None = None,
         mmr_lambda: float | None = None,
         mmr_threshold: float | None = None,
-        multi_query: bool | None = None,
-        authority_sort: bool | None = None,
         source_type_filter: str | None = None,
         language_filter: str | None = None,
         metadata_filter: dict[str, Any] | None = None,
@@ -783,7 +771,6 @@ class KnowledgeService:
             fusion=fusion, rrf_weights=rrf_weights,
             rerank=rerank, rerank_model=rerank_model, rerank_top_n=rerank_top_n,
             mmr=mmr, mmr_lambda=mmr_lambda, mmr_threshold=mmr_threshold,
-            multi_query=multi_query, authority_sort=authority_sort,
             source_type_filter=source_type_filter, language_filter=language_filter,
             metadata_filter=metadata_filter,
         )
@@ -847,8 +834,6 @@ class KnowledgeService:
         score_threshold: float | None = None,
         source_type_filter: str | None = None,
         language_filter: str | None = None,
-        multi_query: bool = False,
-        authority_sort: bool = False,
         vector_top_k: int | None = None,
         keyword_top_k: int | None = None,
         candidate_top_k: int | None = None,
@@ -874,7 +859,6 @@ class KnowledgeService:
             fusion_method=fusion_method, alpha=alpha,
             score_threshold=score_threshold,
             source_type_filter=source_type_filter, language_filter=language_filter,
-            multi_query=multi_query, authority_sort=authority_sort,
             vector_top_k=vector_top_k, keyword_top_k=keyword_top_k,
             candidate_top_k=candidate_top_k, keyword_candidate_k=keyword_candidate_k,
             fusion=fusion, rrf_k=rrf_k, rrf_weights=rrf_weights,

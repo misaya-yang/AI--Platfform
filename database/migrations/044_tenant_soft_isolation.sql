@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS tenant_mcp_configs (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id            VARCHAR(64) NOT NULL UNIQUE,
     allowed_servers      TEXT[] NOT NULL,
-    server_overrides     JSONB,            -- e.g. {"wahda": {"url": "..."}}
+    server_overrides     JSONB,            -- e.g. {"docgen": {"url": "..."}}
     max_connections      INT DEFAULT 5,
     created_at           TIMESTAMPTZ DEFAULT NOW(),
     updated_at           TIMESTAMPTZ DEFAULT NOW()

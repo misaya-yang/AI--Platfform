@@ -14,6 +14,7 @@ import os
 # This ensures env vars are available for module-level configurations
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
 # Load .env from project root (one level up from src/)
@@ -69,7 +70,6 @@ OPENAPI_TAGS = [
     {"name": "Sessions", "description": "Conversation session management — CRUD, message history, per-user isolation."},
     {"name": "LangGraph", "description": "LangGraph Platform proxy — assistants, threads, runs (streaming/sync), and key-value store."},
     {"name": "Knowledge", "description": "Knowledge base proxy — dataset management, document upload, and RAG retrieval."},
-    {"name": "Islamic Content", "description": "Quran / Hadith / Dua / Wahda content proxy to Islamic Content Service."},
     {"name": "Quiz", "description": "AI quiz system — generation, submission, scoring, and exam management."},
     {"name": "Dashboard", "description": "Real-time metrics, usage timeseries, and operational dashboard data."},
 ]
@@ -117,14 +117,13 @@ def create_app() -> FastAPI:
             "- JWT authentication with RBAC and multi-tenant isolation\n"
             "- LangGraph Platform proxy with load balancing and streaming SSE\n"
             "- Knowledge base management with hybrid RAG retrieval\n"
-            "- Islamic content (Quran, Hadith, Dua) via dedicated microservice\n"
             "- AI quiz/exam system with scoring and analytics\n"
             "- Real-time usage metrics and billing\n\n"
             "**Auth:** All endpoints (except `/health` and `/api/v1/auth/login`) require `Authorization: Bearer <token>`."
         ),
         openapi_tags=OPENAPI_TAGS,
-        contact={"name": "Hejaz AI Team", "email": "tech@hejazfs.com.au"},
-        license_info={"name": "Proprietary"},
+        contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
+        license_info={"name": "MIT"},
     )
 
     # ========== 中间件配置 ==========
@@ -321,7 +320,13 @@ def create_app() -> FastAPI:
         """就绪检查端点（K8s readiness probe）"""
         container = get_container()
 
-        checks = {"database": "unknown", "redis": "unknown"}
+        checks = {
+            "database": "unknown",
+            "redis": "unknown",
+            "knowledge_service": "unknown",
+            "assistant_service": "unknown",
+            "mcp_docgen": "unknown",
+        }
         healthy = True
 
         # 检查数据库
@@ -353,6 +358,33 @@ def create_app() -> FastAPI:
                 healthy = False
         else:
             checks["redis"] = "disabled"
+
+        async def probe_http_service(name: str, base_url: str | None) -> bool:
+            if not base_url:
+                checks[name] = "not_configured"
+                return True
+
+            url = f"{base_url.rstrip('/')}/health"
+            try:
+                timeout = httpx.Timeout(2.0, connect=1.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.get(url)
+                if 200 <= response.status_code < 300:
+                    checks[name] = "healthy"
+                    return True
+                checks[name] = f"status_{response.status_code}"
+                return False
+            except Exception as e:
+                checks[name] = f"error: {type(e).__name__}"
+                return False
+
+        service_results = await asyncio.gather(
+            probe_http_service("knowledge_service", os.environ.get("KB_SERVICE_URL")),
+            probe_http_service("assistant_service", os.environ.get("ASSISTANT_SERVICE_URL")),
+            probe_http_service("mcp_docgen", os.environ.get("MCP_DOCGEN_SERVICE_URL")),
+        )
+        if not all(service_results):
+            healthy = False
 
         status_code = 200 if healthy else 503
         return JSONResponse(
@@ -710,8 +742,6 @@ def create_app() -> FastAPI:
         if assistant_service is not None:
             await assistant_service.close()
 
-        # Islamic Content: now handled by microservice at :8091, no cleanup needed
-
         # Stop Assistant TaskManager lifecycle
         from ai_gateway_core.tasks import shutdown_task_manager
 
@@ -872,7 +902,7 @@ async def _load_services_from_database(container: Container, settings: Settings)
 
         # Auto-sync LangGraph service URLs from environment config
         # This ensures DB services always point to the correct upstream
-        # (e.g., localhost:2024 in dev, imam-agent:8000 in Docker)
+        # (e.g., localhost:2024 in dev or a LangGraph service URL in Docker)
         if settings.langgraph.enabled and settings.langgraph.instance_urls:
             env_url = settings.langgraph.instance_urls[0]
             updated = 0

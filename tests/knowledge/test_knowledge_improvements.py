@@ -38,15 +38,15 @@ def test_token_counting():
     test_cases = [
         # English
         ("Hello, how are you doing today?", "English"),
-        ("The Quran is the central religious text of Islam.", "English/Islamic"),
+        ("The deployment runbook defines the rollback procedure.", "English/Runbook"),
         # Arabic
-        ("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ", "Arabic/Bismillah"),
-        ("قُلْ هُوَ اللَّهُ أَحَدٌ", "Arabic/Surah Al-Ikhlas"),
-        ("صلى الله عليه وسلم", "Arabic/PBUH"),
+        ("توثق المنصة خطوات النشر والتحقق من الصحة", "Arabic/Runbook"),
+        ("يجب إيقاف الترحيل عند فشل التحقق", "Arabic/Operations"),
+        ("تدعم قاعدة المعرفة البحث متعدد اللغات", "Arabic/Knowledge"),
         # Chinese
         ("人工智能网关平台", "Chinese"),
         # Mixed
-        ("The Prophet صلى الله عليه وسلم said: 'Actions are judged by intentions.'", "Mixed"),
+        ("The runbook يقول: verify service health before reopening traffic.", "Mixed"),
     ]
 
     counter = TokenCounter(use_tiktoken=True)
@@ -186,26 +186,21 @@ def test_token_based_chunking():
     print("Test 6: Token-Based Chunking")
     print("=" * 60)
 
-    # Sample Islamic text (mixed English/Arabic)
+    # Sample multilingual operations text (mixed English/Arabic)
     sample_text = """
-In the name of Allah, the Most Gracious, the Most Merciful.
+Deployment rollback procedure.
 
-بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ
+توثق هذه الفقرة خطوات الرجوع إلى الإصدار السابق عند فشل التحقق الصحي.
 
-Praise be to Allah, Lord of all the worlds. The Prophet Muhammad (peace be upon him)
-said: "Actions are judged by intentions, and every person will get what they intended."
-This hadith is narrated by Umar ibn al-Khattab (may Allah be pleased with him) and
-recorded in Sahih al-Bukhari and Sahih Muslim.
+Before starting rollback, pause new deployment jobs and record the failing
+health-check output. Notify the platform channel with the service name,
+environment, image tag, and failing endpoint.
 
-Prayer (Salah) is the second pillar of Islam. Muslims are required to pray five times
-a day: Fajr (dawn), Dhuhr (noon), Asr (afternoon), Maghrib (sunset), and Isha (night).
-The prayer consists of specific movements and recitations, including standing (Qiyam),
-bowing (Ruku), prostration (Sujud), and sitting (Juloos).
+استعد صورة الحاوية السابقة ثم تحقق من قاعدة البيانات وقائمة الانتظار وخدمة التخزين.
+إذا فشل الفحص مرة أخرى، أوقف التغيير وافتح تقرير حادثة جديداً.
 
-The Quran states: "Indeed, prayer prohibits immorality and wrongdoing, and the
-remembrance of Allah is greater. And Allah knows that which you do." (29:45)
-
-والصلاة والسلام على رسول الله وعلى آله وصحبه أجمعين
+After the service is healthy, reopen traffic gradually and compare error rate,
+latency, and queue depth against the baseline.
     """
 
     # Test with different token limits

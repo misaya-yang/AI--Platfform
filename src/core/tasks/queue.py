@@ -46,6 +46,12 @@ class TaskQueue:
         """Start the background worker."""
         if self._running:
             return
+        if not self._handlers:
+            logger.info(
+                "Task worker not started for queue %s: no handlers registered",
+                self.queue_name,
+            )
+            return
         self._running = True
         self._worker_task = asyncio.create_task(self._worker_loop())
         logger.info(f"Task worker started for queue: {self.queue_name}")

@@ -1,6 +1,6 @@
 """Dataset management service for knowledge base.
 
-Handles dataset CRUD operations, permissions, configuration, and Islamic defaults.
+Handles dataset CRUD operations, permissions, and configuration.
 Migrated from KnowledgeService as part of Phase 2 refactoring.
 """
 
@@ -137,13 +137,6 @@ class DatasetService:
 
         embedding_config = _ensure_dict(data.get("embedding_config"))
         index_config = _ensure_dict(data.get("index_config"))
-        islamic_defaults = self._build_islamic_dataset_defaults()
-        index_config = self._apply_islamic_dataset_defaults(
-            str(data.get("name") or dataset_id),
-            index_config,
-            islamic_defaults,
-        )
-
         from .embedding import BaseEmbedding, create_embedding
 
         embedder: BaseEmbedding | None = None
@@ -222,14 +215,6 @@ class DatasetService:
 
         updated = dict(dataset)
         updated.update(filtered)
-        if "index_config" in filtered or "name" in filtered:
-            islamic_defaults = self._build_islamic_dataset_defaults()
-            updated["index_config"] = self._apply_islamic_dataset_defaults(
-                str(updated.get("name") or dataset_id),
-                _ensure_dict(updated.get("index_config")),
-                islamic_defaults,
-            )
-
         embedding_keys = {
             "embedding_provider",
             "embedding_model",
@@ -441,98 +426,3 @@ class DatasetService:
 
     def sanitize_dataset_for_response(self, dataset: dict[str, Any]) -> dict[str, Any]:
         return self._redact_dataset_secrets(dataset)
-
-    def _build_islamic_dataset_defaults(self) -> dict[str, Any]:
-        # ``islamic_profile`` is unset on deploys that don't run Islamic KB
-        # — frontend hits this path on every non-Islamic KB-detail page load.
-        # Without the None guard a 500 spammed logs (incident 2026-04-28).
-        profile = self.settings.knowledge.islamic_profile
-        if profile is None or not profile.enabled:
-            return {}
-        return {
-            "retrieval": {
-                "top_k": profile.top_k,
-                "score_threshold": profile.score_threshold,
-                "rerank": {
-                    "enabled": profile.rerank_enabled,
-                    "provider": profile.rerank_provider,
-                    "model": profile.rerank_model,
-                },
-                "islamic": {
-                    "multi_query": profile.multi_query,
-                    "citation_format": profile.citation_format,
-                    "authority_sort": profile.authority_sort,
-                    "strict_section_traceability": profile.strict_section_traceability,
-                    "max_expanded_queries": profile.max_expanded_queries,
-                },
-            },
-            "chunking": {
-                "strict_section_traceability": profile.strict_section_traceability,
-            },
-        }
-
-    @staticmethod
-    def _apply_islamic_dataset_defaults(
-        dataset_name: str,
-        index_config: dict[str, Any],
-        defaults: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        _ = dataset_name
-        chunking = _ensure_dict(index_config.get("chunking"))
-        retrieval = _ensure_dict(index_config.get("retrieval"))
-        islamic_cfg = _ensure_dict(retrieval.get("islamic"))
-        chunk_mode = str(chunking.get("mode") or "").lower()
-
-        is_islamic = bool(islamic_cfg) or chunk_mode == "islamic"
-        if not is_islamic:
-            return index_config
-
-        default_cfg = _ensure_dict(defaults)
-        default_retrieval = _ensure_dict(default_cfg.get("retrieval"))
-        default_islamic = _ensure_dict(default_retrieval.get("islamic"))
-        default_rerank = _ensure_dict(default_retrieval.get("rerank"))
-        default_chunking = _ensure_dict(default_cfg.get("chunking"))
-
-        for key, value in default_retrieval.items():
-            if key in {"islamic", "rerank"}:
-                continue
-            retrieval.setdefault(key, value)
-
-        if default_rerank:
-            rerank_cfg = _ensure_dict(retrieval.get("rerank"))
-            for key, value in default_rerank.items():
-                rerank_cfg.setdefault(key, value)
-            retrieval["rerank"] = rerank_cfg
-
-        for key, value in default_islamic.items():
-            islamic_cfg.setdefault(key, value)
-        if islamic_cfg:
-            retrieval["islamic"] = islamic_cfg
-
-        if (
-            chunk_mode == "islamic"
-            and chunking.get("strict_section_traceability") is None
-            and default_chunking.get("strict_section_traceability") is not None
-        ):
-            chunking["strict_section_traceability"] = bool(
-                default_chunking.get("strict_section_traceability")
-            )
-
-        if (
-            chunk_mode == "islamic"
-            and islamic_cfg.get("strict_section_traceability")
-            and chunking.get("strict_section_traceability") is None
-        ):
-            chunking["strict_section_traceability"] = True
-
-        if chunking.get("strict_section_traceability") and not islamic_cfg.get(
-            "strict_section_traceability"
-        ):
-            islamic_cfg["strict_section_traceability"] = True
-            retrieval["islamic"] = islamic_cfg
-
-        if chunking:
-            index_config["chunking"] = chunking
-        if retrieval:
-            index_config["retrieval"] = retrieval
-        return index_config

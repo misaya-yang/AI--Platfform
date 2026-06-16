@@ -48,6 +48,11 @@ log_step "Pre-flight checks"
 require_docker
 require_env_file
 load_env
+if [ "$INFRA_ONLY" = true ]; then
+    "$SCRIPT_DIR/validate-env.sh" --infra-only --config-only
+else
+    "$SCRIPT_DIR/validate-env.sh" --config-only
+fi
 
 COMPOSE_CMD=$(get_compose_cmd)
 cd "$PROJECT_ROOT"
@@ -55,7 +60,7 @@ cd "$PROJECT_ROOT"
 # -- Pull base images --------------------------------------------------------
 if [ "$PULL" = true ]; then
     log_step "Pulling latest base images"
-    $COMPOSE_CMD pull
+    $COMPOSE_CMD --env-file "$PROJECT_ROOT/.env" pull
 fi
 
 # -- Determine services to deploy --------------------------------------------
@@ -75,13 +80,13 @@ if [ "$BUILD" = true ]; then
         BUILD_ARGS="--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn --build-arg NPM_REGISTRY=https://registry.npmmirror.com"
     fi
     # shellcheck disable=SC2086
-    $COMPOSE_CMD build $BUILD_ARGS $SERVICES
+    $COMPOSE_CMD --env-file "$PROJECT_ROOT/.env" build $BUILD_ARGS $SERVICES
 fi
 
 # -- Start services ----------------------------------------------------------
 log_step "Starting services"
 # shellcheck disable=SC2086
-$COMPOSE_CMD up -d $SERVICES
+$COMPOSE_CMD --env-file "$PROJECT_ROOT/.env" up -d --remove-orphans $SERVICES
 
 # -- Wait for infrastructure to be healthy -----------------------------------
 log_step "Health checks"
@@ -100,8 +105,17 @@ fi
 
 # -- Wait for application health ---------------------------------------------
 if [ "$INFRA_ONLY" != true ]; then
+    wait_for_healthy "Knowledge service" "check_knowledge_health" 60 || log_warn "Knowledge service may still be starting"
+    wait_for_healthy "Assistant service" "check_assistant_health" 60 || log_warn "Assistant service may still be starting"
+    wait_for_healthy "MCP docgen service" "check_docgen_health" 60 || log_warn "MCP docgen service may still be starting"
     wait_for_healthy "Gateway" "check_gateway_health" 60 || log_warn "Gateway may still be starting"
     wait_for_healthy "Frontend" "check_frontend_health" 30 || log_warn "Frontend may still be starting"
+fi
+
+if [ "$INFRA_ONLY" = true ]; then
+    "$SCRIPT_DIR/validate-env.sh" --infra-only --runtime
+else
+    "$SCRIPT_DIR/validate-env.sh" --runtime
 fi
 
 # -- Summary -----------------------------------------------------------------
@@ -110,7 +124,7 @@ $COMPOSE_CMD ps
 echo ""
 log_success "AI Gateway is running"
 echo ""
-echo "  Frontend:  http://localhost:${FRONTEND_PORT:-80}"
+echo "  Frontend:  http://localhost:${FRONTEND_PORT:-8081}"
 echo "  Backend:   http://localhost:${GATEWAY_PORT:-8080}"
 echo "  API Docs:  http://localhost:${GATEWAY_PORT:-8080}/docs"
 echo ""

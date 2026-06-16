@@ -66,7 +66,7 @@ from .quality.cache_optimizer import CacheConfig, ContextCacheOptimizer
 from .code_executor import CodeExecutorService
 from .rag.context_engine import ContextEngine, ContextStructure
 from .rag.context_manager import ContextConfig, get_context_manager
-from .quality.domain_policies import DomainPolicyResolver, ImamPolicy
+from .quality.domain_policies import DomainPolicy, DomainPolicyResolver
 from .files.file_processor import ProcessedFiles, create_file_processor
 from .quality.guardrails import (
     DocumentType,
@@ -763,7 +763,7 @@ Please use this web search context to inform your response when relevant."""
         self,
         user: UserContext,
         dataset_ids: list[str],
-    ) -> tuple[ImamPolicy | None, list[dict[str, Any]]]:
+    ) -> tuple[DomainPolicy | None, list[dict[str, Any]]]:
         """Resolve domain policy based on dataset metadata."""
         if (
             not self.builtin_domain_policy_enabled
@@ -790,7 +790,7 @@ Please use this web search context to inform your response when relevant."""
 
     async def _repair_with_policy(
         self,
-        policy: ImamPolicy,
+        policy: DomainPolicy,
         user_message: str,
         context_text: str,
         answer: str,
@@ -1142,7 +1142,6 @@ Please use this web search context to inform your response when relevant."""
             session_id=session_id,
             domain_rules=domain_policy.scenario_rules() if domain_policy else "",
             include_citations=bool(domain_policy),
-            authority_sort=False,
         )
 
         # Get response
@@ -1160,7 +1159,6 @@ Please use this web search context to inform your response when relevant."""
                 context_text = self._format_context(
                     retrieved_contexts,
                     include_citations=True,
-                    authority_sort=False,
                 )
                 repaired = await self._repair_with_policy(
                     policy=domain_policy,
@@ -1703,7 +1701,6 @@ Please use this web search context to inform your response when relevant."""
         scenario_detection: ScenarioDetectionResult | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
-        authority_sort: bool = False,
     ) -> list[ChatMessage]:
         """Build the message list for the model.
 
@@ -1736,7 +1733,6 @@ Please use this web search context to inform your response when relevant."""
                 user_preferences=user_preferences,
                 domain_rules=domain_rules,
                 include_citations=include_citations,
-                authority_sort=authority_sort,
             )
 
         # Legacy message building (original implementation) - Now with Manus-style prompts
@@ -1795,7 +1791,6 @@ Please use this web search context to inform your response when relevant."""
             context_text = self._format_context(
                 retrieved_contexts,
                 include_citations=include_citations,
-                authority_sort=authority_sort,
             )
             logger.info(
                 f"[KB INJECT] Injecting context from {len(retrieved_contexts)} datasets, text length: {len(context_text)}"
@@ -1913,7 +1908,6 @@ Please use this web search context to inform your response when relevant."""
         user_preferences: str | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
-        authority_sort: bool = False,
     ) -> list[ChatMessage]:
         """Build messages using Context Engine for KV-Cache optimization.
 
@@ -1950,7 +1944,6 @@ Please use this web search context to inform your response when relevant."""
             context_text = self._format_context(
                 retrieved_contexts,
                 include_citations=include_citations,
-                authority_sort=authority_sort,
             )
             current_context_parts.append(self.CONTEXT_TEMPLATE.format(context=context_text))
             logger.info(f"[CONTEXT ENGINE] KB context: {len(context_text)} chars")
@@ -2107,7 +2100,6 @@ Please use this web search context to inform your response when relevant."""
         contexts: list[RetrievedContext],
         max_content_length: int = 400,  # TTFT optimization: truncate long chunks
         include_citations: bool = False,
-        authority_sort: bool = False,
     ) -> str:
         """
         Format retrieved contexts for injection into the prompt.
@@ -2123,20 +2115,6 @@ Please use this web search context to inform your response when relevant."""
         for ctx in contexts:
             parts.append(f"### From: {ctx.dataset_name}")
             chunks = list(ctx.chunks)
-            if authority_sort:
-                try:
-                    from ai_gateway_core.knowledge import get_authority_order
-
-                    def _authority_key(ch: dict[str, Any]) -> int:
-                        meta = ch.get("metadata") or {}
-                        source_type = (
-                            meta.get("source_type") or meta.get("islamic_source_type") or "unknown"
-                        )
-                        return get_authority_order(str(source_type))
-
-                    chunks = sorted(chunks, key=_authority_key)
-                except Exception as exc:
-                    logger.debug(f"Authority sort skipped: {exc}")
 
             for i, chunk in enumerate(chunks, 1):
                 content = chunk["content"]
@@ -2244,4 +2222,3 @@ Please use this web search context to inform your response when relevant."""
             elif "dashscope" in provider or "qwen" in provider:
                 return "dashscope"
         return "dashscope"  # Default fallback
-

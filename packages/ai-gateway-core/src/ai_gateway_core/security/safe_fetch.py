@@ -389,7 +389,7 @@ def validate_callback_url(
     can't redirect us into the private network mid-transaction.
 
     Whitelist: set ``CALLBACK_URL_ALLOWLIST`` env var to a comma-separated
-    list of hosts (e.g. ``10.1.10.32,internal-api.company.com``). Hosts
+    list of hosts (e.g. ``internal-api.example.com``). Hosts
     on the allowlist bypass the private/loopback check entirely.
 
     Note: this is validate-only, so DNS rebinding is still possible

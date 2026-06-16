@@ -205,14 +205,15 @@ export default async function globalSetup(config: FullConfig) {
   const defaultPassword = await detectDefaultPassword();
   const providedEmail = process.env.E2E_USER_EMAIL;
   const providedPassword = process.env.E2E_USER_PASSWORD;
-  const email = providedEmail || `assistant.e2e.${Date.now()}@hejazfs.com.au`;
+  const authEmailDomain = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
+  const email = providedEmail || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
   let password = providedPassword || defaultPassword;
   let loginPayload: Record<string, unknown>;
 
   if (providedEmail && providedPassword) {
     loginPayload = await login(apiURL, email, password);
   } else {
-    const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || "admin@hejazfs.com.au";
+    const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || `admin@${authEmailDomain}`;
     const bootstrapPasswords = await detectBootstrapPasswords(defaultPassword);
     const bootstrapLogin = await loginWithCandidates(apiURL, bootstrapEmail, bootstrapPasswords);
 

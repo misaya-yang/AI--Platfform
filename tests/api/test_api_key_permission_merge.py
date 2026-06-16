@@ -23,7 +23,7 @@ def _build_request() -> SimpleNamespace:
                 "user_id": "api_user_1",
                 "roles": ["user"],
                 "permissions": ["conversation:playground:access"],
-                "allowed_services": ["imam"],
+                "allowed_services": ["agent"],
                 "tier": "normal",
             }
         ),

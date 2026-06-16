@@ -27,8 +27,6 @@ import { MessageSquarePlus, Trash2, ArrowDown, PanelLeft, X } from "lucide-react
 import { useAppStore } from "@/store/useAppStore";
 import { useChatShortcuts } from "@/features/chat/shortcuts";
 import { formatDateTime } from "@/utils/intl";
-// WahdaRecommendations hidden from web — feature is for mobile app only
-import { useTypeahead } from "./useTypeahead";
 
 import { usePlaygroundSessions } from "./hooks/usePlaygroundSessions";
 import { usePlaygroundStream } from "./hooks/usePlaygroundStream";
@@ -136,10 +134,6 @@ export function PlaygroundPage() {
     resolvedToolCallsDefaultOpen,
     showThinkingIndicator,
   } = streamHook;
-
-  // Type-ahead suggestions — only for Imam agent
-  const isImamAgent = activeService?.name?.toLowerCase().includes("imam") ?? false;
-  const typeahead = useTypeahead();
 
   const effectiveShowToolCalls =
     resolvedToolCallsMode !== "hidden" && (showToolCalls || forceVisibleToolCalls);
@@ -430,7 +424,7 @@ export function PlaygroundPage() {
             {t("playground.loadingHistory", "Loading chat history...")}
           </div>
         ) : messages.length === 0 ? (
-          /* Empty state: show Wahda recommendations if no special restore state */
+          /* Empty state */
           historyRestoreState === "loading" || historyRestoreState === "failed" ? (
           <div className="flex h-full items-center justify-center p-8">
             <div className="max-w-md rounded-3xl border border-transparent dark:border-transparent bg-card/70 px-6 py-5 text-sm shadow-sm">
@@ -490,23 +484,18 @@ export function PlaygroundPage() {
             showThinkingIndicator={showThinkingIndicator}
             onShare={async () => {
               if (!activeSessionId || messages.length === 0) return;
-              // Send session_id + messages directly (no backend fetch needed)
-              const shareMessages = messages
-                .filter(m => m.role === "user" || m.role === "assistant")
-                .filter(m => m.content && m.content.trim().length > 0)
-                .map(m => ({ role: m.role, content: m.content }));
               try {
-                const resp = await fetch("/api/v1/islamic/wahda/share", {
+                const resp = await fetch(`/api/v1/assistant/sessions/${encodeURIComponent(activeSessionId)}/share`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ session_id: activeSessionId, messages: shareMessages }),
+                  body: JSON.stringify({ include_artifacts: true }),
                 });
                 if (!resp.ok) {
                   const errText = await resp.text();
                   throw new Error(errText || `Status ${resp.status}`);
                 }
                 const data = await resp.json();
-                const shareUrl = `${window.location.origin}/share/${data.share_id}`;
+                const shareUrl = `${window.location.origin}${data.share_url || `/share/${data.share_code}`}`;
                 // Copy to clipboard (with HTTP fallback)
                 try {
                   await navigator.clipboard.writeText(shareUrl);
@@ -558,40 +547,11 @@ export function PlaygroundPage() {
 
       {/* Floating Input Area */}
       <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
-        <div
-          className="mx-auto w-full max-w-4xl"
-          onBlurCapture={(e) => {
-            // Dismiss typeahead when focus leaves the input area entirely
-            if (isImamAgent && !e.currentTarget.contains(e.relatedTarget as Node)) {
-              typeahead.dismiss();
-            }
-          }}
-        >
-          {/* Type-ahead suggestions (Imam only, hide during/after streaming) */}
-          {isImamAgent && typeahead.visible && typeahead.suggestions.length > 0 && !uiStreamingActive && (
-            <div
-              className="mb-2 rounded-xl border bg-card/95 backdrop-blur-sm shadow-lg overflow-hidden"
-              onMouseDown={(e) => e.preventDefault() /* keep input focused so onBlur doesn't fire before click */}
-            >
-              {typeahead.suggestions.map((s, i) => (
-                <button
-                  key={i}
-                  onClick={() => {
-                    typeahead.dismiss();
-                    handleSend([{ type: "text", data: s }]);
-                  }}
-                  className="w-full px-4 py-2.5 text-left text-sm hover:bg-accent/50 transition-colors border-b last:border-b-0 border-border/50"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
+        <div className="mx-auto w-full max-w-4xl">
           <div className="rounded-2xl border border-transparent dark:border-transparent bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ">
             <MultimodalInput
-              onSend={(inputs, filePaths) => { typeahead.dismiss(); handleSend(inputs, filePaths); }}
+              onSend={handleSend}
               onStop={handleStopStreaming}
-              onTextChange={isImamAgent ? typeahead.check : undefined}
               isStreaming={uiStreamingActive}
               composerId={PLAYGROUND_COMPOSER_ID}
               disabled={!serviceId || uiStreamingActive}

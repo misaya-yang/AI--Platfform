@@ -652,7 +652,7 @@ export function UserManagementPage() {
           <DialogHeader>
             <DialogTitle>Create User</DialogTitle>
             <DialogDescription>
-              Create a new user account. Initial password will be 111111.
+              Create a new user account. The initial password follows the server configuration.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -660,7 +660,7 @@ export function UserManagementPage() {
               <Label>Email</Label>
               <Input
                 type="email"
-                placeholder="name@hejazfs.com.au"
+                placeholder={`name@${import.meta.env.VITE_AUTH_EMAIL_DOMAIN || "example.com"}`}
                 value={formEmail}
                 onChange={(e) => setFormEmail(e.target.value)}
               />
@@ -913,7 +913,7 @@ export function UserManagementPage() {
           <DialogHeader>
             <DialogTitle>Reset Password</DialogTitle>
             <DialogDescription>
-              Reset password for {selectedUser?.email} to default (111111)? The user will be required to change password on next login.
+              Reset password for {selectedUser?.email} to the configured default? The user will be required to change password on next login.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

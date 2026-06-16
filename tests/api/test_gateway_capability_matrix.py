@@ -214,7 +214,7 @@ async def test_service_capacity_config_update_uses_registry_persistence_without_
         service_id="svc-1",
         body=ServiceConfigUpdate(
             capacity=ServiceCapacityConfigUpdate(
-                upstream_group="imam_agent",
+                upstream_group="langgraph_agent",
                 concurrency_limit=3,
                 queue_max=0,
                 queue_timeout_ms=1,
@@ -227,7 +227,7 @@ async def test_service_capacity_config_update_uses_registry_persistence_without_
     assert result["status"] == "success"
     request.app.state.registry.storage.save.assert_awaited_once_with(service)
     request.app.state.proxy_config_loader.invalidate.assert_any_call("svc-1")
-    assert service.get_service_config().capacity.upstream_group == "imam_agent"
+    assert service.get_service_config().capacity.upstream_group == "langgraph_agent"
     assert service.get_service_config().capacity.concurrency_limit == 3
 
 

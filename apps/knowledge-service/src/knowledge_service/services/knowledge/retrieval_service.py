@@ -2,18 +2,12 @@
 
 Handles document retrieval, search, and ranking.
 Migrated from KnowledgeService as part of Phase 2 refactoring.
-
-Cross-Language Retrieval (2025 Best Practice):
-- Automatic query expansion for Islamic terms (EN <-> AR)
-- Language-adaptive weights for hybrid search
-- Merged results from multi-language queries
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -37,204 +31,12 @@ from .retrieval import (
     reciprocal_rank_fusion,
     tokenize,
 )
-from .retrieval_v2 import detect_query_language
 
 if TYPE_CHECKING:
     from ...core.auth.user_resolver import UserContext
     from .knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
-
-
-# =============================================================================
-# Cross-Language Query Expansion for Islamic Content
-# =============================================================================
-
-# Islamic term translations (English -> Arabic)
-ISLAMIC_TERM_TRANSLATIONS_EN_AR: dict[str, str] = {
-    # Worship and Prayer
-    "prayer": "صلاة",
-    "salah": "صلاة",
-    "salat": "صلاة",
-    "fajr": "فجر",
-    "dhuhr": "ظهر",
-    "asr": "عصر",
-    "maghrib": "مغرب",
-    "isha": "عشاء",
-    "wudu": "وضوء",
-    "ablution": "وضوء",
-    "tayammum": "تيمم",
-    "mosque": "مسجد",
-    "masjid": "مسجد",
-    # Pillars of Islam
-    "fasting": "صيام",
-    "sawm": "صيام",
-    "ramadan": "رمضان",
-    "zakat": "زكاة",
-    "charity": "زكاة",
-    "hajj": "حج",
-    "pilgrimage": "حج",
-    "umrah": "عمرة",
-    "shahada": "شهادة",
-    # Quran and Hadith
-    "quran": "قرآن",
-    "hadith": "حديث",
-    "sunnah": "سنة",
-    "surah": "سورة",
-    "ayah": "آية",
-    "verse": "آية",
-    "tafsir": "تفسير",
-    "tafseer": "تفسير",
-    # Jurisprudence
-    "fiqh": "فقه",
-    "fatwa": "فتوى",
-    "halal": "حلال",
-    "haram": "حرام",
-    "makruh": "مكروه",
-    "mustahab": "مستحب",
-    "wajib": "واجب",
-    "fard": "فرض",
-    # Schools of thought
-    "hanafi": "حنفي",
-    "maliki": "مالكي",
-    "shafi": "شافعي",
-    "shafii": "شافعي",
-    "hanbali": "حنبلي",
-    "madhhab": "مذهب",
-    # Beliefs
-    "iman": "إيمان",
-    "faith": "إيمان",
-    "aqeedah": "عقيدة",
-    "tawhid": "توحيد",
-    "shirk": "شرك",
-    # People and Places
-    "prophet": "نبي",
-    "messenger": "رسول",
-    "imam": "إمام",
-    "scholar": "عالم",
-    "mecca": "مكة",
-    "medina": "المدينة",
-    "kaaba": "الكعبة",
-    # Other common terms
-    "islam": "إسلام",
-    "muslim": "مسلم",
-    "eid": "عيد",
-    "dua": "دعاء",
-    "dhikr": "ذكر",
-    "nisab": "نصاب",
-    "riba": "ربا",
-    "interest": "ربا",
-}
-
-
-def _build_reverse_term_map(translations_en_ar: dict[str, str]) -> dict[str, str]:
-    """Build AR->EN map while preserving the first (canonical) EN term."""
-    reverse: dict[str, str] = {}
-    for en_term, ar_term in translations_en_ar.items():
-        reverse.setdefault(ar_term, en_term)
-    return reverse
-
-
-ISLAMIC_TERM_TRANSLATIONS_AR_EN: dict[str, str] = _build_reverse_term_map(
-    ISLAMIC_TERM_TRANSLATIONS_EN_AR
-)
-
-_ARABIC_PATTERN = re.compile(r"[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]")
-
-
-def expand_query_cross_language(query: str) -> tuple[str, list[str], str]:
-    """Expand query for cross-language retrieval."""
-    lang = detect_query_language(query)
-    query_lower = query.lower()
-
-    expanded_terms: set[str] = set()
-    expanded_queries: list[str] = [query]
-
-    if lang == "en":
-        for en_term, ar_term in ISLAMIC_TERM_TRANSLATIONS_EN_AR.items():
-            pattern = rf"\b{re.escape(en_term)}\b"
-            if re.search(pattern, query_lower, re.IGNORECASE):
-                expanded_terms.add(ar_term)
-        if expanded_terms:
-            arabic_expansion = query + " " + " ".join(expanded_terms)
-            expanded_queries.append(arabic_expansion)
-
-    elif lang == "ar":
-        for ar_term, en_term in ISLAMIC_TERM_TRANSLATIONS_AR_EN.items():
-            if ar_term in query:
-                expanded_terms.add(en_term)
-        if expanded_terms:
-            english_expansion = query + " " + " ".join(expanded_terms)
-            expanded_queries.append(english_expansion)
-
-    return query, expanded_queries, lang
-
-
-# =============================================================================
-# Cross-Language Query Expander Class
-# =============================================================================
-
-
-class CrossLanguageQueryExpander:
-    """Cross-language query expander for Arabic-English retrieval."""
-
-    def __init__(
-        self,
-        translations_en_ar: dict[str, str] | None = None,
-        translations_ar_en: dict[str, str] | None = None,
-    ):
-        self.translations_en_ar = translations_en_ar or ISLAMIC_TERM_TRANSLATIONS_EN_AR
-        self.translations_ar_en = translations_ar_en or ISLAMIC_TERM_TRANSLATIONS_AR_EN
-
-    def detect_query_language(self, query: str) -> str:
-        return detect_query_language(query)
-
-    async def expand_query(
-        self,
-        query: str,
-        max_expansions: int = 3,
-    ) -> list[str]:
-        _, expanded_queries, _ = expand_query_cross_language(query)
-        translated_terms = (await self._translate_query(query)).strip()
-        if translated_terms:
-            translated_query = f"{query} {translated_terms}".strip()
-            if translated_query and translated_query not in expanded_queries:
-                expanded_queries.append(translated_query)
-        return expanded_queries[:max_expansions]
-
-    async def _translate_query(self, query: str) -> str:
-        _, expanded, _ = expand_query_cross_language(query)
-        if len(expanded) > 1:
-            return expanded[1].replace(query, "").strip()
-        return ""
-
-    def normalize_islamic_term(self, term: str) -> str | None:
-        term_lower = term.lower().strip()
-        normalizations = {
-            "quran": "quran",
-            "qur'an": "quran",
-            "koran": "quran",
-            "القرآن": "quran",
-            "قرآن": "quran",
-            "muhammad": "muhammad",
-            "mohammed": "muhammad",
-            "mohamed": "muhammad",
-            "محمد": "muhammad",
-            "ramadan": "ramadan",
-            "ramadhan": "ramadan",
-            "رمضان": "ramadan",
-            "salat": "salah",
-            "salah": "salah",
-            "صلاة": "salah",
-            "prayer": "salah",
-            "zakat": "zakat",
-            "zakah": "zakat",
-            "زكاة": "zakat",
-            "hajj": "hajj",
-            "haj": "hajj",
-            "حج": "hajj",
-        }
-        return normalizations.get(term_lower)
 
 
 @dataclass(frozen=True)
@@ -263,7 +65,6 @@ class RetrievalConfig:
     mmr_diversity: float = 0.3
     expand_queries: bool = False
     max_query_expansions: int = 3
-    enable_cross_language: bool = True
     fusion_method: str = "rrf"
     use_adaptive_weights: bool = True
 
@@ -321,9 +122,6 @@ class RetrievalService:
         mmr: bool | None = None,
         mmr_lambda: float | None = None,
         mmr_threshold: float | None = None,
-        # Islamic enhancement parameters
-        multi_query: bool | None = None,
-        authority_sort: bool | None = None,
         # Additional filters (not implemented in core retrieve, for API compatibility)
         source_type_filter: str | None = None,
         language_filter: str | None = None,
@@ -353,7 +151,6 @@ class RetrievalService:
             ) = fusion = None
             rerank = rerank_model = rerank_top_n = None
             mmr = mmr_lambda = mmr_threshold = None
-            multi_query = authority_sort = None
 
         # Mode: dense, bm25, or hybrid
         effective_mode = str(mode or retrieval_defaults.get("mode") or "hybrid").lower()
@@ -496,48 +293,7 @@ class RetrievalService:
         # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
         is_multimodal = self._ks._is_multimodal_dataset(dataset)
 
-        # --- PRE_RETRIEVAL Hook: Islamic multi-query expansion ---
-        # Resolve Islamic enhancement config from dataset index_config
-        islamic_cfg = _ensure_dict(retrieval_defaults.get("islamic"))
-        islamic_citation = bool(islamic_cfg.get("citation_format", False))
-        islamic_max_queries = int(islamic_cfg.get("max_expanded_queries", 3))
-
-        # multi_query / authority_sort: explicit request parameter overrides dataset config.
-        # Only fall back to dataset config when the caller didn't specify (None).
-        if multi_query is not None:
-            islamic_multi_query = bool(multi_query)
-        else:
-            islamic_multi_query = bool(islamic_cfg.get("multi_query", False))
-
-        if authority_sort is not None:
-            islamic_authority_sort = bool(authority_sort)
-        else:
-            islamic_authority_sort = bool(islamic_cfg.get("authority_sort", False))
-
-        # Auto-detection fallback: ONLY when caller didn't specify (multi_query is None)
-        # AND dataset config is also False. Disabled when explicitly passed False.
-        if not islamic_multi_query and multi_query is None:
-            try:
-                from .multi_query import ISLAMIC_SYNONYMS
-
-                q_lower = q.lower()
-                if any(term in q_lower for term in ISLAMIC_SYNONYMS):
-                    islamic_multi_query = True
-            except Exception:
-                pass
-
         queries_to_run: list[str] = [q]
-        meta_islamic_queries: list[str] | None = None
-        if islamic_multi_query:
-            try:
-                from .multi_query import expand_query_islamic
-
-                queries_to_run = expand_query_islamic(q, max_queries=islamic_max_queries)
-                if len(queries_to_run) > 1:
-                    meta_islamic_queries = queries_to_run[:]
-                    logger.info(f"Islamic multi-query expanded: {queries_to_run}")
-            except Exception as mq_err:
-                logger.warning(f"Islamic multi-query expansion failed: {mq_err}")
 
         # --- Parallel Dense + BM25 retrieval for better latency ---
         retrieval_query_concurrency = max(
@@ -545,18 +301,12 @@ class RetrievalService:
             1,
         )
 
-        query_lang = detect_language(q)
-
         dense_queries: list[str] = []
         bm25_queries: list[str] = []
         if effective_mode in {"dense", "hybrid"}:
-            dense_queries = (
-                queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
-            )
+            dense_queries = queries_to_run
         if effective_mode in {"bm25", "hybrid"}:
-            bm25_queries = (
-                queries_to_run if islamic_multi_query and len(queries_to_run) > 1 else [q]
-            )
+            bm25_queries = queries_to_run
 
         # Precompute query vectors for dense queries (BM25 runs in parallel)
         query_vectors: dict[str, list[float]] = {}
@@ -670,10 +420,9 @@ class RetrievalService:
 
         def _merge_dense_results(
             results: list[tuple[list, int]],
-        ) -> tuple[list, int, dict[str, int]]:
+        ) -> tuple[list, int]:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
-            hit_counts: dict[str, int] = {}
             for hits, raw_count in results:
                 total_raw += raw_count
                 for h in hits:
@@ -682,7 +431,6 @@ class RetrievalService:
                     if not seg_id:
                         continue
                     score = float(h.get("score") or 0.0)
-                    hit_counts[seg_id] = hit_counts.get(seg_id, 0) + 1
                     if seg_id not in merged or score > merged[seg_id]["score"]:
                         merged[seg_id] = {
                             "payload": payload,
@@ -690,23 +438,16 @@ class RetrievalService:
                             "point_id": h.get("point_id"),
                         }
 
-            for seg_id, count in hit_counts.items():
-                if count > 1 and seg_id in merged:
-                    bonus = min(0.3, (count - 1) * 0.1)
-                    merged[seg_id]["score"] = merged[seg_id]["score"] * (1 + bonus)
-                    merged[seg_id]["_multi_query_hits"] = count
-
-            dense_merge_k = min(max(vector_k, vector_k * max(len(dense_queries), 1)), candidate_k)
+            dense_merge_k = min(vector_k, candidate_k)
             dense_hits = list(merged.values())
             dense_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-            return dense_hits[:dense_merge_k], total_raw, hit_counts
+            return dense_hits[:dense_merge_k], total_raw
 
         def _merge_bm25_results(
             results: list[tuple[list, int]],
-        ) -> tuple[list, int, dict[str, int]]:
+        ) -> tuple[list, int]:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
-            hit_counts: dict[str, int] = {}
             for hits, raw_count in results:
                 total_raw += raw_count
                 for h in hits:
@@ -714,26 +455,19 @@ class RetrievalService:
                     if not seg_id:
                         continue
                     score = float(h.get("bm25_score") or 0.0)
-                    hit_counts[seg_id] = hit_counts.get(seg_id, 0) + 1
                     if seg_id not in merged or score > float(
                         merged[seg_id].get("bm25_score") or 0.0
                     ):
                         merged[seg_id] = h
 
-            for seg_id, count in hit_counts.items():
-                if count > 1 and seg_id in merged:
-                    bonus = min(0.3, (count - 1) * 0.1)
-                    merged[seg_id]["bm25_score"] = float(merged[seg_id]["bm25_score"]) * (1 + bonus)
-                    merged[seg_id]["_multi_query_hits"] = count
-
-            bm25_merge_k = min(max(keyword_k, keyword_k * max(len(bm25_queries), 1)), candidate_k)
+            bm25_merge_k = min(keyword_k, candidate_k)
             bm25_hits = list(merged.values())
             bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return bm25_hits[:bm25_merge_k], total_raw, hit_counts
+            return bm25_hits[:bm25_merge_k], total_raw
 
-        async def _run_dense_multi() -> tuple[list, int, dict[str, int]]:
+        async def _run_dense_multi() -> tuple[list, int]:
             if not dense_queries:
-                return [], 0, {}
+                return [], 0
             semaphore = asyncio.Semaphore(retrieval_query_concurrency)
 
             async def _run(query_text: str) -> tuple[list, int]:
@@ -743,9 +477,9 @@ class RetrievalService:
             results = await asyncio.gather(*[_run(dq) for dq in dense_queries])
             return _merge_dense_results(results)
 
-        async def _run_bm25_multi() -> tuple[list, int, dict[str, int]]:
+        async def _run_bm25_multi() -> tuple[list, int]:
             if not bm25_queries:
-                return [], 0, {}
+                return [], 0
             semaphore = asyncio.Semaphore(retrieval_query_concurrency)
 
             async def _run(query_text: str) -> tuple[list, int]:
@@ -838,11 +572,11 @@ class RetrievalService:
                 collection = ""
 
         # Execute dense (after vectors) and await BM25 concurrently
-        dense_hits, dense_hits_raw_count, dense_query_hits = await _run_dense_multi()
+        dense_hits, dense_hits_raw_count = await _run_dense_multi()
         if bm25_task is not None:
-            bm25_hits, bm25_hits_raw_count, bm25_query_hits = await bm25_task
+            bm25_hits, bm25_hits_raw_count = await bm25_task
         else:
-            bm25_hits, bm25_hits_raw_count, bm25_query_hits = [], 0, {}
+            bm25_hits, bm25_hits_raw_count = [], 0
 
         # --- Merge candidates with clear score tracking ---
         candidates: dict[str, dict[str, Any]] = {}
@@ -934,22 +668,6 @@ class RetrievalService:
                 bm25_score=float(h.get("bm25_score") or 0.0),
             )
             bm25_ranked_ids.append(seg_id)
-
-        # Attach multi-query hit counts for cross-language traceability
-        if islamic_multi_query and (dense_query_hits or bm25_query_hits):
-            merged_hits: dict[str, int] = {}
-            for sid, count in (dense_query_hits or {}).items():
-                merged_hits[sid] = max(merged_hits.get(sid, 0), count)
-            for sid, count in (bm25_query_hits or {}).items():
-                merged_hits[sid] = max(merged_hits.get(sid, 0), count)
-
-            for sid, count in merged_hits.items():
-                if count <= 1 or sid not in candidates:
-                    continue
-                meta = _ensure_dict(candidates[sid].get("metadata"))
-                meta["cross_language_hits"] = count
-                meta["query_language"] = query_lang
-                candidates[sid]["metadata"] = meta
 
         # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
         # Build score dicts for normalization
@@ -1378,75 +1096,6 @@ class RetrievalService:
             if metadata_filter:
                 meta["metadata_filter"] = dict(metadata_filter)
 
-        # Hydrate missing metadata (citation/source_reference) from DB for dense-only payloads
-        if final_sorted and (islamic_citation or islamic_authority_sort):
-            try:
-                missing_ids = []
-                for item in final_sorted:
-                    if item.get("citation_text") or item.get("source_reference"):
-                        continue
-                    seg_id = str(item.get("segment_id") or "")
-                    if seg_id:
-                        missing_ids.append(seg_id)
-
-                if missing_ids:
-                    seg_rows = await self.db.get_segments_by_ids(list(set(missing_ids)))
-                    seg_map = {str(seg.get("segment_id") or ""): seg for seg in seg_rows if seg}
-                    for item in final_sorted:
-                        if item.get("citation_text") or item.get("source_reference"):
-                            continue
-                        seg_id = str(item.get("segment_id") or "")
-                        if not seg_id:
-                            continue
-                        seg = seg_map.get(seg_id)
-                        if not seg:
-                            continue
-                        meta_from_db = _ensure_dict(seg.get("metadata"))
-                        merged = {**meta_from_db, **_ensure_dict(item.get("metadata"))}
-                        item["metadata"] = merged
-                        source_type = seg.get("source_type") or meta_from_db.get("source_type")
-                        citation_text = seg.get("citation_text") or meta_from_db.get(
-                            "citation_text"
-                        )
-                        source_reference = seg.get("source_reference") or meta_from_db.get(
-                            "source_reference"
-                        )
-                        if source_type and not item.get("source_type"):
-                            item["source_type"] = source_type
-                        if citation_text and not item.get("citation_text"):
-                            item["citation_text"] = citation_text
-                        if source_reference and not item.get("source_reference"):
-                            item["source_reference"] = source_reference
-            except Exception as hydrate_err:
-                logger.warning(f"Failed to hydrate segment metadata for citations: {hydrate_err}")
-
-        # --- POST_RANKING Hook: Islamic citation formatting & authority sort ---
-        if (islamic_citation or islamic_authority_sort) and final_sorted:
-            try:
-                from .citation_formatter import CitationFormatter
-
-                formatter = CitationFormatter()
-
-                if islamic_citation:
-                    # Enrich results with citation_text (does NOT re-sort)
-                    for c in final_sorted:
-                        formatted = formatter.format_citation(c)
-                        if formatted:
-                            c["citation_text"] = formatted
-                    meta["pipeline_stages"].append(
-                        f"Islamic citation formatting: {len(final_sorted)} results enriched"
-                    )
-
-                if islamic_authority_sort:
-                    # Re-sort by Islamic authority (Quran > Hadith > Tafseer > Fiqh > Others)
-                    # Within same authority level, preserve score ordering
-                    final_sorted = formatter.sort_by_authority(final_sorted)
-                    meta["pipeline_stages"].append("Islamic authority sort applied")
-
-            except Exception as islamic_err:
-                logger.warning(f"Islamic POST_RANKING hook failed: {islamic_err}")
-                meta["islamic_enhancement_error"] = str(islamic_err)
-
         # Normalize final scores for display (keep raw for debugging)
         if final_sorted:
             raw_score_map = {
@@ -1459,21 +1108,6 @@ class RetrievalService:
                 raw_score = float(c.get("_final_score") or 0.0)
                 c["_final_score_raw"] = raw_score
                 c["_final_score_norm"] = float(norm_map.get(key, 0.0))
-
-        # Add Islamic multi-query metadata if applicable
-        if meta_islamic_queries:
-            meta["islamic_multi_query"] = True
-            meta["islamic_expanded_queries"] = meta_islamic_queries
-            meta["pipeline_stages"].insert(
-                0,
-                f"Islamic multi-query: {len(meta_islamic_queries)} queries ({', '.join(meta_islamic_queries[:3])}{'...' if len(meta_islamic_queries) > 3 else ''})",
-            )
-        if islamic_citation or islamic_authority_sort:
-            meta["islamic_enhancements"] = {
-                "multi_query": islamic_multi_query,
-                "citation_format": islamic_citation,
-                "authority_sort": islamic_authority_sort,
-            }
 
         # Build result candidates first (to collect image URLs for presigned generation)
         result_candidates: list[dict[str, Any]] = []
@@ -1543,7 +1177,7 @@ class RetrievalService:
             payload["_term_matches"] = c.get("_term_matches")
             payload["_term_ratio"] = c.get("_term_ratio")
 
-            # Islamic citation (added by POST_RANKING hook if enabled)
+            # Pre-formatted citation/source metadata when supplied by ingestion.
             if c.get("citation_text"):
                 payload["citation_text"] = c["citation_text"]
 
@@ -2246,8 +1880,6 @@ class RetrievalService:
         score_threshold: float | None = None,
         source_type_filter: str | None = None,
         language_filter: str | None = None,
-        multi_query: bool = False,
-        authority_sort: bool = False,
         vector_top_k: int | None = None,
         keyword_top_k: int | None = None,
         candidate_top_k: int | None = None,
@@ -2304,8 +1936,6 @@ class RetrievalService:
                     "score_threshold",
                     "source_type_filter",
                     "language_filter",
-                    "multi_query",
-                    "authority_sort",
                     "vector_top_k",
                     "keyword_top_k",
                     "candidate_top_k",
@@ -2356,8 +1986,6 @@ class RetrievalService:
                         source_type_filter=query_spec.get("source_type_filter", source_type_filter),
                         language_filter=query_spec.get("language_filter", language_filter),
                         metadata_filter=query_spec.get("metadata_filter"),
-                        multi_query=query_spec.get("multi_query", multi_query),
-                        authority_sort=query_spec.get("authority_sort", authority_sort),
                         vector_top_k=query_spec.get("vector_top_k", vector_top_k),
                         keyword_top_k=query_spec.get("keyword_top_k", keyword_top_k),
                         candidate_top_k=query_spec.get("candidate_top_k", candidate_top_k),

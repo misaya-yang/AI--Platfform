@@ -37,8 +37,8 @@ class _FakeCacheDB:
 @pytest.fixture
 def proxy_service_config() -> ProxyServiceConfig:
     return ProxyServiceConfig(
-        service_id="imam",
-        service_name="Imam",
+        service_id="agent",
+        service_name="Agent",
         upstream_url="http://localhost:2024",
         cache_enabled=True,
         cache_ttl=120,

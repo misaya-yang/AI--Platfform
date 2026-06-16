@@ -16,7 +16,7 @@ The same pattern lives directly inside
 ``apps/assistant-service/.../routes/chat.py`` for the AS-owned event
 generator. This module is the **proxy-layer** version: it wraps an
 ``async generator`` of bytes (or strings) coming back from a pass-
-through ``client.stream(...)`` so the gateway's SSE proxies for imam-
+through ``client.stream(...)`` so the gateway's SSE proxies for agent-
 agent and other LangGraph upstreams get the same protection without
 having to edit each upstream's code.
 

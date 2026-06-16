@@ -67,7 +67,7 @@ async def _apply(
         request=request,
         user=_user(),
         auth=_auth(),
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         path="threads/t1/runs/wait",
         body=raw_body,
@@ -128,7 +128,7 @@ async def test_hard_block_returns_403_before_upstream(monkeypatch) -> None:
             "event_type": "quota_exceeded",
             "tenant_id": "tenant-a",
             "user_id": "user-a",
-            "service_id": "imam",
+            "service_id": "agent",
             "metadata": {
                 "policy": "hard_block",
                 "status": "blocked",

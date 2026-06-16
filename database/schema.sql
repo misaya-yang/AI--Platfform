@@ -398,14 +398,14 @@ CREATE TABLE IF NOT EXISTS segments (
     has_images BOOLEAN NOT NULL DEFAULT FALSE,
     image_count INTEGER NOT NULL DEFAULT 0 CHECK (image_count >= 0),
     vlm_description TEXT,
-    -- Islamic knowledge traceability fields
-    source_type VARCHAR(50) DEFAULT 'unknown',          -- quran|hadith|tafseer|fiqh|general_islamic|unknown
-    source_reference JSONB NOT NULL DEFAULT '{}'::jsonb, -- Structured citation data
-    citation_text VARCHAR(500) DEFAULT '',               -- Pre-formatted citation string
-    page_number INTEGER,                                 -- Source page number
-    section_header VARCHAR(500) DEFAULT '',               -- Section/chapter heading
-    language VARCHAR(10) DEFAULT 'en',                   -- ar|en|ar_en
-    contextual_prefix TEXT DEFAULT '',                    -- Anthropic contextual retrieval prefix
+    -- Source traceability fields
+    source_type VARCHAR(50) DEFAULT 'unknown',
+    source_reference JSONB NOT NULL DEFAULT '{}'::jsonb,
+    citation_text VARCHAR(500) DEFAULT '',
+    page_number INTEGER,
+    section_header VARCHAR(500) DEFAULT '',
+    language VARCHAR(10) DEFAULT 'en',
+    contextual_prefix TEXT DEFAULT '',
     -- Incremental update detection (from 023_segment_content_hash)
     content_hash VARCHAR(64),
     -- Full-text search (from 028_segments_fulltext_search)

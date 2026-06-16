@@ -395,12 +395,12 @@ Replay (network retry):
 
 ```
 POST /generate-image-async
-{ "prompt": "a cat", "client_request_id": "11111111-..." }
+{ "prompt": "a cat", "client_request_id": "aaaaaaaa-..." }
 → { "task_id": "tsk_A", "idempotent_replay": false, ... }
 
 # network blip; client retries
 POST /generate-image-async
-{ "prompt": "a cat", "client_request_id": "11111111-..." }
+{ "prompt": "a cat", "client_request_id": "aaaaaaaa-..." }
 → { "task_id": "tsk_A", "idempotent_replay": true, ... }    # same task
 ```
 
@@ -408,11 +408,11 @@ Conflict (caller bug — reused key on a new prompt):
 
 ```
 POST /generate-image-async
-{ "prompt": "a cat",  "client_request_id": "11111111-..." }
+{ "prompt": "a cat",  "client_request_id": "aaaaaaaa-..." }
 → 200 OK, task_id=tsk_A
 
 POST /generate-image-async
-{ "prompt": "a dog",  "client_request_id": "11111111-..." }
+{ "prompt": "a dog",  "client_request_id": "aaaaaaaa-..." }
 → 409 { "error_code": "idempotency_conflict", ... }
 ```
 
@@ -556,7 +556,7 @@ finishes. **Existing fields** are preserved; **new fields** are additive.
   "turn_id": "trn_...",
   "parent_artifact_id": "art_prev_...",
   "output_artifact_id": "art_...",
-  "client_request_id": "11111111-...",
+  "client_request_id": "aaaaaaaa-...",
   "error_code": null,
   "idempotent_replay": false,
   "variants": {

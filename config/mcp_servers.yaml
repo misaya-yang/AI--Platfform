@@ -19,21 +19,3 @@ mcp_servers:
     enabled: true
     max_concurrent: 4
     timeout: 120.0
-
-  - name: wahda
-    url: http://wahda-mcp:3001
-    description: "Wahda social platform — create posts, search messages, send DMs"
-    enabled: true
-    max_concurrent: 10
-
-  - name: halalmoney
-    url: http://halalmoney-mcp:3002
-    description: "Halal Money — portfolio management, Shariah compliance checks, product catalog"
-    enabled: true
-    allowed_tools:
-      - get_portfolio
-      - check_halal_status
-      - get_products
-    blocked_tools:
-      - delete_account
-      - transfer_funds

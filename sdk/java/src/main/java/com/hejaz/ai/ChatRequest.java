@@ -9,12 +9,12 @@ import java.util.Map;
  *
  * <p>Use the {@link Builder} to construct instances fluently:
  * <pre>{@code
- * ChatRequest req = ChatRequest.builder("What is Zakat?")
+ * ChatRequest req = ChatRequest.builder("Summarize the onboarding checklist")
  *     .sessionId("sess_abc123")
  *     .modelId("qwen3.6-plus")
  *     .temperature(0.5)
  *     .maxTokens(2048)
- *     .kbDatasetIds(List.of("ds_quran", "ds_hadith"))
+ *     .kbDatasetIds(List.of("ds_product_docs", "ds_support"))
  *     .build();
  * }</pre>
  *

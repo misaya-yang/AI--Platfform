@@ -12,7 +12,7 @@
           "auth"
         ],
         "summary": "Login",
-        "description": "User login with email and password.\n\n- Validates email domain (@hejazfs.com.au only)\n- Checks account lock status\n- Verifies password\n- Returns JWT token and user info\n- Indicates if password change is required",
+        "description": "User login with email and password.\n\n- Validates the configured email domain\n- Checks account lock status\n- Verifies password\n- Returns JWT token and user info\n- Indicates if password change is required",
         "operationId": "login_api_v1_auth_login_post",
         "requestBody": {
           "content": {
@@ -243,7 +243,7 @@
           "users"
         ],
         "summary": "Create User",
-        "description": "Create a new user.\n\n- User is created with default password (111111)\n- User must change password on first login\n\nRequires: user:create permission",
+        "description": "Create a new user.\n\n- User is created with the configured default password\n- User must change password on first login\n\nRequires: user:create permission",
         "operationId": "create_user_api_v1_users_post",
         "requestBody": {
           "required": true,
@@ -418,7 +418,7 @@
           "users"
         ],
         "summary": "Reset User Password",
-        "description": "Reset user password to default (111111).\n\nUser will be required to change password on next login.\n\nRequires: user:edit permission",
+        "description": "Reset user password to the configured default.\n\nUser will be required to change password on next login.\n\nRequires: user:edit permission",
         "operationId": "reset_user_password_api_v1_users__user_id__reset_password_post",
         "parameters": [
           {
@@ -5018,203 +5018,6 @@
         ],
         "summary": "Proxy to Knowledge Base Service",
         "operationId": "proxy_knowledge_api_v1_knowledge__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/islamic/{path}": {
-      "get": {
-        "tags": [
-          "Islamic Content"
-        ],
-        "summary": "Proxy to Islamic Content Service",
-        "description": "Forward all /islamic/* requests to the Islamic Content microservice.",
-        "operationId": "proxy_islamic_content_api_v1_islamic__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "Islamic Content"
-        ],
-        "summary": "Proxy to Islamic Content Service",
-        "description": "Forward all /islamic/* requests to the Islamic Content microservice.",
-        "operationId": "proxy_islamic_content_api_v1_islamic__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "Islamic Content"
-        ],
-        "summary": "Proxy to Islamic Content Service",
-        "description": "Forward all /islamic/* requests to the Islamic Content microservice.",
-        "operationId": "proxy_islamic_content_api_v1_islamic__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "Islamic Content"
-        ],
-        "summary": "Proxy to Islamic Content Service",
-        "description": "Forward all /islamic/* requests to the Islamic Content microservice.",
-        "operationId": "proxy_islamic_content_api_v1_islamic__path__get",
-        "parameters": [
-          {
-            "name": "path",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Path"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "Islamic Content"
-        ],
-        "summary": "Proxy to Islamic Content Service",
-        "description": "Forward all /islamic/* requests to the Islamic Content microservice.",
-        "operationId": "proxy_islamic_content_api_v1_islamic__path__get",
         "parameters": [
           {
             "name": "path",
@@ -14733,8 +14536,8 @@
           },
           "temperature": {
             "type": "number",
-            "maximum": 2.0,
-            "minimum": 0.0,
+            "maximum": 2,
+            "minimum": 0,
             "title": "Temperature",
             "description": "Sampling temperature",
             "default": 0.7
@@ -14767,19 +14570,19 @@
           },
           "kb_top_k": {
             "type": "integer",
-            "maximum": 20.0,
-            "minimum": 1.0,
+            "maximum": 20,
+            "minimum": 1,
             "title": "Kb Top K",
             "description": "Number of KB results to retrieve",
             "default": 5
           },
           "kb_score_threshold": {
             "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
+            "maximum": 1,
+            "minimum": 0,
             "title": "Kb Score Threshold",
             "description": "Minimum relevance score (0.0 = no filtering)",
-            "default": 0.0
+            "default": 0
           },
           "kb_include_images": {
             "type": "boolean",
@@ -14795,8 +14598,8 @@
           },
           "web_search_max_results": {
             "type": "integer",
-            "maximum": 10.0,
-            "minimum": 1.0,
+            "maximum": 10,
+            "minimum": 1,
             "title": "Web Search Max Results",
             "description": "Maximum web search results",
             "default": 5
@@ -15322,8 +15125,8 @@
           },
           "n": {
             "type": "integer",
-            "maximum": 4.0,
-            "minimum": 1.0,
+            "maximum": 4,
+            "minimum": 1,
             "title": "N",
             "description": "Number of images to generate",
             "default": 1
@@ -15911,7 +15714,7 @@
           "success_rate": {
             "type": "number",
             "title": "Success Rate",
-            "default": 0.0
+            "default": 0
           },
           "has_errors": {
             "type": "boolean",
@@ -15975,8 +15778,8 @@
           },
           "polling_interval_minutes": {
             "type": "integer",
-            "maximum": 1440.0,
-            "minimum": 5.0,
+            "maximum": 1440,
+            "minimum": 5,
             "title": "Polling Interval Minutes",
             "description": "Polling interval in minutes",
             "default": 60
@@ -16188,8 +15991,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 1440.0,
-                "minimum": 5.0
+                "maximum": 1440,
+                "minimum": 5
               },
               {
                 "type": "null"
@@ -16582,8 +16385,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 1440.0,
-                "minimum": 5.0
+                "maximum": 1440,
+                "minimum": 5
               },
               {
                 "type": "null"
@@ -16606,8 +16409,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 100.0,
-                "minimum": 0.0
+                "maximum": 100,
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -16850,8 +16653,8 @@
           },
           "max_depth": {
             "type": "integer",
-            "maximum": 100.0,
-            "minimum": 1.0,
+            "maximum": 100,
+            "minimum": 1,
             "title": "Max Depth",
             "description": "Maximum page hierarchy depth",
             "default": 10
@@ -16876,8 +16679,8 @@
           },
           "image_max_size_bytes": {
             "type": "integer",
-            "maximum": 10485760.0,
-            "minimum": 1024.0,
+            "maximum": 10485760,
+            "minimum": 1024,
             "title": "Image Max Size Bytes",
             "description": "Maximum image size in bytes (default 3MB)",
             "default": 3145728
@@ -17208,8 +17011,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 100.0,
-                "minimum": 1.0
+                "maximum": 100,
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -17255,8 +17058,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 1440.0,
-                "minimum": 5.0
+                "maximum": 1440,
+                "minimum": 5
               },
               {
                 "type": "null"
@@ -17293,8 +17096,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 10485760.0,
-                "minimum": 1024.0
+                "maximum": 10485760,
+                "minimum": 1024
               },
               {
                 "type": "null"
@@ -17419,7 +17222,7 @@
           "progress": {
             "type": "number",
             "title": "Progress",
-            "default": 0.0
+            "default": 0
           },
           "total_pages": {
             "type": "integer",
@@ -18184,8 +17987,8 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 365.0,
-                "minimum": 1.0
+                "maximum": 365,
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -18857,8 +18660,8 @@
           },
           "n": {
             "type": "integer",
-            "maximum": 4.0,
-            "minimum": 1.0,
+            "maximum": 4,
+            "minimum": 1,
             "title": "N",
             "description": "Number of images to generate",
             "default": 1
@@ -19229,8 +19032,8 @@
           },
           "max_connections": {
             "type": "integer",
-            "maximum": 100.0,
-            "minimum": 1.0,
+            "maximum": 100,
+            "minimum": 1,
             "title": "Max Connections",
             "default": 5
           }
@@ -19331,7 +19134,7 @@
           "estimated_cost_usd": {
             "type": "number",
             "title": "Estimated Cost Usd",
-            "default": 0.0
+            "default": 0
           },
           "total_runs": {
             "type": "integer",
@@ -19341,7 +19144,7 @@
           "run_success_rate": {
             "type": "number",
             "title": "Run Success Rate",
-            "default": 100.0
+            "default": 100
           },
           "avg_run_duration_ms": {
             "type": "integer",
@@ -19395,14 +19198,14 @@
           },
           "context_window": {
             "type": "integer",
-            "minimum": 1.0,
+            "minimum": 1,
             "title": "Context Window",
             "description": "Context window size in tokens",
             "default": 128000
           },
           "max_output_tokens": {
             "type": "integer",
-            "minimum": 1.0,
+            "minimum": 1,
             "title": "Max Output Tokens",
             "description": "Maximum output tokens",
             "default": 4096
@@ -19423,7 +19226,7 @@
             "anyOf": [
               {
                 "type": "number",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "string",
@@ -19438,7 +19241,7 @@
             "anyOf": [
               {
                 "type": "number",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "string",
@@ -19524,13 +19327,13 @@
             "type": "number",
             "title": "Input Price Per 1K",
             "description": "Price per 1K input tokens (USD)",
-            "default": 0.0
+            "default": 0
           },
           "output_price_per_1k": {
             "type": "number",
             "title": "Output Price Per 1K",
             "description": "Price per 1K output tokens (USD)",
-            "default": 0.0
+            "default": 0
           }
         },
         "type": "object",
@@ -19571,14 +19374,14 @@
           },
           "context_window": {
             "type": "integer",
-            "minimum": 1.0,
+            "minimum": 1,
             "title": "Context Window",
             "description": "Context window size in tokens",
             "default": 128000
           },
           "max_output_tokens": {
             "type": "integer",
-            "minimum": 1.0,
+            "minimum": 1,
             "title": "Max Output Tokens",
             "description": "Maximum output tokens",
             "default": 4096
@@ -19673,7 +19476,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1.0
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -19685,7 +19488,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 1.0
+                "minimum": 1
               },
               {
                 "type": "null"
@@ -19719,7 +19522,7 @@
             "anyOf": [
               {
                 "type": "number",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "string",
@@ -19735,7 +19538,7 @@
             "anyOf": [
               {
                 "type": "number",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "string",
@@ -20318,8 +20121,8 @@
           },
           "question_count": {
             "type": "integer",
-            "maximum": 10.0,
-            "minimum": 1.0,
+            "maximum": 10,
+            "minimum": 1,
             "title": "Question Count",
             "description": "Number of questions",
             "default": 5
@@ -22256,7 +22059,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22269,7 +22072,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22282,7 +22085,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22295,7 +22098,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22308,7 +22111,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22319,8 +22122,8 @@
           },
           "warning_threshold": {
             "type": "integer",
-            "maximum": 100.0,
-            "minimum": 0.0,
+            "maximum": 100,
+            "minimum": 0,
             "title": "Warning Threshold",
             "description": "Warning threshold percentage",
             "default": 80
@@ -22354,7 +22157,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22367,7 +22170,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "minimum": 0.0
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -22664,7 +22467,7 @@
           "progress": {
             "type": "number",
             "title": "Progress",
-            "default": 0.0
+            "default": 0
           }
         },
         "additionalProperties": true,
@@ -23124,8 +22927,8 @@
           },
           "max_calls_per_minute": {
             "type": "integer",
-            "maximum": 10000.0,
-            "minimum": 1.0,
+            "maximum": 10000,
+            "minimum": 1,
             "title": "Max Calls Per Minute",
             "default": 20
           }
@@ -24338,10 +24141,6 @@
     }
   },
   "tags": [
-    {
-      "name": "Islamic Content",
-      "description": "Quran / Hadith / Dua / Prayer / Qibla 对外内容接口，含 canonical 数据演示接口。"
-    },
     {
       "name": "Health",
       "description": "服务健康检查与就绪状态。"

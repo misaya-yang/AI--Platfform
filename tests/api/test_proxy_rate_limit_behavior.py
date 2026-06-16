@@ -38,8 +38,8 @@ def _make_user() -> UserContext:
 
 def _make_service_config(enabled: bool) -> ProxyServiceConfig:
     return ProxyServiceConfig(
-        service_id="imam",
-        service_name="imam",
+        service_id="agent",
+        service_name="agent",
         upstream_url="http://localhost:2024",
         rate_limit_enabled=enabled,
         rate_limit_requests=5,
@@ -50,7 +50,7 @@ def _make_service_config(enabled: bool) -> ProxyServiceConfig:
 @pytest.mark.asyncio
 async def test_service_rate_limit_override_takes_precedence() -> None:
     limiter = _FakeRateLimiter(
-        custom_result=RateLimitResult(allowed=True, dimension="service:imam"),
+        custom_result=RateLimitResult(allowed=True, dimension="service:agent"),
         global_result=RateLimitResult(
             allowed=True,
             dimension="user",
@@ -62,20 +62,20 @@ async def test_service_rate_limit_override_takes_precedence() -> None:
     headers = await check_proxy_rate_limit(
         user=_make_user(),
         rate_limiter=limiter,
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_make_service_config(True),
     )
     assert len(limiter.custom_calls) == 1
     assert len(limiter.global_calls) == 0
     assert "tenant_1" in limiter.custom_calls[0]["key"]
-    assert headers["X-RateLimit-Dimension"] == "service:imam"
+    assert headers["X-RateLimit-Dimension"] == "service:agent"
 
 
 @pytest.mark.asyncio
 async def test_global_rate_limit_used_when_service_override_disabled() -> None:
     limiter = _FakeRateLimiter(
-        custom_result=RateLimitResult(allowed=True, dimension="service:imam"),
+        custom_result=RateLimitResult(allowed=True, dimension="service:agent"),
         global_result=RateLimitResult(
             allowed=True,
             dimension="user",
@@ -87,7 +87,7 @@ async def test_global_rate_limit_used_when_service_override_disabled() -> None:
     headers = await check_proxy_rate_limit(
         user=_make_user(),
         rate_limiter=limiter,
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_make_service_config(False),
     )
@@ -101,7 +101,7 @@ async def test_no_limiter_marks_rate_limit_exempt() -> None:
     headers = await check_proxy_rate_limit(
         user=_make_user(),
         rate_limiter=None,
-        service_name="imam",
+        service_name="agent",
         operation="run_wait",
         service_config=_make_service_config(True),
     )
@@ -113,7 +113,7 @@ async def test_service_rate_limit_rejects_with_429() -> None:
     limiter = _FakeRateLimiter(
         custom_result=RateLimitResult(
             allowed=False,
-            dimension="service:imam",
+            dimension="service:agent",
             limit=5,
             remaining=0,
             reset_at=9999999999,
@@ -125,7 +125,7 @@ async def test_service_rate_limit_rejects_with_429() -> None:
         await check_proxy_rate_limit(
             user=_make_user(),
             rate_limiter=limiter,
-            service_name="imam",
+            service_name="agent",
             operation="run_wait",
             service_config=_make_service_config(True),
         )

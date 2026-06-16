@@ -229,7 +229,7 @@ async def create_user(
     """
     Create a new user.
 
-    - User is created with default password (111111)
+    - User is created with the configured default password
     - User must change password on first login
 
     Requires: user:create permission
@@ -474,7 +474,7 @@ async def reset_user_password(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """
-    Reset user password to default (111111).
+    Reset user password to the configured default.
 
     User will be required to change password on next login.
 

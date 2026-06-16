@@ -224,12 +224,10 @@ class RetrieveRequestSchema(BaseModel):
     image_score_threshold: float | None = None  # Score threshold for images (lower than text)
     use_separate_thresholds: bool = False  # Use different thresholds for text vs image
 
-    # Islamic knowledge traceability filters
-    source_type_filter: str | None = None  # Filter by source: quran|hadith|fiqh|tafseer
+    # Source/metadata filters
+    source_type_filter: str | None = None
     language_filter: str | None = None  # Filter by language: ar|en|ar_en
     metadata_filter: dict[str, Any] | None = None  # Exact-match metadata filter
-    multi_query: bool = False  # Enable Islamic multi-query expansion
-    authority_sort: bool = False  # Sort results by Islamic authority (Quran > Hadith > Fiqh)
 
     # Hierarchical retrieval options (for large document collections)
     hierarchical: bool = False  # Enable hierarchical 3-level retrieval
@@ -265,8 +263,8 @@ class RetrieveHitSchema(BaseModel):
         default_factory=list
     )  # Associated images for text segments
 
-    # Islamic knowledge traceability fields
-    source_type: str | None = None  # quran|hadith|tafseer|fiqh|general_islamic
+    # Source traceability fields
+    source_type: str | None = None
     citation_text: str | None = None  # Pre-formatted citation string
     source_reference: dict[str, Any] = Field(default_factory=dict)  # Structured reference data
 
@@ -519,8 +517,6 @@ class BatchRetrieveQuerySchema(BaseModel):
     source_type_filter: str | None = None
     language_filter: str | None = None
     metadata_filter: dict[str, Any] | None = None
-    multi_query: bool | None = None
-    authority_sort: bool | None = None
     include_images: bool | None = None
     include_associated_images: bool | None = None
 
@@ -568,9 +564,6 @@ class BatchRetrieveRequestSchema(BaseModel):
     mmr: bool | None = None
     mmr_lambda: float | None = None
     mmr_threshold: float | None = None
-    multi_query: bool | None = None
-    authority_sort: bool | None = None
-
     # Multimodal options
     include_images: bool = True
     include_associated_images: bool = True
@@ -615,7 +608,6 @@ class ChunkingConfigSchema(BaseModel):
     - regex: Split by regex pattern
     - recursive: Recursive multi-level splitting
     - qa: Question-answer pair format
-    - islamic: Islamic text-aware chunking (Quran/Hadith/Fiqh/Tafseer)
     """
 
     model_config = ConfigDict(extra="allow")
@@ -657,11 +649,6 @@ class ChunkingConfigSchema(BaseModel):
     # QA mode
     question_prefix: str | None = None
     answer_prefix: str | None = None
-
-    # Islamic text options (for islamic mode)
-    islamic_source_type: str | None = None  # quran|hadith|fiqh|tafseer|auto
-    preserve_verse_integrity: bool = True
-    preserve_hadith_integrity: bool = True
 
     # Pre-processing
     remove_extra_spaces: bool = True

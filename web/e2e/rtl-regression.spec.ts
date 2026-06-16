@@ -19,36 +19,36 @@ function jsonResponse(body: unknown) {
   };
 }
 
-const ARABIC_RESPONSE = `الربا محرم في الإسلام تحريماً قاطعاً، وقد ورد النهي عنه في القرآن الكريم والسنة النبوية الشريفة.
+const ARABIC_RESPONSE = `توضح سياسة النشر أن الرجوع إلى الإصدار السابق يجب أن يتم بعد فشل التحقق الصحي.
 
-## الأدلة من القرآن الكريم
+## الأدلة من الوثائق
 
-قال الله تعالى: "الَّذِينَ يَأْكُلُونَ الرِّبَا لَا يَقُومُونَ إِلَّا كَمَا يَقُومُ الَّذِي يَتَخَبَّطُهُ الشَّيْطَانُ مِنَ الْمَسِّ" [1]
+يجب إيقاف الترحيل التلقائي عند ظهور أخطاء في قاعدة البيانات، ثم تشغيل خطة الرجوع الموثقة. [1]
 
 ## المصادر
 
-[1] Quran 2:275 - Sahih International
+[1] Deployment Runbook - Rollback Procedure
 
-جميع المعلومات المقدمة مستمدة من مصادر إسلامية موثقة. للمسائل التي تتطلب توجيهاً شخصياً بناءً على ظروفكم الخاصة، يرجى استشارة عالم إسلامي مؤهل.`;
+تم الاعتماد على مواد قاعدة المعرفة المتاحة فقط.`;
 
-const ENGLISH_RESPONSE = `Riba (usury/interest) is categorically prohibited in Islam.
+const ENGLISH_RESPONSE = `The rollback procedure should start after the health check fails.
 
-## Evidence from the Quran
+## Evidence from the runbook
 
-Allah says: "Those who consume interest cannot stand [on the Day of Resurrection] except as one stands who is being beaten by Satan into insanity." [1]
-
-## Sources
-
-[1] Quran 2:275 - Sahih International
-
-All information provided is sourced from authenticated Islamic materials. For matters requiring personal guidance based on your specific circumstances, please consult with a qualified Islamic scholar.`;
-
-const MIXED_RESPONSE = `# ما حكم الربا في الإسلام؟
-
-The ruling on Riba (usury) is clear in Islamic jurisprudence. والربا محرم بإجماع العلماء.
+The deployment runbook says to stop automated migration, restore the previous image, and verify service health before reopening traffic. [1]
 
 ## Sources
-[1] Quran 2:275 - Sahih International`;
+
+[1] Deployment Runbook - Rollback Procedure
+
+All information is based on the provided knowledge base materials.`;
+
+const MIXED_RESPONSE = `# ما هي خطوات الرجوع؟
+
+The rollback checklist should be followed before reopening traffic. يجب التحقق من صحة الخدمة أولاً.
+
+## Sources
+[1] Deployment Runbook - Rollback Procedure`;
 
 async function installMockRoutes(page: Page, responseText: string) {
   // Mock models
@@ -156,7 +156,7 @@ test.describe("RTL Rendering Regression", () => {
 
     const composer = page.locator("textarea, [contenteditable]").first();
     await composer.waitFor({ timeout: 10_000 });
-    await composer.fill("What is riba?");
+    await composer.fill("What is the rollback procedure?");
     await page.keyboard.press("Enter");
 
     const assistantCopy = page.locator(".assistant-copy").first();
@@ -200,7 +200,7 @@ test.describe("Citation Language Regression", () => {
     const sourcesHeading = page.getByText("Sources");
     await expect(sourcesHeading).toBeVisible({ timeout: 15_000 });
 
-    const closingPhrase = page.getByText("All information provided is sourced from authenticated Islamic materials");
+    const closingPhrase = page.getByText("All information is based on the provided knowledge base materials");
     await expect(closingPhrase).toBeVisible();
   });
 });

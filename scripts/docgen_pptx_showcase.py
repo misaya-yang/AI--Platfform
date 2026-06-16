@@ -1,6 +1,6 @@
 """Showcase — render the SAME deck in every design system for side-by-side review.
 
-Writes to /Users/misaya.yanghejazfs.com.au/Desktop/test/test_word/showcase/.
+Writes to DOCGEN_SHOWCASE_OUT_DIR or tmp/docgen/showcase/.
 
 Usage:
     python3 scripts/docgen_pptx_showcase.py
@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -41,7 +42,7 @@ BRIEF_BODY = (
 
 
 async def main() -> int:
-    out_root = Path("/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word/showcase")
+    out_root = Path(os.getenv("DOCGEN_SHOWCASE_OUT_DIR", REPO / "tmp/docgen/showcase"))
     out_root.mkdir(parents=True, exist_ok=True)
     pipeline = DocgenPipeline(llm=None, verify=False)
 

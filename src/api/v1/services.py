@@ -31,6 +31,16 @@ from ._assistant_status import get_assistant_health
 
 router = APIRouter()
 
+
+def _normalize_domain_policy(value: Any) -> str:
+    policy = str(value or "").strip().lower()
+    if not policy or policy == "none":
+        return "none"
+    if len(policy) <= 64 and all(ch.isalnum() or ch in "._-" for ch in policy):
+        return policy
+    return "none"
+
+
 _SERVICE_MUTABLE_FIELDS = {
     "name",
     "description",
@@ -233,8 +243,7 @@ def _normalize_langgraph_connector_config(definition: dict) -> None:
         return
 
     metadata["adapter_type"] = "langgraph"
-    domain_policy = str(metadata.get("domain_policy") or "").strip().lower()
-    metadata["domain_policy"] = domain_policy if domain_policy in {"none", "imam"} else "none"
+    metadata["domain_policy"] = _normalize_domain_policy(metadata.get("domain_policy"))
     if proxy_mode:
         metadata["proxy_mode"] = proxy_mode
 

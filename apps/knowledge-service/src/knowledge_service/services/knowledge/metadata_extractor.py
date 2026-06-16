@@ -1,8 +1,7 @@
 """Generic LLM-based metadata extractor for knowledge base chunks.
 
 Uses Qwen 3.6-Plus (free preview via DashScope) to extract structured
-metadata from arbitrary document chunks. Complements the rule-based
-IslamicMetadataExtractor by providing semantic understanding.
+metadata from arbitrary document chunks.
 
 Fields extracted: topic, entities, keywords, summary.
 """
@@ -28,7 +27,7 @@ DASHSCOPE_BASE_URL = os.getenv(
 DEFAULT_MODEL = "qwen3.6-plus"
 
 EXTRACTION_PROMPT = """Extract structured metadata from the following text chunk. Return ONLY a JSON object with:
-- "topic": primary topic (1-5 words, e.g. "Prayer obligations in Islam")
+- "topic": primary topic (1-5 words, e.g. "deployment rollback steps")
 - "entities": list of named entities (people, places, concepts, terms) — max 10
 - "keywords": list of search keywords/phrases — max 8
 - "summary": one-sentence summary (under 50 words)
@@ -36,7 +35,7 @@ EXTRACTION_PROMPT = """Extract structured metadata from the following text chunk
 Rules:
 - Be precise and specific, not generic
 - Keywords should help search retrieval
-- For Arabic/Islamic text, include both Arabic and English terms where applicable
+- For multilingual text, include source-language and English terms where applicable
 - Return ONLY the JSON object, no other text
 
 Text:

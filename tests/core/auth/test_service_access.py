@@ -15,10 +15,10 @@ from src.core.auth.service_access import (
 
 class TestNormalizeServiceScope:
     def test_comma_separated(self):
-        assert normalize_service_scope("imam, flash, gpt") == ["imam", "flash", "gpt"]
+        assert normalize_service_scope("agent, flash, gpt") == ["agent", "flash", "gpt"]
 
     def test_list(self):
-        assert normalize_service_scope(["Imam", "Flash"]) == ["imam", "flash"]
+        assert normalize_service_scope(["Agent", "Flash"]) == ["agent", "flash"]
 
     def test_tuple(self):
         assert normalize_service_scope(("A", "B")) == ["a", "b"]
@@ -38,25 +38,25 @@ class TestNormalizeServiceScope:
 
 class TestServiceScopeMatches:
     def test_exact_match(self):
-        assert service_scope_matches(["imam"], ["imam"])
+        assert service_scope_matches(["agent"], ["agent"])
 
     def test_no_match(self):
-        assert not service_scope_matches(["imam"], ["flash"])
+        assert not service_scope_matches(["agent"], ["flash"])
 
     def test_global_wildcard(self):
         assert service_scope_matches(["*"], ["any-service"])
 
     def test_prefix_wildcard(self):
-        assert service_scope_matches(["imam-*"], ["imam-prod", "imam-dev"])
+        assert service_scope_matches(["agent-*"], ["agent-prod", "agent-dev"])
 
     def test_prefix_wildcard_no_match(self):
-        assert not service_scope_matches(["imam-*"], ["flash"])
+        assert not service_scope_matches(["agent-*"], ["flash"])
 
     def test_empty_scope_matches_all(self):
         assert service_scope_matches([], ["any-service"])
 
     def test_empty_candidates_no_match(self):
-        assert not service_scope_matches(["imam"], [])
+        assert not service_scope_matches(["agent"], [])
 
 
 class TestServiceAccessPolicyFromMetadata:
@@ -65,10 +65,10 @@ class TestServiceAccessPolicyFromMetadata:
         assert policy.mode == ServiceAccessMode.ALL
 
     def test_allowlist_auto_detected(self):
-        metadata = {"service_access": {"allowed_services": "imam,flash"}}
+        metadata = {"service_access": {"allowed_services": "agent,flash"}}
         policy = service_access_policy_from_metadata(metadata)
         assert policy.mode == ServiceAccessMode.ALLOWLIST
-        assert "imam" in policy.allowed_services
+        assert "agent" in policy.allowed_services
 
     def test_explicit_mode(self):
         metadata = {"service_access": {"mode": "all"}}
@@ -84,28 +84,28 @@ class TestServiceAccessPolicyFromMetadata:
 class TestEvaluateServiceAccess:
     def test_all_mode_allows(self):
         policy = ServiceAccessPolicy(mode=ServiceAccessMode.ALL)
-        allowed, reason = evaluate_service_access(policy, ["imam"])
+        allowed, reason = evaluate_service_access(policy, ["agent"])
         assert allowed
         assert reason == "allowed"
 
     def test_denied_by_policy(self):
         policy = ServiceAccessPolicy(
-            mode=ServiceAccessMode.ALL, denied_services=("imam",)
+            mode=ServiceAccessMode.ALL, denied_services=("agent",)
         )
-        allowed, reason = evaluate_service_access(policy, ["imam"])
+        allowed, reason = evaluate_service_access(policy, ["agent"])
         assert not allowed
         assert reason == "denied_by_user_policy"
 
     def test_allowlist_allows_matching(self):
         policy = ServiceAccessPolicy(
-            mode=ServiceAccessMode.ALLOWLIST, allowed_services=("imam", "flash")
+            mode=ServiceAccessMode.ALLOWLIST, allowed_services=("agent", "flash")
         )
-        allowed, reason = evaluate_service_access(policy, ["imam"])
+        allowed, reason = evaluate_service_access(policy, ["agent"])
         assert allowed
 
     def test_allowlist_denies_non_matching(self):
         policy = ServiceAccessPolicy(
-            mode=ServiceAccessMode.ALLOWLIST, allowed_services=("imam",)
+            mode=ServiceAccessMode.ALLOWLIST, allowed_services=("agent",)
         )
         allowed, reason = evaluate_service_access(policy, ["flash"])
         assert not allowed
@@ -115,15 +115,15 @@ class TestEvaluateServiceAccess:
         policy = ServiceAccessPolicy(
             mode=ServiceAccessMode.ALLOWLIST, allowed_services=()
         )
-        allowed, reason = evaluate_service_access(policy, ["imam"])
+        allowed, reason = evaluate_service_access(policy, ["agent"])
         assert not allowed
         assert reason == "user_allowlist_empty"
 
 
 class TestNormalizeServiceCandidates:
     def test_normalizes_and_dedupes(self):
-        result = normalize_service_candidates(["Imam", "imam", "Flash"])
-        assert result == ("imam", "flash")
+        result = normalize_service_candidates(["Agent", "agent", "Flash"])
+        assert result == ("agent", "flash")
 
     def test_empty(self):
         assert normalize_service_candidates([]) == ()

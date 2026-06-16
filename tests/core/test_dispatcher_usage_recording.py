@@ -19,15 +19,15 @@ from src.models.service import ServiceDefinition
 
 def _build_service() -> ServiceDefinition:
     return ServiceDefinition(
-        service_id="imam_service",
-        name="Imam Service",
+        service_id="agent_service",
+        name="Agent Service",
         service_type=ServiceType.LANGGRAPH,
         connector_type=ConnectorType.HTTP,
         supported_modes=[InvocationMode.SYNC, InvocationMode.STREAM],
         accepted_content_types=[ContentType.TEXT],
         output_content_types=[ContentType.TEXT],
         metadata={"provider": "langgraph"},
-        connector_config={"assistant_id": "asst_imam_001"},
+        connector_config={"assistant_id": "asst_agent_001"},
     )
 
 
@@ -76,7 +76,7 @@ async def test_invoke_records_usage_for_registered_service():
     dispatcher = _build_dispatcher(adapter)
     request = UnifiedRequest(
         request_id="req_invoke_1",
-        service_id="imam_service",
+        service_id="agent_service",
         user_id="user_123",
         tenant_id="default",
         inputs=[ContentItem(type=ContentType.TEXT, data="hello")],
@@ -88,9 +88,9 @@ async def test_invoke_records_usage_for_registered_service():
 
     recorder.record_usage.assert_awaited_once()
     kwargs = recorder.record_usage.await_args.kwargs
-    assert kwargs["service_id"] == "imam_service"
+    assert kwargs["service_id"] == "agent_service"
     assert kwargs["user_id"] == "user_123"
-    assert kwargs["assistant_id"] == "asst_imam_001"
+    assert kwargs["assistant_id"] == "asst_agent_001"
     assert kwargs["input_tokens"] == 11
     assert kwargs["output_tokens"] == 9
     assert kwargs["request_type"] == "invoke"
@@ -127,7 +127,7 @@ async def test_stream_records_usage_for_registered_service():
     dispatcher = _build_dispatcher(adapter)
     request = UnifiedRequest(
         request_id="req_stream_1",
-        service_id="imam_service",
+        service_id="agent_service",
         user_id="user_456",
         tenant_id="default",
         inputs=[ContentItem(type=ContentType.TEXT, data="hello stream")],
@@ -142,7 +142,7 @@ async def test_stream_records_usage_for_registered_service():
     assert any(chunk.event_type == StreamEventType.STREAM_END for chunk in chunks)
     recorder.record_usage.assert_awaited_once()
     kwargs = recorder.record_usage.await_args.kwargs
-    assert kwargs["service_id"] == "imam_service"
+    assert kwargs["service_id"] == "agent_service"
     assert kwargs["request_type"] == "stream"
     assert kwargs["input_tokens"] == 5
     assert kwargs["output_tokens"] == 7
@@ -161,7 +161,7 @@ async def test_stream_error_without_usage_records_zero_tokens():
     dispatcher = _build_dispatcher(adapter)
     request = UnifiedRequest(
         request_id="req_stream_err_1",
-        service_id="imam_service",
+        service_id="agent_service",
         user_id="user_789",
         tenant_id="default",
         inputs=[ContentItem(type=ContentType.TEXT, data="hello error")],
@@ -175,7 +175,7 @@ async def test_stream_error_without_usage_records_zero_tokens():
 
     recorder.record_usage.assert_awaited_once()
     kwargs = recorder.record_usage.await_args.kwargs
-    assert kwargs["service_id"] == "imam_service"
+    assert kwargs["service_id"] == "agent_service"
     assert kwargs["status"] == "error"
     assert kwargs["input_tokens"] == 0
     assert kwargs["output_tokens"] == 0

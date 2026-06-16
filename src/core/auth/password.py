@@ -33,8 +33,8 @@ from ai_gateway_core.exceptions import AuthError
 # ============================================================
 # Configuration Constants
 # ============================================================
-ALLOWED_EMAIL_DOMAIN = "hejazfs.com.au"
-DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "Hejaz@Welcome2026!")
+ALLOWED_EMAIL_DOMAIN = os.environ.get("AUTH_ALLOWED_EMAIL_DOMAIN", "example.com").strip().lower()
+DEFAULT_PASSWORD = os.environ.get("DEFAULT_USER_PASSWORD", "AI-Gateway-User-Init-2026!")
 MIN_PASSWORD_LENGTH = 8
 BCRYPT_COST_FACTOR = 12
 MAX_LOGIN_ATTEMPTS = 5

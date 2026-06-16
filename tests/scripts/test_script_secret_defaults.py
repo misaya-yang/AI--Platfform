@@ -3,8 +3,7 @@ from pathlib import Path
 
 def test_kb_maintenance_scripts_do_not_embed_production_pg_passwords():
     scripts = [
-        Path("scripts/backfill_hadith_chapters.py"),
-        Path("scripts/sync_kb_v2_to_pg.py"),
+        Path("scripts/create_admin.py"),
     ]
     production_password = "HejazDB" "2026Secure"
 

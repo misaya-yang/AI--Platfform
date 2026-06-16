@@ -50,8 +50,8 @@ DEFAULT_UAT_CAPACITY_BUDGETS: dict[str, CapacityBudget] = {
         source="default",
         enforced=True,
     ),
-    "upstream.imam_agent": CapacityBudget(
-        key="upstream.imam_agent",
+    "upstream.langgraph_agent": CapacityBudget(
+        key="upstream.langgraph_agent",
         limit=4,
         queue_max=16,
         queue_timeout_ms=3000,
@@ -74,16 +74,6 @@ DEFAULT_UAT_CAPACITY_BUDGETS: dict[str, CapacityBudget] = {
         key="upstream.knowledge_service",
         limit=12,
         queue_max=48,
-        queue_timeout_ms=3000,
-        scope="upstream",
-        source="default",
-        enforced=True,
-        shared=True,
-    ),
-    "upstream.islamic_content": CapacityBudget(
-        key="upstream.islamic_content",
-        limit=20,
-        queue_max=80,
         queue_timeout_ms=3000,
         scope="upstream",
         source="default",
@@ -144,15 +134,13 @@ DEFAULT_UAT_CAPACITY_BUDGETS: dict[str, CapacityBudget] = {
 
 
 SERVICE_UPSTREAM_GROUPS: dict[str, str] = {
-    "local-2024-agent": "imam_agent",
-    "imam": "imam_agent",
-    "imam-agent": "imam_agent",
-    "sheikh-wahda": "imam_agent",
+    "local-2024-agent": "langgraph_agent",
+    "langgraph-agent": "langgraph_agent",
+    "agent": "langgraph_agent",
     "assistant": "assistant_service",
     "assistant-service": "assistant_service",
     "knowledge": "knowledge_service",
     "knowledge-service": "knowledge_service",
-    "islamic-content": "islamic_content",
     "image-generation": "image_generation",
 }
 

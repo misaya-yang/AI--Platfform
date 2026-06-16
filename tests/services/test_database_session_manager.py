@@ -51,9 +51,9 @@ async def test_update_metadata_uses_atomic_patch_and_invalidates_cache():
     session = _build_session("session-2")
     manager._memory_cache[session.session_id] = session
 
-    result = await manager.update_metadata(session.session_id, {"agent_id": "imam"})
+    result = await manager.update_metadata(session.session_id, {"agent_id": "agent"})
 
     assert result is True
-    db.update_session_metadata.assert_awaited_once_with(session.session_id, {"agent_id": "imam"})
+    db.update_session_metadata.assert_awaited_once_with(session.session_id, {"agent_id": "agent"})
     db.save_session.assert_not_awaited()
     assert session.session_id not in manager._memory_cache

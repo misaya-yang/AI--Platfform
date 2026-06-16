@@ -41,6 +41,10 @@ load_env() {
             key=$(echo "$key" | xargs)
             # Only export valid variable names
             if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                value="${value%$'\r'}"
+                if [[ "$value" =~ ^\".*\"$ ]] || [[ "$value" =~ ^\'.*\'$ ]]; then
+                    value="${value:1:${#value}-2}"
+                fi
                 export "$key=$value"
             fi
         done < "$env_file"
@@ -74,13 +78,8 @@ require_docker() {
 
 require_env_file() {
     if [ ! -f "${PROJECT_ROOT}/.env" ]; then
-        if [ -f "${PROJECT_ROOT}/.env.production" ]; then
-            log_warn ".env not found, copying from .env.production"
-            cp "${PROJECT_ROOT}/.env.production" "${PROJECT_ROOT}/.env"
-        else
-            log_error ".env not found. Create it from the deployment secret source before running this command."
-            exit 1
-        fi
+        log_error ".env not found. Copy .env.example to .env and fill the required secrets first."
+        exit 1
     fi
 }
 
@@ -89,13 +88,16 @@ require_env_file() {
 pg_host()     { echo "${POSTGRES_HOST:-localhost}"; }
 pg_port()     { echo "${POSTGRES_PORT:-5432}"; }
 pg_user()     { echo "${POSTGRES_USER:-postgres}"; }
-pg_password() { echo "${POSTGRES_PASSWORD:-111111}"; }
+pg_password() { echo "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"; }
 pg_database() { echo "${POSTGRES_DB:-gateway}"; }
 
 # Container names (overridable via env vars for dev setup)
-pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-postgres}"; }
+pg_container()     { echo "${POSTGRES_CONTAINER:-ai-gateway-pg}"; }
 redis_container()  { echo "${REDIS_CONTAINER:-ai-gateway-redis}"; }
 qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
+assistant_container() { echo "${ASSISTANT_CONTAINER:-ai-gateway-assistant-service}"; }
+knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
+docgen_container()    { echo "${DOCGEN_CONTAINER:-ai-gateway-mcp-docgen-server}"; }
 
 # -- SQL execution helpers ---------------------------------------------------
 # Run SQL via docker exec (production) or psql (dev)
@@ -146,11 +148,13 @@ wait_for_healthy() {
 }
 
 check_postgres_health() {
-    docker exec "$(pg_container)" pg_isready -U "$(pg_user)" -d "$(pg_database)" &>/dev/null
+    docker exec -e "PGPASSWORD=$(pg_password)" "$(pg_container)" \
+        psql -h 127.0.0.1 -U "$(pg_user)" -d "$(pg_database)" -tAc "SELECT 1" 2>/dev/null \
+        | grep -q 1
 }
 
 check_redis_health() {
-    docker exec "$(redis_container)" redis-cli -a "${REDIS_PASSWORD:-111111}" ping 2>/dev/null | grep -q PONG
+    docker exec "$(redis_container)" redis-cli -a "${REDIS_PASSWORD:?REDIS_PASSWORD is required}" ping 2>/dev/null | grep -q PONG
 }
 
 check_qdrant_health() {
@@ -158,11 +162,23 @@ check_qdrant_health() {
 }
 
 check_gateway_health() {
-    curl -sf "http://localhost:${GATEWAY_PORT:-8080}/health" &>/dev/null
+    curl -sf "http://localhost:${GATEWAY_PORT:-8080}/health/ready" &>/dev/null
 }
 
 check_frontend_health() {
-    curl -sf "http://localhost:${FRONTEND_PORT:-80}/health" &>/dev/null
+    curl -sf "http://localhost:${FRONTEND_PORT:-8081}/health" &>/dev/null
+}
+
+check_knowledge_health() {
+    docker exec "$(knowledge_container)" curl -sf "http://127.0.0.1:8092/health" &>/dev/null
+}
+
+check_assistant_health() {
+    docker exec "$(assistant_container)" curl -sf "http://127.0.0.1:8093/health" &>/dev/null
+}
+
+check_docgen_health() {
+    docker exec "$(docgen_container)" curl -sf "http://127.0.0.1:8765/health" &>/dev/null
 }
 
 # -- Confirmation prompt -----------------------------------------------------

@@ -5,9 +5,9 @@
 支持批量上传 PDF 到知识库并完成索引。
 
 用法:
-    python scripts/batch_ingest.py --dataset imam --files "/path/to/*.pdf"
-    python scripts/batch_ingest.py --dataset imam --dir /path/to/documents/
-    python scripts/batch_ingest.py --dataset imam --files "*.pdf" --concurrency 3
+    python scripts/batch_ingest.py --dataset agent --files "/path/to/*.pdf"
+    python scripts/batch_ingest.py --dataset agent --dir /path/to/documents/
+    python scripts/batch_ingest.py --dataset agent --files "*.pdf" --concurrency 3
 
 环境变量:
     GATEWAY_API_KEY - API Key for authentication
@@ -256,7 +256,7 @@ def collect_files_from_dir(directory: Path, recursive: bool = True) -> list[Path
 
 async def main():
     parser = argparse.ArgumentParser(description="Batch ingest PDF documents into knowledge base")
-    parser.add_argument("--dataset", "-d", required=True, help="Dataset ID (e.g., 'imam')")
+    parser.add_argument("--dataset", "-d", required=True, help="Dataset ID (e.g., 'agent')")
     parser.add_argument(
         "--files", "-f", nargs="+", help="File patterns to upload (e.g., '*.pdf' or specific paths)"
     )

@@ -2,7 +2,7 @@
 
 Runs the FULL pipeline (DocgenService → planner → renderer → verifier →
 fix loop → artifact store) on four realistic prompts. Writes the final
-signed-file copy into ``/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word``
+signed-file copy into ``DOCGEN_E2E_OUT_DIR`` or ``tmp/docgen/e2e``
 and prints:
 
   * file path
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -34,7 +35,7 @@ from src.services.assistant.docgen.quality.visual_verifier import StructuralVisi
 from src.services.assistant.docgen.quality.types import IssueSeverity  # noqa: E402
 
 
-DEFAULT_OUT = Path("/Users/misaya.yanghejazfs.com.au/Desktop/test/test_word")
+DEFAULT_OUT = Path(os.getenv("DOCGEN_E2E_OUT_DIR", REPO / "tmp/docgen/e2e"))
 
 
 def _score(reports) -> tuple[float, str]:

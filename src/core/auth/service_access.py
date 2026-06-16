@@ -19,7 +19,7 @@ def normalize_service_scope(value: Any) -> list[str]:
     """Normalize allow/deny service scope definitions.
 
     Supports:
-    - comma separated string: "imam,flash"
+    - comma separated string: "agent,flash"
     - list/tuple/set values
     """
     if not value:
@@ -45,8 +45,8 @@ def service_scope_matches(scope: Sequence[str], candidates: Sequence[str]) -> bo
     """Return True when any candidate is matched by the scope rules.
 
     Scope rules support:
-    - exact match: "imam"
-    - prefix wildcard: "imam-*"
+    - exact match: "agent"
+    - prefix wildcard: "agent-*"
     - global wildcard: "*"
     """
     normalized_scope = normalize_service_scope(scope)

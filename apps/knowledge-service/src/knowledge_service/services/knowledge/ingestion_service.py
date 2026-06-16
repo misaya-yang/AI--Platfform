@@ -306,7 +306,6 @@ class IngestionService:
                 flat_chunks = self._ks._normalize_structured_chunks(flat_chunks, chunking_config)
                 # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
                 if chunking_config.mode not in (
-                    ChunkingMode.ISLAMIC,
                     ChunkingMode.FIXED_SIZE,
                     ChunkingMode.HIERARCHICAL,
                 ):
@@ -330,9 +329,7 @@ class IngestionService:
                 flat_chunks = flatten_chunks(chunk_objects)
 
                 # Merge undersized chunks AFTER flattening (must operate on leaf chunks)
-                # For Quran/Islamic mode, preserve verse-level chunks (traceability > size).
                 if chunking_config.mode not in (
-                    ChunkingMode.ISLAMIC,
                     ChunkingMode.FIXED_SIZE,
                     ChunkingMode.HIERARCHICAL,
                 ):
@@ -358,7 +355,6 @@ class IngestionService:
                         )
                 # Re-merge tiny fragments after strict splitting (avoid micro-chunks)
                 if chunking_config.mode not in (
-                    ChunkingMode.ISLAMIC,
                     ChunkingMode.FIXED_SIZE,
                     ChunkingMode.HIERARCHICAL,
                 ):
@@ -378,114 +374,6 @@ class IngestionService:
                     c.metadata["source_document"] = doc_name
                     c.metadata["source_document_id"] = document_id
                     c.metadata["source_dataset_id"] = dataset_id
-
-            # === Islamic metadata extraction (opt-in via dataset config) ===
-            islamic_cfg = (
-                dataset.get("index_config", {}).get("retrieval", {}).get("islamic", {})
-                if isinstance(dataset.get("index_config"), dict)
-                else {}
-            )
-            islamic_enabled = any(
-                islamic_cfg.get(k)
-                for k in (
-                    "multi_query",
-                    "citation_format",
-                    "authority_sort",
-                    "contextual_prefix",
-                )
-            )
-            if islamic_enabled:
-                try:
-                    from .islamic_metadata import IslamicMetadataExtractor
-
-                    metadata_extractor = IslamicMetadataExtractor()
-                    doc_meta_for_islamic = {
-                        "title": doc_name,
-                        "name": doc_name,
-                        **(doc.get("metadata") or {}),
-                    }
-
-                    def _should_override_citation(existing_val: Any, new_val: Any) -> bool:
-                        if not new_val:
-                            return False
-                        if not existing_val:
-                            return True
-                        existing = str(existing_val).lower()
-                        if "paragraph" in existing or "section:" in existing:
-                            return True
-                        if (
-                            existing.startswith("quran")
-                            and " - " not in existing
-                            and " - " in str(new_val)
-                        ):
-                            return True
-                        return bool(
-                            existing.startswith("bulugh")
-                            and "hadith" not in existing
-                            and "hadith" in str(new_val).lower()
-                        )
-
-                    for c in flat_chunks:
-                        per_chunk_meta = {
-                            **doc_meta_for_islamic,
-                            "paragraph_index": c.metadata.get("paragraph_index", c.index),
-                            "chunk_index": c.metadata.get("chunk_index", c.index),
-                            "section_title": c.metadata.get("section_title"),
-                            "page_number": c.metadata.get("page_number"),
-                        }
-                        islamic_meta = metadata_extractor.extract(c.text, per_chunk_meta)
-                        # Preserve existing Islamic metadata from specialized chunkers
-                        for key, value in islamic_meta.items():
-                            existing = c.metadata.get(key)
-                            if (
-                                key == "source_reference"
-                                and isinstance(existing, dict)
-                                and isinstance(value, dict)
-                            ):
-                                merged = dict(existing)
-                                for k, v in value.items():
-                                    if k not in merged or not merged.get(k):
-                                        merged[k] = v
-                                c.metadata[key] = merged
-                                continue
-                            if key == "citation_text":
-                                if (
-                                    _should_override_citation(existing, value)
-                                    or not existing
-                                    and value
-                                ):
-                                    c.metadata[key] = value
-                                continue
-                            if existing:
-                                continue
-                            c.metadata[key] = value
-                    logger.info(f"Islamic metadata extracted for {len(flat_chunks)} chunks")
-                except Exception as meta_err:
-                    logger.warning(f"Islamic metadata extraction failed (non-fatal): {meta_err}")
-
-            # === Contextual retrieval prefix (opt-in via dataset config) ===
-            if islamic_cfg.get("contextual_prefix"):
-                try:
-                    from .contextual_retrieval import ContextualRetrieval
-
-                    ctx_retrieval = ContextualRetrieval()
-                    doc_meta_ctx = {"title": doc_name, "name": doc_name}
-                    for c in flat_chunks:
-                        prefix = await ctx_retrieval.generate_context_prefix(
-                            chunk_text=c.text,
-                            document_text=text[:5000],
-                            document_metadata=doc_meta_ctx,
-                            chunk_metadata=c.metadata,
-                        )
-                        if prefix:
-                            c.metadata["contextual_prefix"] = prefix
-                            c.metadata["original_text"] = c.text
-                            c.text = f"{prefix}{c.text}"
-                    logger.info(f"Contextual prefixes generated for {len(flat_chunks)} chunks")
-                except Exception as ctx_err:
-                    logger.warning(
-                        f"Contextual retrieval prefix generation failed (non-fatal): {ctx_err}"
-                    )
 
             # Convert to the format expected by the rest of the pipeline
             # Include content_hash for incremental update detection

@@ -7,18 +7,20 @@
  */
 import { test, expect } from "@playwright/test";
 
+const AUTH_EMAIL_DOMAIN = process.env.E2E_AUTH_EMAIL_DOMAIN || "example.com";
+const MODEL_TESTER_PASSWORD = process.env.E2E_MODEL_TESTER_PASSWORD || "ModelTester-ChangeMe-2026!";
 const TEST_USERS = [
-  { email: "islamic_tester_1@hejazfs.com.au", password: "Test1234.dc" },
-  { email: "islamic_tester_2@hejazfs.com.au", password: "Test1234.dc" },
-  { email: "islamic_tester_3@hejazfs.com.au", password: "Test1234.dc" },
-  { email: "islamic_tester_4@hejazfs.com.au", password: "Test1234.dc" },
-  { email: "islamic_tester_5@hejazfs.com.au", password: "Test1234.dc" },
+  { email: `model_tester_1@${AUTH_EMAIL_DOMAIN}`, password: MODEL_TESTER_PASSWORD },
+  { email: `model_tester_2@${AUTH_EMAIL_DOMAIN}`, password: MODEL_TESTER_PASSWORD },
+  { email: `model_tester_3@${AUTH_EMAIL_DOMAIN}`, password: MODEL_TESTER_PASSWORD },
+  { email: `model_tester_4@${AUTH_EMAIL_DOMAIN}`, password: MODEL_TESTER_PASSWORD },
+  { email: `model_tester_5@${AUTH_EMAIL_DOMAIN}`, password: MODEL_TESTER_PASSWORD },
 ];
 
 async function login(page, email: string, password: string) {
   await page.goto("/login", { waitUntil: "domcontentloaded" });
-  // The login form splits email into username + @hejazfs.com.au
-  const username = email.replace("@hejazfs.com.au", "");
+  // The login form accepts either the full email or the local part.
+  const username = email.replace(`@${AUTH_EMAIL_DOMAIN}`, "");
   await page.fill('input#email', username);
   await page.fill('input#password', password);
   await page.click('button[type="submit"]');
@@ -34,7 +36,7 @@ for (const user of TEST_USERS) {
       await page.waitForLoadState("networkidle");
       // Verify playground content is visible
       const bodyText = await page.locator("body").textContent();
-      expect(bodyText).toMatch(/New chat|Playground|模型体验|聊天|assistant|Sh Wahda/i);
+      expect(bodyText).toMatch(/New chat|Playground|模型体验|聊天|assistant/i);
     });
 
     test("sees only playground in sidebar", async ({ page }) => {

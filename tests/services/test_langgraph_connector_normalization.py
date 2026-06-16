@@ -31,14 +31,14 @@ def test_normalize_langgraph_connector_config_backfills_graph_id():
         "metadata": {"adapter_type": "langgraph"},
         "connector_config": {
             "base_url": "http://localhost:2025",
-            "assistant_id": "Imam",
+            "assistant_id": "Agent",
         },
     }
 
     _normalize_langgraph_connector_config(definition)
     connector = definition["connector_config"]
 
-    assert connector["graph_id"] == "Imam"
+    assert connector["graph_id"] == "Agent"
     assert connector["base_url"] == "http://localhost:2025"
     assert connector["upstream_url"] == "http://localhost:2025"
 

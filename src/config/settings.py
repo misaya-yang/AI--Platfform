@@ -302,26 +302,6 @@ class KnowledgeSiliconFlowSettings(BaseModel):
     timeout_seconds: float = 30.0
 
 
-class KnowledgeIslamicProfileSettings(BaseModel):
-    """Islamic retrieval profile defaults (applied only on explicit Islamic opt-in)."""
-
-    enabled: bool = True
-
-    # Retrieval defaults
-    top_k: int = 8
-    score_threshold: float = 0.3
-    rerank_enabled: bool = False
-    rerank_provider: str = "bge"
-    rerank_model: str = "bge-reranker-v2-m3"
-
-    # Islamic retrieval enhancements
-    multi_query: bool = False
-    citation_format: bool = True
-    authority_sort: bool = True
-    strict_section_traceability: bool = True
-    max_expanded_queries: int = 1
-
-
 class KnowledgeSettings(BaseModel):
     enabled: bool = True
     worker_concurrency: int = 2
@@ -329,9 +309,6 @@ class KnowledgeSettings(BaseModel):
     dashscope: KnowledgeProviderSettings = Field(default_factory=KnowledgeProviderSettings)
     gemini: KnowledgeGeminiSettings = Field(default_factory=KnowledgeGeminiSettings)
     siliconflow: KnowledgeSiliconFlowSettings = Field(default_factory=KnowledgeSiliconFlowSettings)
-    islamic_profile: KnowledgeIslamicProfileSettings = Field(
-        default_factory=KnowledgeIslamicProfileSettings
-    )
     # Retrieval latency controls
     dataset_fanout_max_concurrency: int = 6
     retrieval_query_max_concurrency: int = 8
@@ -613,38 +590,6 @@ class StorageSettings(BaseModel):
     oss: StorageOSSSettings = Field(default_factory=StorageOSSSettings)
 
 
-class IslamicContentSettings(BaseModel):
-    """Islamic content source + cache settings for third-party delivery APIs."""
-
-    enabled: bool = True
-    cache_dir: str = "./data/islamic_content"
-    request_timeout_seconds: float = 30.0
-
-    quran_base_url: str = "https://apis.quran.foundation/content/api/v4"
-    quran_auth_url: str = "https://oauth2.quran.foundation"
-    quran_client_id: str = ""
-    quran_client_secret: str = ""
-    quran_access_token: str = ""
-    quran_scope: str = "content"
-    quran_default_translation_id: int = 20
-    quran_default_recitation_id: int = 7
-    quran_word_fields: str = "text_uthmani,text_uthmani_simple,text_imlaei"
-    quran_page_size: int = 50
-
-    sunnah_base_url: str = "https://api.sunnah.com/v1"
-    sunnah_api_key: str = ""
-    sunnah_page_size: int = 50
-
-    hadith_cdn_base_url: str = "https://cdn.jsdelivr.net/gh/fawazahmed0/hadith-api@1"
-    hadith_cdn_enabled: bool = True
-    hadith_cdn_default_lang: str = "eng"
-
-    aladhan_base_url: str = "https://api.aladhan.com/v1"
-    aladhan_default_method: int = 2
-
-    duas_file_path: str = "./data/islamic_content/duas.json"
-
-
 class MetricsSettings(BaseModel):
     """Metrics recorder runtime settings.
 
@@ -713,9 +658,6 @@ class Settings(BaseSettings):
 
     # 对象存储配置（用于 Confluence 图片等）
     storage: StorageSettings = Field(default_factory=StorageSettings)
-
-    # Islamic content aggregation APIs
-    islamic_content: IslamicContentSettings = Field(default_factory=IslamicContentSettings)
 
     # Observability / metrics recorder tuning
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)

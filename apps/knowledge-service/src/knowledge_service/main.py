@@ -233,8 +233,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "multimodal_embedding_max_concurrent": 5,
                         # VLM
                         "vlm_max_concurrent": getattr(s.ocr, "vlm_concurrency", 4),
-                        # Islamic profile (optional)
-                        "islamic_profile": None,
                     })()
                 def __getattr__(self, name):
                     return getattr(self._s, name)
@@ -375,8 +373,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS,
         default_response_class=ORJSONResponse,
         lifespan=lifespan,
-        contact={"name": "Hejaz AI Team", "email": "tech@hejazfs.com.au"},
-        license_info={"name": "Proprietary"},
+        contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
+        license_info={"name": "MIT"},
     )
 
     # --- CORS ---

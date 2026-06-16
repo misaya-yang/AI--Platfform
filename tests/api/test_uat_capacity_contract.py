@@ -14,11 +14,11 @@ from src.proxy.transparent_proxy import ProxyRequest, TransparentProxy
 async def test_three_of_four_no_model_cost_requests_admit_with_capacity_headers(monkeypatch):
     config = ProxyServiceConfig(
         service_id="local-2024-agent",
-        service_name="Sheikh Wahda",
-        upstream_url="http://imam-agent:8000",
+        service_name="LangGraph Agent",
+        upstream_url="http://langgraph-agent:8000",
         metadata={
             "capacity": {
-                "upstream_group": "imam_agent",
+                "upstream_group": "langgraph_agent",
                 "concurrency_limit": 3,
                 "queue_max": 0,
                 "queue_timeout_ms": 100,
@@ -41,7 +41,7 @@ async def test_three_of_four_no_model_cost_requests_admit_with_capacity_headers(
             200,
             headers={"content-type": "application/json"},
             content=b'{"ok": true}',
-            request=httpx.Request("POST", "http://imam-agent:8000/assistants/search"),
+            request=httpx.Request("POST", "http://langgraph-agent:8000/assistants/search"),
         )
 
     monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
@@ -75,5 +75,5 @@ async def test_three_of_four_no_model_cost_requests_admit_with_capacity_headers(
     admitted = [response for response in responses if response.status_code == 200]
     denied = [response for response in responses if response.status_code == 503][0]
     assert all(response.headers["X-Gateway-Capacity-Key"] for response in admitted)
-    assert denied.headers["X-Gateway-Capacity-Key"] == "upstream.imam_agent"
+    assert denied.headers["X-Gateway-Capacity-Key"] == "upstream.langgraph_agent"
     assert b"GATEWAY_CAPACITY_EXHAUSTED" in (denied.body or b"")

@@ -12,7 +12,7 @@
 // ============================================================
 
 export type RetrieveMode = "keyword" | "hybrid" | "vector" | "dense" | "bm25";
-export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa" | "islamic";
+export type ChunkingMode = "automatic" | "fixed_size" | "paragraph" | "page" | "heading" | "regex" | "separator" | "recursive" | "hierarchical" | "qa";
 export type FusionStrategy = "rrf" | "weighted";
 export type Visibility = "private" | "tenant" | "public";
 export type DocumentStatus = "pending" | "parsing" | "segmenting" | "embedding" | "completed" | "failed";
@@ -232,15 +232,6 @@ export interface MMRConfig {
   similarity_threshold?: number;
 }
 
-export interface IslamicEnhancementConfig {
-  multi_query?: boolean;        // PRE_RETRIEVAL: expand query with Islamic synonyms
-  citation_format?: boolean;    // POST_RANKING: attach formatted citations
-  authority_sort?: boolean;     // POST_RANKING: sort by Quran > Hadith > Tafseer > Fiqh
-  contextual_prefix?: boolean;  // INDEX-TIME: prepend context prefix (requires re-index)
-  strict_section_traceability?: boolean; // INDEX-TIME: enforce section_title on every chunk
-  max_expanded_queries?: number; // Max queries for multi_query (default 3)
-}
-
 export interface RetrievalConfig {
   mode: RetrieveMode;
   top_k: number;
@@ -251,7 +242,6 @@ export interface RetrievalConfig {
   fusion?: FusionConfig;
   rerank?: RerankConfig;
   mmr?: MMRConfig;
-  islamic?: IslamicEnhancementConfig;
 }
 
 // Flat retrieval config for API requests

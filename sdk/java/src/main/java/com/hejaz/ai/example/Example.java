@@ -24,14 +24,14 @@ public class Example {
             apiKey = "gw_xxx";
         }
 
-        try (var ai = new HejazAI(apiKey, "https://api.hejaz.com", "wahda")) {
+        try (var ai = new HejazAI(apiKey, "https://api.hejaz.com", "default")) {
             System.out.println("SDK initialized: " + ai);
 
             // ─────────────────────────────────────────────────────────────────
             // 1. Non-streaming chat
             // ─────────────────────────────────────────────────────────────────
             System.out.println("\n=== Non-streaming ===");
-            ChatResponse response = ai.chat().send("What is Zakat?").join();
+            ChatResponse response = ai.chat().send("Summarize the onboarding checklist").join();
             System.out.println("Response: " + response.content());
             System.out.println("Session: " + response.sessionId());
             System.out.println("Model:   " + response.modelId());
@@ -42,7 +42,7 @@ public class Example {
             // 2. Streaming with handler
             // ─────────────────────────────────────────────────────────────────
             System.out.println("\n=== Streaming ===");
-            ai.chat().stream("Explain fasting in Islam", new StreamHandler() {
+            ai.chat().stream("Explain our refund policy", new StreamHandler() {
                 @Override
                 public void onText(String text) {
                     System.out.print(text);
@@ -91,12 +91,12 @@ public class Example {
             // 3. Advanced request with builder
             // ─────────────────────────────────────────────────────────────────
             System.out.println("\n=== Advanced request ===");
-            ChatRequest advancedReq = ChatRequest.builder("What are the 5 pillars of Islam?")
+            ChatRequest advancedReq = ChatRequest.builder("Compare the free and enterprise plan limits.")
                     .modelId("gemini-3-flash-preview")
                     .temperature(0.3)
                     .maxTokens(1024)
-                    .systemPrompt("You are an Islamic scholar. Answer concisely in bullet points.")
-                    .kbDatasetIds(List.of("ds_quran", "ds_hadith"))
+                    .systemPrompt("You are a product support assistant. Answer concisely in bullet points.")
+                    .kbDatasetIds(List.of("ds_product_docs", "ds_pricing"))
                     .kbMode("auto")
                     .webSearchEnabled(false)
                     .build();
