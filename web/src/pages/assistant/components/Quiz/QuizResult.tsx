@@ -117,9 +117,9 @@ export function QuizResult({
             )}
           >
             {pq.correct ? (
-              <CheckCircle2 className="w-[14px] h-[14px] flex-shrink-0" />
+              <CheckCircle2 className="w-[14px] h-[14px] shrink-0" />
             ) : (
-              <XCircle className="w-[14px] h-[14px] flex-shrink-0" />
+              <XCircle className="w-[14px] h-[14px] shrink-0" />
             )}
             <span className="font-medium font-mono tabular-nums">Q{pq.question_num}</span>
             <span className="text-[11px] opacity-80 truncate flex-1">

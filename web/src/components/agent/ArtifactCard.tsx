@@ -188,7 +188,7 @@ function ArtifactPreviewModal({ artifact, isOpen, onClose }: ArtifactPreviewModa
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs"
         onClick={onClose}
       >
         <motion.div
@@ -398,7 +398,7 @@ export function ArtifactCard({
               <motion.div
                 initial={{ scale: 0 }}
                 animate={{ scale: 1 }}
-                className="flex-shrink-0"
+                className="shrink-0"
               >
                 <Check className="h-3.5 w-3.5 text-green-500" />
               </motion.div>

@@ -171,12 +171,12 @@ function PageTreeNodeComponent({
         {/* Icon - Folder or File */}
         {isFolder ? (
           expanded ? (
-            <FolderOpen className="h-4 w-4 text-amber-500 flex-shrink-0" />
+            <FolderOpen className="h-4 w-4 text-amber-500 shrink-0" />
           ) : (
-            <Folder className="h-4 w-4 text-amber-500 flex-shrink-0" />
+            <Folder className="h-4 w-4 text-amber-500 shrink-0" />
           )
         ) : (
-          <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
+          <FileText className="h-4 w-4 text-blue-500 shrink-0" />
         )}
 
         {/* Title */}
@@ -303,7 +303,7 @@ function DepthSelector({
             className={cn(
               "flex-1 rounded-t transition-all duration-300",
               level <= (value > 5 ? 5 : value)
-                ? "bg-gradient-to-t from-primary/80 to-primary/40"
+                ? "bg-linear-to-t from-primary/80 to-primary/40"
                 : "bg-muted/50"
             )}
             style={{ height: `${level * 18}%` }}
@@ -335,7 +335,7 @@ function DepthSelector({
 
       {/* Description */}
       <div className="flex items-start gap-2 p-3 bg-muted/30 rounded-lg border border-border/50">
-        <Info className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+        <Info className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
         <p className="text-xs text-muted-foreground">
           {t("confluence.bind.depthExplanation")}
         </p>
@@ -542,9 +542,9 @@ export default function BindSpacePage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
+    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-sm border-b border-border/50 sticky top-0 z-20">
+      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
         <div className="max-w-4xl mx-auto px-6">
           <div className="flex items-center h-16 gap-4">
             <Button
@@ -556,7 +556,7 @@ export default function BindSpacePage() {
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-teal-500 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-cyan-500 to-teal-500 flex items-center justify-center">
                 <Link2 className="h-5 w-5 text-white" />
               </div>
               <div>
@@ -601,7 +601,7 @@ export default function BindSpacePage() {
                 loading={loadingDatasets}
                 renderOption={(option, isSelected) => (
                   <div className="flex items-center gap-3 w-full">
-                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                       <Database className="h-4 w-4 text-primary" />
                     </div>
                     <div className="flex-1 min-w-0">
@@ -613,7 +613,7 @@ export default function BindSpacePage() {
                       )}
                     </div>
                     {isSelected && (
-                      <CheckCircle className="h-4 w-4 text-primary flex-shrink-0" />
+                      <CheckCircle className="h-4 w-4 text-primary shrink-0" />
                     )}
                   </div>
                 )}
@@ -642,7 +642,7 @@ export default function BindSpacePage() {
         {currentStep === 1 && (
           <Card className="p-6 border-border/60">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
                 <Folder className="h-5 w-5 text-blue-500" />
               </div>
               <div>
@@ -683,7 +683,7 @@ export default function BindSpacePage() {
                       <div className="flex items-center gap-3 w-full">
                         <div
                           className={cn(
-                            "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0",
+                            "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
                             option.type === "personal"
                               ? "bg-amber-500/10"
                               : "bg-blue-500/10"
@@ -705,7 +705,7 @@ export default function BindSpacePage() {
                           </div>
                         </div>
                         {isSelected && (
-                          <CheckCircle className="h-4 w-4 text-primary flex-shrink-0" />
+                          <CheckCircle className="h-4 w-4 text-primary shrink-0" />
                         )}
                       </div>
                     )}
@@ -842,7 +842,7 @@ export default function BindSpacePage() {
         {currentStep === 2 && (
           <Card className="p-6 border-border/60">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-teal-500/10 to-emerald-500/10 border border-teal-500/20 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-teal-500/10 to-emerald-500/10 border border-teal-500/20 flex items-center justify-center">
                 <Settings2 className="h-5 w-5 text-teal-500" />
               </div>
               <div>
@@ -978,7 +978,7 @@ export default function BindSpacePage() {
               <Button
                 onClick={handleCreate}
                 disabled={createBindingMutation.isPending}
-                className="bg-gradient-to-r from-cyan-500 to-teal-500 hover:from-cyan-600 hover:to-teal-600 text-white border-0 min-w-[140px]"
+                className="bg-linear-to-r from-cyan-500 to-teal-500 hover:from-cyan-600 hover:to-teal-600 text-white border-0 min-w-[140px]"
               >
                 {createBindingMutation.isPending ? (
                   <>
@@ -996,7 +996,7 @@ export default function BindSpacePage() {
               <Button
                 onClick={() => setCurrentStep((prev) => prev + 1)}
                 disabled={!canProceed()}
-                className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
+                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
               >
                 {t("common.next")}
                 <ChevronRight className="h-4 w-4 ml-1" />
@@ -1009,7 +1009,7 @@ export default function BindSpacePage() {
         {createBindingMutation.isError && (
           <Card className="mt-4 p-4 border-rose-200 bg-rose-50 dark:bg-rose-950/30 dark:border-rose-900">
             <div className="flex items-start gap-3">
-              <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 flex-shrink-0 mt-0.5" />
+              <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-rose-800 dark:text-rose-400">
                   {t("confluence.bind.createFailed")}

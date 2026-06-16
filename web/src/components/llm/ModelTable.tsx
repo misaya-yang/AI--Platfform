@@ -118,13 +118,13 @@ export function ModelTable({
               <TableCell className="text-center">
                 <div className="flex items-center justify-center gap-1">
                   {model.supports_vision && (
-                    <Badge variant="outline" className="text-[10px] px-1.5 border-purple-200 bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-800 font-semibold shadow-sm">
+                    <Badge variant="outline" className="text-[10px] px-1.5 border-purple-200 bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 dark:border-purple-800 font-semibold shadow-xs">
                       <Eye className="h-3 w-3 mr-1" />
                       {t("models.capabilities.vision")}
                     </Badge>
                   )}
                   {model.supports_tools && (
-                    <Badge variant="outline" className="text-[10px] px-1.5 border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 font-semibold shadow-sm">
+                    <Badge variant="outline" className="text-[10px] px-1.5 border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 dark:border-blue-800 font-semibold shadow-xs">
                       <Wrench className="h-3 w-3 mr-1" />
                       {t("models.capabilities.tools")}
                     </Badge>
@@ -135,7 +135,7 @@ export function ModelTable({
                 <Badge
                   variant="secondary"
                   className={cn(
-                    "text-[10px] font-semibold border shadow-sm",
+                    "text-[10px] font-semibold border shadow-xs",
                     model.access_level === "admin" &&
                     "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/30 dark:text-orange-300 dark:border-orange-800",
                     model.access_level === "premium" &&

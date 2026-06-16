@@ -200,7 +200,7 @@ function SkillsTab() {
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="font-medium text-sm">{skill.title || skill.name}</span>
-                <Badge variant={skill.source === "builtin" ? "secondary" : "outline"} className="text-[10px] px-1.5 py-0">
+                <Badge variant={skill.source === "builtin" ? "secondary" : "outline-solid"} className="text-[10px] px-1.5 py-0">
                   {skill.source === "builtin"
                     ? t("assistant.skillBuiltin", "内置")
                     : t("assistant.skillUser", "用户")}

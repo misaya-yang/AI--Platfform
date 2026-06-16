@@ -248,7 +248,7 @@ export function SettingsPage() {
       </div>
 
       {/* 配置层级说明 */}
-      <Card className="relative overflow-hidden border-primary/20 bg-gradient-to-r from-primary/5 to-transparent dark:from-primary/10 dark:to-transparent">
+      <Card className="relative overflow-hidden border-primary/20 bg-linear-to-r from-primary/5 to-transparent dark:from-primary/10 dark:to-transparent">
         {/* Left gradient border */}
         <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary" />
         <CardContent className="pt-4 pl-5">
@@ -616,7 +616,7 @@ export function SettingsPage() {
                     key={s.value}
                     className={`flex items-center justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 ${
                       lbStrategy === s.value
-                        ? "border-primary/40 bg-primary/5 dark:bg-primary/10 shadow-sm"
+                        ? "border-primary/40 bg-primary/5 dark:bg-primary/10 shadow-xs"
                         : "hover:bg-muted/50 hover:border-border/80"
                     }`}
                     onClick={() => setLbStrategy(s.value)}

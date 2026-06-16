@@ -81,10 +81,10 @@ export function RetrievalResultCard({
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <span
-            className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-white text-sm font-bold shadow-sm ${
+            className={`inline-flex items-center justify-center w-7 h-7 rounded-lg text-white text-sm font-bold shadow-xs ${
               hasExactMatch
-                ? "bg-gradient-to-br from-emerald-500 to-teal-600"
-                : "bg-gradient-to-br from-primary to-accent"
+                ? "bg-linear-to-br from-emerald-500 to-teal-600"
+                : "bg-linear-to-br from-primary to-accent"
             }`}
           >
             {displayRank}

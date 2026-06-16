@@ -174,12 +174,12 @@ function StatusBadge({ status, documentStatus, documentProgress }: StatusBadgePr
 
 function PageIcon({ hasChildren, isExpanded }: { hasChildren: boolean; isExpanded?: boolean }) {
   if (!hasChildren) {
-    return <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+    return <FileText className="h-4 w-4 text-blue-500 shrink-0" />;
   }
   return isExpanded ? (
-    <FolderOpen className="h-4 w-4 text-amber-500 flex-shrink-0" />
+    <FolderOpen className="h-4 w-4 text-amber-500 shrink-0" />
   ) : (
-    <Folder className="h-4 w-4 text-amber-500 flex-shrink-0" />
+    <Folder className="h-4 w-4 text-amber-500 shrink-0" />
   );
 }
 
@@ -213,14 +213,14 @@ function PageListRow({
       <Checkbox
         checked={isSelected}
         onCheckedChange={onSelect}
-        className="flex-shrink-0"
+        className="shrink-0"
       />
 
       {/* Title with depth indicator and icon */}
       <div className="flex-1 min-w-0 flex items-center gap-2">
         {/* Depth indicator */}
         {page.depth > 0 && (
-          <div className="flex items-center gap-0.5 flex-shrink-0" style={{ width: `${page.depth * 12}px` }}>
+          <div className="flex items-center gap-0.5 shrink-0" style={{ width: `${page.depth * 12}px` }}>
             {Array.from({ length: page.depth }).map((_, i) => (
               <span key={i} className="text-muted-foreground/30">|</span>
             ))}
@@ -248,7 +248,7 @@ function PageListRow({
       </div>
 
       {/* Status */}
-      <div className="w-24 flex-shrink-0">
+      <div className="w-24 shrink-0">
         <StatusBadge
           status={page.status}
           documentStatus={page.document_status ?? undefined}
@@ -257,19 +257,19 @@ function PageListRow({
       </div>
 
       {/* Version */}
-      <span className="text-xs text-muted-foreground w-12 text-center flex-shrink-0">
+      <span className="text-xs text-muted-foreground w-12 text-center shrink-0">
         v{page.version}
       </span>
 
       {/* Last synced */}
-      <span className="text-xs text-muted-foreground w-28 text-right flex-shrink-0">
+      <span className="text-xs text-muted-foreground w-28 text-right shrink-0">
         {page.last_synced_at
           ? new Date(page.last_synced_at).toLocaleDateString()
           : "-"}
       </span>
 
       {/* Actions - always visible for better UX */}
-      <div className="flex items-center gap-1 w-28 flex-shrink-0 justify-end">
+      <div className="flex items-center gap-1 w-28 shrink-0 justify-end">
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -400,7 +400,7 @@ function TreeNodeRow({
         )}
 
         {/* Checkbox */}
-        <div className="flex-shrink-0">
+        <div className="shrink-0">
           {isPartial ? (
             <MinusSquare
               className="h-4 w-4 text-primary cursor-pointer"
@@ -438,7 +438,7 @@ function TreeNodeRow({
         </div>
 
         {/* Status */}
-        <div className="w-24 flex-shrink-0">
+        <div className="w-24 shrink-0">
           <StatusBadge
             status={node.status}
             documentStatus={node.document_status ?? undefined}
@@ -447,19 +447,19 @@ function TreeNodeRow({
         </div>
 
         {/* Version */}
-        <span className="text-xs text-muted-foreground w-12 text-center flex-shrink-0">
+        <span className="text-xs text-muted-foreground w-12 text-center shrink-0">
           v{node.version}
         </span>
 
         {/* Last synced */}
-        <span className="text-xs text-muted-foreground w-28 text-right flex-shrink-0">
+        <span className="text-xs text-muted-foreground w-28 text-right shrink-0">
           {node.last_synced_at
             ? new Date(node.last_synced_at).toLocaleDateString()
             : "-"}
         </span>
 
         {/* Actions - always visible for better UX */}
-        <div className="flex items-center gap-1 w-28 flex-shrink-0 justify-end">
+        <div className="flex items-center gap-1 w-28 shrink-0 justify-end">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
@@ -809,9 +809,9 @@ export default function SyncedPagesPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
+    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-sm border-b border-border/50 sticky top-0 z-20">
+      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-6">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-4">
@@ -910,7 +910,7 @@ export default function SyncedPagesPage() {
         <div className="max-w-7xl mx-auto px-6 pt-4">
           <Card className="p-4 bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-800">
             <div className="flex items-start gap-3">
-              <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 flex-shrink-0 mt-0.5" />
+              <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <h3 className="font-medium text-rose-800 dark:text-rose-200">
                   {t("confluence.syncedPages.status.error")}
@@ -1028,14 +1028,14 @@ export default function SyncedPagesPage() {
               <Checkbox
                 checked={selectedIds.size === filteredPages.length && filteredPages.length > 0}
                 onCheckedChange={handleSelectAll}
-                className="flex-shrink-0"
+                className="shrink-0"
               />
             )}
             <span className="flex-1 min-w-0">{t("confluence.syncedPages.columns.title")}</span>
-            <span className="w-24 flex-shrink-0">{t("confluence.syncedPages.columns.status")}</span>
-            <span className="w-12 text-center flex-shrink-0">{t("confluence.syncedPages.columns.version")}</span>
-            <span className="w-28 text-right flex-shrink-0">{t("confluence.syncedPages.columns.lastSync")}</span>
-            <span className="w-28 flex-shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
+            <span className="w-24 shrink-0">{t("confluence.syncedPages.columns.status")}</span>
+            <span className="w-12 text-center shrink-0">{t("confluence.syncedPages.columns.version")}</span>
+            <span className="w-28 text-right shrink-0">{t("confluence.syncedPages.columns.lastSync")}</span>
+            <span className="w-28 shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
           </div>
 
           {/* Content */}
@@ -1093,7 +1093,7 @@ export default function SyncedPagesPage() {
         {/* Batch action bar */}
         {selectedIds.size > 0 && (
           <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4">
-            <Card className="flex items-center gap-4 px-5 py-3 shadow-lg border-primary/20 bg-card/95 backdrop-blur">
+            <Card className="flex items-center gap-4 px-5 py-3 shadow-lg border-primary/20 bg-card/95 backdrop-blur-sm">
               <span className="text-sm font-medium">
                 {t("confluence.syncedPages.selectedCount", { count: selectedIds.size })}
               </span>
@@ -1108,7 +1108,7 @@ export default function SyncedPagesPage() {
                 size="sm"
                 onClick={handleBatchSync}
                 disabled={isBatchSyncing}
-                className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white"
+                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white"
               >
                 {isBatchSyncing ? (
                   <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />

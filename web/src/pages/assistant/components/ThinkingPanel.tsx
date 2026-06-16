@@ -81,7 +81,7 @@ export function ThinkingPanel({
       >
         <Brain
           className={cn(
-            "w-3.5 h-3.5 flex-shrink-0",
+            "w-3.5 h-3.5 shrink-0",
             isStreaming && "animate-pulse"
           )}
         />
@@ -99,7 +99,7 @@ export function ThinkingPanel({
         )}
         <ChevronRight
           className={cn(
-            "w-3 h-3 ml-auto transition-transform flex-shrink-0",
+            "w-3 h-3 ml-auto transition-transform shrink-0",
             isExpanded && "rotate-90"
           )}
         />
@@ -120,7 +120,7 @@ export function ThinkingPanel({
                 "pl-5 pr-2 py-2 text-sm leading-relaxed italic",
                 "border-l-2 border-[hsl(var(--assistant-border))]",
                 "text-[hsl(var(--assistant-text-secondary))]",
-                "whitespace-pre-wrap break-words",
+                "whitespace-pre-wrap wrap-break-word",
                 isStreaming && "max-h-48 overflow-y-auto"
               )}
             >

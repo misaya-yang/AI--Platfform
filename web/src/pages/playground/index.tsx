@@ -197,7 +197,7 @@ export function PlaygroundPage() {
       {playgroundSidebarOpen && (
         <aside
           className={cn(
-            "w-[280px] flex-col bg-gradient-to-b from-muted/30 to-muted/10",
+            "w-[280px] flex-col bg-linear-to-b from-muted/30 to-muted/10",
             isMobile
               ? "absolute inset-y-0 left-0 z-30 flex shadow-2xl"
               : "hidden md:flex"
@@ -210,7 +210,7 @@ export function PlaygroundPage() {
             disabled={!serviceId || uiStreamingActive}
             className="w-full gap-2.5 h-10 bg-foreground/5 hover:bg-foreground/10 text-foreground border border-transparent dark:border-transparent  transition-all duration-200 rounded-xl font-medium"
           >
-            <div className="flex h-5 w-5 items-center justify-center rounded-md bg-gradient-to-br from-blue-500 to-cyan-500">
+            <div className="flex h-5 w-5 items-center justify-center rounded-md bg-linear-to-br from-blue-500 to-cyan-500">
               <MessageSquarePlus className="h-3 w-3 text-white" />
             </div>
             {t("playground.newChat", "New chat")}
@@ -284,7 +284,7 @@ export function PlaygroundPage() {
                     className={cn(
                       "group w-full rounded-lg px-3 py-2.5 text-left transition-all duration-200 border-l-2 cursor-pointer",
                       active
-                        ? `${variant.bg} ${variant.border} shadow-sm`
+                        ? `${variant.bg} ${variant.border} shadow-xs`
                         : "border-l-transparent hover:bg-muted/60 hover:border-l-muted-foreground/30"
                     )}
                   >
@@ -311,7 +311,7 @@ export function PlaygroundPage() {
                           void handleDeleteSession(s.session_id);
                         }}
                         className={cn(
-                          "rounded-md p-1.5 opacity-0 group-hover:opacity-70 hover:!opacity-100 transition-all",
+                          "rounded-md p-1.5 opacity-0 group-hover:opacity-70 hover:opacity-100! transition-all",
                           "hover:bg-destructive/10 hover:text-destructive"
                         )}
                         aria-label={`${t("playground.deleteChat", "Delete chat")}: ${title}`}
@@ -357,7 +357,7 @@ export function PlaygroundPage() {
             >
               <PanelLeft className="h-4 w-4" />
             </Button>
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 text-white shadow-lg shadow-blue-500/30">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-linear-to-br from-blue-500 via-cyan-500 to-sky-500 text-white shadow-lg shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <div className="flex flex-col -space-y-0.5">
@@ -413,7 +413,7 @@ export function PlaygroundPage() {
       <div ref={scrollRef} className="flex-1 overflow-y-auto pb-48 min-h-0 bg-background">
         {!serviceId ? (
           <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-            <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
+            <div className="mb-5 h-16 w-16 rounded-2xl bg-linear-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <h2 className="text-xl font-semibold tracking-tight">{t("playground.welcomeTitle", "How can I help you today?")}</h2>
@@ -427,7 +427,7 @@ export function PlaygroundPage() {
           /* Empty state */
           historyRestoreState === "loading" || historyRestoreState === "failed" ? (
           <div className="flex h-full items-center justify-center p-8">
-            <div className="max-w-md rounded-3xl border border-transparent dark:border-transparent bg-card/70 px-6 py-5 text-sm shadow-sm">
+            <div className="max-w-md rounded-3xl border border-transparent dark:border-transparent bg-card/70 px-6 py-5 text-sm shadow-xs">
               <div className="font-medium text-foreground">
                 {historyRestoreState === "loading" && activeSessionId
                   ? t("playground.restoringSessionTitle", "Restoring selected conversation")
@@ -468,7 +468,7 @@ export function PlaygroundPage() {
           ) : (
           /* Normal empty state for all agents */
           <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-            <div className="mb-5 h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
+            <div className="mb-5 h-16 w-16 rounded-2xl bg-linear-to-br from-blue-500 via-cyan-500 to-sky-500 flex items-center justify-center shadow-xl shadow-blue-500/30">
               <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" /></svg>
             </div>
             <h2 className="text-xl font-semibold tracking-tight">{t("playground.typeToStart", "Type a message to start.")}</h2>
@@ -534,7 +534,7 @@ export function PlaygroundPage() {
             "absolute bottom-40 left-1/2 -translate-x-1/2 z-10",
             "flex items-center justify-center",
             "h-9 w-9 rounded-full",
-            "bg-card/95 border border-transparent dark:border-transparent shadow-lg backdrop-blur-sm",
+            "bg-card/95 border border-transparent dark:border-transparent shadow-lg backdrop-blur-xs",
             "text-muted-foreground hover:text-foreground hover:bg-accent",
             "transition-all duration-200 hover:scale-105",
             ""
@@ -546,9 +546,9 @@ export function PlaygroundPage() {
       )}
 
       {/* Floating Input Area */}
-      <div className="absolute bottom-0 left-0 w-full bg-gradient-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
+      <div className="absolute bottom-0 left-0 w-full bg-linear-to-t from-background from-80% to-transparent pt-10 pb-5 px-6">
         <div className="mx-auto w-full max-w-4xl">
-          <div className="rounded-2xl border border-transparent dark:border-transparent bg-card/95 backdrop-blur-sm shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ">
+          <div className="rounded-2xl border border-transparent dark:border-transparent bg-card/95 backdrop-blur-xs shadow-2xl shadow-black/10 dark:shadow-black/30 overflow-hidden ">
             <MultimodalInput
               onSend={handleSend}
               onStop={handleStopStreaming}

@@ -108,7 +108,7 @@ export function BindingSyncConfigDialog({
             <div className="flex gap-2">
               <Button
                 type="button"
-                variant={syncMode === "manual" ? "default" : "outline"}
+                variant={syncMode === "manual" ? "default" : "outline-solid"}
                 className="flex-1"
                 onClick={() => setSyncMode("manual")}
               >
@@ -117,7 +117,7 @@ export function BindingSyncConfigDialog({
               </Button>
               <Button
                 type="button"
-                variant={syncMode === "polling" ? "default" : "outline"}
+                variant={syncMode === "polling" ? "default" : "outline-solid"}
                 className="flex-1"
                 onClick={() => setSyncMode("polling")}
               >
@@ -164,7 +164,7 @@ export function BindingSyncConfigDialog({
           {/* Error display */}
           {error && (
             <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 flex items-center gap-2">
-              <AlertCircle className="h-4 w-4 text-rose-600 flex-shrink-0" />
+              <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
               <span className="text-sm text-rose-700 dark:text-rose-400">{error}</span>
             </div>
           )}

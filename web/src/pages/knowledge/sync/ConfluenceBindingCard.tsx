@@ -142,7 +142,7 @@ export function ConfluenceBindingCard({
 
   return (
     <>
-      <div className="group relative border rounded-lg p-4 hover:border-primary/30 hover:shadow-sm transition-all bg-card">
+      <div className="group relative border rounded-lg p-4 hover:border-primary/30 hover:shadow-xs transition-all bg-card">
         <div className="flex items-start justify-between gap-4">
           {/* Left: Info */}
           <div className="flex-1 min-w-0">

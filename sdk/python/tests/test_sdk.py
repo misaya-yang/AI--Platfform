@@ -5,6 +5,8 @@ import asyncio
 import sys
 import os
 
+import pytest
+
 # Add SDK to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -15,10 +17,14 @@ from ai_assistant.models.events import EventType
 SERVER = os.environ.get("SDK_TEST_SERVER", "http://127.0.0.1:8080")
 API_KEY = os.environ.get("SDK_TEST_API_KEY", "")
 
+pytestmark = pytest.mark.skipif(
+    not API_KEY,
+    reason="live SDK tests require SDK_TEST_API_KEY",
+)
+
 
 async def test_non_streaming_chat():
     """Test basic non-streaming chat."""
-    assert API_KEY, "SDK_TEST_API_KEY must be set"
     async with AssistantClient(api_key=API_KEY, base_url=SERVER) as client:
         resp = await client.chat.send("Say just OK", session_id="sdk-test-chat")
         assert resp.content, "Expected non-empty content"

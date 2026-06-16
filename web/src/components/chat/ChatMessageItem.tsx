@@ -153,7 +153,7 @@ export const ChatMessageItem = memo(
                 isUser
                   ? [
                       "px-4 py-2.5",
-                      "bg-gradient-to-br from-emerald-500 via-emerald-500 to-teal-600",
+                      "bg-linear-to-br from-emerald-500 via-emerald-500 to-teal-600",
                       "text-white text-[15px] leading-relaxed",
                       "rounded-2xl rounded-tr-sm",
                       "shadow-md shadow-emerald-500/20",
@@ -292,7 +292,7 @@ function MessageActions({
       <button
         type="button"
         onClick={handleCopy}
-        className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+        className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/6 transition-colors"
         title="Copy"
       >
         {copied ? (
@@ -307,7 +307,7 @@ function MessageActions({
         <button
           type="button"
           onClick={onShare}
-          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/6 transition-colors"
           title="Share conversation"
         >
           <Share2 className="h-3.5 w-3.5" />
@@ -319,7 +319,7 @@ function MessageActions({
         <button
           type="button"
           onClick={onRegenerate}
-          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/[0.06] transition-colors"
+          className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:text-slate-300 dark:hover:bg-white/6 transition-colors"
           title="Regenerate response"
         >
           <RefreshCw className="h-3.5 w-3.5" />

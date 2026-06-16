@@ -67,7 +67,7 @@ export function SourcesTab({
       colorClass: {
         gradient: "from-emerald-500/10 to-teal-500/10",
         border: "border-emerald-500/20",
-        iconBg: "bg-gradient-to-br from-emerald-500/10 to-teal-500/10 border-emerald-500/20",
+        iconBg: "bg-linear-to-br from-emerald-500/10 to-teal-500/10 border-emerald-500/20",
         iconColor: "text-emerald-500",
         buttonHover: "hover:bg-emerald-500/10 hover:text-emerald-600 hover:border-emerald-500/30",
       },
@@ -88,7 +88,7 @@ export function SourcesTab({
       colorClass: {
         gradient: "from-primary/10 to-primary/5",
         border: "border-primary/20",
-        iconBg: "bg-gradient-to-br from-primary/10 to-primary/5 border-primary/20",
+        iconBg: "bg-linear-to-br from-primary/10 to-primary/5 border-primary/20",
         iconColor: "text-primary",
         buttonHover: "hover:bg-primary/10 hover:text-primary hover:border-primary/30",
       },
@@ -109,7 +109,7 @@ export function SourcesTab({
       colorClass: {
         gradient: "from-blue-500/10 to-cyan-500/10",
         border: "border-blue-500/20",
-        iconBg: "bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border-blue-500/20",
+        iconBg: "bg-linear-to-br from-blue-500/10 to-cyan-500/10 border-blue-500/20",
         iconColor: "text-blue-500",
         buttonHover: "hover:bg-blue-500/10 hover:text-blue-600 hover:border-blue-500/30",
       },
@@ -143,7 +143,7 @@ export function SourcesTab({
           return (
             <Card
               key={card.key}
-              className={`relative overflow-hidden bg-gradient-to-br ${card.colorClass.gradient} ${card.colorClass.border} p-6 transition-all duration-200 hover:shadow-md`}
+              className={`relative overflow-hidden bg-linear-to-br ${card.colorClass.gradient} ${card.colorClass.border} p-6 transition-all duration-200 hover:shadow-md`}
             >
               {/* Icon */}
               <div

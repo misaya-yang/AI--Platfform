@@ -230,7 +230,7 @@ export function Combobox({
     <div className="flex items-center gap-3 w-full">
       {option.icon && (
         <span className={cn(
-          "flex-shrink-0",
+          "shrink-0",
           isSelected ? "text-primary" : "text-muted-foreground"
         )}>
           {option.icon}
@@ -253,7 +253,7 @@ export function Combobox({
         )}
       </div>
       {isSelected && (
-        <Check className="h-4 w-4 flex-shrink-0 text-primary" />
+        <Check className="h-4 w-4 shrink-0 text-primary" />
       )}
     </div>
   );
@@ -263,7 +263,7 @@ export function Combobox({
     if (!option) return <span className="text-muted-foreground">{placeholder}</span>;
     return (
       <div className="flex items-center gap-2 truncate">
-        {option.icon && <span className="flex-shrink-0">{option.icon}</span>}
+        {option.icon && <span className="shrink-0">{option.icon}</span>}
         <span className="truncate">{option.label}</span>
       </div>
     );
@@ -302,7 +302,7 @@ export function Combobox({
           )}
         >
           {/* Search Input Area */}
-          <div className="p-3 bg-gradient-to-b from-muted/40 to-muted/20 border-b border-border/40">
+          <div className="p-3 bg-linear-to-b from-muted/40 to-muted/20 border-b border-border/40">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/60" />
               <input
@@ -316,7 +316,7 @@ export function Combobox({
                   "w-full h-10 pl-9 pr-9 rounded-lg text-sm",
                   "bg-background",
                   "border border-border/60",
-                  "outline-none",
+                  "outline-hidden",
                   "placeholder:text-muted-foreground/50",
                   "focus:border-primary/50 focus:ring-2 focus:ring-primary/20",
                   "transition-all duration-150"
@@ -361,7 +361,7 @@ export function Combobox({
                       onMouseEnter={() => setHighlightedIndex(index)}
                       className={cn(
                         "relative flex cursor-pointer select-none items-center",
-                        "rounded-lg px-3 py-2.5 text-sm outline-none",
+                        "rounded-lg px-3 py-2.5 text-sm outline-hidden",
                         "transition-all duration-100",
                         // Base state
                         "text-foreground",
@@ -412,7 +412,7 @@ export function Combobox({
           "flex h-10 w-full items-center justify-between",
           "rounded-lg border border-input bg-background px-3 py-2 text-sm",
           "ring-offset-background",
-          "focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+          "focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "transition-all duration-200",
           "hover:border-primary/50",

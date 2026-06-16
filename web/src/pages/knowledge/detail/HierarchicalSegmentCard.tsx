@@ -118,10 +118,10 @@ function ChildChunk({
         
         <div className={cn(
           "relative rounded-lg border transition-all duration-200",
-          "bg-gradient-to-r from-blue-50/80 to-blue-50/40 dark:from-blue-950/30 dark:to-blue-950/20",
+          "bg-linear-to-r from-blue-50/80 to-blue-50/40 dark:from-blue-950/30 dark:to-blue-950/20",
           "border-blue-200 dark:border-blue-900/60",
           "hover:border-blue-300 dark:hover:border-blue-700",
-          "hover:shadow-sm"
+          "hover:shadow-xs"
         )}>
           {/* Child header */}
           <div className="flex items-center justify-between px-3 py-2 border-b border-blue-100 dark:border-blue-900/50">
@@ -244,7 +244,7 @@ export function HierarchicalSegmentCard({
         {/* Parent header - prominent */}
         <div className={cn(
           "flex items-center justify-between px-4 py-3",
-          "bg-gradient-to-r from-slate-50 via-slate-50/80 to-card",
+          "bg-linear-to-r from-slate-50 via-slate-50/80 to-card",
           "dark:from-slate-950 dark:via-slate-950/80 dark:to-card",
           "border-b border-border"
         )}>
@@ -253,7 +253,7 @@ export function HierarchicalSegmentCard({
             <span className={cn(
               "inline-flex items-center justify-center",
               "w-9 h-9 rounded-xl",
-              "bg-gradient-to-br from-slate-600 to-slate-800",
+              "bg-linear-to-br from-slate-600 to-slate-800",
               "dark:from-slate-500 dark:to-slate-700",
               "text-white text-sm font-bold shadow-md"
             )}>
@@ -380,15 +380,15 @@ export function HierarchicalSegmentCard({
         
         {/* Children container */}
         {expanded && children.length > 0 && (
-          <div className="p-4 space-y-3 bg-gradient-to-b from-slate-50/30 to-transparent dark:from-slate-950/20">
+          <div className="p-4 space-y-3 bg-linear-to-b from-slate-50/30 to-transparent dark:from-slate-950/20">
             {/* Section label */}
             <div className="flex items-center gap-2 mb-3">
-              <div className="h-px flex-1 bg-gradient-to-r from-blue-200 to-transparent dark:from-blue-900" />
+              <div className="h-px flex-1 bg-linear-to-r from-blue-200 to-transparent dark:from-blue-900" />
               <span className="text-xs font-medium text-blue-600 dark:text-blue-400 flex items-center gap-1">
                 <Hash className="w-3 h-3" />
                 {t("knowledge.segment.retrievalUnits")}
               </span>
-              <div className="h-px flex-1 bg-gradient-to-l from-blue-200 to-transparent dark:from-blue-900" />
+              <div className="h-px flex-1 bg-linear-to-l from-blue-200 to-transparent dark:from-blue-900" />
             </div>
             
             {/* Child chunks */}
@@ -462,13 +462,13 @@ export function SimpleSegmentCard({
       "hover:border-primary/30 hover:shadow-md"
     )}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 bg-gradient-to-r from-muted/50 to-card">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border/60 bg-linear-to-r from-muted/50 to-card">
         <div className="flex items-center gap-3">
           {/* Index */}
           <span className={cn(
             "inline-flex items-center justify-center w-8 h-8 rounded-lg",
-            "bg-gradient-to-br from-slate-600 to-slate-800 text-white",
-            "text-sm font-bold shadow-sm"
+            "bg-linear-to-br from-slate-600 to-slate-800 text-white",
+            "text-sm font-bold shadow-xs"
           )}>
             {String(index + 1).padStart(2, "0")}
           </span>

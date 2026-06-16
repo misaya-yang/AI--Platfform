@@ -156,7 +156,7 @@ class MessageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (this.state.hasError) {
       return this.props.fallback || (
         <div className="flex items-center gap-2 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
-          <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
+          <AlertCircle className="h-5 w-5 text-red-500 shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-red-800 dark:text-red-200">{i18n.t("assistant.messageRenderFailed")}</p>
             <p className="text-xs text-red-600 dark:text-red-400 truncate">
@@ -562,7 +562,7 @@ export function AssistantPage() {
                 initial={{ width: 0, opacity: 0 }}
                 animate={{ width: 280, opacity: 1 }}
                 exit={{ width: 0, opacity: 0 }}
-                className="border-r border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))] overflow-hidden flex-shrink-0"
+                className="border-r border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))] overflow-hidden shrink-0"
               >
                 <div className="h-full w-[280px]">
                   <ConversationSidebar
@@ -701,7 +701,7 @@ export function AssistantPage() {
                     )}
                     {activeSessionId && !sessionsLoading && (
                       historyRestoreState === "loading" ? (
-                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-sm dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
+                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-xs dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
                           <div className="font-medium">
                             {t("assistant.restoringSessionTitle", "Restoring selected conversation")}
                           </div>
@@ -710,7 +710,7 @@ export function AssistantPage() {
                           </div>
                         </div>
                       ) : historyRestoreState === "failed" ? (
-                        <div className="rounded-2xl border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-900 shadow-sm dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-100">
+                        <div className="rounded-2xl border border-red-200/80 bg-red-50/80 px-4 py-3 text-sm text-red-900 shadow-xs dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-100">
                           <div className="font-medium">
                             {t("assistant.restoreFailedTitle", "Couldn't restore the selected conversation")}
                           </div>
@@ -746,7 +746,7 @@ export function AssistantPage() {
                           </div>
                         </div>
                       ) : (
-                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-sm dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
+                        <div className="rounded-2xl border border-slate-200/80 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-xs dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-200">
                           <div className="font-medium">
                             {t("assistant.selectedSessionEmptyTitle", "Selected conversation has no restored messages")}
                           </div>
@@ -861,7 +861,7 @@ export function AssistantPage() {
               right lane feels uniform when switching chips. */}
           <AnimatePresence>
             {showArtifacts && !isMobile && rightPanel === "artifacts" && (
-              <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden flex-shrink-0">
+              <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden shrink-0">
                 <div className="h-full w-[380px]">
                   <ArtifactsPanel
                     isOpen={showArtifacts}

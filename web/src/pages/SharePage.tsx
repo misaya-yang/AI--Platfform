@@ -115,7 +115,7 @@ export function SharePage() {
     return (
       <div className="assistant-v2 min-h-screen bg-[hsl(var(--assistant-canvas-bg))] text-[hsl(var(--assistant-text-primary))]">
         {/* Header */}
-        <header className="sticky top-0 z-10 bg-[hsl(var(--assistant-canvas-bg)/0.85)] backdrop-blur-sm border-b border-[hsl(var(--assistant-border))]">
+        <header className="sticky top-0 z-10 bg-[hsl(var(--assistant-canvas-bg)/0.85)] backdrop-blur-xs border-b border-[hsl(var(--assistant-border))]">
           <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-full bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] flex items-center justify-center">
@@ -166,7 +166,7 @@ export function SharePage() {
               >
                 {/* Avatar */}
                 <div
-                  className="w-7 h-7 rounded-full flex-shrink-0 flex items-center justify-center text-[11px] font-medium bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] text-[hsl(var(--assistant-text-secondary))]"
+                  className="w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[11px] font-medium bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] text-[hsl(var(--assistant-text-secondary))]"
                   aria-hidden
                 >
                   {isUser ? "U" : "AI"}
@@ -181,7 +181,7 @@ export function SharePage() {
                   }`}
                 >
                   {isUser ? (
-                    <div className="text-[14px] leading-relaxed whitespace-pre-wrap break-words">
+                    <div className="text-[14px] leading-relaxed whitespace-pre-wrap wrap-break-word">
                       {msg.content}
                     </div>
                   ) : (
@@ -267,7 +267,7 @@ function ArtifactCard({ artifact, shareCode }: { artifact: ShareArtifact; shareC
       <div className="flex items-center gap-2.5 p-2.5">
         {/* Monospace uppercase format glyph (matches ArtifactsPanel treatment) */}
         <span
-          className="flex-shrink-0 px-1.5 py-[2px] text-[9px] font-mono font-semibold tracking-wider uppercase rounded bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-tertiary))]"
+          className="shrink-0 px-1.5 py-[2px] text-[9px] font-mono font-semibold tracking-wider uppercase rounded bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-tertiary))]"
           aria-hidden
         >
           {label.slice(0, 4)}

@@ -168,12 +168,12 @@ function PageTreeNodeComponent({
 
         {isFolder ? (
           expanded ? (
-            <FolderOpen className="h-4 w-4 text-amber-500 flex-shrink-0" />
+            <FolderOpen className="h-4 w-4 text-amber-500 shrink-0" />
           ) : (
-            <Folder className="h-4 w-4 text-amber-500 flex-shrink-0" />
+            <Folder className="h-4 w-4 text-amber-500 shrink-0" />
           )
         ) : (
-          <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
+          <FileText className="h-4 w-4 text-blue-500 shrink-0" />
         )}
 
         <span
@@ -507,7 +507,7 @@ export function AddConfluenceBindingDialog({
           {currentStep === 0 && (
             <div className="space-y-4">
               <div className="flex items-start gap-3 p-3 bg-muted/30 rounded-lg border border-border/50">
-                <Info className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+                <Info className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
                 <p className="text-sm text-muted-foreground">
                   {t("knowledge.sync.selectConnectionHint")}
                 </p>
@@ -643,7 +643,7 @@ export function AddConfluenceBindingDialog({
                       </div>
 
                       <div className="flex items-center gap-2 mb-2">
-                        <Badge variant={syncEntireSpace ? "default" : "outline"}>
+                        <Badge variant={syncEntireSpace ? "default" : "outline-solid"}>
                           {syncEntireSpace
                             ? t("knowledge.sync.syncEntireSpace")
                             : t("knowledge.sync.selectedRootPages", { count: selectedPages.size })}

@@ -168,8 +168,8 @@ function CodeBlockCard({ data, className }: CodeBlockCardProps) {
         "rounded-xl overflow-hidden",
         "border border-slate-200/80 dark:border-slate-700/50",
         "bg-white/60 dark:bg-slate-900/60",
-        "backdrop-blur-sm",
-        "shadow-sm",
+        "backdrop-blur-xs",
+        "shadow-xs",
         className
       )}
     >
@@ -306,8 +306,8 @@ function ImageCard({ data, className }: ImageCardProps) {
           "rounded-xl overflow-hidden",
           "border border-slate-200/80 dark:border-slate-700/50",
           "bg-white/60 dark:bg-slate-900/60",
-          "backdrop-blur-sm",
-          "shadow-sm",
+          "backdrop-blur-xs",
+          "shadow-xs",
           className
         )}
       >
@@ -366,7 +366,7 @@ function ImageCard({ data, className }: ImageCardProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs"
             onClick={() => setIsModalOpen(false)}
           >
             <motion.div
@@ -422,8 +422,8 @@ function SummaryCard({ data, className }: SummaryCardProps) {
         "rounded-xl overflow-hidden",
         "border border-slate-200/80 dark:border-slate-700/50",
         "bg-white/60 dark:bg-slate-900/60",
-        "backdrop-blur-sm",
-        "shadow-sm",
+        "backdrop-blur-xs",
+        "shadow-xs",
         className
       )}
     >
@@ -509,8 +509,8 @@ function TableCard({ data, className }: TableCardProps) {
         "rounded-xl overflow-hidden",
         "border border-slate-200/80 dark:border-slate-700/50",
         "bg-white/60 dark:bg-slate-900/60",
-        "backdrop-blur-sm",
-        "shadow-sm",
+        "backdrop-blur-xs",
+        "shadow-xs",
         className
       )}
     >
@@ -622,13 +622,13 @@ function FileCard({ data, className }: FileCardProps) {
         "flex items-center gap-4 p-4 rounded-xl",
         "border border-slate-200/80 dark:border-slate-700/50",
         "bg-white/60 dark:bg-slate-900/60",
-        "backdrop-blur-sm",
-        "shadow-sm",
+        "backdrop-blur-xs",
+        "shadow-xs",
         className
       )}
     >
       {/* File icon */}
-      <div className="flex-shrink-0 w-12 h-12 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
+      <div className="shrink-0 w-12 h-12 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
         {fileIcon}
       </div>
 

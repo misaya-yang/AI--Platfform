@@ -404,7 +404,7 @@ export function UserManagementPage() {
       </div>
 
       {/* Users table */}
-      <div className="rounded-xl border border-border/60 bg-card/50 backdrop-blur-sm shadow-sm overflow-hidden">
+      <div className="rounded-xl border border-border/60 bg-card/50 backdrop-blur-xs shadow-xs overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow>

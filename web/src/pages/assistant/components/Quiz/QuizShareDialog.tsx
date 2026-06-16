@@ -56,7 +56,7 @@ export function QuizShareDialog({ quizId, open, onClose }: QuizShareDialogProps)
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs"
         onClick={onClose}
       >
         <motion.div
@@ -128,7 +128,7 @@ export function QuizShareDialog({ quizId, open, onClose }: QuizShareDialogProps)
                     <button
                       type="button"
                       onClick={handleCopy}
-                      className="flex-shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
+                      className="shrink-0 p-1.5 rounded-lg hover:bg-muted transition-colors"
                     >
                       {copied ? (
                         <Check className="w-4 h-4 text-emerald-500" />

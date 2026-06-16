@@ -76,7 +76,7 @@ function ChildChunkCard({
   return (
     <div className="group/child relative">
       {/* Indentation line */}
-      <div className="absolute left-3 top-0 bottom-0 w-px bg-gradient-to-b from-blue-400/50 via-blue-400/30 to-transparent" />
+      <div className="absolute left-3 top-0 bottom-0 w-px bg-linear-to-b from-blue-400/50 via-blue-400/30 to-transparent" />
       
       <div className="ml-8 relative">
         {/* Connector */}
@@ -185,7 +185,7 @@ export function ChunkCard({
       <div className={cn(
         "rounded-xl border transition-all duration-200",
         "bg-card border-border/60",
-        "hover:border-primary/30 hover:shadow-sm"
+        "hover:border-primary/30 hover:shadow-xs"
       )}>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border/60">
@@ -277,7 +277,7 @@ export function ChunkCard({
         className="flex items-center gap-4 px-4 py-3 bg-slate-50/80 dark:bg-slate-950/50 border-b border-border cursor-pointer"
         onClick={() => setExpanded(!expanded)}
       >
-        <span className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-slate-600 to-slate-800 text-white font-bold text-sm shadow-sm">
+        <span className="inline-flex items-center justify-center w-10 h-10 rounded-lg bg-linear-to-br from-slate-600 to-slate-800 text-white font-bold text-sm shadow-xs">
           {String(index).padStart(2, "0")}
         </span>
         

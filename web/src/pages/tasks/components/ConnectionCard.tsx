@@ -107,7 +107,7 @@ export function ConnectionCard({
         <div className="flex items-start justify-between mb-3">
           <div className="flex items-center gap-2 min-w-0">
             <div className={cn("w-2 h-2 rounded-full", status.bgColor)} />
-            <Globe className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            <Globe className="h-4 w-4 text-muted-foreground shrink-0" />
             <span className="font-medium text-sm truncate">
               {connection.domain}
             </span>

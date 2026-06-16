@@ -259,7 +259,7 @@ export function AppLayout() {
                           }}
                         />
                       )}
-                      <span className="app-nav-icon flex-shrink-0">
+                      <span className="app-nav-icon shrink-0">
                         <NavItemIcon icon={item.icon} />
                       </span>
                       {!collapsed && (
@@ -290,7 +290,7 @@ export function AppLayout() {
                 collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
-              <span className="app-nav-icon flex-shrink-0">
+              <span className="app-nav-icon shrink-0">
                 {darkMode ? <Moon size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <Sun size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
@@ -311,7 +311,7 @@ export function AppLayout() {
                 collapsed ? 'justify-center py-[10px]' : 'gap-[10px] px-[10px] py-[10px]'
               }`}
             >
-              <span className="app-nav-icon flex-shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
+              <span className="app-nav-icon shrink-0" style={{ transform: collapsed ? 'rotate(180deg)' : 'none', transition: '.18s' }}>
                 {collapsed ? <PanelLeft size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} /> : <PanelLeftClose size={NAV_ICON_SIZE} strokeWidth={NAV_ICON_STROKE} />}
               </span>
               {!collapsed && (
@@ -335,7 +335,7 @@ export function AppLayout() {
         }}>
           <div className="flex min-w-0 flex-1 items-center gap-3">
             {isMobile && (
-              <button onClick={() => setCollapsed(p => !p)} className="h-8 w-8 flex-shrink-0 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
+              <button onClick={() => setCollapsed(p => !p)} className="h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
                 <Menu size={18} />
               </button>
             )}
@@ -347,7 +347,7 @@ export function AppLayout() {
             </div>
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-            <div className="flex flex-shrink-0 items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
+            <div className="flex shrink-0 items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
               <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-primary bg-primary/10 border border-primary/15">
                 {userInitials}
               </div>

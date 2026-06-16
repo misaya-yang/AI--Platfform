@@ -99,7 +99,7 @@ export function ProviderCard({
             const brand = getProviderBrand(provider.provider_id);
             return (
               <div className={cn(
-                "flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold transition-colors duration-200",
+                "shrink-0 w-10 h-10 rounded-lg flex items-center justify-center text-sm font-bold transition-colors duration-200",
                 brand.bg, brand.text, brand.darkBg, brand.darkText
               )}>
                 {brand.initial}
@@ -114,7 +114,7 @@ export function ProviderCard({
                 {provider.display_name}
               </h3>
               {/* Status Indicator */}
-              <div className="flex-shrink-0" title={provider.is_enabled ? t("common.enabled", "Enabled") : t("common.disabled", "Disabled")}>
+              <div className="shrink-0" title={provider.is_enabled ? t("common.enabled", "Enabled") : t("common.disabled", "Disabled")}>
                 <span className={cn(
                   "inline-flex rounded-full h-2 w-2",
                   provider.is_enabled ? "bg-green-500" : "bg-gray-400"
@@ -144,7 +144,7 @@ export function ProviderCard({
           </div>
 
           {/* Actions — visible on hover */}
-          <div className="flex-shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+          <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
             <Button
               variant="ghost"
               size="icon"
@@ -208,13 +208,13 @@ export function ProviderCard({
             )}
           >
             {testResult.success ? (
-              <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
             ) : (
-              <XCircle className="h-3.5 w-3.5 flex-shrink-0" />
+              <XCircle className="h-3.5 w-3.5 shrink-0" />
             )}
             <span className="flex-1 truncate">{testResult.message}</span>
             {testResult.latency_ms && (
-              <span className="opacity-70 tabular-nums flex-shrink-0">{testResult.latency_ms}ms</span>
+              <span className="opacity-70 tabular-nums shrink-0">{testResult.latency_ms}ms</span>
             )}
           </div>
         )}

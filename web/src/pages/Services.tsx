@@ -349,28 +349,28 @@ export function ServicesPage() {
           <TabsList className="bg-muted/50 p-1 h-auto rounded-xl">
             <TabsTrigger
               value="services"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
             >
               <Server className="h-4 w-4" />
               {t("services.page.tabs.services")}
             </TabsTrigger>
             <TabsTrigger
               value="providers"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
             >
               <Cloud className="h-4 w-4" />
               {t("services.page.tabs.providers")}
             </TabsTrigger>
             <TabsTrigger
               value="models"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
             >
               <Cpu className="h-4 w-4" />
               {t("services.page.tabs.models")}
             </TabsTrigger>
             <TabsTrigger
               value="exams"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm transition-all text-muted-foreground"
+              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
             >
               <ClipboardList className="h-4 w-4" />
               {t("services.page.tabs.exams", "考试管理")}
@@ -423,7 +423,7 @@ export function ServicesPage() {
 
         <div className="min-h-[500px]">
           {/* Services Tab */}
-          <TabsContent value="services" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+          <TabsContent value="services" className="mt-0 space-y-4 focus-visible:outline-hidden focus-visible:ring-0">
             {servicesQuery.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[1, 2, 3, 4, 5, 6].map((i) => (
@@ -465,7 +465,7 @@ export function ServicesPage() {
           </TabsContent>
 
           {/* Providers Tab */}
-          <TabsContent value="providers" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+          <TabsContent value="providers" className="mt-0 space-y-4 focus-visible:outline-hidden focus-visible:ring-0">
             {providersQuery.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[1, 2, 3, 4, 5, 6].map((i) => (
@@ -500,7 +500,7 @@ export function ServicesPage() {
           </TabsContent>
 
           {/* Models Tab */}
-          <TabsContent value="models" className="mt-0 space-y-4 focus-visible:outline-none focus-visible:ring-0">
+          <TabsContent value="models" className="mt-0 space-y-4 focus-visible:outline-hidden focus-visible:ring-0">
             {modelsQuery.isLoading ? (
               <div className="space-y-4">
                 {[1, 2, 3, 4, 5].map((i) => (
@@ -516,7 +516,7 @@ export function ServicesPage() {
                 {searchQuery && <p className="text-sm text-muted-foreground/60 mt-1">{t("models.search.noResults", "No models match your search.")}</p>}
               </div>
             ) : (
-              <div className="bg-background/50 backdrop-blur-sm rounded-2xl border border-border/50 overflow-hidden shadow-sm">
+              <div className="bg-background/50 backdrop-blur-xs rounded-2xl border border-border/50 overflow-hidden shadow-xs">
                 <ModelTable
                   models={models}
                   providers={providerMap}
@@ -530,7 +530,7 @@ export function ServicesPage() {
           </TabsContent>
 
           {/* Exams Tab */}
-          <TabsContent value="exams" className="mt-0 focus-visible:outline-none focus-visible:ring-0">
+          <TabsContent value="exams" className="mt-0 focus-visible:outline-hidden focus-visible:ring-0">
             <ExamsTabContent />
           </TabsContent>
         </div>

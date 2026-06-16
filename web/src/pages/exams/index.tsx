@@ -47,7 +47,7 @@ import {
 import { listQuizzes } from "@/api/quiz";
 import type { QuizData } from "@/pages/assistant/types";
 
-const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
+const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline-solid" }> = {
   draft: { label: "Draft", variant: "secondary" },
   published: { label: "Published", variant: "default" },
   closed: { label: "Closed", variant: "outline" },

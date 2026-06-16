@@ -14,7 +14,7 @@ from docgen.skills import (
 from docgen.skills.router import Intent
 
 
-_SKILLS_DIR = Path(__file__).resolve().parents[4] / "src/services/assistant/skills"
+_SKILLS_DIR = Path(__file__).resolve().parents[2] / "src/docgen/_skills_data"
 
 
 def _registry() -> SkillRegistry:

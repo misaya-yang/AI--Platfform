@@ -124,7 +124,7 @@ const statusConfig: Record<AgentStatus, {
   retrieving: {
     icon: Search,
     color: "text-primary",
-    bgColor: "bg-gradient-to-r from-primary/5 via-indigo-500/5 to-blue-500/5",
+    bgColor: "bg-linear-to-r from-primary/5 via-indigo-500/5 to-blue-500/5",
     borderColor: "border-primary/30 dark:border-primary/30",
     glowColor: "shadow-[0_0_20px_-5px] shadow-primary/30",
     label: "Retrieving",
@@ -133,7 +133,7 @@ const statusConfig: Record<AgentStatus, {
   executing: {
     icon: Terminal,
     color: "text-amber-500",
-    bgColor: "bg-gradient-to-r from-amber-500/5 via-orange-500/5 to-yellow-500/5",
+    bgColor: "bg-linear-to-r from-amber-500/5 via-orange-500/5 to-yellow-500/5",
     borderColor: "border-amber-500/30 dark:border-amber-400/30",
     glowColor: "shadow-[0_0_20px_-5px] shadow-amber-500/30",
     label: "Executing",
@@ -142,7 +142,7 @@ const statusConfig: Record<AgentStatus, {
   generating: {
     icon: Sparkles,
     color: "text-emerald-500",
-    bgColor: "bg-gradient-to-r from-emerald-500/5 via-teal-500/5 to-cyan-500/5",
+    bgColor: "bg-linear-to-r from-emerald-500/5 via-teal-500/5 to-cyan-500/5",
     borderColor: "border-emerald-500/30 dark:border-emerald-400/30",
     glowColor: "shadow-[0_0_20px_-5px] shadow-emerald-500/30",
     label: "Generating",
@@ -188,7 +188,7 @@ function StatusIcon({
       className={cn(
         "flex items-center justify-center h-10 w-10 rounded-xl transition-all duration-300",
         config.animate
-          ? `bg-gradient-to-br from-${config.color.replace("text-", "")}/20 to-${config.color.replace("text-", "")}/10`
+          ? `bg-linear-to-br from-${config.color.replace("text-", "")}/20 to-${config.color.replace("text-", "")}/10`
           : "bg-slate-100 dark:bg-slate-800",
         className
       )}
@@ -408,7 +408,7 @@ function GenerationContent({ state }: { state: AgentStatusStreamState }) {
       {/* Animated gradient line */}
       <div className="mt-2 h-1 rounded-full overflow-hidden bg-slate-200 dark:bg-slate-700">
         <motion.div
-          className="h-full bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500"
+          className="h-full bg-linear-to-r from-emerald-500 via-teal-500 to-cyan-500"
           animate={{
             x: ["-100%", "100%"],
           }}
@@ -454,7 +454,7 @@ export function AgentStatusStream({
       exit={{ opacity: 0, y: -10 }}
       className={cn(
         "rounded-xl border p-4 transition-all duration-300",
-        "backdrop-blur-sm",
+        "backdrop-blur-xs",
         config.bgColor,
         config.borderColor,
         config.animate && config.glowColor,
@@ -478,7 +478,7 @@ export function AgentStatusStream({
               {state.phaseName || config.label}
             </span>
             {collapsible && (
-              <ChevronDown className="h-4 w-4 text-slate-400 flex-shrink-0" />
+              <ChevronDown className="h-4 w-4 text-slate-400 shrink-0" />
             )}
           </div>
         ) : (
@@ -502,7 +502,7 @@ export function AgentStatusStream({
         {collapsible && !isCollapsed && (
           <motion.div
             animate={{ rotate: 180 }}
-            className="flex-shrink-0"
+            className="shrink-0"
           >
             <ChevronDown className="h-4 w-4 text-slate-400" />
           </motion.div>

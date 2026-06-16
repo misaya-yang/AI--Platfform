@@ -81,14 +81,14 @@ export function ServiceCard({
       <Card
         className={cn(
           "relative overflow-hidden cursor-pointer group transition-all duration-200 border bg-card hover:shadow-md hover:border-primary/30",
-          selected && "ring-1 ring-primary/50 border-primary/40 shadow-sm bg-primary/[0.02] dark:bg-primary/[0.04]"
+          selected && "ring-1 ring-primary/50 border-primary/40 shadow-xs bg-primary/2 dark:bg-primary/4"
         )}
         onClick={onSelect}
       >
         <CardContent className="p-4 relative">
           <div className="flex items-center gap-4">
             {/* Icon */}
-            <div className="flex-shrink-0 p-2.5 rounded-lg bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors duration-300 border border-primary/20">
+            <div className="shrink-0 p-2.5 rounded-lg bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-foreground transition-colors duration-300 border border-primary/20">
               <ServiceIcon serviceType={service.service_type} />
             </div>
 
@@ -99,7 +99,7 @@ export function ServiceCard({
                   {service.name}
                 </h3>
                 {/* Status Indicator */}
-                <div className="flex-shrink-0" title={isHealthy ? t("services.status.active", "Active") : t("services.status.inactive", "Inactive")}>
+                <div className="shrink-0" title={isHealthy ? t("services.status.active", "Active") : t("services.status.inactive", "Inactive")}>
                   <span className={cn(
                     "inline-flex rounded-full h-2 w-2",
                     isHealthy ? "bg-green-500" : "bg-red-500"
@@ -127,7 +127,7 @@ export function ServiceCard({
             </div>
 
             {/* Actions */}
-            <div className="flex-shrink-0 flex items-center gap-1">
+            <div className="shrink-0 flex items-center gap-1">
               {!isVirtual && (
                 <Button
                   variant="ghost"

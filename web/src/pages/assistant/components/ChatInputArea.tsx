@@ -186,7 +186,7 @@ export function ChatInputArea({
       <div className="p-4">
         <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
           {/* Input container — restrained: 10px radius, hairline border,
-              no drop-shadow at rest; focus-within swaps to accent-tinted
+              no drop-shadow-sm at rest; focus-within swaps to accent-tinted
               ring without elevating the card. */}
           <div className="relative flex items-end gap-2 p-2 rounded-[10px] bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] focus-within:border-[hsl(var(--assistant-accent))]/40 transition-colors duration-150">
             {/* Quick actions menu */}

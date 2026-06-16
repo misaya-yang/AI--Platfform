@@ -133,13 +133,13 @@ function ConnectionCard({
   return (
     <Card className="group relative overflow-hidden border-border/60 hover:border-primary/30 transition-all duration-300 hover:shadow-lg hover:shadow-primary/5">
       {/* Top accent bar */}
-      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-500 to-teal-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+      <div className="absolute top-0 left-0 right-0 h-1 bg-linear-to-r from-blue-500 via-cyan-500 to-teal-500 opacity-0 group-hover:opacity-100 transition-opacity" />
 
       <div className="p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-4">
             {/* Icon */}
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center group-hover:scale-105 transition-transform">
+            <div className="w-12 h-12 rounded-xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center group-hover:scale-105 transition-transform">
               <Cloud className="h-6 w-6 text-blue-500" />
             </div>
 
@@ -227,7 +227,7 @@ function ConnectionCard({
                     onClick={() => navigate(`/confluence/bindings/${binding.binding_id}/pages`)}
                   >
                     <div className="flex items-center gap-3">
-                      <Database className={`h-4 w-4 flex-shrink-0 ${binding.status === "error" ? "text-rose-500" : "text-cyan-600"}`} />
+                      <Database className={`h-4 w-4 shrink-0 ${binding.status === "error" ? "text-rose-500" : "text-cyan-600"}`} />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 text-sm">
                           <span className="font-medium truncate">
@@ -298,7 +298,7 @@ function ConnectionCard({
                     {/* Error message - show for error status even if last_error is empty */}
                     {(binding.last_error || binding.status === "error") && (
                       <div className="mt-2 p-2 bg-rose-50/50 dark:bg-rose-950/30 rounded text-xs text-rose-600 dark:text-rose-400 line-clamp-3 flex items-start gap-2">
-                        <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                        <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
                         <span>{binding.last_error || t("confluence.syncedPages.status.error")}</span>
                       </div>
                     )}
@@ -343,7 +343,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
-      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center mb-6">
+      <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center mb-6">
         <Cloud className="h-10 w-10 text-blue-500/60" />
       </div>
       <h3 className="text-lg font-semibold text-foreground mb-2">
@@ -352,7 +352,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
       <p className="text-sm text-muted-foreground max-w-sm mb-6">
         {t("confluence.noConnectionsDesc")}
       </p>
-      <Button onClick={onCreateClick} className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0">
+      <Button onClick={onCreateClick} className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0">
         <Plus className="h-4 w-4 mr-1.5" />
         {t("confluence.newConnection")}
       </Button>
@@ -463,13 +463,13 @@ export default function ConnectionListPage() {
   const selectedConnection = connections.find((c) => c.connection_id === deleteConnectionId);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
+    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-sm border-b border-border/50 sticky top-0 z-20">
+      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
         <div className="max-w-6xl mx-auto px-6">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
                 <Cloud className="h-5 w-5 text-white" />
               </div>
               <div>
@@ -489,7 +489,7 @@ export default function ConnectionListPage() {
               </Button>
               <Button
                 onClick={() => navigate("/confluence/connections/new")}
-                className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
+                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
               >
                 <Plus className="h-4 w-4 mr-1.5" />
                 {t("confluence.newConnection")}

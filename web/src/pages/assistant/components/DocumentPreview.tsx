@@ -84,7 +84,7 @@ function DocumentHeader({
           hasContent && "cursor-pointer hover:opacity-80 transition-opacity"
         )}
       >
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-sm">
+        <div className="w-10 h-10 rounded-lg bg-linear-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-xs">
           <FileText className="h-5 w-5 text-white" />
         </div>
         <div className="text-left">
@@ -294,7 +294,7 @@ export function DocumentPreview({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       className={cn(
-        "rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-sm",
+        "rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden shadow-xs",
         className
       )}
     >

@@ -171,18 +171,18 @@ export function WorkflowBeat({
           "group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left",
           "transition-colors duration-150",
           hasTools
-            ? "cursor-pointer hover:bg-slate-100/60 dark:hover:bg-white/[0.04]"
+            ? "cursor-pointer hover:bg-slate-100/60 dark:hover:bg-white/4"
             : "cursor-default",
-          "focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400/30"
+          "focus:outline-hidden focus-visible:ring-2 focus-visible:ring-slate-400/30"
         )}
       >
         {/* Left icon — spinner while running, else sparkle */}
         {showSpinner ? (
-          <Loader2 className="h-3.5 w-3.5 flex-shrink-0 text-slate-400 dark:text-slate-500 animate-spin" />
+          <Loader2 className="h-3.5 w-3.5 shrink-0 text-slate-400 dark:text-slate-500 animate-spin" />
         ) : (
           <Sparkles
             className={cn(
-              "h-3.5 w-3.5 flex-shrink-0",
+              "h-3.5 w-3.5 shrink-0",
               isRunning
                 ? "text-slate-400 dark:text-slate-500 animate-pulse"
                 : "text-slate-400 dark:text-slate-500"
@@ -209,7 +209,7 @@ export function WorkflowBeat({
           <motion.div
             animate={{ rotate: expanded ? 90 : 0 }}
             transition={{ duration: 0.15, ease: "easeOut" }}
-            className="flex-shrink-0"
+            className="shrink-0"
           >
             <ChevronRight className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
           </motion.div>

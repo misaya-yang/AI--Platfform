@@ -43,11 +43,16 @@ export default defineConfig(({ mode }) => {
       // Optimize chunk splitting
       rollupOptions: {
         output: {
-          manualChunks: {
+          manualChunks(id) {
             // React + React DOM + Router must stay together (shared hooks context)
-            vendor: ["react", "react-dom", "react-router-dom"],
+            if (/[\\/]node_modules[\\/](react|react-dom|react-router-dom)[\\/]/.test(id)) {
+              return "vendor";
+            }
             // Ant Design UI library (largest dep, ~1MB)
-            ui: ["antd", "@ant-design/icons", "@ant-design/cssinjs"],
+            if (/[\\/]node_modules[\\/](@ant-design|antd)[\\/]/.test(id)) {
+              return "ui";
+            }
+            return undefined;
           },
         },
       },

@@ -153,7 +153,7 @@ function OptionList({
         const baseClass =
           "w-full flex items-start gap-2.5 rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-150 ease-out";
 
-        let stateClass = "";
+        let stateClass: string;
         const style: React.CSSProperties = {};
         if (!showResult) {
           if (isSelected) {
@@ -192,7 +192,7 @@ function OptionList({
             {/* Label prefix: mono, tertiary — no filled bubble, just a character */}
             <span
               className={cn(
-                "flex-shrink-0 w-5 pt-[1px] text-[11px] font-mono font-medium tabular-nums",
+                "shrink-0 w-5 pt-px text-[11px] font-mono font-medium tabular-nums",
                 isSelected && !showResult
                   ? "text-[hsl(var(--assistant-accent))]"
                   : "text-[hsl(var(--assistant-text-tertiary))]",
@@ -213,13 +213,13 @@ function OptionList({
 
             {showResult && isCorrectOption && (
               <Check
-                className="w-[14px] h-[14px] mt-[2px] flex-shrink-0 text-[hsl(var(--assistant-accent))]"
+                className="w-[14px] h-[14px] mt-[2px] shrink-0 text-[hsl(var(--assistant-accent))]"
                 aria-label="Correct"
               />
             )}
             {isWrong && (
               <X
-                className="w-[14px] h-[14px] mt-[2px] flex-shrink-0 text-[hsl(var(--destructive))]"
+                className="w-[14px] h-[14px] mt-[2px] shrink-0 text-[hsl(var(--destructive))]"
                 aria-label="Incorrect"
               />
             )}
@@ -267,7 +267,7 @@ function ShortAnswerInput({
           background: bgColor,
         }}
         className={cn(
-          "w-full rounded-md border px-3 py-2.5 text-[13px] text-[hsl(var(--assistant-text-primary))] placeholder:text-[hsl(var(--assistant-text-tertiary))] focus:outline-none focus:border-[hsl(var(--assistant-accent))] resize-none transition-colors duration-150",
+          "w-full rounded-md border px-3 py-2.5 text-[13px] text-[hsl(var(--assistant-text-primary))] placeholder:text-[hsl(var(--assistant-text-tertiary))] focus:outline-hidden focus:border-[hsl(var(--assistant-accent))] resize-none transition-colors duration-150",
           disabled && "cursor-default opacity-80",
         )}
       />

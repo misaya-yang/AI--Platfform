@@ -133,7 +133,7 @@ function ErrorItem({ error, defaultExpanded = false }: { error: StreamError; def
         )}
         onClick={() => hasDetails && setIsExpanded(!isExpanded)}
       >
-        <Icon className={cn("h-4 w-4 mt-0.5 flex-shrink-0", config.iconClass)} />
+        <Icon className={cn("h-4 w-4 mt-0.5 shrink-0", config.iconClass)} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
             <span className={cn("text-sm font-medium", config.titleClass)}>
@@ -193,7 +193,7 @@ function ErrorItem({ error, defaultExpanded = false }: { error: StreamError; def
               {/* Suggestion */}
               {error.suggestion && (
                 <div className="flex items-start gap-2 text-xs bg-white dark:bg-slate-800 rounded p-2">
-                  <Lightbulb className="h-3.5 w-3.5 text-amber-500 mt-0.5 flex-shrink-0" />
+                  <Lightbulb className="h-3.5 w-3.5 text-amber-500 mt-0.5 shrink-0" />
                   <span className="text-slate-600 dark:text-slate-300">
                     {error.suggestion}
                   </span>

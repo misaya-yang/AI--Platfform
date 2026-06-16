@@ -193,7 +193,7 @@ function TaskTimelineItem({ task, isLast }: { task: AgentTask; isLast: boolean }
             {/* Task icon */}
             {task.icon && (
               <div className={cn(
-                "flex-shrink-0",
+                "shrink-0",
                 task.status === "completed" && "text-emerald-600 dark:text-emerald-400",
                 task.status === "failed" && "text-red-600 dark:text-red-400",
                 task.status === "in_progress" && "text-blue-600 dark:text-blue-400",
@@ -387,7 +387,7 @@ export function AgentTaskTimeline({
       )}
     >
       {/* Header */}
-      <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-slate-100/50 dark:from-slate-800 dark:to-slate-800/50 border-b border-slate-200 dark:border-slate-700">
+      <div className="px-4 py-3 bg-linear-to-r from-slate-50 to-slate-100/50 dark:from-slate-800 dark:to-slate-800/50 border-b border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-amber-500" />

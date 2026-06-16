@@ -86,7 +86,7 @@ function ProgressBar({ completed, total }: { completed: number; total: number })
       </div>
       <div className="h-2 w-full bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
         <motion.div
-          className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 rounded-full"
+          className="h-full bg-linear-to-r from-blue-500 to-emerald-500 rounded-full"
           initial={{ width: 0 }}
           animate={{ width: `${percentage}%` }}
           transition={{ duration: 0.3, ease: "easeOut" }}
@@ -123,7 +123,7 @@ function TaskItem({ task }: { task: Task }) {
         getStatusClasses()
       )}
     >
-      <div className="mt-0.5 flex-shrink-0">
+      <div className="mt-0.5 shrink-0">
         <StatusIcon status={task.status} />
       </div>
       <div className="flex-1 min-w-0">
@@ -244,12 +244,12 @@ export function TaskPanel({ goal, tasks, collectedInfo, isVisible }: TaskPanelPr
       initial={{ opacity: 0, y: -20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
-      className="mb-4 p-4 rounded-2xl bg-gradient-to-br from-slate-50 to-slate-100/50 dark:from-slate-900/80 dark:to-slate-800/50 border border-slate-200/60 dark:border-slate-700/40 backdrop-blur-sm"
+      className="mb-4 p-4 rounded-2xl bg-linear-to-br from-slate-50 to-slate-100/50 dark:from-slate-900/80 dark:to-slate-800/50 border border-slate-200/60 dark:border-slate-700/40 backdrop-blur-xs"
     >
       {/* Header with Goal */}
       {goal && (
         <div className="flex items-start gap-3 mb-4">
-          <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-gradient-to-br from-blue-500/20 to-indigo-500/20">
+          <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-linear-to-br from-blue-500/20 to-indigo-500/20">
             <Target className="h-4 w-4 text-blue-600 dark:text-blue-400" />
           </div>
           <div className="flex-1 min-w-0">

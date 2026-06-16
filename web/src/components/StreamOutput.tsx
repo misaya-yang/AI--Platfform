@@ -284,14 +284,14 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
           <button
             onClick={handleDownload}
             disabled={isDownloading}
-            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors disabled:opacity-50"
+            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-xs transition-colors disabled:opacity-50"
             title={t("common.downloadImage")}
           >
             <Download className={`h-4 w-4 ${isDownloading ? 'animate-pulse' : ''}`} />
           </button>
           <button
             onClick={handleOpenInNewTab}
-            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-sm transition-colors"
+            className="p-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white backdrop-blur-xs transition-colors"
             title={t("common.openInNewTab")}
           >
             <ExternalLink className="h-4 w-4" />
@@ -400,7 +400,7 @@ export const StreamOutput = memo(function StreamOutput({
   if (!text) return null;
 
   return (
-    <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none break-words prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:break-words prose-pre:rounded-xl prose-pre:border prose-pre:border-[hsl(var(--assistant-border))] prose-pre:bg-[hsl(var(--assistant-surface-soft))] prose-code:whitespace-pre-wrap prose-code:break-words prose-code:text-[14px] prose-blockquote:border-l-[hsl(var(--assistant-border))]${rtl ? " text-right" : ""}${isStreaming ? " streaming-fade-in" : ""}`}>
+    <div dir={rtl ? "rtl" : undefined} className={`assistant-copy prose prose-slate dark:prose-invert max-w-none wrap-break-word prose-p:my-3 prose-p:leading-7 prose-p:text-[15px] sm:prose-p:text-[16px] prose-headings:mt-7 prose-headings:mb-3 prose-headings:font-semibold prose-headings:tracking-tight prose-ul:my-3 prose-ol:my-3 prose-li:my-1 prose-li:text-[15px] sm:prose-li:text-[16px] prose-pre:my-4 prose-pre:overflow-x-auto prose-pre:max-w-full prose-pre:whitespace-pre-wrap prose-pre:wrap-break-word prose-pre:rounded-xl prose-pre:border prose-pre:border-[hsl(var(--assistant-border))] prose-pre:bg-[hsl(var(--assistant-surface-soft))] prose-code:whitespace-pre-wrap prose-code:wrap-break-word prose-code:text-[14px] prose-blockquote:border-l-[hsl(var(--assistant-border))]${rtl ? " text-right" : ""}${isStreaming ? " streaming-fade-in" : ""}`}>
       <ReactMarkdown
         remarkPlugins={[
           remarkGfm,

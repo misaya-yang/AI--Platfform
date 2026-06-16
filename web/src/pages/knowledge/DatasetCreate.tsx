@@ -283,7 +283,7 @@ Try pasting your own content here to test.`);
                 <div className="flex-1 border rounded-md bg-muted/40 p-4 overflow-y-auto">
                   <div className="space-y-4">
                     {chunks.map((c, i) => (
-                      <div key={i} className="bg-card p-3 rounded border shadow-sm text-sm">
+                      <div key={i} className="bg-card p-3 rounded border shadow-xs text-sm">
                         <div className="mb-2 text-xs text-muted-foreground/70 flex justify-between">
                           <span># {i + 1}</span>
                           <span>{c.char_count} chars</span>
@@ -620,7 +620,7 @@ export default function DatasetCreatePage() {
       <div className="max-w-4xl mx-auto px-6 py-8">
         {error && (
           <div className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
+            <AlertCircle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
             <div>
               <p className="text-sm font-medium text-red-800 dark:text-red-300">{t("knowledge.create.createFailed")}</p>
               <p className="text-sm text-red-600 dark:text-red-400 mt-1">{error}</p>

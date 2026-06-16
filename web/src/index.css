@@ -1,6 +1,141 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+@plugin '@tailwindcss/typography';
+
+@custom-variant dark (&:is(.dark *));
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
+  @media (width >= --theme(--breakpoint-sm)) {
+    max-width: none;
+  }
+  @media (width >= 1400px) {
+    max-width: 1400px;
+  }
+}
+
+@theme {
+  --font-sans:
+    'Geist Sans', 'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
+    system-ui, sans-serif;
+  --font-arabic: 'Noto Naskh Arabic', 'Traditional Arabic', serif;
+  --font-assistant:
+    'Geist Sans', 'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei',
+    system-ui, sans-serif;
+  --font-mono:
+    'IBM Plex Mono', 'JetBrains Mono', SFMono-Regular, Menlo, monospace;
+
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-success: hsl(var(--success));
+  --color-success-foreground: hsl(var(--success-foreground));
+
+  --color-warning: hsl(var(--warning));
+  --color-warning-foreground: hsl(var(--warning-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --radius-lg: var(--radius-lg);
+  --radius-md: var(--radius-md);
+  --radius-sm: var(--radius-sm);
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+
+  @keyframes accordion-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-accordion-content-height);
+    }
+  }
+  @keyframes accordion-up {
+    from {
+      height: var(--radix-accordion-content-height);
+    }
+    to {
+      height: 0;
+    }
+  }
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility status-pulse {
+  animation: pulse-status 2s ease-in-out infinite;
+}
+
+@utility status-online {
+  background: hsl(var(--success));
+  animation: pulse-status 2s ease-in-out infinite;
+}
+
+@utility stagger-item {
+  /* Staggered reveal: set --stagger-i via style attr on each child */
+  opacity: 0;
+  animation: stagger-in 0.35s var(--ease-out) both;
+  animation-delay: calc(var(--stagger-i, 0) * 80ms);
+}
+
+@utility table-row-enter {
+  /* Table row reveal */
+  opacity: 0;
+  animation: row-enter 0.3s var(--ease-out) both;
+  animation-delay: calc(var(--stagger-i, 0) * 50ms);
+}
+
+@utility animate-fade-in {
+  animation: fadeIn 0.2s var(--ease-out);
+}
+
+@utility animate-slide-up {
+  animation: slideUp 0.25s var(--ease-out);
+}
+
+@utility page-transition {
+  animation: pageEnter 0.2s var(--ease-out);
+}
 
 /* ═══════════════════════════════════════════
    AI Gateway — professional operations console
@@ -171,31 +306,6 @@
     background: hsl(var(--primary) / 0.18);
     color: hsl(var(--foreground));
   }
-}
-
-@layer components {
-  .status-pulse { animation: pulse-status 2s ease-in-out infinite; }
-  .status-online { background: hsl(var(--success)); animation: pulse-status 2s ease-in-out infinite; }
-
-  /* Staggered reveal: set --stagger-i via style attr on each child */
-  .stagger-item {
-    opacity: 0;
-    animation: stagger-in 0.35s var(--ease-out) both;
-    animation-delay: calc(var(--stagger-i, 0) * 80ms);
-  }
-
-  /* Table row reveal */
-  .table-row-enter {
-    opacity: 0;
-    animation: row-enter 0.3s var(--ease-out) both;
-    animation-delay: calc(var(--stagger-i, 0) * 50ms);
-  }
-}
-
-@layer utilities {
-  .animate-fade-in { animation: fadeIn 0.2s var(--ease-out); }
-  .animate-slide-up { animation: slideUp 0.25s var(--ease-out); }
-  .page-transition { animation: pageEnter 0.2s var(--ease-out); }
 }
 
 @media (prefers-reduced-motion: reduce) {

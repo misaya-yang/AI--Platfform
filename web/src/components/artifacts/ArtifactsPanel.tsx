@@ -196,7 +196,7 @@ function ViewToggle({
             {active && (
               <span
                 aria-hidden
-                className="absolute left-2.5 right-2.5 -bottom-[5px] h-[1.5px] rounded-sm bg-[hsl(var(--assistant-accent))]"
+                className="absolute left-2.5 right-2.5 bottom-[-5px] h-[1.5px] rounded-sm bg-[hsl(var(--assistant-accent))]"
               />
             )}
           </button>
@@ -393,7 +393,7 @@ function ImageCard({
             <button
               type="button"
               onClick={handleOpenInNewTab}
-              className="act-btn p-1.5 rounded-md bg-black/55 hover:bg-black/75 text-white backdrop-blur-sm"
+              className="act-btn p-1.5 rounded-md bg-black/55 hover:bg-black/75 text-white backdrop-blur-xs"
               aria-label={t("common.openInNewTab", "Open in new tab")}
             >
               <Eye className="h-3.5 w-3.5" />
@@ -599,12 +599,12 @@ export function ArtifactsPanel({
               {displayTitle}
             </span>
             {displayFormat && (
-              <span className="flex-shrink-0 px-1.5 py-[1px] text-[9px] font-mono font-semibold tracking-wider uppercase rounded bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-tertiary))]">
+              <span className="shrink-0 px-1.5 py-px text-[9px] font-mono font-semibold tracking-wider uppercase rounded bg-[hsl(var(--assistant-chip-bg))] text-[hsl(var(--assistant-text-tertiary))]">
                 {displayFormat}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2 mt-[1px] text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
+          <div className="flex items-center gap-2 mt-px text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
             <span className="truncate">{subtitle}</span>
             <StatusIndicator status={executionStatus} timeMs={executionTimeMs} />
           </div>
@@ -815,7 +815,7 @@ export function ArtifactsPanel({
             >
               <pre
                 className={cn(
-                  "p-4 text-[12px] font-mono leading-relaxed whitespace-pre-wrap break-words",
+                  "p-4 text-[12px] font-mono leading-relaxed whitespace-pre-wrap wrap-break-word",
                   "text-[hsl(var(--assistant-text-primary))] bg-[hsl(var(--assistant-chip-bg))]",
                 )}
               >
@@ -838,7 +838,7 @@ export function ArtifactsPanel({
             >
               <pre
                 className={cn(
-                  "p-4 text-[12px] font-mono leading-relaxed whitespace-pre-wrap break-words",
+                  "p-4 text-[12px] font-mono leading-relaxed whitespace-pre-wrap wrap-break-word",
                   "text-[hsl(var(--assistant-text-primary))]",
                 )}
               >

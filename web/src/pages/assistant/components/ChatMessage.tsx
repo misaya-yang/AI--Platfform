@@ -252,7 +252,7 @@ function AttachmentsDisplay({
           className={
             useV2
               ? "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border border-[hsl(var(--assistant-border-soft))] bg-[hsl(var(--assistant-chip-bg))]/80 text-[hsl(var(--assistant-text-secondary))]"
-              : "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/20 backdrop-blur-sm text-xs text-white/90 border border-white/20"
+              : "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/20 backdrop-blur-xs text-xs text-white/90 border border-white/20"
           }
         >
           {att.type === "image" ? (
@@ -278,10 +278,10 @@ function ImageGeneratingPlaceholder({ prompt }: { prompt?: string }) {
       <motion.div
         initial={{ opacity: 0, scale: 0.98 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="relative w-[200px] h-[200px] rounded-xl overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-700"
+        className="relative w-[200px] h-[200px] rounded-xl overflow-hidden bg-linear-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-700"
       >
         <motion.div
-          className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent dark:via-white/5"
+          className="absolute inset-0 bg-linear-to-r from-transparent via-white/20 to-transparent dark:via-white/5"
           animate={{ x: ["-100%", "100%"] }}
           transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
         />
@@ -382,7 +382,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               "rounded-3xl px-5 py-3",
               ASSISTANT_UI_V2
                 ? "bg-[hsl(var(--assistant-user-bubble))] text-[hsl(var(--assistant-text-primary))]"
-                : "bg-primary text-white shadow-sm shadow-primary/15",
+                : "bg-primary text-white shadow-xs shadow-primary/15",
             )}
           >
             <div className="whitespace-pre-wrap leading-relaxed text-[15px]">

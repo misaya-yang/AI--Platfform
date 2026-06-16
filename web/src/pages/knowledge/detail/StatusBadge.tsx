@@ -123,7 +123,7 @@ export function StatusBadge({ status, error, progress, metadata }: StatusBadgePr
         <Tooltip>
           <TooltipTrigger asChild>{badge}</TooltipTrigger>
           <TooltipContent>
-            <p className="max-w-xs break-words text-xs">{error}</p>
+            <p className="max-w-xs wrap-break-word text-xs">{error}</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

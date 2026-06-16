@@ -100,7 +100,7 @@ function CitationItem({ citation, index }: { citation: RAGCitation; index: numbe
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[hsl(var(--assistant-surface-soft))] transition-colors"
       >
-        <span className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded bg-[hsl(var(--assistant-surface-soft))] text-[10px] font-medium text-[hsl(var(--assistant-text-secondary))] font-mono tabular-nums">
+        <span className="shrink-0 w-5 h-5 flex items-center justify-center rounded bg-[hsl(var(--assistant-surface-soft))] text-[10px] font-medium text-[hsl(var(--assistant-text-secondary))] font-mono tabular-nums">
           {index + 1}
         </span>
 

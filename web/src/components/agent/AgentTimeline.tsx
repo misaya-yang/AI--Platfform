@@ -45,7 +45,7 @@ export type StepStatus = "pending" | "running" | "completed" | "error";
 export type StepType =
   | "planning"
   | "analysis"
-  | "outline"
+  | "outline-solid"
   | "generating"
   | "validating"
   | "repairing"
@@ -223,7 +223,7 @@ function StepProgress({ progress }: { progress: number }) {
       <motion.div
         initial={{ width: 0 }}
         animate={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }}
-        className="h-full bg-gradient-to-r from-blue-500 to-violet-500 rounded-full"
+        className="h-full bg-linear-to-r from-blue-500 to-violet-500 rounded-full"
         transition={{ duration: 0.3 }}
       />
     </div>

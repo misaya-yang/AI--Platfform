@@ -25,7 +25,7 @@ export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
     <div className={`rounded-xl border ${meta.border} ${meta.bg} overflow-hidden transition-all my-2`}>
       {/* Header */}
       <button
-        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+        className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-black/2 dark:hover:bg-white/2 transition-colors"
         onClick={() => setExpanded(!expanded)}
       >
         <span className="text-base shrink-0">{meta.icon}</span>
@@ -72,7 +72,7 @@ export function SubAgentCard({ subAgent }: { subAgent: SubAgentState }) {
 
           {/* Streaming text */}
           {subAgent.streamingText && isRunning && (
-            <div className="p-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.03] text-[12px] font-mono max-h-[120px] overflow-y-auto text-muted-foreground/70 leading-relaxed">
+            <div className="p-2 rounded-lg bg-black/3 dark:bg-white/3 text-[12px] font-mono max-h-[120px] overflow-y-auto text-muted-foreground/70 leading-relaxed">
               {subAgent.streamingText.slice(-400)}
             </div>
           )}

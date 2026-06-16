@@ -124,11 +124,11 @@ function PageTreeNode({
           "flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200",
           "cursor-pointer group relative",
           // Base hover state
-          "hover:bg-gradient-to-r hover:from-slate-50 hover:to-slate-100/50",
+          "hover:bg-linear-to-r hover:from-slate-50 hover:to-slate-100/50",
           "dark:hover:from-slate-800/50 dark:hover:to-slate-800/30",
           // Selected state
           isSelected && [
-            "bg-gradient-to-r from-blue-50 to-cyan-50/50",
+            "bg-linear-to-r from-blue-50 to-cyan-50/50",
             "dark:from-blue-950/40 dark:to-cyan-950/30",
             "hover:from-blue-100/80 hover:to-cyan-100/50",
             "dark:hover:from-blue-950/50 dark:hover:to-cyan-950/40",
@@ -141,7 +141,7 @@ function PageTreeNode({
       >
         {/* Left accent bar for selected items */}
         {isSelected && (
-          <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-gradient-to-b from-blue-500 to-cyan-500 rounded-r-full" />
+          <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-linear-to-b from-blue-500 to-cyan-500 rounded-r-full" />
         )}
 
         {/* Expand/Collapse Button */}
@@ -172,9 +172,9 @@ function PageTreeNode({
         {/* Checkbox */}
         {isSynced ? (
           <div className="relative">
-            <CheckCircle className="h-[18px] w-[18px] text-emerald-500 drop-shadow-sm" />
+            <CheckCircle className="h-[18px] w-[18px] text-emerald-500 drop-shadow-xs" />
             {/* Glow effect */}
-            <div className="absolute inset-0 bg-emerald-400/20 rounded-full blur-sm animate-pulse" />
+            <div className="absolute inset-0 bg-emerald-400/20 rounded-full blur-xs animate-pulse" />
           </div>
         ) : (
           <button
@@ -189,7 +189,7 @@ function PageTreeNode({
             )}
           >
             {checkboxState === "checked" ? (
-              <CheckSquare className="h-[18px] w-[18px] text-blue-500 drop-shadow-sm" />
+              <CheckSquare className="h-[18px] w-[18px] text-blue-500 drop-shadow-xs" />
             ) : checkboxState === "partial" ? (
               <MinusSquare className="h-[18px] w-[18px] text-blue-400/70" />
             ) : (
@@ -240,7 +240,7 @@ function PageTreeNode({
               "bg-emerald-100 dark:bg-emerald-900/40",
               "text-emerald-700 dark:text-emerald-400",
               "border border-emerald-200 dark:border-emerald-800/50",
-              "shadow-sm"
+              "shadow-xs"
             )}
           >
             <CheckCircle className="h-3 w-3 mr-1" />
@@ -269,7 +269,7 @@ function PageTreeNode({
         <div className="relative animate-in slide-in-from-top-1 fade-in-0 duration-200">
           {/* Vertical connecting line */}
           <div
-            className="absolute top-0 bottom-4 w-px bg-gradient-to-b from-slate-200 to-transparent dark:from-slate-700"
+            className="absolute top-0 bottom-4 w-px bg-linear-to-b from-slate-200 to-transparent dark:from-slate-700"
             style={{ left: `${level * 20 + 24}px` }}
           />
           {node.children.map((child) => (
@@ -382,7 +382,7 @@ export default function AddPagesModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop with blur */}
       <div
-        className="absolute inset-0 bg-background/60 backdrop-blur-sm"
+        className="absolute inset-0 bg-background/60 backdrop-blur-xs"
         onClick={onClose}
       />
 
@@ -397,12 +397,12 @@ export default function AddPagesModal({
         "animate-in fade-in-0 zoom-in-95 duration-300"
       )}>
         {/* Gradient top border accent */}
-        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-blue-500 via-cyan-500 to-blue-500" />
+        <div className="absolute top-0 inset-x-0 h-1 bg-linear-to-r from-blue-500 via-cyan-500 to-blue-500" />
 
         {/* Header */}
         <div className="relative px-6 py-5 border-b border-border/60">
           {/* Background pattern */}
-          <div className="absolute inset-0 bg-gradient-to-br from-muted/50 to-card dark:from-muted/30 dark:to-card" />
+          <div className="absolute inset-0 bg-linear-to-br from-muted/50 to-card dark:from-muted/30 dark:to-card" />
           <div className="absolute inset-0 opacity-[0.03] dark:opacity-[0.05]" style={{
             backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23000000' fill-opacity='1'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
           }} />
@@ -412,7 +412,7 @@ export default function AddPagesModal({
               {/* Icon container with gradient */}
               <div className={cn(
                 "p-3 rounded-xl",
-                "bg-gradient-to-br from-blue-500 to-cyan-500",
+                "bg-linear-to-br from-blue-500 to-cyan-500",
                 "shadow-lg shadow-blue-500/25"
               )}>
                 <Plus className="h-5 w-5 text-white" />
@@ -464,7 +464,7 @@ export default function AddPagesModal({
                 "border-border",
                 "focus:border-blue-400 dark:focus:border-blue-500",
                 "focus:ring-2 focus:ring-blue-500/20",
-                "shadow-sm",
+                "shadow-xs",
                 "placeholder:text-slate-400",
                 "transition-all duration-200"
               )}
@@ -478,7 +478,7 @@ export default function AddPagesModal({
             <div className="flex flex-col items-center justify-center py-16">
               <div className="relative">
                 <div className="absolute inset-0 bg-blue-500/20 rounded-full blur-xl animate-pulse" />
-                <div className="relative p-4 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500">
+                <div className="relative p-4 rounded-full bg-linear-to-br from-blue-500 to-cyan-500">
                   <Loader2 className="h-6 w-6 text-white animate-spin" />
                 </div>
               </div>
@@ -503,7 +503,7 @@ export default function AddPagesModal({
               "rounded-xl overflow-hidden",
               "bg-card",
               "border border-border/60",
-              "shadow-sm"
+              "shadow-xs"
             )}>
               <div className="p-2">
                 {pageTreeResponse.root_pages.map((node) => (
@@ -547,9 +547,9 @@ export default function AddPagesModal({
                   <Badge
                     className={cn(
                       "text-sm h-7 px-3 font-medium",
-                      "bg-gradient-to-r from-blue-500 to-cyan-500",
+                      "bg-linear-to-r from-blue-500 to-cyan-500",
                       "text-white border-0",
-                      "shadow-sm shadow-blue-500/25",
+                      "shadow-xs shadow-blue-500/25",
                       "animate-in fade-in-0 zoom-in-95 duration-200"
                     )}
                   >
@@ -596,7 +596,7 @@ export default function AddPagesModal({
                 disabled={selectedPages.size === 0 || addPagesMutation.isPending}
                 className={cn(
                   "h-10 px-5 rounded-xl",
-                  "bg-gradient-to-r from-blue-500 to-cyan-500",
+                  "bg-linear-to-r from-blue-500 to-cyan-500",
                   "hover:from-blue-600 hover:to-cyan-600",
                   "text-white font-medium border-0",
                   "shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40",
@@ -629,7 +629,7 @@ export default function AddPagesModal({
               "animate-in fade-in-0 slide-in-from-top-2 duration-200"
             )}>
               <p className="text-sm text-rose-700 dark:text-rose-400 flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                <AlertCircle className="h-4 w-4 shrink-0" />
                 {getErrorMessage(addPagesMutation.error)}
               </p>
             </div>

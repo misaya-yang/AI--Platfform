@@ -230,9 +230,9 @@ export default function ConnectionCreatePage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
+    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-sm border-b border-border/50 sticky top-0 z-20">
+      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
         <div className="max-w-3xl mx-auto px-6">
           <div className="flex items-center h-16 gap-4">
             <Button
@@ -244,7 +244,7 @@ export default function ConnectionCreatePage() {
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
                 <Cloud className="h-5 w-5 text-white" />
               </div>
               <div>
@@ -389,9 +389,9 @@ export default function ConnectionCreatePage() {
                     }`}
                   >
                     {testStatus === "success" ? (
-                      <CheckCircle className="h-5 w-5 text-emerald-600 flex-shrink-0" />
+                      <CheckCircle className="h-5 w-5 text-emerald-600 shrink-0" />
                     ) : (
-                      <AlertCircle className="h-5 w-5 text-rose-600 flex-shrink-0" />
+                      <AlertCircle className="h-5 w-5 text-rose-600 shrink-0" />
                     )}
                     <span
                       className={`text-sm ${
@@ -426,7 +426,7 @@ export default function ConnectionCreatePage() {
               <Button
                 type="submit"
                 disabled={createMutation.isPending}
-                className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0 min-w-[140px]"
+                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0 min-w-[140px]"
               >
                 {createMutation.isPending ? (
                   <>
@@ -447,7 +447,7 @@ export default function ConnectionCreatePage() {
           {createMutation.isError && (
             <Card className="p-4 border-rose-200 bg-rose-50 dark:bg-rose-950/30">
               <div className="flex items-center gap-3">
-                <AlertCircle className="h-5 w-5 text-rose-600 flex-shrink-0" />
+                <AlertCircle className="h-5 w-5 text-rose-600 shrink-0" />
                 <div>
                   <p className="font-medium text-rose-800 dark:text-rose-400">
                     {t("confluence.create.errors.createFailed")}

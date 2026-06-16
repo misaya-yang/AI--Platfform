@@ -179,14 +179,14 @@ export function ToolCallBlock({
         "border-l-[3px] transition-[border-color,box-shadow] duration-300",
         config.accent,
         isExpanded
-          ? "shadow-sm dark:shadow-black/20"
+          ? "shadow-xs dark:shadow-black/20"
           : "shadow-none"
       )}
     >
       {/* Shimmer progress bar for running state */}
       {isRunning && (
         <div className="absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden bg-blue-100/50 dark:bg-blue-900/30">
-          <div className="h-full bg-gradient-to-r from-transparent via-blue-500/70 to-transparent animate-shimmer" />
+          <div className="h-full bg-linear-to-r from-transparent via-blue-500/70 to-transparent animate-shimmer" />
         </div>
       )}
 
@@ -196,23 +196,23 @@ export function ToolCallBlock({
         className={cn(
           "flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left",
           "transition-colors duration-150",
-          "bg-white/50 dark:bg-white/[0.02]",
-          "hover:bg-slate-50/80 dark:hover:bg-white/[0.04]",
-          "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30 focus-visible:ring-inset"
+          "bg-white/50 dark:bg-white/2",
+          "hover:bg-slate-50/80 dark:hover:bg-white/4",
+          "focus:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/30 focus-visible:ring-inset"
         )}
         type="button"
       >
         <motion.div
           animate={{ rotate: isExpanded ? 90 : 0 }}
           transition={{ duration: 0.15, ease: "easeOut" }}
-          className="flex-shrink-0"
+          className="shrink-0"
         >
           <ChevronRight className="h-2.5 w-2.5 text-slate-400 dark:text-slate-500" />
         </motion.div>
 
         <StatusIcon
           className={cn(
-            "h-3 w-3 flex-shrink-0",
+            "h-3 w-3 shrink-0",
             config.text,
             isRunning && "animate-spin"
           )}
@@ -221,11 +221,11 @@ export function ToolCallBlock({
         {/* Tool name + inline args — all on one line */}
         <div className="flex-1 min-w-0 flex items-center gap-1.5 overflow-hidden">
           {stepNumber != null && (
-            <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 flex-shrink-0">
+            <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 shrink-0">
               #{stepNumber}
             </span>
           )}
-          <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate flex-shrink-0">
+          <span className="font-mono text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate shrink-0">
             {formatToolName(toolCall.name)}
           </span>
           {!isExpanded && argsPreview && (
@@ -236,7 +236,7 @@ export function ToolCallBlock({
         </div>
 
         {/* Status badge */}
-        <div className="flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           {isRunning && <ElapsedTimer className={config.text} />}
           <span className={cn("text-[9px] font-semibold uppercase tracking-wider", config.text)}>
             {t(config.labelKey, config.label)}
@@ -260,7 +260,7 @@ export function ToolCallBlock({
                 <div className="px-3 py-2.5">
                   <div className="flex items-center gap-1.5 mb-1.5">
                     <Terminal className="h-2.5 w-2.5 text-slate-400 dark:text-slate-500" />
-                    <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-slate-400 dark:text-slate-500">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
                       {hasValidArgs
                         ? t("playground.toolCall.arguments", "Arguments")
                         : t(
@@ -281,7 +281,7 @@ export function ToolCallBlock({
                       "bg-slate-50 dark:bg-slate-900/60",
                       "text-[11px] font-mono text-slate-600 dark:text-slate-300 leading-relaxed",
                       "border border-slate-200/50 dark:border-slate-700/40",
-                      "whitespace-pre-wrap break-words"
+                      "whitespace-pre-wrap wrap-break-word"
                     )}
                   >
                     {formattedArgs}
@@ -300,7 +300,7 @@ export function ToolCallBlock({
                 >
                   <div className="flex items-center gap-1.5 mb-1.5">
                     <CheckCircle2 className="h-2.5 w-2.5 text-emerald-500 dark:text-emerald-400" />
-                    <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-emerald-500 dark:text-emerald-400">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-emerald-500 dark:text-emerald-400">
                       {t("playground.toolCall.result", "Result")}
                     </span>
                   </div>
@@ -310,7 +310,7 @@ export function ToolCallBlock({
                       "bg-emerald-50/50 dark:bg-emerald-950/20",
                       "text-[11px] font-mono text-slate-600 dark:text-emerald-200 leading-relaxed",
                       "border border-emerald-200/40 dark:border-emerald-800/30",
-                      "whitespace-pre-wrap break-words"
+                      "whitespace-pre-wrap wrap-break-word"
                     )}
                   >
                     {formattedResult}

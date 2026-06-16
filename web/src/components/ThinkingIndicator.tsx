@@ -123,7 +123,7 @@ export function ThinkingIndicator({
 
         {/* Shimmer bar */}
         <div className="w-32 h-1 rounded-full bg-primary/10 dark:bg-primary/20 overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-transparent via-primary/60 to-transparent animate-shimmer" />
+          <div className="h-full bg-linear-to-r from-transparent via-primary/60 to-transparent animate-shimmer" />
         </div>
       </div>
     );
@@ -143,7 +143,7 @@ export function ThinkingIndicator({
       )}
     >
       {/* Animated indicator */}
-      <div className="relative flex-shrink-0">
+      <div className="relative shrink-0">
         <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shadow-md shadow-primary/20 animate-thinking-ring">
           <Icon className="w-4 h-4 text-white" />
         </div>
@@ -166,7 +166,7 @@ export function ThinkingIndicator({
 
         {/* Inline shimmer bar */}
         <div className="w-24 h-[3px] rounded-full bg-violet-100 dark:bg-violet-900/30 overflow-hidden">
-          <div className="h-full bg-gradient-to-r from-transparent via-violet-500/50 to-transparent animate-shimmer" />
+          <div className="h-full bg-linear-to-r from-transparent via-violet-500/50 to-transparent animate-shimmer" />
         </div>
       </div>
     </motion.div>

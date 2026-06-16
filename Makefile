@@ -3,7 +3,7 @@
 # =============================================================================
 # 运维只需要记住 make 命令:
 #
-#   make deploy          部署全部服务 (构建+启动+迁移+健康检查)
+#   make deploy          部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 #   make deploy-build    部署并强制重新构建镜像
 #   make deploy-cn       使用国内镜像构建部署
 #   make validate-config 校验 .env 和 Compose 配置
@@ -61,7 +61,7 @@ validate-config:            ## 仅校验 .env 和 Compose 配置
 
 .PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status
 
-deploy:                     ## 部署全部服务 (启动+迁移+健康检查)
+deploy:                     ## 部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 	@bash $(SCRIPTS)/deploy.sh
 
 deploy-build:               ## 部署并重新构建镜像

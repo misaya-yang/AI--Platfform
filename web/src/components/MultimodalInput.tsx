@@ -415,7 +415,7 @@ export function MultimodalInput({
             className={cn(
               "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
               canSend
-                ? "bg-primary hover:bg-primary/90 shadow-sm hover:shadow-md hover:scale-105"
+                ? "bg-primary hover:bg-primary/90 shadow-xs hover:shadow-md hover:scale-105"
                 : "bg-muted text-muted-foreground opacity-50"
             )}
           >

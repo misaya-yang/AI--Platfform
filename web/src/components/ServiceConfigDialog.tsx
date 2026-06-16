@@ -1631,7 +1631,7 @@ export function ServiceConfigDialog({
                             {["user", "developer", "admin"].map((role) => (
                               <Badge
                                 key={role}
-                                variant={authForm.allowed_roles.includes(role) ? "default" : "outline"}
+                                variant={authForm.allowed_roles.includes(role) ? "default" : "outline-solid"}
                                 className="cursor-pointer"
                                 onClick={() => {
                                   const roles = authForm.allowed_roles.includes(role)

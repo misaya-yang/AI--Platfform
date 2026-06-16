@@ -92,7 +92,7 @@ function FolderDialog({
               if (e.key === "Escape") handleClose();
             }}
             placeholder={t("assistant.folderPlaceholder", "e.g. Product Research")}
-            className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
+            className="w-full rounded-xl border border-border bg-background px-3.5 py-2.5 text-sm outline-hidden focus:border-primary focus:ring-2 focus:ring-primary/20 transition-all"
             autoFocus
           />
         </div>
@@ -252,7 +252,7 @@ function SessionItem({
               if (e.key === "Enter") commitEdit();
               if (e.key === "Escape") setIsEditing(false);
             }}
-            className="w-full rounded-md border border-primary/40 bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
+            className="w-full rounded-md border border-primary/40 bg-background px-2 py-1.5 text-sm outline-hidden focus:border-primary"
             autoFocus
           />
         </div>

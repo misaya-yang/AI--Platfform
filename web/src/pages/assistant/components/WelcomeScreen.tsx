@@ -21,7 +21,7 @@ export function WelcomeScreen() {
           <Bot className="h-10 w-10 text-primary" />
         </motion.div>
         <motion.div
-          className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-emerald-500 shadow-sm"
+          className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-emerald-500 shadow-xs"
           animate={{ scale: [1, 1.2, 1] }}
           transition={{ duration: 2, repeat: Infinity }}
         />

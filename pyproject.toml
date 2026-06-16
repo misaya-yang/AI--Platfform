@@ -78,7 +78,13 @@ dependencies = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/ai-gateway-core", "apps/assistant-service"]
+members = [
+    "packages/ai-gateway-core",
+    "apps/assistant-service",
+    "apps/knowledge-service",
+    "packages/mcp-docgen-server",
+    "sdk/python",
+]
 
 [tool.uv.sources]
 ai-gateway-core = { workspace = true }

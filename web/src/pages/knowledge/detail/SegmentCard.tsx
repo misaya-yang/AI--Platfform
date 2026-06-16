@@ -30,9 +30,9 @@ export function SegmentCard({
     return (
       <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-md transition-all duration-200 bg-card overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2.5 bg-primary/[0.03] dark:bg-primary/[0.06] border-b border-border/60">
+        <div className="flex items-center justify-between px-4 py-2.5 bg-primary/3 dark:bg-primary/6 border-b border-border/60">
           <div className="flex items-center gap-3">
-            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-primary text-white text-xs font-bold shadow-sm">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-primary text-white text-xs font-bold shadow-xs">
               <ImageIcon className="w-3.5 h-3.5" />
             </span>
             <div className="flex items-center gap-2">
@@ -100,7 +100,7 @@ export function SegmentCard({
                 <img
                   src={segment.image_url}
                   alt={segment.image_filename || "Segment image"}
-                  className={`max-w-full h-auto max-h-96 rounded-lg shadow-sm border border-border/40 object-contain mx-auto transition-opacity duration-300 ${
+                  className={`max-w-full h-auto max-h-96 rounded-lg shadow-xs border border-border/40 object-contain mx-auto transition-opacity duration-300 ${
                     imageLoaded ? "opacity-100" : "opacity-0 absolute"
                   }`}
                   onLoad={() => setImageLoaded(true)}
@@ -152,9 +152,9 @@ export function SegmentCard({
   // Text segment rendering (original)
   return (
     <div className="group border border-border/60 rounded-xl hover:border-primary/30 hover:shadow-md transition-all duration-200 bg-card overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-2.5 bg-gradient-to-r from-muted/70 to-card border-b border-border/60">
+      <div className="flex items-center justify-between px-4 py-2.5 bg-linear-to-r from-muted/70 to-card border-b border-border/60">
         <div className="flex items-center gap-3">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-gradient-to-br from-primary to-accent text-primary-foreground text-xs font-bold shadow-sm">
+          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-linear-to-br from-primary to-accent text-primary-foreground text-xs font-bold shadow-xs">
             {String(index + 1).padStart(2, "0")}
           </span>
           <div className="flex items-center gap-2">

@@ -185,7 +185,7 @@ export function ExamDetailPage() {
     );
   }
 
-  const statusColor: BadgeVariant = exam.status === "published" ? "default" : exam.status === "closed" ? "outline" : "secondary";
+  const statusColor: BadgeVariant = exam.status === "published" ? "default" : exam.status === "closed" ? "outline-solid" : "secondary";
 
   return (
     <div className="space-y-6 p-6 max-w-6xl mx-auto">

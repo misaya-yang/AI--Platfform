@@ -134,7 +134,7 @@ export function SlideOutlinePreview({
                   className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors"
                 >
                   {/* Slide number */}
-                  <div className="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center flex-shrink-0">
+                  <div className="w-6 h-6 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center shrink-0">
                     <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
                       {slide.number}
                     </span>

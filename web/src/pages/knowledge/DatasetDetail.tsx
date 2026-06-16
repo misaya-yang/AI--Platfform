@@ -1339,7 +1339,7 @@ export function KnowledgeDatasetDetailPage() {
                   className={`
                     flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm transition-all
                     ${contentTypeFilter === tab.key
-                      ? "bg-background shadow-sm text-foreground font-medium"
+                      ? "bg-background shadow-xs text-foreground font-medium"
                       : "text-muted-foreground hover:text-foreground"
                     }
                   `}
@@ -1421,7 +1421,7 @@ export function KnowledgeDatasetDetailPage() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button
-                      variant={batchMode ? "default" : "outline"}
+                      variant={batchMode ? "default" : "outline-solid"}
                       className={`h-9 ${batchMode ? "bg-primary text-white" : "bg-card"}`}
                     >
                       <ListChecks className="h-4 w-4 mr-1.5" />
@@ -1594,13 +1594,13 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 切片列表 */}
             {selectedDoc && (
-              <Card className="p-0 overflow-hidden shadow-sm border-primary/20 mt-6">
+              <Card className="p-0 overflow-hidden shadow-xs border-primary/20 mt-6">
                 {/* 标题栏 - 带明显的返回按钮 */}
-                <div className="px-5 py-4 border-b border-border bg-gradient-to-r from-muted/70 via-card to-primary/10 flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-border bg-linear-to-r from-muted/70 via-card to-primary/10 flex items-center justify-between">
                   <div className="flex items-center gap-4">
                     <button
                       onClick={() => setSelectedDocId(undefined)}
-                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-all shadow-sm"
+                      className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-muted-foreground hover:text-primary bg-card hover:bg-primary/5 border border-border hover:border-primary/20 rounded-lg transition-all shadow-xs"
                     >
                       <ArrowLeft className="h-4 w-4" />
                       <span>{t("knowledge.detail.backToList")}</span>
@@ -1634,7 +1634,7 @@ export function KnowledgeDatasetDetailPage() {
                 <div className="max-h-[500px] overflow-auto p-4 bg-muted/30">
                   {segments.length === 0 ? (
                     <div className="text-center py-16">
-                      <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-muted/40 to-muted flex items-center justify-center mb-4">
+                      <div className="w-16 h-16 mx-auto rounded-2xl bg-linear-to-br from-muted/40 to-muted flex items-center justify-center mb-4">
                         <Hash className="h-8 w-8 text-muted-foreground/70" />
                       </div>
                       <p className="text-muted-foreground font-medium">{t("knowledge.detail.noSegments")}</p>
@@ -1788,7 +1788,7 @@ export function KnowledgeDatasetDetailPage() {
                   </Button>
 
                   {Object.keys(hitMeta).length > 0 && (
-                    <div className="p-4 bg-gradient-to-r from-muted/70 to-primary/5 rounded-lg border border-border">
+                    <div className="p-4 bg-linear-to-r from-muted/70 to-primary/5 rounded-lg border border-border">
                       <h4 className="text-xs font-semibold text-foreground/80 mb-3 flex items-center gap-2">
                         <BarChart3 className="h-3.5 w-3.5" />
                         {t("knowledge.detail.retrievalStats")}
@@ -1860,7 +1860,7 @@ export function KnowledgeDatasetDetailPage() {
 
             {/* 右侧：结果 */}
             <div className="col-span-8">
-              <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-sm">
+              <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-xs">
                 <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center justify-between sticky top-0">
                   <div className="flex items-center gap-3">
                     <h3 className="font-bold text-foreground">{t("knowledge.detail.retrievalResults")}</h3>
@@ -1890,7 +1890,7 @@ export function KnowledgeDatasetDetailPage() {
                   ))}
                   {hitResults.length === 0 && !hitLoading && (
                     <div className="text-center py-20">
-                      <div className="w-20 h-20 mx-auto rounded-2xl bg-gradient-to-br from-emerald-100 to-teal-100 flex items-center justify-center mb-4">
+                      <div className="w-20 h-20 mx-auto rounded-2xl bg-linear-to-br from-emerald-100 to-teal-100 flex items-center justify-center mb-4">
                         <Search className="h-10 w-10 text-emerald-400" />
                       </div>
                       <p className="text-lg font-medium text-muted-foreground">{t("knowledge.detail.noResults")}</p>
@@ -1918,8 +1918,8 @@ export function KnowledgeDatasetDetailPage() {
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* 左侧：配置 */}
             <div className="space-y-6 lg:col-span-4">
-              <Card className="p-0 overflow-hidden shadow-sm border-border">
-                <div className="px-5 py-4 bg-gradient-to-r from-muted/70 via-card to-primary/10 border-b border-border/60">
+              <Card className="p-0 overflow-hidden shadow-xs border-border">
+                <div className="px-5 py-4 bg-linear-to-r from-muted/70 via-card to-primary/10 border-b border-border/60">
                   <h3 className="font-bold text-foreground flex items-center gap-2">
                     <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
                       <Sliders className="h-4 w-4 text-primary" />
@@ -2170,7 +2170,7 @@ export function KnowledgeDatasetDetailPage() {
             {/* 右侧：对话 */}
             <div className="lg:col-span-8">
               <Card className="p-0 h-[calc(100vh-200px)] flex flex-col overflow-hidden border-border">
-                <div className="px-5 py-4 border-b border-border/60 bg-card/90 backdrop-blur flex items-center justify-between">
+                <div className="px-5 py-4 border-b border-border/60 bg-card/90 backdrop-blur-sm flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center">
                       <MessageSquare className="h-4 w-4 text-primary" />
@@ -2188,7 +2188,7 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
                 </div>
 
-                <div className="flex-1 overflow-auto bg-gradient-to-b from-card via-card to-muted/40 px-4 py-6">
+                <div className="flex-1 overflow-auto bg-linear-to-b from-card via-card to-muted/40 px-4 py-6">
                   {qaMessages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center text-center h-full">
                       <div className="w-20 h-20 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4">
@@ -2231,7 +2231,7 @@ export function KnowledgeDatasetDetailPage() {
                                 {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4 text-primary" />}
                               </div>
                               <div className="flex flex-col gap-2">
-                                <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${bubbleStyles}`}>
+                                <div className={`rounded-2xl px-4 py-3 text-sm shadow-xs ${bubbleStyles}`}>
                                   {msg.role === "assistant" ? (
                                     msg.content ? (
                                       <StreamOutput text={msg.content} />
@@ -2496,8 +2496,8 @@ export function KnowledgeDatasetDetailPage() {
               ) : datasetConfig ? (
                 <div className="space-y-4">
                   {/* 分块模式标签 */}
-                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-amber-500/15 bg-gradient-to-r from-amber-500/5 to-transparent">
-                    <div className="w-9 h-9 rounded-lg bg-amber-500/10 dark:bg-amber-500/15 flex items-center justify-center flex-shrink-0">
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-amber-500/15 bg-linear-to-r from-amber-500/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-amber-500/10 dark:bg-amber-500/15 flex items-center justify-center shrink-0">
                       <Sliders className="h-4 w-4 text-amber-500" />
                     </div>
                     <div className="flex-1 min-w-0">
@@ -2747,8 +2747,8 @@ export function KnowledgeDatasetDetailPage() {
               ) : datasetConfig ? (
                 <div className="space-y-4">
                   {/* 检索模式标签 */}
-                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-emerald-500/15 bg-gradient-to-r from-emerald-500/5 to-transparent">
-                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 dark:bg-emerald-500/15 flex items-center justify-center flex-shrink-0">
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-emerald-500/15 bg-linear-to-r from-emerald-500/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-emerald-500/10 dark:bg-emerald-500/15 flex items-center justify-center shrink-0">
                       <Search className="h-4 w-4 text-emerald-500" />
                     </div>
                     <div className="flex-1 min-w-0">
@@ -2776,7 +2776,7 @@ export function KnowledgeDatasetDetailPage() {
 
                   {/* 融合权重 - hybrid模式 */}
                   {(datasetConfig.retrieval?.mode === "hybrid") && (
-                    <div className="p-3.5 rounded-xl border border-primary/15 bg-gradient-to-r from-primary/5 to-transparent">
+                    <div className="p-3.5 rounded-xl border border-primary/15 bg-linear-to-r from-primary/5 to-transparent">
                       <div className="flex items-center justify-between mb-2.5">
                         <p className="text-xs font-medium text-primary">{t("knowledge.detail.fusionWeight")}</p>
                         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
@@ -2884,8 +2884,8 @@ export function KnowledgeDatasetDetailPage() {
               {datasetConfig && !embeddingEditing && (
                 <div className="space-y-3">
                   {/* Model label row */}
-                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-primary/15 bg-gradient-to-r from-primary/5 to-transparent">
-                    <div className="w-9 h-9 rounded-lg bg-primary/10 dark:bg-primary/15 flex items-center justify-center flex-shrink-0">
+                  <div className="flex items-center gap-3 p-3.5 rounded-xl border border-primary/15 bg-linear-to-r from-primary/5 to-transparent">
+                    <div className="w-9 h-9 rounded-lg bg-primary/10 dark:bg-primary/15 flex items-center justify-center shrink-0">
                       <span className="text-sm font-bold text-primary">
                         {datasetConfig.embedding?.provider === "gemini" ? "G" : "A"}
                       </span>
@@ -2896,7 +2896,7 @@ export function KnowledgeDatasetDetailPage() {
                         {datasetConfig.embedding?.model || t("knowledge.detail.notSet")}
                       </p>
                     </div>
-                    <Badge variant="outline" className="text-xs border-primary/30 text-primary flex-shrink-0">
+                    <Badge variant="outline" className="text-xs border-primary/30 text-primary shrink-0">
                       {t("knowledge.detail.dimension", { dim: datasetConfig.embedding?.dimension || "?" })}
                     </Badge>
                   </div>
@@ -2943,7 +2943,7 @@ export function KnowledgeDatasetDetailPage() {
                         {EMBEDDING_MODELS.map((m) => (
                           <SelectItem key={`${m.provider}:${m.model}`} value={`${m.provider}:${m.model}`}>
                             <div className="flex items-center gap-2">
-                              <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary flex-shrink-0">
+                              <span className="w-5 h-5 rounded bg-primary/10 flex items-center justify-center text-[10px] font-bold text-primary shrink-0">
                                 {m.provider === "gemini" ? "G" : m.provider === "siliconflow" ? "S" : "A"}
                               </span>
                               <span>{m.label}</span>
@@ -3280,7 +3280,7 @@ for chunk in results.get("chunks", []):
 
                 {/* 提示信息 */}
                 <div className="p-3 bg-violet-50 border border-violet-200 rounded-lg text-sm text-violet-700 flex items-start gap-2">
-                  <ExternalLink className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                  <ExternalLink className="h-4 w-4 mt-0.5 shrink-0" />
                   <div>
                     <p className="font-medium">{t("knowledge.detail.integrationGuide")}</p>
                     <p className="text-xs mt-1 text-violet-600">
@@ -3430,7 +3430,7 @@ for chunk in results.get("chunks", []):
 
               <div className="space-y-3 text-sm text-muted-foreground">
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
                     <Bot className="h-3.5 w-3.5 text-primary" />
                   </div>
                   <div>
@@ -3439,7 +3439,7 @@ for chunk in results.get("chunks", []):
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-emerald-500/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 rounded-full bg-emerald-500/10 flex items-center justify-center shrink-0 mt-0.5">
                     <Brain className="h-3.5 w-3.5 text-emerald-500" />
                   </div>
                   <div>
@@ -3448,7 +3448,7 @@ for chunk in results.get("chunks", []):
                   </div>
                 </div>
                 <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 rounded-full bg-violet-500/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <div className="w-6 h-6 rounded-full bg-violet-500/10 flex items-center justify-center shrink-0 mt-0.5">
                     <Code className="h-3.5 w-3.5 text-violet-500" />
                   </div>
                   <div>
@@ -3475,7 +3475,7 @@ for chunk in results.get("chunks", []):
         }
       }}>
         <DialogContent className="max-w-4xl bg-card max-h-[90vh] overflow-hidden flex flex-col">
-          <DialogHeader className="flex-shrink-0">
+          <DialogHeader className="shrink-0">
             <DialogTitle className="text-xl font-semibold">{t("knowledge.detail.uploadDialogTitle")}</DialogTitle>
           </DialogHeader>
 
@@ -3484,7 +3484,7 @@ for chunk in results.get("chunks", []):
               <div className="flex gap-4">
                 {/* Upload zone - compact */}
                 <div
-                  className="flex-shrink-0 w-48 border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-primary/40 transition-colors cursor-pointer bg-muted/40"
+                  className="shrink-0 w-48 border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-primary/40 transition-colors cursor-pointer bg-muted/40"
                   onClick={() => fileRef.current?.click()}
                   onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
                   onDrop={(e) => {
@@ -3504,7 +3504,7 @@ for chunk in results.get("chunks", []):
                   <div className="mt-2 flex flex-wrap gap-2 max-h-24 overflow-auto">
                     {pendingFiles.map((file, i) => (
                       <Badge key={i} variant="secondary" className="flex items-center gap-1 py-1 px-2 max-w-[200px]">
-                        <FileText className="h-3 w-3 flex-shrink-0" />
+                        <FileText className="h-3 w-3 shrink-0" />
                         <span className="truncate text-xs">{file.name}</span>
                         <button
                           onClick={(e) => {
@@ -4149,7 +4149,7 @@ for chunk in results.get("chunks", []):
 
               {/* Current embedding model info */}
               <div className="p-3 bg-primary/5 rounded-lg border border-primary/20 flex items-center gap-3">
-                <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                <div className="w-8 h-8 bg-primary rounded flex items-center justify-center text-white text-xs font-bold shrink-0">
                   {dataset?.embedding_provider === "gemini" ? "G" : "A"}
                 </div>
                 <div className="text-sm">
@@ -4161,7 +4161,7 @@ for chunk in results.get("chunks", []):
               </div>
             </div>
 
-          <DialogFooter className="mt-4 pt-4 border-t flex-shrink-0">
+          <DialogFooter className="mt-4 pt-4 border-t shrink-0">
             <Button
               variant="outline"
               disabled={uploading}

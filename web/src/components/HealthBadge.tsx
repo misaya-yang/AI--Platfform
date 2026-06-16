@@ -18,6 +18,6 @@ export function HealthBadge({ status }: { status?: string }) {
       ? "secondary"
       : s === "error" || s === "timeout"
       ? "destructive"
-      : "outline";
+      : "outline-solid";
   return <Badge variant={variant}>{statusMap[s] || s}</Badge>;
 }

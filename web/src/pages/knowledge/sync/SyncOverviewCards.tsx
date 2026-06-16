@@ -90,7 +90,7 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
       {cards.map((card) => (
         <div
           key={card.key}
-          className={`relative overflow-hidden rounded-xl bg-gradient-to-br ${card.color} border p-4`}
+          className={`relative overflow-hidden rounded-xl bg-linear-to-br ${card.color} border p-4`}
         >
           <div className="flex items-start justify-between">
             <div>

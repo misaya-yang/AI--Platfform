@@ -171,9 +171,9 @@ function StatusBadge({
 
 function PageIcon({ hasChildren }: { hasChildren: boolean }) {
   if (!hasChildren) {
-    return <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />;
+    return <FileText className="h-4 w-4 text-blue-500 shrink-0" />;
   }
-  return <Folder className="h-4 w-4 text-amber-500 flex-shrink-0" />;
+  return <Folder className="h-4 w-4 text-amber-500 shrink-0" />;
 }
 
 // ============================================================
@@ -197,12 +197,12 @@ function PageListRow({
 
   return (
     <div className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/40 border-b border-border/40 last:border-b-0 transition-colors">
-      <Checkbox checked={isSelected} onCheckedChange={onSelect} className="flex-shrink-0" />
+      <Checkbox checked={isSelected} onCheckedChange={onSelect} className="shrink-0" />
 
       <div className="flex-1 min-w-0 flex items-center gap-2">
         {page.depth > 0 && (
           <div
-            className="flex items-center gap-0.5 flex-shrink-0"
+            className="flex items-center gap-0.5 shrink-0"
             style={{ width: `${page.depth * 12}px` }}
           >
             {Array.from({ length: page.depth }).map((_, i) => (
@@ -218,7 +218,7 @@ function PageListRow({
         <span className="text-sm font-medium text-foreground truncate">{page.title}</span>
       </div>
 
-      <div className="w-24 flex-shrink-0">
+      <div className="w-24 shrink-0">
         <StatusBadge
           status={page.status}
           effectiveStatusProp={page.effective_status}
@@ -227,15 +227,15 @@ function PageListRow({
         />
       </div>
 
-      <span className="text-xs text-muted-foreground w-12 text-center flex-shrink-0">
+      <span className="text-xs text-muted-foreground w-12 text-center shrink-0">
         v{page.version}
       </span>
 
-      <span className="text-xs text-muted-foreground w-28 text-right flex-shrink-0">
+      <span className="text-xs text-muted-foreground w-28 text-right shrink-0">
         {page.last_synced_at ? new Date(page.last_synced_at).toLocaleDateString() : "-"}
       </span>
 
-      <div className="flex items-center justify-center gap-3 w-28 flex-shrink-0 text-sm">
+      <div className="flex items-center justify-center gap-3 w-28 shrink-0 text-sm">
         {isSyncing ? (
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -565,7 +565,7 @@ export function BindingPagesPanel({
               filteredPages.length > 0 && selectedIds.size === filteredPages.length
             }
             onCheckedChange={handleSelectAll}
-            className="flex-shrink-0"
+            className="shrink-0"
           />
           <span className="flex-1">{t("knowledge.sync.document")}</span>
           <span className="w-24">{t("knowledge.sync.status")}</span>

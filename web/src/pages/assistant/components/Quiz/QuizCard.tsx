@@ -457,7 +457,7 @@ export function QuizCard({
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[hsl(var(--assistant-border))]">
-        <BookOpen className="w-[14px] h-[14px] text-[hsl(var(--assistant-text-secondary))] flex-shrink-0" />
+        <BookOpen className="w-[14px] h-[14px] text-[hsl(var(--assistant-text-secondary))] shrink-0" />
         <div className="flex-1 min-w-0">
           <h3 className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))] truncate leading-snug">
             {quizData.title}
@@ -676,7 +676,7 @@ export function QuizCard({
                 }}
               >
                 <div
-                  className="flex-shrink-0 w-8 h-8 rounded-md flex items-center justify-center"
+                  className="shrink-0 w-8 h-8 rounded-md flex items-center justify-center"
                   style={{
                     backgroundColor: "hsl(var(--destructive) / 0.15)",
                   }}
@@ -693,7 +693,7 @@ export function QuizCard({
                   >
                     {t("assistant.quiz.submitErrorTitle", "提交失败")}
                   </h4>
-                  <p className="text-[11px] text-[hsl(var(--assistant-text-secondary))] break-words leading-relaxed">
+                  <p className="text-[11px] text-[hsl(var(--assistant-text-secondary))] wrap-break-word leading-relaxed">
                     {submitError ??
                       t(
                         "assistant.quiz.submitErrorGeneric",
@@ -973,7 +973,7 @@ function StateChip({
   return (
     <span
       className={
-        "flex-shrink-0 inline-flex items-center gap-1.5 h-6 px-2 rounded-full border text-[11px] font-medium tabular-nums " +
+        "shrink-0 inline-flex items-center gap-1.5 h-6 px-2 rounded-full border text-[11px] font-medium tabular-nums " +
         toneClass
       }
       aria-live="polite"

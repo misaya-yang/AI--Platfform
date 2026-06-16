@@ -14,13 +14,12 @@ function applyInitialThemeAndLocale() {
   document.documentElement.dir = "ltr";
 
   let mode = "system";
-  let resolved: string | null = null;
+  let resolved: string;
   let legacyDarkMode: boolean | null = null;
   try {
     const parsed = storageRaw ? JSON.parse(storageRaw) : null;
     const state = parsed && parsed.state ? parsed.state : {};
     mode = state.themeMode || mode;
-    resolved = state.resolvedTheme || null;
     legacyDarkMode =
       typeof state.darkMode === "boolean" ? state.darkMode : null;
   } catch {

@@ -26,7 +26,7 @@ const SelectTrigger = React.forwardRef<
       "ring-offset-background transition-all duration-200",
       "hover:border-slate-300 dark:hover:border-slate-600",
       "hover:shadow-[0_2px_4px_rgba(0,0,0,0.06)]",
-      "focus:outline-none focus:ring-2 focus:ring-ring/50 focus:ring-offset-2",
+      "focus:outline-hidden focus:ring-2 focus:ring-ring/50 focus:ring-offset-2",
       "focus:border-primary/50",
       // Placeholder and disabled
       "placeholder:text-muted-foreground",
@@ -57,7 +57,7 @@ const SelectContent = React.forwardRef<
       ref={ref}
       className={cn(
         // Solid opaque background - NOT transparent
-        "relative max-h-96 min-w-[8rem] overflow-hidden rounded-xl",
+        "relative max-h-96 min-w-32 overflow-hidden rounded-xl",
         "bg-white dark:bg-slate-900",
         // Border with premium shadow
         "border border-slate-200/80 dark:border-slate-700/80",
@@ -88,7 +88,7 @@ const SelectContent = React.forwardRef<
         className={cn(
           "p-1.5",
           position === "popper" &&
-            "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]"
+            "h-(--radix-select-trigger-height) w-full min-w-(--radix-select-trigger-width)"
         )}
       >
         {children}
@@ -115,17 +115,17 @@ const SelectItem = React.forwardRef<
     ref={ref}
     className={cn(
       // Base styles
-      "relative flex w-full cursor-pointer select-none items-center rounded-lg py-2 pl-3 pr-9 text-sm outline-none",
+      "relative flex w-full cursor-pointer select-none items-center rounded-lg py-2 pl-3 pr-9 text-sm outline-hidden",
       // Hover state with subtle gradient
       "transition-all duration-150",
       "hover:bg-slate-100 dark:hover:bg-slate-800",
       // Focus/highlighted state with primary color hint
-      "focus:bg-gradient-to-r focus:from-primary/10 focus:to-sky-500/5",
+      "focus:bg-linear-to-r focus:from-primary/10 focus:to-sky-500/5",
       "focus:text-slate-900 dark:focus:text-slate-100",
       // Selected indicator background
       "data-[state=checked]:bg-primary/5 data-[state=checked]:text-primary",
       // Disabled
-      "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "data-disabled:pointer-events-none data-disabled:opacity-50",
       className
     )}
     {...props}

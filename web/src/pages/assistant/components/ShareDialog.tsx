@@ -151,7 +151,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                 <input
                   readOnly
                   value={`${window.location.origin}${shareInfo.share_url}`}
-                  className="flex-1 bg-transparent text-sm font-mono truncate outline-none"
+                  className="flex-1 bg-transparent text-sm font-mono truncate outline-hidden"
                 />
                 <button
                   onClick={handleCopy}

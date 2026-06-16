@@ -119,7 +119,7 @@ See `CHANGELOG.md` for the module-level summary of the current open-source stand
 ## Deployment Commands
 
 ```bash
-make deploy        # build/start/migrate/health-check all services
+make deploy        # start/migrate/health-check all services without rebuilding images
 make deploy-build  # force rebuild
 make deploy-infra  # start only postgres, redis, qdrant
 make deploy-app    # start app services and their compose dependencies

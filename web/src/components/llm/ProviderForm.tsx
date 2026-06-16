@@ -254,7 +254,7 @@ export function ProviderForm({
                   <Label>{t("llm.provider.template", "Provider template")}</Label>
                   <Button
                     type="button"
-                    variant={advancedMode ? "default" : "outline"}
+                    variant={advancedMode ? "default" : "outline-solid"}
                     size="sm"
                     onClick={() => setAdvancedMode((value) => !value)}
                   >

@@ -111,7 +111,7 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
       <Card className="p-6">
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
               <Cloud className="h-5 w-5 text-blue-500" />
             </div>
             <div>
@@ -185,7 +185,7 @@ function EmptySyncState({ onAdd }: { onAdd: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="text-center py-12">
-      <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
+      <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
         <Cloud className="h-8 w-8 text-blue-500" />
       </div>
       <h3 className="font-semibold text-lg mb-2">{t("knowledge.sync.noConfluenceSync")}</h3>

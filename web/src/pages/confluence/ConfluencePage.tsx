@@ -358,7 +358,7 @@ function PageTreeNode({
           {node.title}
         </span>
         {isSelected && (
-          <CheckCircle className="h-4 w-4 text-primary flex-shrink-0" />
+          <CheckCircle className="h-4 w-4 text-primary shrink-0" />
         )}
       </div>
       {hasChildren && isExpanded && (

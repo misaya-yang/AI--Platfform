@@ -115,7 +115,7 @@ export function CitationBadge({
       onClick={onClick}
       className={cn(
         "inline-flex items-center justify-center",
-        "min-w-[1.25rem] h-[1.125rem] px-1",
+        "min-w-5 h-4.5 px-1",
         "text-[10px] font-medium",
         "border rounded",
         "transition-all duration-150",
@@ -294,7 +294,7 @@ function CitationDetailCard({ citation, index, isSelected, onSelect }: CitationD
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-white/50 dark:hover:bg-slate-700/30 transition-colors"
       >
         {/* Index badge */}
-        <span className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-lg bg-slate-200/80 dark:bg-slate-700/80 text-xs font-semibold text-slate-600 dark:text-slate-300">
+        <span className="shrink-0 w-6 h-6 flex items-center justify-center rounded-lg bg-slate-200/80 dark:bg-slate-700/80 text-xs font-semibold text-slate-600 dark:text-slate-300">
           {index + 1}
         </span>
 
@@ -523,7 +523,7 @@ export function CitationDrawer({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-sm z-40"
+            className="fixed inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-xs z-40"
           />
 
           {/* Drawer */}

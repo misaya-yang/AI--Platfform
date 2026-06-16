@@ -28,7 +28,7 @@ const STATUS_CONFIG: Record<
   string,
   {
     labelKey: string;
-    variant: "default" | "secondary" | "destructive" | "outline";
+    variant: "default" | "secondary" | "destructive" | "outline-solid";
     icon: React.ReactNode;
     color: string;
   }
@@ -277,7 +277,7 @@ export function TaskQueryTab() {
               {taskQuery.data.error && (
                 <div className="mt-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20">
                   <div className="flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
+                    <AlertCircle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
                     <div>
                       <p className="text-xs font-medium text-destructive">
                         {t("tasks.errorInfo")}
