@@ -1,4 +1,4 @@
-# hejaz-docgen
+# ai-docgen
 
 Design-system-driven document generation for Microsoft Office and PDF formats
 (docx / pptx / xlsx / pdf). The LLM plans a typed pydantic Intermediate

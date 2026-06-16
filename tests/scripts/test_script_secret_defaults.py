@@ -5,7 +5,7 @@ def test_kb_maintenance_scripts_do_not_embed_production_pg_passwords():
     scripts = [
         Path("scripts/create_admin.py"),
     ]
-    production_password = "HejazDB" "2026Secure"
+    production_password = "Production" "SecretPlaceholder"
 
     for script in scripts:
         text = script.read_text()

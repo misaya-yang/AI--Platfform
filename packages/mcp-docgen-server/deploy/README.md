@@ -59,7 +59,7 @@ docker push ghcr.io/YOUR-ORG/mcp-docgen:$(git rev-parse --short HEAD)
 
 # 2. Swap placeholders in the manifests
 sed -i.bak -e "s|ghcr.io/YOUR-ORG/mcp-docgen:TAG|ghcr.io/YOUR-ORG/mcp-docgen:$(git rev-parse --short HEAD)|g" \
-           -e "s|docgen.internal.example.com|docgen.internal.hejaz.internal|g" \
+           -e "s|docgen.internal.example.com|docgen.internal.example.com|g" \
   packages/mcp-docgen-server/deploy/k8s/*.yaml
 
 # 3. Create the secrets the pod pulls via envFrom (optional — only if you
@@ -68,7 +68,7 @@ kubectl create secret generic mcp-docgen-secrets \
   --from-literal=ANTHROPIC_API_KEY=xxx \
   --from-literal=AWS_ACCESS_KEY_ID=xxx \
   --from-literal=AWS_SECRET_ACCESS_KEY=xxx \
-  --from-literal=DOCGEN_S3_BUCKET=hejaz-docgen-artifacts
+  --from-literal=DOCGEN_S3_BUCKET=ai-docgen-artifacts
 
 # 4. Apply
 kubectl apply -f packages/mcp-docgen-server/deploy/k8s/
@@ -88,7 +88,7 @@ curl -fsS http://localhost:8765/health
 
 ## 3. Wiring the assistant-service
 
-Once the server is up at `https://docgen.internal.hejaz.internal/mcp`, add
+Once the server is up at `https://docgen.internal.example.com/mcp`, add
 a config entry in the main repo:
 
 **`src/services/assistant/mcp/config.py`** — add to the `servers` list:
@@ -96,7 +96,7 @@ a config entry in the main repo:
 ```python
 MCPServerConfig(
     name="docgen",
-    url="https://docgen.internal.hejaz.internal/mcp",
+    url="https://docgen.internal.example.com/mcp",
     transport="http",
     api_key=os.environ.get("MCP_DOCGEN_TOKEN"),   # optional bearer auth
     timeout=180.0,   # full deck generation can run long

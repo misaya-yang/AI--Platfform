@@ -141,7 +141,7 @@ def _request(
 
 
 @pytest.mark.asyncio
-async def test_run_config_injects_gateway_resolved_hejaz_model():
+async def test_run_config_injects_gateway_resolved_gateway_model():
     LangGraphAdapter.configure_model_control_plane(FakeProviderService(), FakeModelService())
     adapter = LangGraphAdapter(
         _service(
@@ -160,25 +160,25 @@ async def test_run_config_injects_gateway_resolved_hejaz_model():
             parameters={
                 "config": {
                     "configurable": {
-                        "hejaz_model": {"_api_key": "browser-secret"},
+                        "gateway_model": {"_api_key": "browser-secret"},
                         "locale": "en",
                     }
                 }
             }
         )
     )
-    hejaz_model = config["configurable"]["hejaz_model"]
+    gateway_model = config["configurable"]["gateway_model"]
 
-    assert hejaz_model["tenant_id"] == "tenant-a"
-    assert hejaz_model["provider_id"] == "dashscope-prod"
-    assert hejaz_model["provider"] == "dashscope"
-    assert hejaz_model["model"] == "qwen-max"
-    assert hejaz_model["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert hejaz_model["_api_key"] == "unit-test-runtime-secret"
-    assert hejaz_model["api_key_fingerprint"] == hashlib.sha256(
+    assert gateway_model["tenant_id"] == "tenant-a"
+    assert gateway_model["provider_id"] == "dashscope-prod"
+    assert gateway_model["provider"] == "dashscope"
+    assert gateway_model["model"] == "qwen-max"
+    assert gateway_model["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert gateway_model["_api_key"] == "unit-test-runtime-secret"
+    assert gateway_model["api_key_fingerprint"] == hashlib.sha256(
         b"unit-test-runtime-secret"
     ).hexdigest()[:16]
-    assert hejaz_model["cache_epoch"] == "7"
+    assert gateway_model["cache_epoch"] == "7"
     assert config["configurable"]["locale"] == "en"
     assert "browser-secret" not in str(config)
 
@@ -209,10 +209,10 @@ async def test_adapter_injects_failover_candidate_shape():
     )
 
     config = await adapter._build_run_config(_request())
-    hejaz_model = config["configurable"]["hejaz_model"]
-    candidates = hejaz_model["failover"]["candidates"]
+    gateway_model = config["configurable"]["gateway_model"]
+    candidates = gateway_model["failover"]["candidates"]
 
-    assert hejaz_model["provider_id"] == "dashscope-prod"
+    assert gateway_model["provider_id"] == "dashscope-prod"
     assert [(c["provider_id"], c["model_id"]) for c in candidates] == [
         ("dashscope-prod", "qwen-max"),
         ("google-ai-studio", "gemini-3.5-flash"),
@@ -222,14 +222,14 @@ async def test_adapter_injects_failover_candidate_shape():
 
 
 @pytest.mark.asyncio
-async def test_run_config_ignores_caller_supplied_hejaz_model_when_service_disabled():
+async def test_run_config_ignores_caller_supplied_gateway_model_when_service_disabled():
     adapter = LangGraphAdapter(_service(model_override={"enabled": False}))
 
     config = await adapter._build_run_config(
         _request(
             context={
                 "configurable": {
-                    "hejaz_model": {"_api_key": "browser-secret"},
+                    "gateway_model": {"_api_key": "browser-secret"},
                     "dataset_id": "dataset-a",
                 }
             },
@@ -243,7 +243,7 @@ async def test_run_config_ignores_caller_supplied_hejaz_model_when_service_disab
         )
     )
 
-    assert "hejaz_model" not in config["configurable"]
+    assert "gateway_model" not in config["configurable"]
     assert config["configurable"]["dataset_id"] == "dataset-a"
     assert config["configurable"]["checkpoint_ns"] == "tenant-a"
     assert config["configurable"]["thread_id"] == "session-1"

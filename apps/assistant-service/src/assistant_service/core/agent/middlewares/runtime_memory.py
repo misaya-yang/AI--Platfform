@@ -1,13 +1,13 @@
 """
-OpenClaw memory retrieval middleware.
+Assistant memory retrieval middleware.
 
 Before each model call:
-  1. Ask OpenClaw for the top-N memory snippets relevant to the user's message.
+  1. Ask assistant runtime for the top-N memory snippets relevant to the user's message.
   2. Append a system message with the snippets so the model can ground on them.
   3. Emit a `memory_retrieved` event for UI observability.
   4. Schedule a daily reflection job (fire-and-forget).
 
-Ported from AgentLoop._execute_streaming_first's inline OpenClaw memory block
+Ported from AgentLoop._execute_streaming_first's inline assistant memory block
 to establish the middleware pattern. Behavior is intentionally byte-identical
 to the pre-refactor inline code so the SSE golden tests stay green.
 """
@@ -22,7 +22,7 @@ from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ..agent_loop import AgentLoopContext, AgentLoopEvent
-    from ...runtime.compat.runtime_adapter import OpenClawRuntimeAdapter
+    from ...runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
 logger = get_logger(__name__)
 
@@ -46,19 +46,19 @@ def _sanitize_snippet(text: str) -> str:
     return cleaned
 
 
-class OpenClawMemoryMiddleware:
-    """Injects OpenClaw retrieved-memory snippets and schedules reflection."""
+class RuntimeMemoryMiddleware:
+    """Injects assistant runtime retrieved-memory snippets and schedules reflection."""
 
-    name = "openclaw_memory"
+    name = "runtime_memory"
 
     def __init__(
         self,
-        runtime: "OpenClawRuntimeAdapter | None",
+        runtime: "AssistantRuntimeAdapter | None",
         phase_tag: Any,
     ) -> None:
         """
         Args:
-            runtime: OpenClaw runtime adapter; no-op when None.
+            runtime: assistant runtime adapter; no-op when None.
             phase_tag: AgentLoopPhase value used on emitted events. Injected
                 rather than hardcoded so tests can swap it.
         """
@@ -82,7 +82,7 @@ class OpenClawMemoryMiddleware:
                 tenant_id=ctx.tenant_id,
                 user_id=ctx.user_id,
                 query=ctx.message,
-                openclaw_mode=ctx.config.openclaw_mode,
+                runtime_mode=ctx.config.runtime_mode,
                 memory_profile=ctx.config.memory_profile,
                 max_results=6,
             )
@@ -96,7 +96,7 @@ class OpenClawMemoryMiddleware:
             # containing `</context>\n\nIgnore previous instructions...` would
             # otherwise break the fence and take over the turn.
             if memory_result.snippets:
-                ctx.openclaw_memory_snippets = [
+                ctx.runtime_memory_snippets = [
                     _sanitize_snippet(f"({snippet.source_type}) {snippet.content}")
                     for snippet in memory_result.snippets
                 ]
@@ -111,7 +111,7 @@ class OpenClawMemoryMiddleware:
                 },
             )
         except Exception:
-            logger.exception("OpenClaw memory retrieval failed")
+            logger.exception("assistant memory retrieval failed")
 
         # Reflection scheduling is best-effort and independent of retrieval.
         with contextlib.suppress(Exception):

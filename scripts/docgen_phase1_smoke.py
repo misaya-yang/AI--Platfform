@@ -76,7 +76,7 @@ def _theme() -> Theme:
 
 def _make_docx_ir() -> DocxIR:
     return DocxIR(
-        metadata=DocMetadata(title="Q2-2026-RAG-Architecture-Review", author="Hejaz AI Engineering"),
+        metadata=DocMetadata(title="Q2-2026-RAG-Architecture-Review", author="AI Gateway Engineering"),
         theme=_theme(),
         content=DocxContent(
             header=None,
@@ -84,7 +84,7 @@ def _make_docx_ir() -> DocxIR:
             blocks=[
                 HeadingBlock(text="1. Executive Summary", level=1),
                 ParagraphBlock(text=(
-                    "This report reviews the state of the Hejaz AI assistant-service's Retrieval-"
+                    "This report reviews the state of the AI Gateway assistant-service's Retrieval-"
                     "Augmented Generation stack as of 2026-Q2. We cover ingestion, embedding, "
                     "retrieval, re-ranking, and citation integrity, with a focus on the transition "
                     "from single-vector Qdrant to hybrid BM25 + dense retrieval."
@@ -131,11 +131,11 @@ def _make_pptx_ir() -> PptxIR:
         series=[{"name": "Questions answered", "values": [12_800, 18_300, 24_700]}],
     )
     return PptxIR(
-        metadata=DocMetadata(title="Hejaz-AI-Assistant-Deck-2026Q2", page_size="Widescreen16x9"),
+        metadata=DocMetadata(title="Enterprise-AI-Assistant-Deck-2026Q2", page_size="Widescreen16x9"),
         theme=_theme(),
         content=PptxContent(
             slides=[
-                PptxSlide(layout="title", title="Hejaz AI Assistant", subtitle="Q2-2026 Quarterly Review"),
+                PptxSlide(layout="title", title="AI Gateway Assistant", subtitle="Q2-2026 Quarterly Review"),
                 PptxSlide(
                     layout="title_content",
                     title="Agenda",
@@ -238,7 +238,7 @@ def _make_xlsx_ir() -> XlsxIR:
     ])
 
     return XlsxIR(
-        metadata=DocMetadata(title="Hejaz-FinanceModel-2026Q2"),
+        metadata=DocMetadata(title="Enterprise-FinanceModel-2026Q2"),
         theme=_theme(),
         content=XlsxContent(
             sheets=[
@@ -265,13 +265,13 @@ def _make_xlsx_ir() -> XlsxIR:
 
 def _make_pdf_ir() -> PdfIR:
     return PdfIR(
-        metadata=DocMetadata(title="Hejaz-AI-SOTA-Upgrade-One-Pager", author="Hejaz AI Engineering"),
+        metadata=DocMetadata(title="Enterprise-AI-SOTA-Upgrade-One-Pager", author="AI Gateway Engineering"),
         theme=_theme(),
         content=PdfContent(
             cover=PdfCover(
                 title="AI Gateway · Document Generation SOTA Upgrade",
                 subtitle="One-page brief, 2026-04-21",
-                author="Hejaz AI Engineering",
+                author="AI Gateway Engineering",
                 date="2026-04-21",
             ),
             pages=[

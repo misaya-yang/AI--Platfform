@@ -72,7 +72,7 @@ class MCPClient:
     """
 
     PROTOCOL_VERSION = "2025-11-25"
-    CLIENT_INFO = {"name": "hejaz-ai-sdk", "version": "1.0.0"}
+    CLIENT_INFO = {"name": "ai-gateway-sdk", "version": "1.0.0"}
 
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config

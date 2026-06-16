@@ -21,7 +21,7 @@ DesignSystemName = Literal[
     "carbon",
     "keynote",
     "editorial",
-    "hejaz",
+    "enterprise",
 ]
 
 DocumentFormat = Literal["docx", "pptx", "xlsx", "pdf"]

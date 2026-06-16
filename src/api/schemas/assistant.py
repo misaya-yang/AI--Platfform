@@ -177,9 +177,9 @@ class AssistantChatRequest(BaseModel):
     os_agent_enabled: bool = Field(
         default=False, description="Enable OS-Agent Lite tools for this request"
     )
-    openclaw_mode: Literal["off", "compat", "full"] = Field(
+    runtime_mode: Literal["off", "compat", "full"] = Field(
         default="compat",
-        description="OpenClaw runtime mode: off, compat, full",
+        description="assistant runtime mode: off, compat, full",
     )
     queue_mode: Literal["collect", "followup", "steer", "interrupt"] = Field(
         default="collect",

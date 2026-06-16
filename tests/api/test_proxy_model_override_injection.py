@@ -103,14 +103,14 @@ def test_safe_model_override_debug_exposes_no_secret_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_proxy_run_injects_gateway_resolved_hejaz_model() -> None:
+async def test_proxy_run_injects_gateway_resolved_gateway_model() -> None:
     body = json.dumps(
         {
             "input": {"messages": [{"role": "user", "content": "hello"}]},
             "config": {
                 "configurable": {
                     "thread_id": "t1",
-                    "hejaz_model": {"_api_key": "browser-secret"},
+                    "gateway_model": {"_api_key": "browser-secret"},
                 }
             },
         }
@@ -134,23 +134,23 @@ async def test_proxy_run_injects_gateway_resolved_hejaz_model() -> None:
     )
 
     payload = json.loads((updated or b"{}").decode("utf-8"))
-    hejaz_model = payload["config"]["configurable"]["hejaz_model"]
-    assert hejaz_model["tenant_id"] == "tenant-a"
-    assert hejaz_model["provider_id"] == "dashscope"
-    assert hejaz_model["provider"] == "dashscope"
-    assert hejaz_model["model_id"] == "qwen3.6-plus"
-    assert hejaz_model["model"] == "qwen3.6-plus"
-    assert hejaz_model["temperature"] == 0.2
-    assert hejaz_model["cache_epoch"] == "7"
-    assert hejaz_model["_api_key"] == "gateway-runtime-secret"
-    assert hejaz_model["api_key_fingerprint"] == hashlib.sha256(
+    gateway_model = payload["config"]["configurable"]["gateway_model"]
+    assert gateway_model["tenant_id"] == "tenant-a"
+    assert gateway_model["provider_id"] == "dashscope"
+    assert gateway_model["provider"] == "dashscope"
+    assert gateway_model["model_id"] == "qwen3.6-plus"
+    assert gateway_model["model"] == "qwen3.6-plus"
+    assert gateway_model["temperature"] == 0.2
+    assert gateway_model["cache_epoch"] == "7"
+    assert gateway_model["_api_key"] == "gateway-runtime-secret"
+    assert gateway_model["api_key_fingerprint"] == hashlib.sha256(
         b"gateway-runtime-secret"
     ).hexdigest()[:16]
     assert "browser-secret" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio
-async def test_proxy_run_injects_hejaz_model_when_config_is_absent() -> None:
+async def test_proxy_run_injects_gateway_model_when_config_is_absent() -> None:
     body = json.dumps(
         {
             "input": {"messages": [{"role": "user", "content": "hello"}]},
@@ -174,10 +174,10 @@ async def test_proxy_run_injects_hejaz_model_when_config_is_absent() -> None:
     )
 
     payload = json.loads((updated or b"{}").decode("utf-8"))
-    hejaz_model = payload["config"]["configurable"]["hejaz_model"]
-    assert hejaz_model["provider_id"] == "dashscope"
-    assert hejaz_model["model_id"] == "qwen3.6-plus"
-    assert hejaz_model["_api_key"] == "gateway-runtime-secret"
+    gateway_model = payload["config"]["configurable"]["gateway_model"]
+    assert gateway_model["provider_id"] == "dashscope"
+    assert gateway_model["model_id"] == "qwen3.6-plus"
+    assert gateway_model["_api_key"] == "gateway-runtime-secret"
 
 
 @pytest.mark.asyncio
@@ -185,7 +185,7 @@ async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key
     body = json.dumps(
         {
             "input": {"messages": [{"role": "user", "content": "hello"}]},
-            "config": {"configurable": {"hejaz_model": {"api_key": "browser-secret"}}},
+            "config": {"configurable": {"gateway_model": {"api_key": "browser-secret"}}},
         }
     ).encode("utf-8")
 
@@ -217,8 +217,8 @@ async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key
     )
 
     payload = json.loads((updated or b"{}").decode("utf-8"))
-    hejaz_model = payload["config"]["configurable"]["hejaz_model"]
-    candidates = hejaz_model["failover"]["candidates"]
+    gateway_model = payload["config"]["configurable"]["gateway_model"]
+    candidates = gateway_model["failover"]["candidates"]
 
     assert [(c["provider_id"], c["model_id"]) for c in candidates] == [
         ("dashscope", "qwen3.6-plus"),
@@ -230,11 +230,11 @@ async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key
 
 
 @pytest.mark.asyncio
-async def test_proxy_run_scrubs_browser_hejaz_model_when_override_disabled() -> None:
+async def test_proxy_run_scrubs_browser_gateway_model_when_override_disabled() -> None:
     body = json.dumps(
         {
             "input": {"messages": [{"role": "user", "content": "hello"}]},
-            "config": {"configurable": {"hejaz_model": {"_api_key": "browser-secret"}}},
+            "config": {"configurable": {"gateway_model": {"_api_key": "browser-secret"}}},
         }
     ).encode("utf-8")
 
@@ -248,5 +248,5 @@ async def test_proxy_run_scrubs_browser_hejaz_model_when_override_disabled() -> 
     )
 
     payload = json.loads((updated or b"{}").decode("utf-8"))
-    assert "hejaz_model" not in payload["config"]["configurable"]
+    assert "gateway_model" not in payload["config"]["configurable"]
     assert "browser-secret" not in json.dumps(payload)

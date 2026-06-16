@@ -1,5 +1,5 @@
 """Compatibility adapter layer for the Assistant runtime."""
 
-from .runtime_adapter import OpenClawRuntimeAdapter
+from .runtime_adapter import AssistantRuntimeAdapter
 
-__all__ = ["OpenClawRuntimeAdapter"]
+__all__ = ["AssistantRuntimeAdapter"]

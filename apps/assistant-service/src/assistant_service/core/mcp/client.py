@@ -191,7 +191,7 @@ class MCPClient:
         result = await self._jsonrpc("initialize", {
             "protocolVersion": "2025-11-25",
             "capabilities": {"tools": {}},
-            "clientInfo": {"name": "hejaz-ai-gateway", "version": "1.0.0"},
+            "clientInfo": {"name": "ai-gateway", "version": "1.0.0"},
         })
         self._server_info = result.get("serverInfo", {})
         await self._notify("notifications/initialized")

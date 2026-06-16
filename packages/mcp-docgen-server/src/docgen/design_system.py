@@ -10,7 +10,7 @@ Four built-in systems, each a complete design:
   carbon    — IBM Carbon productive, high-contrast, accent #0F62FE.
   keynote   — Apple Keynote-clean; surface white, accent #0071E3.
   editorial — magazine / New Yorker vibe, cream surface, red accent.
-  hejaz     — project-specific green + gold (user's brand).
+  enterprise — reusable green + gold enterprise preset.
 
 Each system supplies:
   * 14 colour tokens (semantic, LCH-ish derivation in mind)
@@ -300,7 +300,7 @@ def _editorial() -> DesignSystem:
     )
 
 
-def _hejaz() -> DesignSystem:
+def _enterprise() -> DesignSystem:
     c = ColorTokens(
         surface="FAF8F2",
         surface_elevated="FFFFFF",
@@ -318,8 +318,8 @@ def _hejaz() -> DesignSystem:
         accent_secondary="7C3AED",
     )
     return DesignSystem(
-        name="hejaz",
-        description="Hejaz AI brand — deep green + gold.",
+        name="enterprise",
+        description="Enterprise preset - deep green + gold.",
         colors=c,
         type_scale=TypeScale(),
         shapes=ShapeTokens(),
@@ -382,7 +382,7 @@ _REGISTRY: dict[str, DesignSystem] = {
     "carbon": _carbon(),
     "keynote": _keynote(),
     "editorial": _editorial(),
-    "hejaz": _hejaz(),
+    "enterprise": _enterprise(),
     "claude": _claude(),
 }
 

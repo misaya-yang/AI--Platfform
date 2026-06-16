@@ -1,5 +1,5 @@
 """Runtime extensions for the Assistant agent loop."""
 
-from .compat.runtime_adapter import OpenClawRuntimeAdapter
+from .compat.runtime_adapter import AssistantRuntimeAdapter
 
-__all__ = ["OpenClawRuntimeAdapter"]
+__all__ = ["AssistantRuntimeAdapter"]

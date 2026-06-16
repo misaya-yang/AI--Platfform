@@ -1,6 +1,6 @@
 /**
  * CLI configuration types.
- * Config stored at ~/.hejaz/config.json
+ * Config stored at ~/.ai-gateway/config.json
  */
 
 export interface CLIConfig {

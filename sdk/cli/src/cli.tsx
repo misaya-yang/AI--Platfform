@@ -2,8 +2,8 @@
  * CLI entry point — argument parsing + Ink App render.
  *
  * Usage:
- *   hejaz --api-key gw_xxx --base-url https://yang.misaya.online
- *   hejaz --config   # Open config wizard
+ *   ai-gateway --api-key gw_xxx --base-url http://localhost:8080
+ *   ai-gateway --config   # Open config wizard
  */
 
 import { render } from "ink";
@@ -16,7 +16,7 @@ import { App } from "./app.js";
 const cli = meow(
   `
   Usage
-    $ hejaz [options]
+    $ ai-gateway [options]
 
   Options
     --api-key, -k     API key for the AI Gateway
@@ -27,9 +27,9 @@ const cli = meow(
     --version, -v     Show version
 
   Examples
-    $ hejaz --api-key gw_xxx --base-url https://yang.misaya.online
-    $ hejaz -k gw_xxx -m qwen3.6-plus
-    $ hejaz --kb product-docs,sales
+    $ ai-gateway --api-key gw_xxx --base-url http://localhost:8080
+    $ ai-gateway -k gw_xxx -m qwen3.6-plus
+    $ ai-gateway --kb product-docs,sales
 `,
   {
     importMeta: import.meta,
@@ -67,8 +67,8 @@ if (cli.flags.apiKey || cli.flags.baseUrl || cli.flags.model || cli.flags.tenant
 if (!config.api_key) {
   console.error(
     "\x1b[31mError: No API key configured.\x1b[0m\n\n" +
-      "Run with: hejaz --api-key gw_YOUR_KEY\n" +
-      "Or set in: ~/.hejaz/config.json\n",
+      "Run with: ai-gateway --api-key gw_YOUR_KEY\n" +
+      "Or set in: ~/.ai-gateway/config.json\n",
   );
   process.exit(1);
 }

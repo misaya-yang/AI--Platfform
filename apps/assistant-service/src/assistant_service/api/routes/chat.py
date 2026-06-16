@@ -50,7 +50,7 @@ class ChatRequest(BaseModel):
     os_agent_enabled: bool | None = None
     enable_task_planning: bool = False
     confirm_plan: bool = False
-    openclaw_mode: str | None = None
+    runtime_mode: str | None = None
     queue_mode: str | None = None
     context_detail: bool = False
     skills_enabled: bool | None = None
@@ -94,7 +94,7 @@ def _build_config(body: ChatRequest, model_registry):
         execution_profile=body.execution_profile,
         memory_mode=body.memory_mode,
         os_agent_enabled=body.os_agent_enabled,
-        openclaw_mode=body.openclaw_mode,
+        runtime_mode=body.runtime_mode,
         queue_mode=body.queue_mode,
         context_detail=body.context_detail,
         skills_enabled=body.skills_enabled,

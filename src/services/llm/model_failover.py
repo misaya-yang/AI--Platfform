@@ -1,6 +1,6 @@
 """Gateway-owned LangGraph model failover helpers.
 
-This module builds the server-only ``configurable.hejaz_model`` payload consumed
+This module builds the server-only ``configurable.gateway_model`` payload consumed
 by LangChain middleware. Browser payloads are never trusted for provider,
 model, or credential selection.
 """

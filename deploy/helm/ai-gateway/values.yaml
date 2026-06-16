@@ -6,7 +6,7 @@
 # =============================================================================
 
 global:
-  imageRegistry: "ghcr.io/hejaz-io"
+  imageRegistry: "ghcr.io/YOUR-ORG"
   imagePullPolicy: IfNotPresent
 
 # -----------------------------------------------------------------------------

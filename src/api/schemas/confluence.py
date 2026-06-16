@@ -81,7 +81,7 @@ class ConfluenceSpaceBindingCreateSchema(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     dataset_id: str = Field(..., description="Target dataset ID")
-    space_key: str = Field(..., description="Confluence space key (e.g., 'HFDSH')")
+    space_key: str = Field(..., description="Confluence space key (e.g., 'ENG')")
     root_page_id: str | None = Field(
         default=None, description="Root page ID to sync from (deprecated, use root_page_ids)"
     )

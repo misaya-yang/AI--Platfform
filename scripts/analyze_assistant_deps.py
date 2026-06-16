@@ -109,8 +109,8 @@ def classify(target_module: str) -> tuple[str, str]:
         return "contract", "metrics — observability contract; both services want to record"
     if tm == "src.services.storage" or tm.startswith("src.services.storage."):
         return "contract", "storage — artifact/file storage contract; impl differs per service"
-    if tm == "src.openclaw" or tm.startswith("src.openclaw."):
-        return "move", "src.openclaw.* — assistant-owned, dedup candidate"
+    if tm == "src.runtime" or tm.startswith("src.runtime."):
+        return "move", "src.runtime.* — assistant-owned, dedup candidate"
     return "review", "unclassified — operator must reclassify before Phase 2"
 
 

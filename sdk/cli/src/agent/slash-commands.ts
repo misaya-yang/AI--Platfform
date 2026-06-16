@@ -185,7 +185,7 @@ export function parseSlashCommand(
           `  Session:  ${state.sessionId ?? "none"}`,
           `  MCP:      ${(state.mcpServers ?? []).join(", ") || "none"}`,
           "",
-          "Edit: ~/.hejaz/config.json",
+          "Edit: ~/.ai-gateway/config.json",
         ].join("\n"),
       };
 
@@ -315,7 +315,7 @@ export function parseSlashCommand(
           "Agent Management:\n" +
           "  /agent list              — List available agents (builtin + custom)\n" +
           "  /agent run <name> <prompt> — Run an agent with a task\n" +
-          "\nCustom agents: ~/.hejaz/agents/*.md or .hejaz/agents/*.md",
+          "\nCustom agents: ~/.ai-gateway/agents/*.md or .ai-gateway/agents/*.md",
       };
 
     // ─── /share ──────────────────────────────────────────────
@@ -345,7 +345,7 @@ export function parseSlashCommand(
 }
 
 const HELP_TEXT = `
-Hejaz AI CLI Commands:
+AI Gateway CLI Commands:
 
   Conversation
     /new                  Start new conversation

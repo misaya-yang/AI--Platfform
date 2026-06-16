@@ -51,7 +51,7 @@ async def main() -> int:
     for ds_name in systems:
         brief = Brief(
             doc_type="pptx",
-            title=f"Hejaz AI · Q2-2026 Review — {ds_name}",
+            title=f"AI Gateway · Q2-2026 Review — {ds_name}",
             goal="Quarterly review",
             body_markdown=BRIEF_BODY,
             style_hints={

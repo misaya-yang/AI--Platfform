@@ -21,7 +21,7 @@ app.add_middleware(RequestIDMiddleware)
 ```
 
 The header echoes back on the response so a curl from the gateway sees
-the same ID it sent and downstream APIs (Imam → KB) can keep using it
+the same ID it sent and downstream APIs (assistant → KB) can keep using it
 when invoking each other.
 """
 

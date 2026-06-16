@@ -110,7 +110,7 @@ def test_gateway_configurable_overwrites_identity_and_scrubs_browser_secrets() -
                     "user_id": "attacker-user",
                     "tenant_id": "attacker-tenant",
                     "checkpoint_ns": "attacker-ns",
-                    "hejaz_model": {"_api_key": "browser-secret"},
+                    "gateway_model": {"_api_key": "browser-secret"},
                     "provider_api_key": "nested-secret",
                     "locale": "en",
                 },
@@ -135,7 +135,7 @@ def test_gateway_configurable_overwrites_identity_and_scrubs_browser_secrets() -
     assert configurable["checkpoint_ns"] == "tenant-a"
     assert configurable["thread_id"] == "thread-123"
     assert configurable["locale"] == "en"
-    assert "hejaz_model" not in configurable
+    assert "gateway_model" not in configurable
     assert "provider_api_key" not in configurable
     assert "browser-secret" not in json.dumps(payload)
     assert "nested-secret" not in json.dumps(payload)
@@ -177,21 +177,21 @@ async def test_stream_and_wait_paths_receive_same_gateway_model_override() -> No
     stream_config, wait_config = results
     assert stream_config["user_id"] == "gateway-user"
     assert wait_config["tenant_id"] == "tenant-a"
-    assert stream_config["hejaz_model"] == wait_config["hejaz_model"]
-    hejaz_model = stream_config["hejaz_model"]
-    assert hejaz_model["provider_id"] == "dashscope-prod"
-    assert hejaz_model["model_id"] == "qwen-max"
-    assert hejaz_model["api_key_fingerprint"] == hashlib.sha256(
+    assert stream_config["gateway_model"] == wait_config["gateway_model"]
+    gateway_model = stream_config["gateway_model"]
+    assert gateway_model["provider_id"] == "dashscope-prod"
+    assert gateway_model["model_id"] == "qwen-max"
+    assert gateway_model["api_key_fingerprint"] == hashlib.sha256(
         b"gateway-runtime-secret"
     ).hexdigest()[:16]
 
 
 @pytest.mark.asyncio
-async def test_disabled_override_does_not_restore_browser_hejaz_model() -> None:
+async def test_disabled_override_does_not_restore_browser_gateway_model() -> None:
     body = json.dumps(
         {
             "input": {"messages": [{"role": "user", "content": "hello"}]},
-            "config": {"configurable": {"hejaz_model": {"_api_key": "browser-secret"}}},
+            "config": {"configurable": {"gateway_model": {"_api_key": "browser-secret"}}},
         }
     ).encode("utf-8")
 
@@ -213,7 +213,7 @@ async def test_disabled_override_does_not_restore_browser_hejaz_model() -> None:
     )
 
     payload = json.loads((updated or b"{}").decode("utf-8"))
-    assert "hejaz_model" not in payload["config"]["configurable"]
+    assert "gateway_model" not in payload["config"]["configurable"]
     assert "browser-secret" not in json.dumps(payload)
 
 

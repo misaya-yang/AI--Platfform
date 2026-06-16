@@ -161,7 +161,7 @@
             "title": "Model Id",
             "type": "string"
           },
-          "openclaw_mode": {
+          "runtime_mode": {
             "anyOf": [
               {
                 "type": "string"

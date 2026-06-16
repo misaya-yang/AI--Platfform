@@ -65,11 +65,11 @@ def _make_briefs() -> dict[str, Brief]:
     return {
         "docx": Brief(
             doc_type="docx",
-            title="Hejaz AI Gateway — Q2-2026 RAG Architecture Review",
+            title="AI Gateway — Q2-2026 RAG Architecture Review",
             goal="Internal technical review of the RAG stack",
             body_markdown=(
                 "# Executive Summary\n"
-                "This document reviews the state of the Hejaz AI assistant-service's Retrieval-Augmented "
+                "This document reviews the state of the AI Gateway assistant-service's Retrieval-Augmented "
                 "Generation pipeline as of 2026-Q2, covering ingestion, embedding, retrieval, re-ranking, "
                 "and citation integrity.\n\n"
                 "# Scorecard\n"
@@ -91,12 +91,12 @@ def _make_briefs() -> dict[str, Brief]:
                 "- Vision critic runs on a fresh Anthropic client — no shared context.\n"
                 "- Sandbox-first: LibreOffice and Playwright never enter the API container.\n"
             ),
-            palette_name="hejaz-green-gold",
+            palette_name="enterprise-green-gold",
             font_pair_name="helvetica-helvetica",
         ),
         "pptx": Brief(
             doc_type="pptx",
-            title="Hejaz AI Assistant — Q2-2026 Quarterly Review",
+            title="AI Gateway Assistant — Q2-2026 Quarterly Review",
             goal="Quarterly review deck for the engineering team and leadership",
             body_markdown=(
                 "# Where we were\n"
@@ -115,13 +115,13 @@ def _make_briefs() -> dict[str, Brief]:
                 "# Close\n"
                 "Render then verify, not verify then render.\n"
             ),
-            palette_name="hejaz-green-gold",
+            palette_name="enterprise-green-gold",
             font_pair_name="helvetica-helvetica",
             style_hints={"chart": "true"},
         ),
         "xlsx": Brief(
             doc_type="xlsx",
-            title="Hejaz FinanceModel 2026",
+            title="Enterprise FinanceModel 2026",
             goal="Three-year P&L with growth assumption and gross-profit formulas",
             palette_name="corporate-navy",
             font_pair_name="helvetica-helvetica",
@@ -129,7 +129,7 @@ def _make_briefs() -> dict[str, Brief]:
         ),
         "pdf": Brief(
             doc_type="pdf",
-            title="Hejaz AI — Document Generation SOTA Upgrade, One-page Brief",
+            title="AI Gateway — Document Generation SOTA Upgrade, One-page Brief",
             goal="Public one-page project brief for internal stakeholders report",
             body_markdown=(
                 "# Why now\n"
@@ -150,7 +150,7 @@ def _make_briefs() -> dict[str, Brief]:
                 "Phase 1 = IR and four renderers. Phase 2 = planner plus style guide. "
                 "Phase 3 = vision critic and fix loop. Phase 4 = artifact store and streaming UX.\n"
             ),
-            palette_name="hejaz-green-gold",
+            palette_name="enterprise-green-gold",
             font_pair_name="times-helvetica",
         ),
     }

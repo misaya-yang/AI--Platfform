@@ -1,7 +1,7 @@
 """
 Skills sub-package — execution engine, parser, tool bridge.
 
-Extends the OpenClaw skills system with:
+Extends the runtime skills system with:
 - SKILL.md parsing (YAML frontmatter + markdown)
 - Skill → Tool registration (function_call bridge)
 - Execution dispatching (builtin://, md://, db://)

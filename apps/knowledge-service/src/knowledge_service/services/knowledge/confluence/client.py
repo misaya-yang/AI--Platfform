@@ -498,7 +498,7 @@ class ConfluenceClient:
         根据 Space Key 获取空间
 
         Args:
-            space_key: 空间 Key (如 "HFDSH")
+            space_key: 空间 Key (如 "ENG")
 
         Returns:
             ConfluenceSpace 对象
@@ -575,7 +575,7 @@ class ConfluenceClient:
             搜索结果列表
 
         Example CQL:
-            - space=HFDSH AND type=page
+            - space=ENG AND type=page
             - lastModified > "2024-01-01"
             - title ~ "FAQ"
         """

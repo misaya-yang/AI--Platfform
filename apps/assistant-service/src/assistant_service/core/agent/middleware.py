@@ -2,7 +2,7 @@
 AgentMiddleware protocol + chain runner.
 
 Middleware is the project's answer to harness-engine's "middleware layer"
-(reference_harness_engine.md) and mirrors the callback pattern Imam uses via
+(reference_harness_engine.md) and mirrors the callback pattern agent runtimes use via
 LangGraph's `BaseMessageModifier`. The agent loop stays a thin scaffold;
 extension concerns (memory load, skill inject, permission gating, sensors)
 register as middleware.

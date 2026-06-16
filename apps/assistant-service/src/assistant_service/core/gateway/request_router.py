@@ -16,7 +16,7 @@ class RoutedAssistantRequest:
     memory_mode: str
     os_agent_enabled: bool
     policy_profile: str
-    openclaw_mode: str = "compat"
+    runtime_mode: str = "compat"
     queue_mode: str = "collect"
     context_detail: bool = False
     skills_enabled: bool | None = None
@@ -28,7 +28,7 @@ class AssistantRequestRouter:
 
     ALLOWED_EXECUTION_PROFILES = {"safe", "balanced", "power"}
     ALLOWED_MEMORY_MODES = {"auto", "strict", "off"}
-    ALLOWED_OPENCLAW_MODES = {"off", "compat", "full"}
+    ALLOWED_RUNTIME_MODES = {"off", "compat", "full"}
     ALLOWED_QUEUE_MODES = {"collect", "followup", "steer", "interrupt"}
     ALLOWED_MEMORY_PROFILES = {"off", "basic", "hybrid"}
 
@@ -47,9 +47,9 @@ class AssistantRequestRouter:
         if memory_mode not in self.ALLOWED_MEMORY_MODES:
             memory_mode = self.policy_engine.default_memory_mode
 
-        openclaw_mode = str(getattr(config, "openclaw_mode", "compat") or "compat").strip().lower()
-        if openclaw_mode not in self.ALLOWED_OPENCLAW_MODES:
-            openclaw_mode = "compat"
+        runtime_mode = str(getattr(config, "runtime_mode", "compat") or "compat").strip().lower()
+        if runtime_mode not in self.ALLOWED_RUNTIME_MODES:
+            runtime_mode = "compat"
 
         queue_mode = str(getattr(config, "queue_mode", "collect") or "collect").strip().lower()
         if queue_mode not in self.ALLOWED_QUEUE_MODES:
@@ -84,7 +84,7 @@ class AssistantRequestRouter:
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
             policy_profile=profile,
-            openclaw_mode=openclaw_mode,
+            runtime_mode=runtime_mode,
             queue_mode=queue_mode,
             context_detail=bool(getattr(config, "context_detail", False)),
             skills_enabled=skills_enabled,

@@ -88,7 +88,7 @@ guardrails and context management. Level 4 Production Harness with full
 six-layer plus metrics plus error recovery. Level 5 Self-improving — the
 harness tunes its own prompts, retrieval, and routing via feedback loops.
 
-# Where Hejaz stands today
+# Where this platform stands today
 Current assessment: Level 4 Production. 53 out of 60 across the six layers.
 Gaps to Level 5: self-built tracing pipeline, semantic response quality
 scoring, differentiated init vs continuation prompts.
@@ -207,7 +207,7 @@ async def main() -> int:
         doc_type="pptx",
         title="Agent Harness Engineering — 2026 Internal Training",
         goal=(
-            "30-minute internal training deck for Hejaz engineers and product. "
+            "30-minute internal training deck for platform engineers and product. "
             "Audience knows LLM / RAG / Agents at a working level but is new to "
             "the 2026 'harness' framing. Deck must be professional, technical, "
             "Stripe / Anthropic engineering-deck tone. 12–15 slides. Bilingual: "

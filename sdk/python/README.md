@@ -1,11 +1,11 @@
-# Hejaz AI Assistant SDK
+# AI Gateway Assistant SDK
 
-Python SDK for the Hejaz AI Gateway — chat, streaming, knowledge base, image generation, and more.
+Python SDK for AI Gateway — chat, streaming, knowledge base, image generation, and more.
 
 ## Install
 
 ```bash
-pip install hejaz-ai-sdk
+pip install ai-gateway-sdk
 ```
 
 ## Quick Start
@@ -13,7 +13,7 @@ pip install hejaz-ai-sdk
 ```python
 from ai_assistant import AssistantClient
 
-async with AssistantClient(api_key="your-key", base_url="https://api.hejaz.com") as client:
+async with AssistantClient(api_key="your-key", base_url="http://localhost:8080") as client:
     # Simple chat
     response = await client.chat.send("Summarize the onboarding checklist")
     print(response.content)

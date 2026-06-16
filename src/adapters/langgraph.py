@@ -157,7 +157,7 @@ class LangGraphAdapter(ProtocolAdapter):
             configurable = {}
         configurable = dict(configurable)
         # Browser/caller supplied model config is never authoritative.
-        configurable.pop("hejaz_model", None)
+        configurable.pop("gateway_model", None)
 
         # Merge in caller-provided configurable from request.context / request.parameters.
         for source in (request.context, request.parameters):
@@ -166,7 +166,7 @@ class LangGraphAdapter(ProtocolAdapter):
             src_cfg = source.get("configurable")
             if isinstance(src_cfg, dict):
                 for k, v in src_cfg.items():
-                    if k == "hejaz_model":
+                    if k == "gateway_model":
                         continue
                     if k not in configurable and v is not None:
                         configurable[k] = v
@@ -213,7 +213,7 @@ class LangGraphAdapter(ProtocolAdapter):
         run_config = self._build_base_run_config(request, thread_id=thread_id)
         model_override = await self._build_model_override_config(request)
         if model_override:
-            run_config["configurable"]["hejaz_model"] = model_override
+            run_config["configurable"]["gateway_model"] = model_override
         return run_config
 
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:

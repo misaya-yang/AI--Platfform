@@ -1,10 +1,10 @@
 /**
- * HEJAZ.md hierarchical project memory system.
+ * AGENTS.md hierarchical project memory system.
  *
  * Discovery order:
- * 1. ~/.hejaz/HEJAZ.md (global)
- * 2. <project-root>/HEJAZ.md (project-level)
- * 3. <project-root>/.hejaz/rules/*.md (modular rules)
+ * 1. ~/.ai-gateway/AGENTS.md (global)
+ * 2. <project-root>/AGENTS.md (project-level)
+ * 3. <project-root>/.ai-gateway/rules/*.md (modular rules)
  *
  * All found content is concatenated and injected into system prompt.
  */
@@ -16,21 +16,21 @@ import { join, resolve } from "node:path";
 export function loadProjectMemory(): string {
   const parts: string[] = [];
 
-  // 1. Global HEJAZ.md
-  const globalPath = join(homedir(), ".hejaz", "HEJAZ.md");
+  // 1. Global AGENTS.md
+  const globalPath = join(homedir(), ".ai-gateway", "AGENTS.md");
   if (existsSync(globalPath)) {
     parts.push(`[Global Instructions]\n${readFileSync(globalPath, "utf-8").trim()}`);
   }
 
-  // 2. Project-level HEJAZ.md (walk up from cwd)
-  const projectFile = findUpward("HEJAZ.md", process.cwd());
+  // 2. Project-level AGENTS.md (walk up from cwd)
+  const projectFile = findUpward("AGENTS.md", process.cwd());
   if (projectFile) {
     parts.push(`[Project Instructions]\n${readFileSync(projectFile, "utf-8").trim()}`);
   }
 
-  // 3. .hejaz/rules/*.md in project root
+  // 3. .ai-gateway/rules/*.md in project root
   const projectRoot = projectFile ? resolve(projectFile, "..") : process.cwd();
-  const rulesDir = join(projectRoot, ".hejaz", "rules");
+  const rulesDir = join(projectRoot, ".ai-gateway", "rules");
   if (existsSync(rulesDir)) {
     try {
       const files = readdirSync(rulesDir).filter((f) => f.endsWith(".md")).sort();
@@ -44,7 +44,7 @@ export function loadProjectMemory(): string {
   }
 
   // 4. Load memories.json entries
-  const memoriesPath = join(homedir(), ".hejaz", "memories.json");
+  const memoriesPath = join(homedir(), ".ai-gateway", "memories.json");
   if (existsSync(memoriesPath)) {
     try {
       const memories = JSON.parse(readFileSync(memoriesPath, "utf-8"));

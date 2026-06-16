@@ -75,6 +75,26 @@ OPENAPI_TAGS = [
 ]
 
 
+def _make_process_file_handler(app: FastAPI, *, process_file_task):
+    """Build a legacy task handler bound to the initialized assistant service."""
+
+    async def _handler(payload):
+        assistant_service = getattr(app.state, "assistant_service", None)
+        file_processor = (
+            getattr(assistant_service, "file_processor", None)
+            if assistant_service is not None
+            else None
+        )
+        if file_processor is None:
+            logger.warning(
+                "Skipping process_file task because assistant_service.file_processor is unavailable"
+            )
+            return None
+        return await process_file_task(payload, file_processor)
+
+    return _handler
+
+
 def create_app() -> FastAPI:
     """
     创建 FastAPI 应用
@@ -292,10 +312,20 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_router, prefix="/v1")
 
     # ========== Scalar API 文档（现代化 UI + 可调用）==========
-    from scalar_fastapi import Layout, get_scalar_api_reference
+    try:
+        from scalar_fastapi import Layout, get_scalar_api_reference
+    except ModuleNotFoundError:
+        Layout = None
+        get_scalar_api_reference = None
 
     @app.get("/scalar", include_in_schema=False)
     async def scalar_html():
+        if get_scalar_api_reference is None or Layout is None:
+            return PlainTextResponse(
+                "Scalar UI is unavailable because scalar-fastapi is not installed. "
+                "Use /docs or install project dependencies.",
+                status_code=503,
+            )
         return get_scalar_api_reference(
             openapi_url=app.openapi_url,
             title=f"{app.title} — API Reference",

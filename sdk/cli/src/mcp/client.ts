@@ -32,7 +32,7 @@ export class MCPClient {
   tools: MCPTool[] = [];
 
   static PROTOCOL_VERSION = "2025-11-25";
-  static CLIENT_INFO = { name: "hejaz-ai-cli", version: "1.0.0" };
+  static CLIENT_INFO = { name: "ai-gateway-cli", version: "1.0.0" };
 
   constructor(config: MCPServerConfig) {
     this.config = config;

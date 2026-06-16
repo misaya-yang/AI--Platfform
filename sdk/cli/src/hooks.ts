@@ -1,7 +1,7 @@
 /**
  * Hooks system — Pre/Post tool execution hooks.
  *
- * Config: ~/.hejaz/hooks.json
+ * Config: ~/.ai-gateway/hooks.json
  *
  * Supported events:
  * - PreToolUse: runs before tool execution, can deny (exit 2) or transform args
@@ -34,7 +34,7 @@ interface HooksConfig {
   PostToolUse?: HookRule[];
 }
 
-const HOOKS_FILE = join(homedir(), ".hejaz", "hooks.json");
+const HOOKS_FILE = join(homedir(), ".ai-gateway", "hooks.json");
 
 let cachedHooks: HooksConfig | null = null;
 

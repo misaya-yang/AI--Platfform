@@ -9,7 +9,7 @@ description = "Knowledge Base Microservice - Independent KB service extracted fr
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Hejaz Engineering" }]
+authors = [{ name = "AI Gateway Maintainers" }]
 dependencies = [
     "fastapi>=0.124.0",
     "uvicorn>=0.38.0",

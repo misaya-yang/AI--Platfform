@@ -48,11 +48,11 @@ async def test_usage_record_metadata_contains_pricing_and_token_source():
     assert record.metadata["token_source"] == "zero_on_failure"
 
 
-def test_effective_hejaz_model_payload_wins_for_cost_attribution():
+def test_effective_gateway_model_payload_wins_for_cost_attribution():
     payload = {
         "config": {
             "configurable": {
-                "hejaz_model": {
+                "gateway_model": {
                     "provider": "dashscope",
                     "model": "qwen-max",
                 }

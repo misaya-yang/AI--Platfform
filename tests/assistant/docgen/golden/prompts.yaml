@@ -61,7 +61,7 @@ prompts:
 
   - id: docx-one-pager
     doc_type: docx
-    title: Project One-pager — Imam Assistant v3
+    title: Project One-pager — General Assistant v3
     goal: One-page product brief
 
   - id: docx-research-note
@@ -72,7 +72,7 @@ prompts:
   # -------------------- PPTX (8) --------------------
   - id: pptx-quarterly-deck
     doc_type: pptx
-    title: Hejaz AI Q2 Deck
+    title: AI Gateway Q2 Deck
     goal: Quarterly update deck for the team
     body_markdown: |
       # Problem
@@ -84,7 +84,7 @@ prompts:
 
   - id: pptx-investor-pitch
     doc_type: pptx
-    title: Hejaz AI Investor Pitch
+    title: AI Gateway Investor Pitch
     goal: Short investor pitch deck
 
   - id: pptx-onboarding
@@ -99,7 +99,7 @@ prompts:
 
   - id: pptx-product-review
     doc_type: pptx
-    title: Product Review — Imam Assistant
+    title: Product Review — General Assistant
     goal: Product review presentation
 
   - id: pptx-research-share

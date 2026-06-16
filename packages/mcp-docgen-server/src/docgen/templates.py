@@ -57,11 +57,11 @@ _BUILTINS: dict[str, Template] = {
     ),
     "enterprise-dark": Template(
         name="enterprise-dark",
-        description="Enterprise dark — hejaz-green-gold + serif body.",
-        palette_name="hejaz-green-gold",
+        description="Enterprise dark — enterprise-green-gold + serif body.",
+        palette_name="enterprise-green-gold",
         font_pair_name="times-helvetica",
         accent_style="left_bar",
-        header_text="Hejaz AI Engineering",
+        header_text="AI Gateway Engineering",
         cover_treatment="full",
     ),
 }

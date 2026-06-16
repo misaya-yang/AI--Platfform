@@ -134,7 +134,7 @@ function checkPathAccess(
       if (!absPath.startsWith(cwd + "/") && absPath !== cwd) {
         return {
           action: "deny",
-          reason: `Path outside allowed directories. Add to ~/.hejaz/permissions.json allowed_dirs`,
+          reason: `Path outside allowed directories. Add to ~/.ai-gateway/permissions.json allowed_dirs`,
         };
       }
     }

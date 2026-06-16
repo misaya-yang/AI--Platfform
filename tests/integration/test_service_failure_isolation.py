@@ -297,7 +297,7 @@ async def test_assistant_service_down_isolation(
         login_resp = await _async_post(
             http,
             f"{_API_PREFIX}/auth/login",
-            json={"email": "nonexistent@hejaz.test", "password": "x"},
+            json={"email": "nonexistent@enterprise.test", "password": "x"},
             timeout=5.0,
         )
         assert login_resp.status_code < 500, (

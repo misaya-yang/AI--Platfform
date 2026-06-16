@@ -11,8 +11,9 @@ import { bash, bashDefinition } from "./bash.js";
 import { listDir, listDirDefinition } from "./list-dir.js";
 import { tree, treeDefinition } from "./tree.js";
 import { todoWrite, todoDefinition } from "./todo.js";
+import type { ToolDefinition } from "../types/tools.js";
 
-export const OS_TOOL_DEFINITIONS = [
+export const OS_TOOL_DEFINITIONS: ToolDefinition[] = [
   readFileDefinition,
   writeFileDefinition,
   editFileDefinition,

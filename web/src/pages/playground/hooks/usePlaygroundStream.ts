@@ -130,9 +130,9 @@ function asSafeString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function readHejazFailoverEvent(value: unknown): Record<string, unknown> | null {
+function readGatewayFailoverEvent(value: unknown): Record<string, unknown> | null {
   const data = asRecord(value);
-  if (!data || data.type !== "hejaz_model_failover") return null;
+  if (!data || data.type !== "gateway_model_failover") return null;
   return data;
 }
 
@@ -770,7 +770,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
               }
 
               if (eventName === "custom") {
-                const failoverEvent = readHejazFailoverEvent(eventData);
+                const failoverEvent = readGatewayFailoverEvent(eventData);
                 if (failoverEvent) {
                   const status = asSafeString(failoverEvent.status);
                   const providerId = asSafeString(failoverEvent.provider_id);
@@ -791,7 +791,7 @@ export function usePlaygroundStream(opts: UsePlaygroundStreamOptions) {
                         createdAt: new Date().toISOString(),
                         status: "failed",
                         meta: {
-                          type: "hejaz_model_failover_notice",
+                          type: "gateway_model_failover_notice",
                           failover_status: status,
                           provider_id: providerId,
                           model_id: modelId,

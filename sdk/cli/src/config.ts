@@ -1,5 +1,5 @@
 /**
- * Config manager — reads/writes ~/.hejaz/config.json and permissions.json
+ * Config manager — reads/writes ~/.ai-gateway/config.json and permissions.json
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,7 +13,7 @@ import {
   type PermissionsConfig,
 } from "./types/config.js";
 
-const CONFIG_DIR = join(homedir(), ".hejaz");
+const CONFIG_DIR = join(homedir(), ".ai-gateway");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const PERMISSIONS_FILE = join(CONFIG_DIR, "permissions.json");
 const MCP_SERVERS_FILE = join(CONFIG_DIR, "mcp_servers.json");

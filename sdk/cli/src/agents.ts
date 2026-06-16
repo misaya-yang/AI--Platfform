@@ -1,5 +1,5 @@
 /**
- * Custom agent definitions — .hejaz/agents/*.md
+ * Custom agent definitions — .ai-gateway/agents/*.md
  *
  * Agent files use YAML frontmatter:
  * ---
@@ -59,17 +59,17 @@ const BUILTIN_AGENTS: AgentDef[] = [
 ];
 
 /**
- * Load all agent definitions: builtin + global (~/.hejaz/agents/) + project (.hejaz/agents/)
+ * Load all agent definitions: builtin + global (~/.ai-gateway/agents/) + project (.ai-gateway/agents/)
  */
 export function loadAgents(): AgentDef[] {
   const agents = [...BUILTIN_AGENTS];
 
   // Global agents
-  const globalDir = join(homedir(), ".hejaz", "agents");
+  const globalDir = join(homedir(), ".ai-gateway", "agents");
   loadAgentsFromDir(globalDir, "global", agents);
 
   // Project agents
-  const projectDir = join(process.cwd(), ".hejaz", "agents");
+  const projectDir = join(process.cwd(), ".ai-gateway", "agents");
   loadAgentsFromDir(projectDir, "project", agents);
 
   return agents;

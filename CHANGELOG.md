@@ -5,7 +5,10 @@
 ### Open-source standalone release
 
 - Repositioned the project as a standalone AI Gateway platform with a general AI assistant and a knowledge-base service.
-- Removed domain-specific Islamic/Wahda/Halalmoney application surfaces, mock servers, ingestion scripts, tests, and frontend pages from the default product path.
+- Removed legacy domain-specific application surfaces, mock servers, ingestion scripts, tests, and frontend pages from the default product path.
+- Removed private repository memory, stale planning files, generated SDK archives, and outdated product-specific test/refactor artifacts.
+- Generalized SDK package names, CLI storage paths, Java namespaces, docgen package naming, sample URLs, Helm defaults, and docgen fixtures.
+- Renamed the gateway-authored LangGraph runtime model payload to `gateway_model`.
 - Added a root `.env.example` for local Docker deployment without committing real secrets.
 - Added strict environment validation for required secrets, model keys, embedding keys, provider names, port conflicts, CORS JSON shape, Docker Compose interpolation, and runtime dependency health.
 - Updated `README.md` with a downloader-ready quickstart, required env variables, deployment commands, validation commands, microservice communication notes, DB/Qdrant volume caveats, and troubleshooting.
@@ -38,7 +41,7 @@
 ### Knowledge base
 
 - Simplified the knowledge service toward a provider-neutral KB/RAG surface.
-- Removed Islamic-specific chunking, metadata, authority, synonym, ingestion, and evaluation paths from the default code path.
+- Removed domain-specific chunking, metadata, authority, synonym, ingestion, and evaluation paths from the default code path.
 - Exposed embedding provider configuration through root env variables:
   - `KB_EMBEDDING_PROVIDER`
   - `KB_EMBEDDING_API_KEY`

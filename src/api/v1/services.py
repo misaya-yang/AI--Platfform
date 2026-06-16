@@ -671,7 +671,7 @@ def _mask_sensitive_config(config: dict) -> dict:
                 masked[key] = "***[hidden]***"
             else:
                 masked[key] = "***"
-        elif key == "hejaz_model" and isinstance(value, dict):
+        elif key == "gateway_model" and isinstance(value, dict):
             masked[key] = _mask_sensitive_config(value)
         else:
             if isinstance(value, dict):

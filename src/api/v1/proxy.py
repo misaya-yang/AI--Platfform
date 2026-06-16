@@ -445,7 +445,7 @@ def _is_langgraph_run_path(method: str, path: str) -> bool:
     return "/runs" in normalized_path
 
 
-def _scrub_caller_hejaz_model(body: bytes | None, method: str, path: str) -> tuple[bytes | None, dict[str, Any] | None]:
+def _scrub_caller_gateway_model(body: bytes | None, method: str, path: str) -> tuple[bytes | None, dict[str, Any] | None]:
     """Remove browser-supplied runtime model config before Gateway-controlled injection."""
     if not body or not _is_langgraph_run_path(method, path):
         return body, None
@@ -461,9 +461,9 @@ def _scrub_caller_hejaz_model(body: bytes | None, method: str, path: str) -> tup
 
     updated_config = dict(run_config)
     configurable = updated_config.get("configurable")
-    if isinstance(configurable, dict) and "hejaz_model" in configurable:
+    if isinstance(configurable, dict) and "gateway_model" in configurable:
         updated_config["configurable"] = {
-            k: v for k, v in configurable.items() if k != "hejaz_model"
+            k: v for k, v in configurable.items() if k != "gateway_model"
         }
         updated_payload["config"] = updated_config
         return _encode_json_body(updated_payload), updated_payload
@@ -475,7 +475,7 @@ LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST = {
     "user_id",
     "tenant_id",
     "checkpoint_ns",
-    "hejaz_model",
+    "gateway_model",
     "_api_key",
     "api_key",
     "apikey",
@@ -601,10 +601,10 @@ async def _inject_langgraph_model_override_config(
     """
     Inject Gateway-resolved LangGraph runtime model config for transparent proxy runs.
 
-    Browser-supplied ``hejaz_model`` is never authoritative. Provider, model and
+    Browser-supplied ``gateway_model`` is never authoritative. Provider, model and
     API key are resolved server-side from the Gateway control plane.
     """
-    body, payload = _scrub_caller_hejaz_model(body, method, path)
+    body, payload = _scrub_caller_gateway_model(body, method, path)
     if (
         not body
         or payload is None
@@ -641,7 +641,7 @@ async def _inject_langgraph_model_override_config(
     updated_config = dict(run_config) if isinstance(run_config, dict) else {}
     configurable = updated_config.get("configurable")
     updated_config["configurable"] = dict(configurable) if isinstance(configurable, dict) else {}
-    updated_config["configurable"]["hejaz_model"] = runtime_config
+    updated_config["configurable"]["gateway_model"] = runtime_config
     updated_payload["config"] = updated_config
 
     logger.info(

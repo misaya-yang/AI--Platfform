@@ -310,8 +310,8 @@ class TestHardcodedValueRemoval:
             content = f.read()
 
         # 检查不包含硬编码的域名
-        assert "hejazfs.atlassian.net" not in content, (
-            "Should not contain hardcoded domain 'hejazfs.atlassian.net'"
+        assert "yourcompany.atlassian.net" not in content, (
+            "Should not contain hardcoded domain 'yourcompany.atlassian.net'"
         )
 
         # 检查域名默认值是空字符串
@@ -385,7 +385,7 @@ class TestCQLValidation:
         """测试有效的 Space Key"""
         from src.services.knowledge.confluence.client import _escape_cql_value
 
-        assert _escape_cql_value("HFDSH") == "HFDSH"
+        assert _escape_cql_value("ENG") == "ENG"
         assert _escape_cql_value("my-space") == "my-space"
         assert _escape_cql_value("space_123") == "space_123"
         assert _escape_cql_value("ABC123") == "ABC123"

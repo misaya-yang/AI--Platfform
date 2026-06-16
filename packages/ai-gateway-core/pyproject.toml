@@ -9,7 +9,7 @@ description = "Shared primitives (logging, exceptions, enums, protocols, proxy f
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Hejaz Engineering" }]
+authors = [{ name = "AI Gateway Maintainers" }]
 # Runtime deps the package itself imports. After Phase 5f Batch C the
 # package owns concretes (DatabaseStorage, S3 storage, skill parser,
 # usage recorder) that previously lived in the gateway and pulled their

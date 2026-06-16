@@ -1,13 +1,13 @@
 /**
  * Memory system — persistent notes across CLI sessions.
- * Stored at ~/.hejaz/memories.json
+ * Stored at ~/.ai-gateway/memories.json
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const MEMORY_FILE = join(homedir(), ".hejaz", "memories.json");
+const MEMORY_FILE = join(homedir(), ".ai-gateway", "memories.json");
 
 export interface MemoryEntry {
   text: string;
@@ -33,7 +33,7 @@ export function saveMemory(text: string): MemoryEntry {
   };
   memories.push(entry);
 
-  const dir = join(homedir(), ".hejaz");
+  const dir = join(homedir(), ".ai-gateway");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(MEMORY_FILE, JSON.stringify(memories, null, 2) + "\n", "utf-8");
   return entry;

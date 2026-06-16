@@ -194,7 +194,7 @@ class SubAgentManager:
 
     def _build_system_prompt(self, config: SubAgentConfig, defaults: dict) -> str:
         suffix = defaults.get("system_prompt_suffix", "")
-        return f"""You are a specialized sub-agent within the Hejaz AI platform.
+        return f"""You are a specialized sub-agent within the AI Gateway platform.
 
 {suffix}
 

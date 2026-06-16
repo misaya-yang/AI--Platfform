@@ -7,7 +7,7 @@
 #
 # These are listed as hard deps because the entrypoint imports them
 # unconditionally. Keeping them out of ``[optional-dependencies]`` means
-# ``pip install hejaz-docgen`` brings up a working MCP server, which is
+# ``pip install ai-docgen`` brings up a working MCP server, which is
 # what the Dockerfile and stdio test both assume.
 
 Transport is chosen by the ``MCP_TRANSPORT`` env var:

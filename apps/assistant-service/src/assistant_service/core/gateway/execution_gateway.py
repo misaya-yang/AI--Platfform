@@ -60,7 +60,7 @@ class RunRecord:
     os_agent_enabled: bool
     request_preview: str
     queue_mode: str | None = None
-    openclaw_mode: str | None = None
+    runtime_mode: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -103,7 +103,7 @@ class AssistantExecutionGateway:
         self._policy_lattice = ToolPolicyLattice()
         self._sandbox_resolver = SandboxResolver()
         self._tool_policy_v2_enabled = (
-            os.getenv("ASSISTANT_OPENCLAW_TOOL_POLICY_V2", "false").lower() == "true"
+            os.getenv("ASSISTANT_RUNTIME_TOOL_POLICY_V2", "false").lower() == "true"
         )
 
     @staticmethod
@@ -137,7 +137,7 @@ class AssistantExecutionGateway:
         os_agent_enabled: bool,
         request_preview: str,
         queue_mode: str | None = None,
-        openclaw_mode: str | None = None,
+        runtime_mode: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         self._runs[run_id] = RunRecord(
@@ -151,7 +151,7 @@ class AssistantExecutionGateway:
             memory_mode=memory_mode,
             os_agent_enabled=os_agent_enabled,
             queue_mode=queue_mode,
-            openclaw_mode=openclaw_mode,
+            runtime_mode=runtime_mode,
             request_preview=request_preview,
             started_at=now,
         )
@@ -278,7 +278,7 @@ class AssistantExecutionGateway:
             "memory_mode": run.memory_mode,
             "os_agent_enabled": run.os_agent_enabled,
             "queue_mode": run.queue_mode,
-            "openclaw_mode": run.openclaw_mode,
+            "runtime_mode": run.runtime_mode,
             "request_preview": run.request_preview,
             "usage": run.usage,
             "error": run.error,
@@ -319,7 +319,7 @@ class AssistantExecutionGateway:
             "memory_mode": row.get("memory_mode"),
             "os_agent_enabled": bool(row.get("os_agent_enabled")),
             "queue_mode": row.get("queue_mode"),
-            "openclaw_mode": row.get("openclaw_mode"),
+            "runtime_mode": row.get("runtime_mode"),
             "request_preview": row.get("request_preview"),
             "usage": usage or {},
             "error": row.get("error"),

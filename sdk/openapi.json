@@ -14664,7 +14664,7 @@
             "description": "Enable OS-Agent Lite tools for this request",
             "default": false
           },
-          "openclaw_mode": {
+          "runtime_mode": {
             "type": "string",
             "enum": [
               "off",
@@ -14672,7 +14672,7 @@
               "full"
             ],
             "title": "Openclaw Mode",
-            "description": "OpenClaw runtime mode: off, compat, full",
+            "description": "assistant runtime mode: off, compat, full",
             "default": "compat"
           },
           "queue_mode": {
@@ -16613,7 +16613,7 @@
           "space_key": {
             "type": "string",
             "title": "Space Key",
-            "description": "Confluence space key (e.g., 'HFDSH')"
+            "description": "Confluence space key (e.g., 'ENG')"
           },
           "root_page_id": {
             "anyOf": [

@@ -32,7 +32,7 @@ class FontPair:
 
 
 PALETTES: dict[str, Palette] = {
-    "hejaz-green-gold": Palette("hejaz-green-gold", "luxury", ("0B3D2E", "C9A15A", "F5F1E8", "1F2937", "7C3AED")),
+    "enterprise-green-gold": Palette("enterprise-green-gold", "luxury", ("0B3D2E", "C9A15A", "F5F1E8", "1F2937", "7C3AED")),
     "corporate-navy":    Palette("corporate-navy",    "professional", ("0F172A", "1E40AF", "F1F5F9", "64748B", "F59E0B")),
     "editorial-slate":   Palette("editorial-slate",   "editorial",    ("1F2937", "EF4444", "F9FAFB", "6B7280", "111827")),
     "tech-blue-white":   Palette("tech-blue-white",   "tech",         ("0D1B2A", "3B82F6", "FFFFFF", "CBD5E1", "22C55E")),

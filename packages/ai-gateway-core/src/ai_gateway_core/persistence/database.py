@@ -372,11 +372,11 @@ class DatabaseStorage:
             await self._auto_apply_openai_embedding_migration()
             await self._auto_apply_observability_governance_migration()
             await self._auto_apply_assistant_gateway_migration()
-            await self._auto_apply_openclaw_memory_sot_migration()
-            await self._auto_apply_openclaw_queue_lane_migration()
-            await self._auto_apply_openclaw_skills_migration()
-            await self._auto_apply_openclaw_scheduler_audit_migration()
-            await self._auto_apply_openclaw_context_metrics_migration()
+            await self._auto_apply_assistant_memory_sot_migration()
+            await self._auto_apply_assistant_queue_lane_migration()
+            await self._auto_apply_assistant_skills_migration()
+            await self._auto_apply_assistant_scheduler_audit_migration()
+            await self._auto_apply_assistant_context_metrics_migration()
             await self._auto_apply_tenant_isolation_migration()
             await self._auto_apply_conversation_shares_migration()
 
@@ -887,8 +887,8 @@ class DatabaseStorage:
             else:
                 logger.exception("Failed to apply migration 034")
 
-    async def _openclaw_memory_sot_needs_migration(self) -> bool:
-        """Check whether OpenClaw memory source-of-truth tables are missing."""
+    async def _assistant_memory_sot_needs_migration(self) -> bool:
+        """Check whether assistant memory source-of-truth tables are missing."""
         if not self._pool:
             return False
         async with self._pool.acquire() as conn:
@@ -899,14 +899,14 @@ class DatabaseStorage:
             )
             return sources is None or chunks is None or reflections is None
 
-    async def _auto_apply_openclaw_memory_sot_migration(self) -> None:
-        """Apply migration 035 for OpenClaw memory SoT/index tables."""
+    async def _auto_apply_assistant_memory_sot_migration(self) -> None:
+        """Apply migration 035 for assistant memory SoT/index tables."""
         if not self._pool:
             return
         try:
-            needs = await self._openclaw_memory_sot_needs_migration()
+            needs = await self._assistant_memory_sot_needs_migration()
         except (asyncpg.PostgresError, OSError):
-            logger.exception("Could not check OpenClaw memory SoT migration")
+            logger.exception("Could not check assistant memory SoT migration")
             return
         if not needs:
             return
@@ -914,7 +914,7 @@ class DatabaseStorage:
         migration_path = (
             _SCHEMA_ROOT
             / "migrations"
-            / "035_openclaw_memory_sot.sql"
+            / "035_assistant_memory_sot.sql"
         )
         if not migration_path.exists():
             logger.warning(f"Migration 035 not found: {migration_path}")
@@ -922,14 +922,14 @@ class DatabaseStorage:
 
         try:
             await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 035_openclaw_memory_sot.sql")
+            logger.info("Applied migration 035_assistant_memory_sot.sql")
         except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 035 already applied")
             else:
                 logger.exception("Failed to apply migration 035")
 
-    async def _openclaw_queue_lane_needs_migration(self) -> bool:
+    async def _assistant_queue_lane_needs_migration(self) -> bool:
         """Check whether command queue lane columns are missing."""
         if not self._pool:
             return False
@@ -964,14 +964,14 @@ class DatabaseStorage:
             )
             return lane_col is None or mode_col is None or priority_col is None or steer_col is None
 
-    async def _auto_apply_openclaw_queue_lane_migration(self) -> None:
+    async def _auto_apply_assistant_queue_lane_migration(self) -> None:
         """Apply migration 036 for queue lane/mode/priority columns."""
         if not self._pool:
             return
         try:
-            needs = await self._openclaw_queue_lane_needs_migration()
+            needs = await self._assistant_queue_lane_needs_migration()
         except (asyncpg.PostgresError, OSError):
-            logger.exception("Could not check OpenClaw queue lane migration")
+            logger.exception("Could not check assistant runtime queue lane migration")
             return
         if not needs:
             return
@@ -979,7 +979,7 @@ class DatabaseStorage:
         migration_path = (
             _SCHEMA_ROOT
             / "migrations"
-            / "036_openclaw_queue_lanes.sql"
+            / "036_assistant_queue_lanes.sql"
         )
         if not migration_path.exists():
             logger.warning(f"Migration 036 not found: {migration_path}")
@@ -987,14 +987,14 @@ class DatabaseStorage:
 
         try:
             await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 036_openclaw_queue_lanes.sql")
+            logger.info("Applied migration 036_assistant_queue_lanes.sql")
         except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 036 already applied")
             else:
                 logger.exception("Failed to apply migration 036")
 
-    async def _openclaw_skills_needs_migration(self) -> bool:
+    async def _assistant_skills_needs_migration(self) -> bool:
         """Check whether skill registry tables are missing."""
         if not self._pool:
             return False
@@ -1004,14 +1004,14 @@ class DatabaseStorage:
             runs = await conn.fetchval("SELECT to_regclass('public.assistant_skill_runs')")
             return skills is None or versions is None or runs is None
 
-    async def _auto_apply_openclaw_skills_migration(self) -> None:
+    async def _auto_apply_assistant_skills_migration(self) -> None:
         """Apply migration 037 for dynamic skills."""
         if not self._pool:
             return
         try:
-            needs = await self._openclaw_skills_needs_migration()
+            needs = await self._assistant_skills_needs_migration()
         except (asyncpg.PostgresError, OSError):
-            logger.exception("Could not check OpenClaw skills migration")
+            logger.exception("Could not check runtime skills migration")
             return
         if not needs:
             return
@@ -1019,7 +1019,7 @@ class DatabaseStorage:
         migration_path = (
             _SCHEMA_ROOT
             / "migrations"
-            / "037_openclaw_skills.sql"
+            / "037_assistant_skills.sql"
         )
         if not migration_path.exists():
             logger.warning(f"Migration 037 not found: {migration_path}")
@@ -1027,14 +1027,14 @@ class DatabaseStorage:
 
         try:
             await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 037_openclaw_skills.sql")
+            logger.info("Applied migration 037_assistant_skills.sql")
         except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 037 already applied")
             else:
                 logger.exception("Failed to apply migration 037")
 
-    async def _openclaw_scheduler_audit_needs_migration(self) -> bool:
+    async def _assistant_scheduler_audit_needs_migration(self) -> bool:
         """Check whether scheduler and audit tables are missing."""
         if not self._pool:
             return False
@@ -1043,14 +1043,14 @@ class DatabaseStorage:
             audit = await conn.fetchval("SELECT to_regclass('public.assistant_audit_events')")
             return jobs is None or audit is None
 
-    async def _auto_apply_openclaw_scheduler_audit_migration(self) -> None:
+    async def _auto_apply_assistant_scheduler_audit_migration(self) -> None:
         """Apply migration 038 for scheduler/audit tables."""
         if not self._pool:
             return
         try:
-            needs = await self._openclaw_scheduler_audit_needs_migration()
+            needs = await self._assistant_scheduler_audit_needs_migration()
         except (asyncpg.PostgresError, OSError):
-            logger.exception("Could not check OpenClaw scheduler/audit migration")
+            logger.exception("Could not check assistant runtime scheduler/audit migration")
             return
         if not needs:
             return
@@ -1058,7 +1058,7 @@ class DatabaseStorage:
         migration_path = (
             _SCHEMA_ROOT
             / "migrations"
-            / "038_openclaw_scheduler_audit.sql"
+            / "038_assistant_scheduler_audit.sql"
         )
         if not migration_path.exists():
             logger.warning(f"Migration 038 not found: {migration_path}")
@@ -1066,14 +1066,14 @@ class DatabaseStorage:
 
         try:
             await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 038_openclaw_scheduler_audit.sql")
+            logger.info("Applied migration 038_assistant_scheduler_audit.sql")
         except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 038 already applied")
             else:
                 logger.exception("Failed to apply migration 038")
 
-    async def _openclaw_context_metrics_needs_migration(self) -> bool:
+    async def _assistant_context_metrics_needs_migration(self) -> bool:
         """Check whether context breakdown table is missing."""
         if not self._pool:
             return False
@@ -1081,14 +1081,14 @@ class DatabaseStorage:
             table = await conn.fetchval("SELECT to_regclass('public.assistant_context_breakdown')")
             return table is None
 
-    async def _auto_apply_openclaw_context_metrics_migration(self) -> None:
+    async def _auto_apply_assistant_context_metrics_migration(self) -> None:
         """Apply migration 039 for context detail metrics."""
         if not self._pool:
             return
         try:
-            needs = await self._openclaw_context_metrics_needs_migration()
+            needs = await self._assistant_context_metrics_needs_migration()
         except (asyncpg.PostgresError, OSError):
-            logger.exception("Could not check OpenClaw context metrics migration")
+            logger.exception("Could not check assistant runtime context metrics migration")
             return
         if not needs:
             return
@@ -1096,7 +1096,7 @@ class DatabaseStorage:
         migration_path = (
             _SCHEMA_ROOT
             / "migrations"
-            / "039_openclaw_context_metrics.sql"
+            / "039_assistant_context_metrics.sql"
         )
         if not migration_path.exists():
             logger.warning(f"Migration 039 not found: {migration_path}")
@@ -1104,7 +1104,7 @@ class DatabaseStorage:
 
         try:
             await self.execute_schema(str(migration_path))
-            logger.info("Applied migration 039_openclaw_context_metrics.sql")
+            logger.info("Applied migration 039_assistant_context_metrics.sql")
         except asyncpg.PostgresError as e:
             if "already exists" in str(e).lower():
                 logger.info("Migration 039 already applied")

@@ -263,11 +263,11 @@ class AssistantConfig:
     enable_memory_loading: bool = False  # Disabled by default - reduces TTFT significantly
     enable_react_loop: bool = False  # Disabled by default - simple generation for most queries
 
-    # Assistant Gateway policy profile (OpenClaw-style)
+    # Assistant Gateway policy profile (runtime-policy)
     execution_profile: str = "safe"  # safe | balanced | power
     memory_mode: str = "auto"  # auto | strict | off
     os_agent_enabled: bool = False  # gated by policy engine + tenant/user permissions
-    openclaw_mode: str = "compat"  # off | compat | full
+    runtime_mode: str = "compat"  # off | compat | full
     queue_mode: str = "collect"  # collect | followup | steer | interrupt
     context_detail: bool = False  # emit detailed context cost breakdown
     skills_enabled: bool | None = None  # per-request skill toggle
@@ -1405,7 +1405,7 @@ Please use this web search context to inform your response when relevant."""
             execution_profile=config.execution_profile,
             memory_mode=config.memory_mode,
             os_agent_enabled=config.os_agent_enabled,
-            openclaw_mode=config.openclaw_mode,
+            runtime_mode=config.runtime_mode,
             queue_mode=config.queue_mode,
             context_detail=config.context_detail,
             skills_enabled=config.skills_enabled,

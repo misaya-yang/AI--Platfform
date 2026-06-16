@@ -4,18 +4,18 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.hejaz</groupId>
+    <groupId>com.aigateway</groupId>
     <artifactId>ai-sdk</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
-    <name>Hejaz AI Java SDK</name>
+    <name>AI Gateway Java SDK</name>
     <description>
-        Java SDK for the Hejaz AI Gateway REST API and SSE streaming.
+        Java SDK for the AI Gateway REST API and SSE streaming.
         Provides non-streaming chat, SSE streaming with callbacks,
         and full event type coverage matching the Python SDK.
     </description>
-    <url>https://github.com/hejaz/ai-gateway</url>
+    <url>https://github.com/misaya-yang/AI--Platfform</url>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

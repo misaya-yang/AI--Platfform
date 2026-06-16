@@ -417,7 +417,7 @@ export function App({ config }: { config: CLIConfig }) {
                 model_id: model,
                 history: historyForSummary,
               })) {
-                if (evt.event_type === "text_delta") {
+                if (evt.eventType === "text_delta") {
                   summaryText += typeof evt.data === "string" ? evt.data : (evt.data as any)?.text || "";
                 }
               }
@@ -691,7 +691,7 @@ export function App({ config }: { config: CLIConfig }) {
     <Box flexDirection="column" padding={1}>
       {/* Header */}
       <Box marginBottom={1}>
-        <Text bold color="cyan">Hejaz AI CLI v{CLI_VERSION}</Text>
+        <Text bold color="cyan">AI Gateway CLI v{CLI_VERSION}</Text>
         <Text color="gray">
           {" "}| {model}
           {kbIds.length > 0 ? ` | KB: ${kbIds.join(", ")}` : ""}

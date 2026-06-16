@@ -1,6 +1,6 @@
-# @hejaz/ai-cli
+# ai-gateway-cli
 
-A Claude Code-like terminal AI assistant powered by the Hejaz AI Gateway.
+A Claude Code-like terminal AI assistant powered by AI Gateway.
 
 ## Features
 
@@ -15,19 +15,19 @@ A Claude Code-like terminal AI assistant powered by the Hejaz AI Gateway.
 ## Install
 
 ```bash
-npm install -g @hejaz/ai-cli
+npm install -g ai-gateway-cli
 ```
 
 ## Quick Start
 
 ```bash
 # Start with API key
-hejaz --api-key gw_YOUR_KEY --base-url https://your-gateway.com
+ai-gateway --api-key gw_YOUR_KEY --base-url http://localhost:8080
 
 # Or configure once
-hejaz --api-key gw_YOUR_KEY --base-url https://your-gateway.com
-# Config saved to ~/.hejaz/config.json — subsequent runs just:
-hejaz
+ai-gateway --api-key gw_YOUR_KEY --base-url http://localhost:8080
+# Config saved to ~/.ai-gateway/config.json — subsequent runs just:
+ai-gateway
 ```
 
 ## Usage
@@ -76,7 +76,7 @@ hejaz
 ## Configuration
 
 ```
-~/.hejaz/
+~/.ai-gateway/
 ├── config.json          # API key, model, base URL
 ├── permissions.json     # File access rules
 ├── mcp_servers.json     # MCP server configs

@@ -72,7 +72,7 @@ from ..memory.compressor import (
     ContextCompressor,
     ModelRegistryLLMService,
 )
-from ..runtime.compat.runtime_adapter import OpenClawRuntimeAdapter
+from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 from ..rag.query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from ..rag.rag_metrics import (
     RAGMetrics,
@@ -88,7 +88,7 @@ from .artifact_persister import (
     sanitize_output_files as _artifact_sanitize_output_files,
 )
 from .middleware import MiddlewareChain, VerdictKind
-from .middlewares.runtime_memory import OpenClawMemoryMiddleware
+from .middlewares.runtime_memory import RuntimeMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
 from .tool_dedup import (
@@ -332,7 +332,7 @@ class AgentLoopConfig:
     execution_profile: str = "safe"
     memory_mode: str = "auto"
     os_agent_enabled: bool = False
-    openclaw_mode: str = "compat"  # off | compat | full
+    runtime_mode: str = "compat"  # off | compat | full
     queue_mode: str = "collect"  # collect | followup | steer | interrupt
     context_detail: bool = False
     skills_enabled: bool | None = None
@@ -355,7 +355,7 @@ class AgentLoopConfig:
             "execution_profile": self.execution_profile,
             "memory_mode": self.memory_mode,
             "os_agent_enabled": self.os_agent_enabled,
-            "openclaw_mode": self.openclaw_mode,
+            "runtime_mode": self.runtime_mode,
             "queue_mode": self.queue_mode,
             "context_detail": self.context_detail,
             "skills_enabled": self.skills_enabled,
@@ -388,7 +388,7 @@ class AgentLoopContext:
     user_preferences: dict[str, Any] | None = None
     session_memory: dict[str, Any] | None = None
     long_term_memory: dict[str, Any] | None = None
-    openclaw_memory_snippets: list[str] = field(default_factory=list)
+    runtime_memory_snippets: list[str] = field(default_factory=list)
 
     # Step 2: Scenario
     scenario: ScenarioDetectionResult | None = None
@@ -405,7 +405,7 @@ class AgentLoopContext:
     # Step 5: Context
     context_structure: ContextStructure | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
-    openclaw_skills_metadata: list[dict[str, Any]] = field(default_factory=list)
+    runtime_skills_metadata: list[dict[str, Any]] = field(default_factory=list)
 
     # Step 6: Execution
     tool_results: list[ToolExecutionResult] = field(default_factory=list)
@@ -461,7 +461,7 @@ class AgentLoop:
         execution_gateway: AssistantExecutionGateway | None = None,
         request_router: AssistantRequestRouter | None = None,
         database: Any | None = None,
-        runtime_adapter: OpenClawRuntimeAdapter | None = None,
+        runtime_adapter: AssistantRuntimeAdapter | None = None,
         # System prompt
         system_prompt: str = "",
         # Optional persistence / artifact / file-processing dependencies
@@ -507,10 +507,10 @@ class AgentLoop:
         self.request_router = request_router or AssistantRequestRouter()
         self.context_budget_manager = ContextBudgetManager()
         self.database = database
-        self.openclaw_runtime = runtime_adapter
-        if self.openclaw_runtime is None and self.database is not None:
+        self.assistant_runtime = runtime_adapter
+        if self.assistant_runtime is None and self.database is not None:
             with contextlib.suppress(Exception):
-                self.openclaw_runtime = OpenClawRuntimeAdapter.from_env(database=self.database)
+                self.assistant_runtime = AssistantRuntimeAdapter.from_env(database=self.database)
 
         self.system_prompt = system_prompt
 
@@ -530,8 +530,8 @@ class AgentLoop:
         """Register middleware concerns that were previously inlined in the loop."""
         chain = MiddlewareChain()
         chain.add(
-            OpenClawMemoryMiddleware(
-                runtime=self.openclaw_runtime,
+            RuntimeMemoryMiddleware(
+                runtime=self.assistant_runtime,
                 phase_tag=AgentLoopPhase.MEMORY_LOADING,
             )
         )
@@ -640,9 +640,9 @@ class AgentLoop:
                 "queue_mode": ctx.routed_request.queue_mode
                 if ctx.routed_request
                 else ctx.config.queue_mode,
-                "openclaw_mode": ctx.routed_request.openclaw_mode
+                "runtime_mode": ctx.routed_request.runtime_mode
                 if ctx.routed_request
-                else ctx.config.openclaw_mode,
+                else ctx.config.runtime_mode,
                 "memory_profile": ctx.routed_request.memory_profile
                 if ctx.routed_request
                 else ctx.config.memory_profile,
@@ -721,7 +721,7 @@ class AgentLoop:
         config.execution_profile = ctx.routed_request.execution_profile
         config.memory_mode = ctx.routed_request.memory_mode
         config.os_agent_enabled = ctx.routed_request.os_agent_enabled
-        config.openclaw_mode = ctx.routed_request.openclaw_mode
+        config.runtime_mode = ctx.routed_request.runtime_mode
         config.queue_mode = ctx.routed_request.queue_mode
         config.context_detail = ctx.routed_request.context_detail
         config.skills_enabled = ctx.routed_request.skills_enabled
@@ -773,7 +773,7 @@ class AgentLoop:
                         if ctx.routed_request
                         else config.os_agent_enabled,
                         queue_mode=ctx.routed_request.queue_mode if ctx.routed_request else None,
-                        openclaw_mode=ctx.routed_request.openclaw_mode
+                        runtime_mode=ctx.routed_request.runtime_mode
                         if ctx.routed_request
                         else None,
                         request_preview=ctx.message[:500],
@@ -789,7 +789,7 @@ class AgentLoop:
                             "memory_mode": ctx.routed_request.memory_mode,
                             "os_agent_enabled": ctx.routed_request.os_agent_enabled,
                             "policy_profile": ctx.routed_request.policy_profile,
-                            "openclaw_mode": ctx.routed_request.openclaw_mode,
+                            "runtime_mode": ctx.routed_request.runtime_mode,
                             "queue_mode": ctx.routed_request.queue_mode,
                             "context_detail": ctx.routed_request.context_detail,
                         },
@@ -1618,16 +1618,16 @@ class AgentLoop:
                     logger.debug("Failed to load dataset name map", exc_info=True)
                     dataset_name_map = None
 
-            # OpenClaw skill metadata: load dynamically and inject only compact metadata.
-            if self.openclaw_runtime:
+            # runtime skill metadata: load dynamically and inject only compact metadata.
+            if self.assistant_runtime:
                 should_use_skills = (
                     bool(ctx.config.skills_enabled)
                     if ctx.config.skills_enabled is not None
-                    else bool(self.openclaw_runtime.features.skills)
+                    else bool(self.assistant_runtime.features.skills)
                 )
                 if should_use_skills:
                     with contextlib.suppress(Exception):
-                        loaded = await self.openclaw_runtime.skill_registry.load_from_database(
+                        loaded = await self.assistant_runtime.skill_registry.load_from_database(
                             tenant_id=ctx.tenant_id,
                             user_id=ctx.user_id,
                         )
@@ -1642,19 +1642,19 @@ class AgentLoop:
                         from ..skills.tool_bridge import SkillToolBridge
                         from ..tools.tool_registry import get_tool_registry
                         bridge = SkillToolBridge(
-                            self.openclaw_runtime.skill_registry,
+                            self.assistant_runtime.skill_registry,
                             get_tool_registry(),
                         )
                         bridge.sync_all_skills()
                     except Exception as e:
                         logger.debug(f"Skill tool bridge sync failed: {e}")
 
-                    selected_skills = self.openclaw_runtime.skill_registry.select_for_query(
+                    selected_skills = self.assistant_runtime.skill_registry.select_for_query(
                         ctx.message,
                         max_skills=3,
                     )
                     if selected_skills:
-                        ctx.openclaw_skills_metadata = [
+                        ctx.runtime_skills_metadata = [
                             selection.skill.to_dict() for selection in selected_skills
                         ]
                         yield AgentLoopEvent(
@@ -1695,7 +1695,7 @@ class AgentLoop:
 
             # System prompt is kept BYTE-IDENTICAL across requests for the same
             # (tenant, enabled_tools, kb_datasets) combo. All query-dependent
-            # context (skills selection, user memory, OpenClaw snippets) moves
+            # context (skills selection, user memory, runtime snippets) moves
             # to the user turn as a `<context>...</context>` block — that way
             # Anthropic / Gemini prompt caching on the system prefix actually
             # hits.
@@ -1722,9 +1722,9 @@ class AgentLoop:
             system_prompt = base_prompt
             messages.append({"role": "system", "content": system_prompt})
 
-            # Middleware chain populates ctx.openclaw_memory_snippets and friends
+            # Middleware chain populates ctx.runtime_memory_snippets and friends
             # but no longer inserts its own system messages (see middleware
-            # OpenClawMemoryMiddleware for the storage-only contract).
+            # RuntimeMemoryMiddleware for the storage-only contract).
             async for _mw_event in self.middleware_chain.run_before_call(ctx, messages):
                 yield _mw_event
 
@@ -1741,9 +1741,9 @@ class AgentLoop:
                     "## User Custom Instructions (client-supplied, lower priority than system)\n"
                     + extra_prompt
                 )
-            if ctx.openclaw_skills_metadata:
+            if ctx.runtime_skills_metadata:
                 skill_lines = []
-                for skill in ctx.openclaw_skills_metadata[:5]:
+                for skill in ctx.runtime_skills_metadata[:5]:
                     skill_lines.append(
                         f"- {skill.get('name')}@{skill.get('version', '1.0.0')}: "
                         f"{str(skill.get('summary') or skill.get('description') or '')[:180]}"
@@ -1756,7 +1756,7 @@ class AgentLoop:
                 # L2: instructions for trigger-matched skills (max 2).
                 import re as _re
                 l2_loaded = 0
-                for skill in ctx.openclaw_skills_metadata[:3]:
+                for skill in ctx.runtime_skills_metadata[:3]:
                     trigger = skill.get("trigger")
                     if not trigger or l2_loaded >= 2:
                         continue
@@ -1775,10 +1775,10 @@ class AgentLoop:
             if long_term_memory_prompt:
                 dynamic_sections.append(f"## User Memory\n{long_term_memory_prompt}")
 
-            if ctx.openclaw_memory_snippets:
+            if ctx.runtime_memory_snippets:
                 snippet_lines = [
                     f"[{idx}] {s[:240]}"
-                    for idx, s in enumerate(ctx.openclaw_memory_snippets[:6], 1)
+                    for idx, s in enumerate(ctx.runtime_memory_snippets[:6], 1)
                 ]
                 dynamic_sections.append(
                     "## Retrieved Memory Snippets\n" + "\n".join(snippet_lines)
@@ -1851,10 +1851,10 @@ class AgentLoop:
 
             if (
                 ctx.config.context_detail
-                and self.openclaw_runtime
-                and self.openclaw_runtime.features.context_v2
+                and self.assistant_runtime
+                and self.assistant_runtime.features.context_v2
             ):
-                detail = self.openclaw_runtime.build_context_assembler(
+                detail = self.assistant_runtime.build_context_assembler(
                     provider="openai"
                 ).cost_breakdown.analyze(
                     system_prompt=system_prompt,
@@ -1863,8 +1863,8 @@ class AgentLoop:
                     injected_files=getattr(processed_files, "file_metadata", [])
                     if processed_files
                     else [],
-                    skills_metadata=ctx.openclaw_skills_metadata,
-                    memory_snippets=ctx.openclaw_memory_snippets,
+                    skills_metadata=ctx.runtime_skills_metadata,
+                    memory_snippets=ctx.runtime_memory_snippets,
                 )
                 yield AgentLoopEvent(
                     phase=phase,
@@ -3210,9 +3210,9 @@ class AgentLoop:
                     logger.exception("Failed to persist structured user memory")
 
             if (
-                self.openclaw_runtime
-                and self.openclaw_runtime.features.memory_v2
-                and str(ctx.config.openclaw_mode or "compat").lower() != "off"
+                self.assistant_runtime
+                and self.assistant_runtime.features.memory_v2
+                and str(ctx.config.runtime_mode or "compat").lower() != "off"
                 and str(ctx.config.memory_profile or "basic").lower() != "off"
             ):
                 try:
@@ -3221,10 +3221,10 @@ class AgentLoop:
                     )
                     if len(conversation_snapshot) > 6000:
                         conversation_snapshot = conversation_snapshot[:6000]
-                    redacted_text, findings = self.openclaw_runtime.pii_filter.redact(
+                    redacted_text, findings = self.assistant_runtime.pii_filter.redact(
                         conversation_snapshot
                     )
-                    source_path = self.openclaw_runtime.memory_store.append_daily_entry(
+                    source_path = self.assistant_runtime.memory_store.append_daily_entry(
                         ctx.tenant_id,
                         ctx.user_id,
                         redacted_text,
@@ -3232,7 +3232,7 @@ class AgentLoop:
                     source_content = ""
                     with open(source_path, encoding="utf-8") as file_obj:
                         source_content = file_obj.read()
-                    await self.openclaw_runtime.memory_indexer.index_source(
+                    await self.assistant_runtime.memory_indexer.index_source(
                         tenant_id=ctx.tenant_id,
                         user_id=ctx.user_id,
                         source_path=source_path,
@@ -3245,7 +3245,7 @@ class AgentLoop:
                         },
                     )
                 except Exception as exc:
-                    logger.exception("Failed to persist OpenClaw daily memory")
+                    logger.exception("Failed to persist assistant runtime daily memory")
 
             yield AgentLoopEvent(
                 phase=phase,

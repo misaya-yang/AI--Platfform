@@ -81,7 +81,7 @@ async def test_docx_planner_stable_without_markdown():
 async def test_pptx_planner_builds_deck_and_quote_close():
     brief = Brief(
         doc_type="pptx",
-        title="Hejaz AI",
+        title="AI Gateway",
         goal="Pitch deck for investors",
         body_markdown="# Problem\nBlah\n# Solution\nMore blah",
         style_hints={"chart": "true"},

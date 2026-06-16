@@ -92,7 +92,7 @@ def test_json_schema_exposes_four_formats() -> None:
 def test_json_schema_exposes_six_design_systems() -> None:
     schema = input_json_schema()
     systems = _collect_enum_for_field(schema, "design_system")
-    assert sorted(systems) == ["carbon", "claude", "editorial", "hejaz", "keynote", "stripe"]
+    assert sorted(systems) == ["carbon", "claude", "editorial", "enterprise", "keynote", "stripe"]
 
 
 def test_json_schema_is_dumpable() -> None:

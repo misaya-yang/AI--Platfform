@@ -668,7 +668,7 @@ test("playground renders native langgraph tool events without heavy assistant ca
   await composer.fill(`e2e-pg-native-${Date.now()}`);
   await composer.press("Enter");
 
-  await expect(page.getByText("Imam native response")).toBeVisible();
+  await expect(page.getByText("Agent native response")).toBeVisible();
   await expect(page.getByText("classify_query")).toBeVisible();
   await expect(page.getByText("unknown_tool")).toHaveCount(0);
   await expect(page.locator('[data-message-supplemental="timeline"]')).toHaveCount(0);

@@ -1,10 +1,10 @@
 {
-  "name": "hejaz-ai-cli",
+  "name": "ai-gateway-cli",
   "version": "1.5.0",
-  "description": "Hejaz AI CLI — Claude Code-like terminal AI assistant with OS Agent, MCP, and knowledge base integration",
+  "description": "AI Gateway CLI — Claude Code-like terminal AI assistant with OS Agent, MCP, and knowledge base integration",
   "type": "module",
   "bin": {
-    "hejaz": "dist/cli.js"
+    "ai-gateway": "dist/cli.js"
   },
   "scripts": {
     "build": "node esbuild.config.js",
@@ -22,13 +22,13 @@
     "mcp",
     "os-agent",
     "terminal",
-    "hejaz"
+    "gateway"
   ],
-  "author": "Hejaz AI Gateway Team",
+  "author": "AI Gateway Maintainers",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hejaz/ai-gateway.git",
+    "url": "git+https://github.com/misaya-yang/AI--Platfform.git",
     "directory": "sdk/cli"
   },
   "engines": {

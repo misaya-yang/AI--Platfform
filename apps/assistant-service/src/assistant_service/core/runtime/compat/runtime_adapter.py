@@ -1,4 +1,4 @@
-"""OpenClaw runtime adapter for compatibility-mode integration."""
+"""Assistant runtime adapter for compatibility-mode integration."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from ..skills.registry import SkillRegistry
 
 
 @dataclass
-class OpenClawFeatures:
-    """Feature switches for staged OpenClaw rollout."""
+class AssistantRuntimeFeatures:
+    """Feature switches for staged assistant runtime rollout."""
 
     memory_v2: bool = False
     context_v2: bool = False
@@ -47,13 +47,13 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-class OpenClawRuntimeAdapter:
-    """Bridge OpenClaw components into existing assistant runtime."""
+class AssistantRuntimeAdapter:
+    """Bridge optional runtime components into the assistant loop."""
 
     def __init__(
         self,
         *,
-        features: OpenClawFeatures,
+        features: AssistantRuntimeFeatures,
         memory_store: MemorySourceStore,
         memory_indexer: MemoryIndexer,
         memory_retriever: HybridMemoryRetriever,
@@ -81,15 +81,15 @@ class OpenClawRuntimeAdapter:
         vector_store: Any | None = None,
         embedder: Any | None = None,
         base_memory_dir: str | None = None,
-    ) -> OpenClawRuntimeAdapter:
+    ) -> AssistantRuntimeAdapter:
         """Build runtime adapter with env-driven feature flags."""
-        features = OpenClawFeatures(
-            memory_v2=_env_flag("ASSISTANT_OPENCLAW_MEMORY_V2", True),
-            context_v2=_env_flag("ASSISTANT_OPENCLAW_CONTEXT_V2", False),
-            tool_policy_v2=_env_flag("ASSISTANT_OPENCLAW_TOOL_POLICY_V2", False),
-            skills=_env_flag("ASSISTANT_OPENCLAW_SKILLS", False),
-            scheduler=_env_flag("ASSISTANT_OPENCLAW_SCHEDULER", False),
-            failover_v2=_env_flag("ASSISTANT_OPENCLAW_FAILOVER_V2", False),
+        features = AssistantRuntimeFeatures(
+            memory_v2=_env_flag("ASSISTANT_RUNTIME_MEMORY_V2", True),
+            context_v2=_env_flag("ASSISTANT_RUNTIME_CONTEXT_V2", False),
+            tool_policy_v2=_env_flag("ASSISTANT_RUNTIME_TOOL_POLICY_V2", False),
+            skills=_env_flag("ASSISTANT_RUNTIME_SKILLS", False),
+            scheduler=_env_flag("ASSISTANT_RUNTIME_SCHEDULER", False),
+            failover_v2=_env_flag("ASSISTANT_RUNTIME_FAILOVER_V2", False),
         )
 
         memory_store = MemorySourceStore(base_memory_dir)
@@ -126,19 +126,19 @@ class OpenClawRuntimeAdapter:
         tenant_id: str,
         user_id: str,
         query: str,
-        openclaw_mode: str,
+        runtime_mode: str,
         memory_profile: str | None,
         max_results: int = 6,
     ) -> MemoryProviderResult:
         """Load hybrid memory snippets for request-time context injection."""
-        mode = self.normalize_mode(openclaw_mode)
+        mode = self.normalize_mode(runtime_mode)
         profile = (memory_profile or "basic").strip().lower()
         if mode == "off":
             return MemoryProviderResult(
                 snippets=[],
                 loaded_sources=0,
                 fallback_used=True,
-                fallback_reason="openclaw_mode_off",
+                fallback_reason="runtime_mode_off",
             )
         if profile == "off":
             return MemoryProviderResult(
