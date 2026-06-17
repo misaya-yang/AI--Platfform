@@ -22,6 +22,7 @@ interface ChatInputAreaProps {
   isStreaming: boolean;
   isGeneratingImage: boolean;
   isImageMode: boolean;
+  hasAvailableModel: boolean;
   handleFileSelect: (files: FileList | null) => void;
   removeFile: (index: number) => void;
   onSend: () => void;
@@ -50,6 +51,7 @@ export function ChatInputArea({
   isStreaming,
   isGeneratingImage,
   isImageMode,
+  hasAvailableModel,
   handleFileSelect,
   removeFile,
   onSend,
@@ -110,6 +112,7 @@ export function ChatInputArea({
     !isStreaming &&
     !isUploading &&
     !isGeneratingImage &&
+    hasAvailableModel &&
     Boolean(input.trim() || hasUploadedFiles);
 
   // Reset height when input clears
@@ -235,8 +238,12 @@ export function ChatInputArea({
                       "Describe the image you want to create... (ESC to cancel)"
                     )
                   : t(
-                      "assistant.placeholder",
-                      "Type your message... (Ctrl+V to paste images)"
+                      hasAvailableModel
+                        ? "assistant.placeholder"
+                        : "assistant.noModelsPlaceholder",
+                      hasAvailableModel
+                        ? "Type your message... (Ctrl+V to paste images)"
+                        : "No models available"
                     )
               }
               className={cn(
@@ -245,7 +252,7 @@ export function ChatInputArea({
                   ? "placeholder:text-[hsl(var(--assistant-accent))]"
                   : "placeholder:text-[hsl(var(--assistant-text-tertiary))]"
               )}
-              disabled={isStreaming || isGeneratingImage}
+              disabled={isStreaming || isGeneratingImage || !hasAvailableModel}
               rows={1}
             />
 

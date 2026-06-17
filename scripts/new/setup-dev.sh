@@ -11,9 +11,39 @@
 #   --stop       Stop containers
 #   --reset      Destroy and recreate everything
 #   --status     Show current status
+#   --env FILE   Use a specific env file instead of .env
 # =============================================================================
 
 source "$(dirname "$0")/common.sh"
+
+# -- Parse args --------------------------------------------------------------
+ACTION="full"
+EXPLICIT_ENV_FILE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --start)  ACTION="start"; shift ;;
+        --stop)   ACTION="stop"; shift ;;
+        --reset)  ACTION="reset"; shift ;;
+        --status) ACTION="status"; shift ;;
+        --env)
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--env requires a file path"
+                exit 2
+            fi
+            EXPLICIT_ENV_FILE=true
+            ENV_FILE="$2"; shift 2 ;;
+        -h|--help)
+            echo "Usage: $0 [--start|--stop|--reset|--status] [--env FILE]"
+            exit 0 ;;
+        *) log_error "Unknown: $1"; exit 1 ;;
+    esac
+done
+
+if [ "$EXPLICIT_ENV_FILE" = true ]; then
+    require_env_file
+fi
+
 load_env
 
 # -- Dev container config (standalone, not via docker-compose) ----------------
@@ -30,32 +60,31 @@ if [[ "${GATEWAY_DATABASE__DSN:-}" =~ postgresql://([^:]+):([^@]+)@([^:]+):([0-9
     PG_DB="${BASH_REMATCH[5]}"
 else
     PG_USER="${POSTGRES_USER:-postgres}"
-    PG_PASS="${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    PG_PASS="${POSTGRES_PASSWORD:-}"
     PG_HOST="${POSTGRES_HOST:-127.0.0.1}"
     PG_PORT="${POSTGRES_PORT:-5433}"
     PG_DB="${POSTGRES_DB:-gateway}"
 fi
 
-REDIS_PASS="${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+REDIS_PASS="${REDIS_PASSWORD:-}"
 REDIS_DEV_PORT="${REDIS_PORT:-6379}"
-QDRANT_DEV_PORT="${QDRANT_PORT:-6333}"
+QDRANT_DEV_PORT="${QDRANT_HTTP_PORT:-${QDRANT_PORT:-6333}}"
 QDRANT_GRPC_DEV_PORT="${QDRANT_GRPC_PORT:-6334}"
 
-# -- Parse args --------------------------------------------------------------
-ACTION="full"
+require_dev_runtime_config() {
+    local missing=false
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --start)  ACTION="start"; shift ;;
-        --stop)   ACTION="stop"; shift ;;
-        --reset)  ACTION="reset"; shift ;;
-        --status) ACTION="status"; shift ;;
-        -h|--help)
-            echo "Usage: $0 [--start|--stop|--reset|--status]"
-            exit 0 ;;
-        *) log_error "Unknown: $1"; exit 1 ;;
-    esac
-done
+    if [ -z "$PG_PASS" ]; then
+        log_error "POSTGRES_PASSWORD is required"
+        missing=true
+    fi
+    if [ -z "$REDIS_PASS" ]; then
+        log_error "REDIS_PASSWORD is required"
+        missing=true
+    fi
+
+    [ "$missing" = false ] || exit 1
+}
 
 # -- Container helpers -------------------------------------------------------
 container_running() { docker ps --format '{{.Names}}' | grep -q "^$1$"; }
@@ -92,6 +121,8 @@ remove_all() {
 }
 
 start_containers() {
+    require_dev_runtime_config
+
     log_step "Starting dev containers"
 
     ensure_container "$DEV_PG_CONTAINER" "postgres:16-alpine" \
@@ -128,8 +159,8 @@ init_db() {
     # Run migrations with tracking
     log_info "Running migrations..."
     # Pass dev container name via environment so migrate.sh's common.sh picks it up
-    POSTGRES_CONTAINER="$DEV_PG_CONTAINER" "$(dirname "$0")/migrate.sh" --auto 2>/dev/null \
-        || POSTGRES_CONTAINER="$DEV_PG_CONTAINER" "$(dirname "$0")/migrate.sh"
+    POSTGRES_CONTAINER="$DEV_PG_CONTAINER" ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh" --auto 2>/dev/null \
+        || POSTGRES_CONTAINER="$DEV_PG_CONTAINER" ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh"
 }
 
 show_status() {

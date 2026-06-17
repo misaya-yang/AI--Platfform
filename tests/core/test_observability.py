@@ -13,7 +13,13 @@ from ai_gateway_core.logging import (
     get_log_context,
     set_log_context,
 )
-from src.core.observability.metrics import Counter, Gauge, Histogram
+
+from src.core.observability.metrics import (
+    Counter,
+    Gauge,
+    Histogram,
+    MetricsCollector,
+)
 from src.core.observability.tracing import (
     Span,
     TraceContext,
@@ -159,3 +165,38 @@ class TestMetrics:
 
         assert histogram.avg() == 132  # (10+20+30+100+500)/5
         assert histogram.percentile(50) == 30
+
+    def test_collector_exports_baseline_prometheus_metrics(self):
+        """Prometheus export should not be empty on a fresh gateway."""
+        previous_instance = MetricsCollector._instance
+        MetricsCollector._instance = None
+        try:
+            collector = MetricsCollector()
+
+            output = collector.to_prometheus()
+            assert "# HELP gateway_up Gateway metrics endpoint availability" in output
+            assert "# TYPE gateway_up gauge" in output
+            assert "gateway_up 1" in output
+            assert "# HELP gateway_requests_total Total number of requests" in output
+            assert "# TYPE gateway_request_duration_ms histogram" in output
+
+            collector.request_metrics.record_request("GET", "/health", 200, 12.5)
+            output = collector.to_prometheus()
+            assert (
+                'gateway_requests_total{method="GET",path="/health",status_code="200",service_id=""} 1.0'
+                in output
+            )
+            assert (
+                'gateway_request_duration_ms_bucket{method="GET",path="/health",service_id="",le="25"} 1'
+                in output
+            )
+            assert (
+                'gateway_request_duration_ms_sum{method="GET",path="/health",service_id=""} 12.5'
+                in output
+            )
+            assert (
+                'gateway_request_duration_ms_count{method="GET",path="/health",service_id=""} 1'
+                in output
+            )
+        finally:
+            MetricsCollector._instance = previous_instance

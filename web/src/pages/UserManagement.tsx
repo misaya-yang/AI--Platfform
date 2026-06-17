@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ArrowUpDown, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getAllowedEmailDomain } from "@/config/runtime";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +50,7 @@ export function UserManagementPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { hasPermission, user: currentUser } = useAuthStore();
+  const allowedDomain = getAllowedEmailDomain();
 
   // Permissions
   const canCreate = hasPermission("user:create");
@@ -660,7 +662,7 @@ export function UserManagementPage() {
               <Label>Email</Label>
               <Input
                 type="email"
-                placeholder={`name@${import.meta.env.VITE_AUTH_EMAIL_DOMAIN || "example.com"}`}
+                placeholder={`name@${allowedDomain}`}
                 value={formEmail}
                 onChange={(e) => setFormEmail(e.target.value)}
               />

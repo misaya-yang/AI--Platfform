@@ -22,13 +22,12 @@ import csv
 import io
 import logging
 from datetime import datetime
-from typing import Any
 
+import asyncpg
+from ai_gateway_core.quiz import ExamService
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-
-from ai_gateway_core.quiz import ExamService
 
 from ...core.auth.user_resolver import UserContext
 from ..deps import get_user_context
@@ -122,7 +121,11 @@ async def list_exams(
 ):
     _require_exam_permission(user, "exam:view")
     svc = _get_exam_service(request)
-    return await svc.list_exams(user.tenant_id, status=status, limit=limit, offset=offset)
+    try:
+        return await svc.list_exams(user.tenant_id, status=status, limit=limit, offset=offset)
+    except asyncpg.UndefinedTableError:
+        logger.warning("Exam tables are not initialized; returning empty exam list")
+        return {"exams": [], "total": 0}
 
 
 @router.get("/{exam_id}")

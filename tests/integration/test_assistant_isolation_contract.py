@@ -8,7 +8,9 @@ True-Isolation migration (plans/Assistant-Service-True-Isolation-Plan.md §3).
 
 Requirements to actually execute (otherwise it skips cleanly):
   - Gateway reachable at GATEWAY_BASE_URL (default http://localhost:8080).
-  - Assistant-service reachable at ASSISTANT_BASE_URL (default http://localhost:8093).
+  - Optional direct assistant-service reachability if
+    ASSISTANT_REQUIRE_DIRECT=true. The default compose topology keeps
+    assistant-service private, so the gateway route is the release contract.
   - Credentials for a throwaway user supplied via env. If credentials are
     absent, the test skips — never fails — so CI gates without provisioned
     infra stay green.
@@ -30,11 +32,11 @@ import pytest
 
 GATEWAY_BASE_URL = os.getenv("GATEWAY_BASE_URL", "http://localhost:8080").rstrip("/")
 ASSISTANT_BASE_URL = os.getenv("ASSISTANT_BASE_URL", "http://localhost:8093").rstrip("/")
+REQUIRE_ASSISTANT_DIRECT = os.getenv("ASSISTANT_REQUIRE_DIRECT", "").lower() == "true"
 API_PREFIX = f"{GATEWAY_BASE_URL}/api/v1"
 
 USER_EMAIL = os.getenv("ASSISTANT_ISOLATION_EMAIL", os.getenv("ASSISTANT_E2E_USER1_EMAIL", ""))
 USER_PASSWORD = os.getenv("ASSISTANT_ISOLATION_PASSWORD", os.getenv("ASSISTANT_E2E_PASSWORD", ""))
-MODEL_ID = os.getenv("ASSISTANT_ISOLATION_MODEL", os.getenv("ASSISTANT_E2E_MODEL_ID", "gemini-3-flash-preview"))
 
 SHORT_PROMPT = "ping"
 
@@ -52,7 +54,7 @@ def _require_live_services() -> None:
     missing = []
     if not _reach(GATEWAY_BASE_URL):
         missing.append(f"gateway@{GATEWAY_BASE_URL}")
-    if not _reach(ASSISTANT_BASE_URL):
+    if REQUIRE_ASSISTANT_DIRECT and not _reach(ASSISTANT_BASE_URL):
         missing.append(f"assistant@{ASSISTANT_BASE_URL}")
     if missing:
         pytest.skip(f"isolation contract skipped — unreachable: {', '.join(missing)}")
@@ -79,6 +81,36 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _resolve_model_id(client: httpx.Client, token: str) -> str:
+    override = os.getenv("ASSISTANT_ISOLATION_MODEL", os.getenv("ASSISTANT_E2E_MODEL_ID", "")).strip()
+    if override:
+        return override
+
+    models_resp = client.get(
+        f"{API_PREFIX}/assistant/models",
+        headers=_auth(token),
+        timeout=15.0,
+    )
+    assert models_resp.status_code == 200, models_resp.text
+    models = models_resp.json().get("models") or []
+    assert models, (
+        "no available assistant models; configure provider credentials that match "
+        "enabled llm_models before running the black-box isolation contract"
+    )
+
+    config_resp = client.get(
+        f"{API_PREFIX}/assistant/config",
+        headers=_auth(token),
+        timeout=15.0,
+    )
+    default_model_id = ""
+    if config_resp.status_code == 200:
+        default_model_id = str(config_resp.json().get("default_model_id") or "")
+
+    model_ids = [str(m.get("id") or "") for m in models]
+    return default_model_id if default_model_id in model_ids else model_ids[0]
+
+
 @pytest.mark.integration
 def test_assistant_isolation_contract_nonstream() -> None:
     """Non-streaming chat must return content, usage, session_id, run_id."""
@@ -86,6 +118,7 @@ def test_assistant_isolation_contract_nonstream() -> None:
 
     with httpx.Client(timeout=30.0) as client:
         token = _login(client)
+        model_id = _resolve_model_id(client, token)
         session_id = str(uuid.uuid4())
         r = client.post(
             f"{API_PREFIX}/assistant/chat",
@@ -93,7 +126,7 @@ def test_assistant_isolation_contract_nonstream() -> None:
             json={
                 "session_id": session_id,
                 "message": SHORT_PROMPT,
-                "model_id": MODEL_ID,
+                "model_id": model_id,
                 # Keep the request cheap and deterministic.
                 "temperature": 0.0,
                 "max_tokens": 16,
@@ -122,6 +155,7 @@ def test_assistant_isolation_contract_stream() -> None:
 
     with httpx.Client(timeout=30.0) as client:
         token = _login(client)
+        model_id = _resolve_model_id(client, token)
         session_id = str(uuid.uuid4())
         events: list[dict[str, Any]] = []
         terminal_seen = False
@@ -136,7 +170,7 @@ def test_assistant_isolation_contract_stream() -> None:
             json={
                 "session_id": session_id,
                 "message": SHORT_PROMPT,
-                "model_id": MODEL_ID,
+                "model_id": model_id,
                 "temperature": 0.0,
                 "max_tokens": 16,
                 "kb_mode": "off",

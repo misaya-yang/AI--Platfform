@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
-ENV_FILE="${PROJECT_ROOT}/.env"
+ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/.env}"
 RUNTIME_CHECK=false
 CONFIG_CHECK=true
 INFRA_ONLY=false
@@ -32,7 +32,11 @@ USAGE
 while [ $# -gt 0 ]; do
     case "$1" in
         --env)
-            ENV_FILE="${2:-}"
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--env requires a file path"
+                exit 2
+            fi
+            ENV_FILE="$2"
             shift 2
             ;;
         --config-only)
@@ -81,7 +85,7 @@ strip_optional_quotes() {
 }
 
 load_env_file() {
-    if [ ! -f "$ENV_FILE" ]; then
+    if [ ! -r "$ENV_FILE" ]; then
         fail "Missing env file: $ENV_FILE"
         return
     fi
@@ -185,6 +189,93 @@ require_url() {
     fi
 }
 
+is_non_local_auth_domain() {
+    local auth_domain
+    auth_domain="$(env_value AUTH_ALLOWED_EMAIL_DOMAIN)"
+    ! is_placeholder "$auth_domain" && [ "$auth_domain" != "example.com" ]
+}
+
+normalize_domain() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+require_frontend_auth_domain_alignment() {
+    local auth_domain frontend_domain
+    auth_domain="$(env_value AUTH_ALLOWED_EMAIL_DOMAIN)"
+    frontend_domain="$(env_value VITE_AUTH_EMAIL_DOMAIN)"
+
+    [ -z "$frontend_domain" ] && return
+
+    if is_non_local_auth_domain &&
+        [ "$(normalize_domain "$frontend_domain")" != "$(normalize_domain "$auth_domain")" ]; then
+        fail "VITE_AUTH_EMAIL_DOMAIN must match AUTH_ALLOWED_EMAIL_DOMAIN when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+    fi
+}
+
+email_domain() {
+    local value="$1"
+    printf '%s' "${value##*@}" | tr '[:upper:]' '[:lower:]'
+}
+
+require_support_email_release_ready() {
+    local support_email
+    support_email="$(env_value VITE_SUPPORT_EMAIL)"
+
+    [ -z "$support_email" ] && return
+
+    if ! [[ "$support_email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+        fail "VITE_SUPPORT_EMAIL must be a valid email address when set."
+        return
+    fi
+
+    if is_non_local_auth_domain && [ "$(email_domain "$support_email")" = "example.com" ]; then
+        fail "VITE_SUPPORT_EMAIL must not use example.com when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+    fi
+}
+
+require_public_url() {
+    local key="$1"
+    local value
+    value="$(env_value "$key")"
+
+    require_url "$key"
+    [ -z "$value" ] && return
+
+    if is_non_local_auth_domain; then
+        if [[ ! "$value" =~ ^https:// ]]; then
+            fail "$key must use https:// when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
+        if [[ "$value" =~ ^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([:/]|$) ]]; then
+            fail "$key must not use localhost or loopback when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
+    fi
+}
+
+require_frontend_runtime_url() {
+    local key="$1"
+    local value
+    value="$(env_value "$key")"
+    [ -z "$value" ] && return
+
+    if [[ "$value" =~ ^/[^/] ]]; then
+        return
+    fi
+
+    if ! [[ "$value" =~ ^https?:// ]]; then
+        fail "$key must be empty, a same-origin path, or an http(s) URL."
+        return
+    fi
+
+    if is_non_local_auth_domain; then
+        if [[ ! "$value" =~ ^https:// ]]; then
+            fail "$key must use https:// or a same-origin path when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
+        if [[ "$value" =~ ^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([:/]|$) ]]; then
+            fail "$key must not use localhost or loopback when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
+    fi
+}
+
 require_domain() {
     local key="$1"
     local value
@@ -208,6 +299,36 @@ require_json_array_of_strings() {
 
     if ! [[ "$value" =~ ^\[[[:space:]]*\"[^\"]*\"([[:space:]]*,[[:space:]]*\"[^\"]*\")*[[:space:]]*\]$ ]]; then
         fail "$key must be a JSON array of strings."
+    fi
+}
+
+require_cors_origins() {
+    local key="$1"
+    local value auth_domain
+    value="$(env_value "$key")"
+
+    if [ -z "$value" ]; then
+        fail "$key must be set to a JSON array of explicit http(s) origins."
+        return
+    fi
+
+    if [[ "$value" == *"*"* ]]; then
+        fail "$key must not use wildcard origins."
+        return
+    fi
+
+    if ! [[ "$value" =~ ^\[[[:space:]]*\"https?://[A-Za-z0-9.-]+(:[0-9]+)?\"([[:space:]]*,[[:space:]]*\"https?://[A-Za-z0-9.-]+(:[0-9]+)?\")*[[:space:]]*\]$ ]]; then
+        fail "$key must be a JSON array of explicit http(s) origins."
+        return
+    fi
+
+    if is_non_local_auth_domain; then
+        if [[ "$value" == *"\"http://"* ]]; then
+            fail "$key must use https origins when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
+        if [[ "$value" == *"localhost"* ]] || [[ "$value" == *"127.0.0.1"* ]] || [[ "$value" == *"0.0.0.0"* ]]; then
+            fail "$key must not include localhost origins when AUTH_ALLOWED_EMAIL_DOMAIN is non-local."
+        fi
     fi
 }
 
@@ -241,10 +362,16 @@ validate_ports() {
         8092
     )
     local seen=""
+    local selected="${*:-}"
     local index=0
     local key value
 
     for key in "${keys[@]}"; do
+        if [ -n "$selected" ] && [[ " $selected " != *" $key "* ]]; then
+            index=$((index + 1))
+            continue
+        fi
+
         value="$(env_value "$key")"
         value="${value:-${defaults[$index]}}"
         index=$((index + 1))
@@ -263,10 +390,130 @@ validate_ports() {
 
 validate_compose_config() {
     local compose_cmd
+    local no_interpolate=false
+
+    if [ "$ERRORS" -gt 0 ]; then
+        log_warn "Skipping docker compose config validation until earlier configuration errors are fixed."
+        return
+    fi
+
     compose_cmd="$(get_compose_cmd)"
-    if ! (cd "$PROJECT_ROOT" && $compose_cmd --env-file "$ENV_FILE" config --quiet); then
+
+    if [ "${1:-}" = "--no-interpolate" ]; then
+        no_interpolate=true
+        shift
+    fi
+
+    if [ "$no_interpolate" = true ]; then
+        if ! (cd "$PROJECT_ROOT" && $compose_cmd --env-file "$ENV_FILE" config --quiet --no-interpolate "$@"); then
+            fail "docker compose config validation failed."
+        fi
+        return
+    fi
+
+    if ! (cd "$PROJECT_ROOT" && $compose_cmd --env-file "$ENV_FILE" config --quiet "$@"); then
         fail "docker compose config validation failed."
     fi
+}
+
+configured_chat_providers() {
+    local providers=""
+    local google_backend="${GOOGLE_CHAT_BACKEND:-${GOOGLE_API_BACKEND:-ai_studio}}"
+    google_backend="$(printf '%s' "$google_backend" | tr '[:upper:]' '[:lower:]')"
+
+    if has_any_key OPENAI_API_KEY; then
+        providers="${providers} openai"
+    fi
+    if has_any_key ANTHROPIC_API_KEY; then
+        providers="${providers} anthropic"
+    fi
+    if has_any_key DEEPSEEK_API_KEY; then
+        providers="${providers} deepseek"
+    fi
+    if has_any_key DASHSCOPE_CHAT_API_KEY DASHSCOPE_API_KEY; then
+        providers="${providers} dashscope"
+    fi
+
+    # Mirror ai_gateway_core.config.resolve_google("chat") plus the
+    # assistant-service provider bootstrap:
+    # - AI Studio backend uses GEMINI_API_KEY / GOOGLE_API_KEY for `google`.
+    # - Vertex backend uses VERTEX_CHAT_API_KEY -> VERTEX_API_KEY -> studio key
+    #   fallback, and assistant-service configures both `google` with backend
+    #   vertex and `google-vertex`.
+    # - With AI Studio backend, VERTEX_API_KEY alone configures only
+    #   `google-vertex`; VERTEX_CHAT_API_KEY alone is ignored by runtime.
+    if [ "$google_backend" = "vertex" ]; then
+        if has_any_key VERTEX_CHAT_API_KEY VERTEX_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; then
+            providers="${providers} google google-vertex"
+        fi
+    else
+        if has_any_key GEMINI_API_KEY GOOGLE_API_KEY; then
+            providers="${providers} google"
+        fi
+        if has_any_key VERTEX_API_KEY; then
+            providers="${providers} google-vertex"
+        fi
+    fi
+
+    printf '%s\n' "$providers" | xargs
+}
+
+provider_in_list() {
+    local needle="$1"
+    local haystack="$2"
+    [[ " $haystack " == *" $needle "* ]]
+}
+
+query_enabled_model_providers() {
+    local sql="
+        SELECT provider_id || '|' || COUNT(*)
+        FROM llm_models
+        WHERE tenant_id = 'default' AND is_enabled = true
+        GROUP BY provider_id
+        ORDER BY provider_id;
+    "
+
+    if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
+        docker exec -i "$(pg_container)" psql -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    elif command -v psql &>/dev/null; then
+        PGPASSWORD="$(pg_password)" psql -h "$(pg_host)" -p "$(pg_port)" \
+            -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+validate_assistant_model_alignment() {
+    local configured providers_summary rows available_count enabled_summary provider count
+
+    configured="$(configured_chat_providers)"
+    rows="$(query_enabled_model_providers)" || {
+        fail "Unable to query llm_models for assistant model/provider alignment."
+        return
+    }
+
+    if [ -z "$rows" ]; then
+        fail "No enabled assistant models found in llm_models for tenant default."
+        return
+    fi
+
+    available_count=0
+    enabled_summary=""
+    while IFS='|' read -r provider count; do
+        [ -z "$provider" ] && continue
+        enabled_summary="${enabled_summary}${enabled_summary:+, }${provider}:${count}"
+        if provider_in_list "$provider" "$configured"; then
+            available_count=$((available_count + count))
+        fi
+    done <<< "$rows"
+
+    providers_summary="${configured:-none}"
+    if [ "$available_count" -le 0 ]; then
+        fail "No enabled assistant models match configured chat providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
+        return
+    fi
+
+    log_success "Assistant model/provider alignment is valid (${available_count} available model(s))."
 }
 
 validate_config() {
@@ -279,15 +526,28 @@ validate_config() {
 
     require_secret POSTGRES_PASSWORD 8
     require_secret REDIS_PASSWORD 8
-    require_secret JWT_SECRET 32
-    require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
-    require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
-    require_domain AUTH_ALLOWED_EMAIL_DOMAIN
-
     require_positive_int POSTGRES_PORT 5432
     require_positive_int REDIS_PORT 6379
     require_positive_int QDRANT_HTTP_PORT 6333
     require_positive_int QDRANT_GRPC_PORT 6334
+
+    if [ "$INFRA_ONLY" = true ]; then
+        validate_ports POSTGRES_PORT REDIS_PORT QDRANT_HTTP_PORT QDRANT_GRPC_PORT
+        validate_compose_config --no-interpolate postgres redis qdrant
+        if [ "$ERRORS" -eq 0 ]; then
+            log_success "Infrastructure configuration validation passed"
+        fi
+        return
+    fi
+
+    require_secret JWT_SECRET 32
+    require_secret GATEWAY_ASSISTANT_SHARED_SECRET 32
+    require_secret DOCGEN_ARTIFACT_SIGN_KEY 32
+    require_secret_or_local_default DEFAULT_USER_PASSWORD 12 "ChangeMe-Admin-2026!"
+    require_domain AUTH_ALLOWED_EMAIL_DOMAIN
+    require_frontend_auth_domain_alignment
+    require_support_email_release_ready
+
     require_positive_int GATEWAY_PORT 8080
     require_positive_int FRONTEND_PORT 8081
     require_positive_int KNOWLEDGE_SERVICE_PORT 8092
@@ -301,14 +561,6 @@ validate_config() {
 
     validate_ports
 
-    if [ "$INFRA_ONLY" = true ]; then
-        validate_compose_config
-        if [ "$ERRORS" -eq 0 ]; then
-            log_success "Infrastructure configuration validation passed"
-        fi
-        return
-    fi
-
     local embedding_provider="${KB_EMBEDDING_PROVIDER:-gemini}"
     case "$embedding_provider" in
         gemini|dashscope|siliconflow)
@@ -321,23 +573,19 @@ validate_config() {
     require_non_empty KB_EMBEDDING_API_KEY
     require_positive_int KB_EMBEDDING_DIMENSION 1024
 
-    if ! has_any_key \
-        DASHSCOPE_CHAT_API_KEY \
-        DASHSCOPE_API_KEY \
-        GOOGLE_API_KEY \
-        GEMINI_API_KEY \
-        OPENAI_API_KEY \
-        ANTHROPIC_API_KEY \
-        DEEPSEEK_API_KEY; then
-        fail "Set at least one chat model API key: DASHSCOPE_CHAT_API_KEY, DASHSCOPE_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or DEEPSEEK_API_KEY."
+    if [ -z "$(configured_chat_providers)" ]; then
+        fail "Set at least one usable chat model API key: DASHSCOPE_CHAT_API_KEY, DASHSCOPE_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, VERTEX_API_KEY, or VERTEX_CHAT_API_KEY with GOOGLE_CHAT_BACKEND=vertex."
     fi
 
     require_url ASSISTANT_SERVICE_URL
     require_url KB_SERVICE_URL
-    require_url DOCGEN_PUBLIC_URL
+    require_public_url DOCGEN_PUBLIC_URL
+    require_frontend_runtime_url VITE_API_URL
+    require_frontend_runtime_url VITE_API_BASE_URL
+    require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
     require_url MCP_DOCGEN_SERVICE_URL
-    require_json_array_of_strings KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
-    require_json_array_of_strings ASSISTANT_CORS_ALLOW_ORIGINS_JSON
+    require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
+    require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
 
     validate_compose_config
 
@@ -365,7 +613,9 @@ validate_runtime() {
     wait_for_healthy "Assistant service" "check_assistant_health" 60 || fail "Assistant service runtime check failed."
     wait_for_healthy "MCP docgen service" "check_docgen_health" 60 || fail "MCP docgen runtime check failed."
     wait_for_healthy "Gateway readiness" "check_gateway_health" 60 || fail "Gateway runtime check failed."
+    wait_for_healthy "Gateway metrics endpoint" "check_gateway_metrics" 60 || fail "Gateway metrics check failed."
     wait_for_healthy "Frontend health endpoint" "check_frontend_health" 60 || fail "Frontend runtime check failed."
+    validate_assistant_model_alignment
 
     if [ "$ERRORS" -eq 0 ]; then
         log_success "Runtime validation passed"

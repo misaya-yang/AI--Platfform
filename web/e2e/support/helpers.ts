@@ -15,6 +15,65 @@ export interface E2ETestUser {
   password: string;
 }
 
+export interface E2EClientAuthUser {
+  user_id: string;
+  email: string;
+  display_name: string;
+  department: string | null;
+  roles: string[];
+  permissions: string[];
+  effective_permissions: string[];
+  tier: string;
+  force_password_change: boolean;
+}
+
+export async function installClientAuth(
+  page: Page,
+  overrides: Partial<E2EClientAuthUser> = {}
+) {
+  const permissions = overrides.permissions || [
+    "console:dashboard:view",
+    "conversation:playground:access",
+  ];
+  const user: E2EClientAuthUser = {
+    user_id: "e2e-client-user",
+    email: "e2e-client@example.com",
+    display_name: "E2E Client",
+    department: null,
+    roles: ["user"],
+    permissions,
+    effective_permissions: overrides.effective_permissions || permissions,
+    tier: "normal",
+    force_password_change: false,
+    ...overrides,
+  };
+  const authState = {
+    state: {
+      token: "e2e-client-token",
+      user,
+      isAuthenticated: true,
+      forcePasswordChange: user.force_password_change,
+      rememberMe: true,
+    },
+    version: 0,
+  };
+
+  await page.route("**/api/v1/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(user),
+    });
+  });
+  await page.addInitScript(
+    ({ authStorageKey, authPayload }) => {
+      localStorage.setItem(authStorageKey, JSON.stringify(authPayload));
+      sessionStorage.removeItem(authStorageKey);
+    },
+    { authStorageKey: AUTH_STORAGE_KEY, authPayload: authState }
+  );
+}
+
 export function getApiUrl(): string {
   const apiUrl = process.env.E2E_API_URL;
   if (!apiUrl) {

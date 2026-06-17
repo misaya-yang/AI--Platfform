@@ -77,8 +77,10 @@ plugins/frontend-design/
 # AI Agent Skills (local development only)
 .agents/
 
-# Documentation (managed separately, except Islamic content handoff docs)
-docs/
+# Documentation (managed separately, except named handoff docs)
+docs/*
+!docs/general_ai_assistant_upgrade/
+!docs/general_ai_assistant_upgrade/**
 !apps/islamic-content-service/docs/
 !apps/islamic-content-service/docs/**
 !apps/assistant-service/docs/
@@ -144,6 +146,8 @@ apps/islamic-content-service/data/
 *-Report*.docx
 *-Report*.js
 *-Spec.md
+!docs/general_ai_assistant_upgrade/reports/
+!docs/general_ai_assistant_upgrade/reports/**
 claude-code-*.md
 # plans/ holds migration plans and generated reports. Track .md + .json
 # (committable deliverables); ignore any other scratch/binary artifacts

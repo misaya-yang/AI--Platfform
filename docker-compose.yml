@@ -213,7 +213,9 @@ services:
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       GOOGLE_API_BACKEND: "${GOOGLE_API_BACKEND:-}"
+      GOOGLE_CHAT_BACKEND: "${GOOGLE_CHAT_BACKEND:-}"
       VERTEX_API_KEY: "${VERTEX_API_KEY:-}"
+      VERTEX_CHAT_API_KEY: "${VERTEX_CHAT_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
@@ -308,9 +310,16 @@ services:
         VITE_API_URL: ""
         VITE_API_BASE_URL: ""
         VITE_AUTH_EMAIL_DOMAIN: "${VITE_AUTH_EMAIL_DOMAIN:-${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
-        VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@example.com}"
+        VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
     image: ai-gateway-web:${TAG:-latest}
     container_name: ai-gateway-frontend
+    environment:
+      VITE_API_URL: "${VITE_API_URL:-}"
+      VITE_API_BASE_URL: "${VITE_API_BASE_URL:-}"
+      VITE_AUTH_EMAIL_DOMAIN: "${VITE_AUTH_EMAIL_DOMAIN:-${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
+      VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
+      VITE_TELEMETRY_ENDPOINT: "${VITE_TELEMETRY_ENDPOINT:-}"
+      VITE_SSE_DEBUG: "${VITE_SSE_DEBUG:-}"
     ports:
       - "${FRONTEND_PORT:-8081}:80"
     networks:
@@ -384,7 +393,6 @@ services:
     command: ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--workers", "3"]
     volumes:
       - kb-data:/app/data
-      - ./apps/knowledge-service/src/knowledge_service:/usr/local/lib/python3.12/site-packages/knowledge_service
     ports:
       - "127.0.0.1:${KNOWLEDGE_SERVICE_PORT:-8092}:8092"
     networks:
@@ -457,7 +465,9 @@ services:
       GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
       GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       GOOGLE_API_BACKEND: "${GOOGLE_API_BACKEND:-}"
+      GOOGLE_CHAT_BACKEND: "${GOOGLE_CHAT_BACKEND:-}"
       VERTEX_API_KEY: "${VERTEX_API_KEY:-}"
+      VERTEX_CHAT_API_KEY: "${VERTEX_CHAT_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"

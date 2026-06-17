@@ -19,16 +19,16 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-
+import asyncpg
 from ai_gateway_core.quiz import (
     QuizGenerator,
     QuizGrader,
     QuizService,
     QuizShareManager,
 )
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from ...core.auth.user_resolver import UserContext
 from ...core.client_ip import get_client_ip_from_request
@@ -97,14 +97,14 @@ class QuizAttemptResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_quiz_service(request: Request) -> QuizService:
+def _get_quiz_service(request: Request, *, require_model_registry: bool = True) -> QuizService:
     """Build a QuizService from app state."""
     db = getattr(request.app.state, "database", None)
     if db is None:
         raise HTTPException(503, "Database not available")
 
     registry = getattr(request.app.state, "model_registry", None)
-    if registry is None:
+    if registry is None and require_model_registry:
         raise HTTPException(503, "Model registry not available")
 
     generator = QuizGenerator(registry)
@@ -256,13 +256,17 @@ async def list_quizzes(
     offset: int = Query(0, ge=0),
 ):
     """List the current user's quizzes."""
-    svc = _get_quiz_service(request)
-    quizzes, total = await svc.list_quizzes(
-        tenant_id=user.tenant_id,
-        user_id=user.user_id,
-        limit=limit,
-        offset=offset,
-    )
+    svc = _get_quiz_service(request, require_model_registry=False)
+    try:
+        quizzes, total = await svc.list_quizzes(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            limit=limit,
+            offset=offset,
+        )
+    except asyncpg.UndefinedTableError:
+        logger.warning("Quiz tables are not initialized; returning empty quiz list")
+        quizzes, total = [], 0
     return QuizListResponse(quizzes=quizzes, total=total)
 
 

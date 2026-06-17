@@ -1,3 +1,5 @@
+import { getTelemetryEndpoint } from "@/config/runtime";
+
 type ChatSurface = "assistant" | "playground";
 type StreamOutcome = "completed" | "cancelled" | "failed";
 
@@ -69,7 +71,7 @@ function emitTelemetry(event: string, payload: Record<string, unknown>) {
     })
   );
 
-  const endpoint = import.meta.env.VITE_TELEMETRY_ENDPOINT;
+  const endpoint = getTelemetryEndpoint();
   if (endpoint && typeof navigator.sendBeacon === "function") {
     try {
       navigator.sendBeacon(endpoint, JSON.stringify(envelope));

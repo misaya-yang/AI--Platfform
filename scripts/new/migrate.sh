@@ -12,27 +12,41 @@
 #   --init       Initialize schema (first-time setup)
 #   --status     Show migration status
 #   --auto       Non-interactive mode (used by deploy.sh)
+#   --env FILE   Use a specific env file instead of .env
 # =============================================================================
 
 source "$(dirname "$0")/common.sh"
-load_env
 
 # -- Parse args --------------------------------------------------------------
 INIT=false
 STATUS=false
 AUTO=false
+EXPLICIT_ENV_FILE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --init)   INIT=true; shift ;;
         --status) STATUS=true; shift ;;
         --auto)   AUTO=true; shift ;;
+        --env)
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--env requires a file path"
+                exit 2
+            fi
+            EXPLICIT_ENV_FILE=true
+            ENV_FILE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--init] [--status] [--auto]"
+            echo "Usage: $0 [--init] [--status] [--auto] [--env FILE]"
             exit 0 ;;
-        *) shift ;;
+        *) log_error "Unknown option: $1"; exit 2 ;;
     esac
 done
+
+if [ "$EXPLICIT_ENV_FILE" = true ]; then
+    require_env_file
+fi
+
+load_env
 
 cd "$PROJECT_ROOT"
 
@@ -46,6 +60,43 @@ ensure_tracking_table() {
     " >/dev/null
 }
 
+base_schema_exists() {
+    run_sql "
+        SELECT CASE
+            WHEN to_regclass('public.services') IS NULL
+              OR to_regclass('public.datasets') IS NULL
+              OR to_regclass('public.documents') IS NULL
+              OR to_regclass('public.segments') IS NULL
+            THEN 'missing'
+            ELSE 'present'
+        END;
+    " 2>/dev/null \
+        | grep -q "present"
+}
+
+ensure_base_schema() {
+    if base_schema_exists; then
+        return 0
+    fi
+
+    if [ ! -f "database/schema.sql" ]; then
+        log_error "database/schema.sql not found"
+        exit 1
+    fi
+
+    log_info "Base schema missing; applying schema.sql..."
+    if ! output=$(run_sql_file "database/schema.sql" 2>&1); then
+        log_error "Base schema initialization failed"
+        echo "$output" | grep "^ERROR" || true
+        exit 1
+    fi
+    if echo "$output" | grep -q "^ERROR"; then
+        log_error "Base schema initialization failed"
+        echo "$output" | grep "^ERROR"
+        exit 1
+    fi
+}
+
 # -- Check if migration was already applied ----------------------------------
 is_applied() {
     local filename="$1"
@@ -55,7 +106,7 @@ is_applied() {
         return 1
     fi
     local result
-    result=$(run_sql "SELECT 1 FROM schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1")
+    result=$(run_sql "SELECT 1 FROM schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
     [ "$result" -gt 0 ]
 }
 
@@ -105,7 +156,12 @@ if [ "$INIT" = true ]; then
     fi
 
     log_info "Applying schema.sql..."
-    run_sql_file "database/schema.sql" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30
+    if ! output=$(run_sql_file "database/schema.sql" 2>&1); then
+        log_error "Schema initialization failed"
+        echo "$output" | grep "^ERROR" || true
+        exit 1
+    fi
+    echo "$output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
     log_success "Schema initialized"
     ensure_tracking_table
     exit 0
@@ -113,6 +169,7 @@ fi
 
 # -- Run pending migrations --------------------------------------------------
 log_step "Running database migrations"
+ensure_base_schema
 ensure_tracking_table
 
 if [ ! -d "database/migrations" ]; then
@@ -134,18 +191,23 @@ for migration_file in database/migrations/*.sql; do
     fi
 
     log_info "Applying: $filename"
-    output=$(run_sql_file "$migration_file" 2>&1)
+    if ! output=$(run_sql_file "$migration_file" 2>&1); then
+        log_error "Migration failed: $filename"
+        echo "$output" | grep "^ERROR" || true
+        if [ "$AUTO" = true ]; then
+            log_error "Stopping automatic migration run; fix the migration and rerun."
+        fi
+        exit 1
+    fi
 
     # Check for errors (but not NOTICEs)
     if echo "$output" | grep -q "^ERROR"; then
         log_error "Migration failed: $filename"
         echo "$output" | grep "^ERROR"
         if [ "$AUTO" = true ]; then
-            log_warn "Continuing in auto mode despite error (migration NOT recorded)..."
-            continue
-        else
-            exit 1
+            log_error "Stopping automatic migration run; fix the migration and rerun."
         fi
+        exit 1
     fi
 
     record_migration "$filename"

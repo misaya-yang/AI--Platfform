@@ -27,4 +27,5 @@ services:
     command:
       ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--reload"]
     volumes:
+      - ./apps/knowledge-service/src/knowledge_service:/usr/local/lib/python3.12/site-packages/knowledge_service
       - ./packages/ai-gateway-core/src/ai_gateway_core:/usr/local/lib/python3.12/site-packages/ai_gateway_core

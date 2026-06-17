@@ -10,6 +10,8 @@ set -euo pipefail
 # -- Project paths -----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DEFAULT_ENV_FILE="${PROJECT_ROOT}/.env"
+ENV_FILE="${ENV_FILE:-$DEFAULT_ENV_FILE}"
 
 # -- Colors ------------------------------------------------------------------
 RED='\033[0;31m'
@@ -28,8 +30,13 @@ log_error()   { echo -e "${RED}[ERROR]${NC}   $1"; }
 log_step()    { echo -e "\n${CYAN}${BOLD}=> $1${NC}"; }
 
 # -- Environment loading -----------------------------------------------------
+env_file_path() {
+    echo "${ENV_FILE:-$DEFAULT_ENV_FILE}"
+}
+
 load_env() {
-    local env_file="${PROJECT_ROOT}/.env"
+    local env_file
+    env_file="$(env_file_path)"
     if [ -f "$env_file" ]; then
         set -a
         # Parse KEY=VALUE lines only (skip comments, empty lines; no arbitrary execution)
@@ -77,8 +84,10 @@ require_docker() {
 }
 
 require_env_file() {
-    if [ ! -f "${PROJECT_ROOT}/.env" ]; then
-        log_error ".env not found. Copy .env.example to .env and fill the required secrets first."
+    local env_file
+    env_file="$(env_file_path)"
+    if [ ! -f "$env_file" ]; then
+        log_error "Env file not found: $env_file. Copy .env.example to .env or set ENV_FILE to a populated env file."
         exit 1
     fi
 }
@@ -116,9 +125,9 @@ run_sql() {
 run_sql_file() {
     local file="$1"
     if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
-        docker exec -i "$(pg_container)" psql -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        docker exec -i "$(pg_container)" psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
     elif command -v psql &>/dev/null; then
-        PGPASSWORD="$(pg_password)" psql -h "$(pg_host)" -p "$(pg_port)" -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
+        PGPASSWORD="$(pg_password)" psql -v ON_ERROR_STOP=1 -h "$(pg_host)" -p "$(pg_port)" -U "$(pg_user)" -d "$(pg_database)" < "$file" 2>&1
     else
         log_error "Cannot connect to PostgreSQL"
         return 1
@@ -165,16 +174,23 @@ check_gateway_health() {
     curl -sf "http://localhost:${GATEWAY_PORT:-8080}/health/ready" &>/dev/null
 }
 
+check_gateway_metrics() {
+    local body
+    body="$(curl -fsS "http://localhost:${GATEWAY_PORT:-8080}/metrics" 2>/dev/null)" || return 1
+    printf '%s\n' "$body" | grep -Eq '^# HELP |^# TYPE ' || return 1
+    printf '%s\n' "$body" | grep -Eq '^gateway_up($|[ {])'
+}
+
 check_frontend_health() {
     curl -sf "http://localhost:${FRONTEND_PORT:-8081}/health" &>/dev/null
 }
 
 check_knowledge_health() {
-    docker exec "$(knowledge_container)" curl -sf "http://127.0.0.1:8092/health" &>/dev/null
+    docker exec "$(knowledge_container)" curl -sf "http://127.0.0.1:8092/health/ready" &>/dev/null
 }
 
 check_assistant_health() {
-    docker exec "$(assistant_container)" curl -sf "http://127.0.0.1:8093/health" &>/dev/null
+    docker exec "$(assistant_container)" curl -sf "http://127.0.0.1:8093/health/ready" &>/dev/null
 }
 
 check_docgen_health() {

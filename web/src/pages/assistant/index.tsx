@@ -35,6 +35,7 @@ import {
 import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
 // Local Components & Hooks
 import {
@@ -172,6 +173,7 @@ class MessageErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
 export function AssistantPage() {
   const { t } = useTranslation();
+  const { toast } = useToast();
 
   // 1. Data Loading State
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -455,6 +457,14 @@ export function AssistantPage() {
 
   // Handle Send
   const handleSend = useCallback(() => {
+    if (!selectedModel || models.length === 0) {
+      toast({
+        title: t("assistant.noModels", "No models available"),
+        variant: "destructive",
+      });
+      return;
+    }
+
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
     const filePaths = successfulUploads.map((f) => f.response!.file_path);
 
@@ -497,7 +507,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, sendMessage, clearFiles, t]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, sendMessage, clearFiles, t, toast]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -825,6 +835,7 @@ export function AssistantPage() {
               isStreaming={isStreaming}
               isGeneratingImage={isGeneratingImage}
               isImageMode={isImageMode}
+              hasAvailableModel={models.length > 0 && Boolean(selectedModel)}
               handleFileSelect={handleFileSelect}
               removeFile={removeFile}
               onSend={isImageMode ? handleImageSend : handleSend}

@@ -9,13 +9,12 @@
 #   (default)           Create a new backup
 #   --restore [file]    Restore from backup (latest if no file specified)
 #   --list              List available backups
+#   --env FILE          Use a specific env file instead of .env
 # =============================================================================
 
 source "$(dirname "$0")/common.sh"
-load_env
 
 BACKUP_DIR="${PROJECT_ROOT}/backups"
-mkdir -p "$BACKUP_DIR"
 
 RESTORE=false
 LIST=false
@@ -29,10 +28,16 @@ while [[ $# -gt 0 ]]; do
                 BACKUP_FILE="$1"; shift
             fi ;;
         --list) LIST=true; shift ;;
+        --env)
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--env requires a file path"
+                exit 2
+            fi
+            ENV_FILE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--restore [file]] [--list]"
+            echo "Usage: $0 [--restore [file]] [--list] [--env FILE]"
             exit 0 ;;
-        *) shift ;;
+        *) log_error "Unknown option: $1"; exit 2 ;;
     esac
 done
 
@@ -42,6 +47,9 @@ if [ "$LIST" = true ]; then
     ls -lh "$BACKUP_DIR"/*.sql.gz 2>/dev/null || echo "  (none)"
     exit 0
 fi
+
+require_env_file
+load_env
 
 # -- Restore -----------------------------------------------------------------
 if [ "$RESTORE" = true ]; then
@@ -59,13 +67,15 @@ if [ "$RESTORE" = true ]; then
     confirm "Restore from $(basename "$BACKUP_FILE")?" || { log_info "Cancelled"; exit 0; }
 
     log_info "Restoring from $(basename "$BACKUP_FILE")..."
-    gunzip -c "$BACKUP_FILE" | docker exec -i "$(pg_container)" psql -U "$(pg_user)" -d "$(pg_database)"
+    gunzip -c "$BACKUP_FILE" | docker exec -i "$(pg_container)" psql -v ON_ERROR_STOP=1 -U "$(pg_user)" -d "$(pg_database)"
     log_success "Database restored"
     exit 0
 fi
 
 # -- Create backup -----------------------------------------------------------
 log_step "Creating database backup"
+
+mkdir -p "$BACKUP_DIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="${BACKUP_DIR}/gateway_${TIMESTAMP}.sql.gz"

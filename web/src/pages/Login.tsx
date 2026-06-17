@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { getAllowedEmailDomain, getSupportEmail } from "@/config/runtime";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuthStore } from "@/store/useAuthStore";
@@ -45,8 +46,8 @@ export function LoginPage() {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { setAuth, setLoading, isLoading } = useAuthStore();
-  const allowedDomain = import.meta.env.VITE_AUTH_EMAIL_DOMAIN || "example.com";
-  const supportEmail = import.meta.env.VITE_SUPPORT_EMAIL || `admin@${allowedDomain}`;
+  const allowedDomain = getAllowedEmailDomain();
+  const supportEmail = getSupportEmail();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");

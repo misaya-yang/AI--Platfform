@@ -33,6 +33,7 @@
 
 SHELL := /bin/bash
 SCRIPTS := scripts/new
+ENV_FILE ?= .env
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 DEV_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
@@ -42,104 +43,106 @@ DEV_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
 .PHONY: quickstart validate-config validate
 
-quickstart:                 ## 零配置一键部署 (首次使用)
-	@bash $(SCRIPTS)/validate-env.sh --config-only
-	@$(COMPOSE) --env-file .env up -d --build --remove-orphans
-	@bash $(SCRIPTS)/validate-env.sh --runtime
+quickstart:                 ## 零配置一键部署 (首次使用: 启动+迁移+校验)
+	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
+	@$(COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans
+	@ENV_FILE="$(ENV_FILE)" bash -c 'source "$(SCRIPTS)/common.sh"; load_env; wait_for_healthy "PostgreSQL" "check_postgres_health" 30'
+	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)" --auto
+	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --runtime
 	@echo ""
 	@echo "AI Gateway is starting..."
-	@bash -c 'source "$(SCRIPTS)/common.sh"; load_env; echo "  Gateway:  http://localhost:$${GATEWAY_PORT:-8080}"; echo "  Frontend: http://localhost:$${FRONTEND_PORT:-8081}"'
+	@ENV_FILE="$(ENV_FILE)" bash -c 'source "$(SCRIPTS)/common.sh"; load_env; echo "  Gateway:  http://localhost:$${GATEWAY_PORT:-8080}"; echo "  Frontend: http://localhost:$${FRONTEND_PORT:-8081}"'
 	@echo "  Run 'make status' to check health."
 
 validate:                   ## 校验 .env、Compose 配置和运行时依赖
-	@bash $(SCRIPTS)/validate-env.sh --runtime
+	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --runtime
 
 validate-config:            ## 仅校验 .env 和 Compose 配置
-	@bash $(SCRIPTS)/validate-env.sh --config-only
+	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
 
 # -- Deployment ---------------------------------------------------------------
 
 .PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status
 
 deploy:                     ## 部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
-	@bash $(SCRIPTS)/deploy.sh
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)
 
 deploy-build:               ## 部署并重新构建镜像
-	@bash $(SCRIPTS)/deploy.sh --build
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --build $(ARGS)
 
 deploy-cn:                  ## 使用国内镜像构建部署
-	@bash $(SCRIPTS)/deploy.sh --cn
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --cn $(ARGS)
 
 deploy-infra:               ## 仅部署基础设施 (postgres/redis/qdrant)
-	@bash $(SCRIPTS)/deploy.sh --infra
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --infra $(ARGS)
 
-deploy-app:                 ## 仅部署应用 (gateway/frontend)
-	@bash $(SCRIPTS)/deploy.sh --app
+deploy-app:                 ## 仅部署应用服务 (gateway/frontend/assistant/knowledge/docgen)
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --app $(ARGS)
 
 stop:                       ## 停止所有服务
-	@cd "$(shell pwd)" && $(COMPOSE) stop
+	@cd "$(shell pwd)" && $(COMPOSE) --env-file "$(ENV_FILE)" stop
 
 restart:                    ## 重启所有服务
-	@cd "$(shell pwd)" && $(COMPOSE) restart
+	@cd "$(shell pwd)" && $(COMPOSE) --env-file "$(ENV_FILE)" restart
 
 logs:                       ## 查看实时日志
-	@cd "$(shell pwd)" && $(COMPOSE) logs -f
+	@cd "$(shell pwd)" && $(COMPOSE) --env-file "$(ENV_FILE)" logs -f
 
 status:                     ## 查看所有服务状态和健康检查
-	@bash $(SCRIPTS)/status.sh
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/status.sh
 
 # -- Database Migrations ------------------------------------------------------
 
 .PHONY: migrate migrate-init migrate-status
 
 migrate:                    ## 运行数据库迁移 (自动跳过已执行的)
-	@bash $(SCRIPTS)/migrate.sh
+	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)"
 
 migrate-init:               ## 首次初始化数据库 schema
-	@bash $(SCRIPTS)/migrate.sh --init
+	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)" --init
 
 migrate-status:             ## 查看迁移状态 (已执行/待执行)
-	@bash $(SCRIPTS)/migrate.sh --status
+	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)" --status
 
 # -- Backup & Restore --------------------------------------------------------
 
 .PHONY: backup restore backup-list
 
 backup:                     ## 创建数据库备份
-	@bash $(SCRIPTS)/backup.sh
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/backup.sh
 
 restore:                    ## 从最新备份恢复
-	@bash $(SCRIPTS)/backup.sh --restore
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/backup.sh --restore
 
 backup-list:                ## 列出所有备份
-	@bash $(SCRIPTS)/backup.sh --list
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/backup.sh --list
 
 # -- Development Environment --------------------------------------------------
 
 .PHONY: dev-setup dev-start dev-stop dev-reset dev-status dev-compose dev-compose-logs
 
 dev-setup:                  ## 一键搭建本地开发环境 (容器+数据库+迁移)
-	@bash $(SCRIPTS)/setup-dev.sh
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh
 
 dev-start:                  ## 启动开发容器
-	@bash $(SCRIPTS)/setup-dev.sh --start
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh --start
 
 dev-stop:                   ## 停止开发容器
-	@bash $(SCRIPTS)/setup-dev.sh --stop
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh --stop
 
 dev-reset:                  ## 重置开发环境 (销毁并重建)
-	@bash $(SCRIPTS)/setup-dev.sh --reset
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh --reset
 
 dev-status:                 ## 查看开发环境状态
-	@bash $(SCRIPTS)/setup-dev.sh --status
+	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh --status
 
 dev-compose:                ## 源码挂载启动应用服务 (首次 quickstart/build 后使用)
-	@bash $(SCRIPTS)/validate-env.sh --config-only
-	@$(DEV_COMPOSE) --env-file .env up -d --remove-orphans gateway assistant-service knowledge-service frontend
+	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --remove-orphans gateway assistant-service knowledge-service frontend
 	@echo "Development compose is running with backend source mounts and uvicorn reload."
 
 dev-compose-logs:           ## 查看源码挂载开发服务日志
-	@$(DEV_COMPOSE) --env-file .env logs -f gateway assistant-service knowledge-service frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway assistant-service knowledge-service frontend
 
 # -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
 

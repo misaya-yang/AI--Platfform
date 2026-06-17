@@ -195,12 +195,9 @@ class Histogram:
         }
 
         for label_key in self._counts:
-            labels = dict(zip(self.label_names, label_key, strict=False))
-            label_str = str(labels) if labels else "default"
-
-            result["buckets"][label_str] = dict(self._bucket_counts[label_key])
-            result["sum"][label_str] = self._sums[label_key]
-            result["count"][label_str] = self._counts[label_key]
+            result["buckets"][label_key] = dict(self._bucket_counts[label_key])
+            result["sum"][label_key] = self._sums[label_key]
+            result["count"][label_key] = self._counts[label_key]
 
         return result
 
@@ -398,6 +395,11 @@ class MetricsCollector:
                     instance._gauges = {}
                     instance._histograms = {}
                     instance.request_metrics = RequestMetrics()
+                    instance._register_request_metrics()
+                    instance.gateway_up = instance.register_gauge(
+                        Gauge("gateway_up", "Gateway metrics endpoint availability")
+                    )
+                    instance.gateway_up.set(1)
                     cls._instance = instance
         return cls._instance
 
@@ -419,6 +421,19 @@ class MetricsCollector:
         """注册直方图"""
         self._histograms[histogram.name] = histogram
         return histogram
+
+    def _register_request_metrics(self) -> None:
+        """Register default request metrics for Prometheus export."""
+        request_metrics = self.request_metrics
+        self.register_counter(request_metrics.requests_total)
+        self.register_counter(request_metrics.errors_total)
+        self.register_counter(request_metrics.rate_limit_triggered)
+        self.register_counter(request_metrics.rate_limit_decisions_total)
+        self.register_counter(request_metrics.billing_flush_failures_total)
+        self.register_counter(request_metrics.billing_records_dropped_total)
+        self.register_gauge(request_metrics.circuit_breaker_state)
+        self.register_gauge(request_metrics.active_connections)
+        self.register_histogram(request_metrics.request_duration_ms)
 
     def collect_all(self) -> dict[str, Any]:
         """收集所有指标"""
@@ -459,13 +474,17 @@ class MetricsCollector:
             lines.append(f"# HELP {name} {histogram.description}")
             lines.append(f"# TYPE {name} histogram")
             collected = histogram.collect()
-            for label_str, buckets in collected["buckets"].items():
+            for label_key, buckets in collected["buckets"].items():
+                base_labels = dict(zip(histogram.label_names, label_key, strict=False))
                 for bucket, count in buckets.items():
-                    lines.append(f'{name}_bucket{{le="{bucket}"}} {count}')
-            for label_str, value in collected["sum"].items():
-                lines.append(f"{name}_sum {value}")
-            for label_str, value in collected["count"].items():
-                lines.append(f"{name}_count {value}")
+                    labels = {**base_labels, "le": str(bucket)}
+                    lines.append(f"{name}_bucket{self._format_labels(labels)} {count}")
+            for label_key, value in collected["sum"].items():
+                labels = dict(zip(histogram.label_names, label_key, strict=False))
+                lines.append(f"{name}_sum{self._format_labels(labels)} {value}")
+            for label_key, value in collected["count"].items():
+                labels = dict(zip(histogram.label_names, label_key, strict=False))
+                lines.append(f"{name}_count{self._format_labels(labels)} {value}")
 
         return "\n".join(lines)
 

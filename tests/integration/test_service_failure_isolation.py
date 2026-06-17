@@ -19,6 +19,9 @@ Environment switches:
 
     INTEGRATION_GATEWAY_URL          Base URL (default http://localhost:8080)
     INTEGRATION_DOCKER_COMPOSE_FILE  Compose file (default docker-compose.yml)
+    INTEGRATION_DOCKER_ENV_FILE      Compose env file for metadata/stop/start.
+                                     Defaults to .env when present, then
+                                     .env.example, then no env file.
     INTEGRATION_SKIP_REASON          If set, whole module is skipped (CI escape hatch).
     INTEGRATION_USE_LIVE_STACK       "true" → never docker stop/start (target prod;
                                      only the breaker isolation test runs).
@@ -43,7 +46,6 @@ import httpx
 import pytest
 import pytest_asyncio
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -51,6 +53,7 @@ import pytest_asyncio
 _GATEWAY_URL = os.getenv("INTEGRATION_GATEWAY_URL", "http://localhost:8080").rstrip("/")
 _API_PREFIX = f"{_GATEWAY_URL}/api/v1"
 _COMPOSE_FILE = os.getenv("INTEGRATION_DOCKER_COMPOSE_FILE", "docker-compose.yml")
+_COMPOSE_ENV_FILE = os.getenv("INTEGRATION_DOCKER_ENV_FILE", "").strip()
 _SKIP_REASON = os.getenv("INTEGRATION_SKIP_REASON", "").strip()
 _USE_LIVE_STACK = os.getenv("INTEGRATION_USE_LIVE_STACK", "").lower() == "true"
 
@@ -70,10 +73,20 @@ pytestmark = pytest.mark.integration
 # docker compose helper (private, never raises on missing docker)
 # ---------------------------------------------------------------------------
 
+def _compose_env_args() -> list[str]:
+    if _COMPOSE_ENV_FILE:
+        return ["--env-file", _COMPOSE_ENV_FILE]
+    if os.path.exists(".env"):
+        return ["--env-file", ".env"]
+    if os.path.exists(".env.example"):
+        return ["--env-file", ".env.example"]
+    return []
+
+
 def _compose(cmd: list[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
     """Run ``docker compose -f <file> <cmd>``; never raise on missing docker."""
     return subprocess.run(
-        ["docker", "compose", "-f", _COMPOSE_FILE, *cmd],
+        ["docker", "compose", *_compose_env_args(), "-f", _COMPOSE_FILE, *cmd],
         check=False,
         capture_output=True,
         text=True,
@@ -275,7 +288,7 @@ async def test_assistant_service_down_isolation(
     compose_stack: dict[str, Any],
     http: httpx.AsyncClient,
 ) -> None:
-    """AS down → gateway /health 200 fast, /assistant/chat 502/503 fast, then recovers."""
+    """AS down → gateway /health 200 fast, assistant proxy 502/503 fast, then recovers."""
     if compose_stack["live_stack"]:
         pytest.skip("INTEGRATION_USE_LIVE_STACK=true; skipping docker stop/start tests")
     if not _service_in_stack(compose_stack, "assistant-service"):
@@ -304,23 +317,26 @@ async def test_assistant_service_down_isolation(
             f"auth/login returned 5xx with AS down: {login_resp.status_code} {login_resp.text}"
         )
 
-        # 3. /assistant/chat returns 502/503 cleanly within the 10 s budget.
-        chat_resp, chat_elapsed = await _measure_latency(
-            lambda: _async_post(
+        # 3. A proxy-only assistant endpoint returns 502/503 cleanly
+        # within the 10 s budget. Avoid /assistant/chat here because
+        # gateway model-permission checks can fail before the request
+        # reaches assistant-service.
+        assistant_resp, assistant_elapsed = await _measure_latency(
+            lambda: _async_get(
                 http,
-                f"{_API_PREFIX}/assistant/chat",
-                json={"message": "ping", "model_id": "gemini-3-flash-preview"},
+                f"{_API_PREFIX}/assistant/config",
                 timeout=_FAIL_FAST_BUDGET,
             )
         )
-        assert chat_elapsed < _FAIL_FAST_BUDGET, (
-            f"/assistant/chat hung for {chat_elapsed:.2f}s (budget {_FAIL_FAST_BUDGET}s)"
+        assert assistant_elapsed < _FAIL_FAST_BUDGET, (
+            f"/assistant/config hung for {assistant_elapsed:.2f}s "
+            f"(budget {_FAIL_FAST_BUDGET}s)"
         )
-        assert chat_resp.status_code in {401, 403, 502, 503}, (
-            f"expected clean 502/503 (or auth gate 401/403) with AS down; "
-            f"got {chat_resp.status_code}: {chat_resp.text[:200]}"
+        assert assistant_resp.status_code in {502, 503}, (
+            f"expected clean 502/503 with AS down; "
+            f"got {assistant_resp.status_code}: {assistant_resp.text[:200]}"
         )
-        assert chat_resp.status_code != 500, "AS down must NOT bubble up as a 500"
+        assert assistant_resp.status_code != 500, "AS down must NOT bubble up as a 500"
 
         # 4. Restart AS and wait for healthy.
         _start_service("assistant-service")
@@ -328,6 +344,14 @@ async def test_assistant_service_down_isolation(
             http, f"{_GATEWAY_URL}/health", timeout=_RESTART_HEALTHY_BUDGET
         )
         assert recovered, f"gateway not healthy {_RESTART_HEALTHY_BUDGET}s after AS restart"
+        assistant_proxy_recovered = await _wait_for_health(
+            http,
+            f"{_API_PREFIX}/assistant/config",
+            timeout=_RESTART_HEALTHY_BUDGET,
+        )
+        assert assistant_proxy_recovered, (
+            "assistant proxy route did not recover after assistant-service restart"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -353,16 +377,12 @@ async def test_knowledge_service_down_isolation(
         health_resp = await _async_get(http, f"{_GATEWAY_URL}/health", timeout=_HEALTH_BUDGET)
         assert health_resp.status_code == 200
 
-        # 2. AS /health (via gateway proxy) still 200. The gateway's
-        # /health/services aggregates downstream health and is the
-        # canonical isolation probe.
-        services_resp = await _async_get(
-            http, f"{_GATEWAY_URL}/health/services", timeout=5.0
+        # 2. AS config via gateway still returns 200; a knowledge-service
+        # outage must not poison an unrelated assistant-service proxy route.
+        config_resp = await _async_get(
+            http, f"{_API_PREFIX}/assistant/config", timeout=5.0
         )
-        # 200 (full) or 503 (partial) is acceptable here — what we want
-        # to assert is that the gateway is *answering* with structured
-        # data, not 500/hang.
-        assert services_resp.status_code in {200, 503}, services_resp.text
+        assert config_resp.status_code == 200, config_resp.text
 
         # 3. /knowledge/datasets/<id>/retrieve returns 502/503 cleanly.
         bogus_id = uuid.uuid4().hex
@@ -439,11 +459,12 @@ async def test_langgraph_agent_down_isolation(
         gw_health = await _async_get(http, f"{_GATEWAY_URL}/health", timeout=_HEALTH_BUDGET)
         assert gw_health.status_code == 200
 
-        # 2. AS /health surface (via gateway). 200 or 503 (partial) — never 500.
+        # 2. AS config surface via gateway. 200 proves an unrelated
+        # assistant-service route is alive and not gated by LangGraph.
         as_health = await _async_get(
-            http, f"{_GATEWAY_URL}/health/services", timeout=5.0
+            http, f"{_API_PREFIX}/assistant/config", timeout=5.0
         )
-        assert as_health.status_code in {200, 503}
+        assert as_health.status_code == 200
 
         # 3. /langgraph/threads returns 502/503 fast. Note the gateway
         # mounts the LangGraph proxy at /api/v1/langgraph — there is no
@@ -503,23 +524,22 @@ async def test_gateway_restart_drains_gracefully(
     async def _stream_consumer() -> None:
         nonlocal sse_error, finished_cleanly
         try:
-            async with httpx.AsyncClient(timeout=_DRAIN_BUDGET + 10.0) as c:
-                async with c.stream(
-                    "POST",
-                    f"{_API_PREFIX}/assistant/chat/stream",
-                    json=body,
-                ) as resp:
-                    if resp.status_code != 200:
-                        # Any non-stream response is a clean break — that
-                        # is acceptable (we just need it not to be a
-                        # half-written SSE frame).
+            async with httpx.AsyncClient(timeout=_DRAIN_BUDGET + 10.0) as c, c.stream(
+                "POST",
+                f"{_API_PREFIX}/assistant/chat/stream",
+                json=body,
+            ) as resp:
+                if resp.status_code != 200:
+                    # Any non-stream response is a clean break — that
+                    # is acceptable (we just need it not to be a
+                    # half-written SSE frame).
+                    finished_cleanly = True
+                    return
+                async for line in resp.aiter_lines():
+                    sse_lines.append(line)
+                    if line.startswith("data:") and ('"done"' in line or '"run_finished"' in line):
                         finished_cleanly = True
                         return
-                    async for line in resp.aiter_lines():
-                        sse_lines.append(line)
-                        if line.startswith("data:") and ('"done"' in line or '"run_finished"' in line):
-                            finished_cleanly = True
-                            return
             finished_cleanly = True
         except (httpx.HTTPError, OSError) as exc:
             # Connection reset / ECONNRESET during drain is acceptable —
@@ -617,16 +637,14 @@ async def test_circuit_breaker_per_route_isolation(
         f"tail statuses={statuses[-3:]}"
     )
 
-    # Concurrently, an unrelated assistant route (a different breaker
-    # key) must remain healthy. We pick /health/services as the
-    # canonical sibling — it does NOT touch the assistant chat code
+    # Concurrently, an unrelated public health route (a different breaker
+    # key) must remain healthy. It does NOT touch the assistant chat code
     # path or the model adapter, so its breaker is independent.
     sibling_resp = await _async_get(
-        http, f"{_GATEWAY_URL}/health/services", timeout=2.0
+        http, f"{_API_PREFIX}/health", timeout=2.0
     )
-    assert sibling_resp.status_code in {200, 503}, (
+    assert sibling_resp.status_code == 200, (
         f"sibling route unexpectedly affected by chat breaker: "
         f"{sibling_resp.status_code} {sibling_resp.text[:200]}"
     )
-    # 200 = full health, 503 = partial — both prove the route itself
-    # is alive and not gated by the chat-route breaker.
+    # 200 proves the route itself is alive and not gated by the chat-route breaker.

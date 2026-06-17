@@ -3,6 +3,7 @@ import {
   assertInpBudget,
   assertNoBlockingA11yIssues,
   ensureAuthenticatedPage,
+  installClientAuth,
   installTelemetryCollector,
   modKey,
   readTelemetryEvents,
@@ -35,6 +36,16 @@ type MockPlaygroundSession = {
   created_at: string;
   updated_at: string;
   metadata?: Record<string, unknown>;
+};
+
+type MockAssistantModel = {
+  id: string;
+  name: string;
+  provider: string;
+  context_window: number;
+  max_output_tokens: number;
+  supports_vision: boolean;
+  supports_tools: boolean;
 };
 
 function jsonResponse(body: unknown) {
@@ -79,25 +90,35 @@ function buildMockAssistantSession(
 
 async function installAssistantHarness(
   page: Page,
-  fulfillStream: (route: Route) => Promise<void>
+  fulfillStream: (route: Route) => Promise<void>,
+  options: {
+    models?: MockAssistantModel[];
+    defaultModelId?: string;
+    availableProviders?: string[];
+  } = {}
 ) {
   let sessionCounter = 0;
   const sessions = new Map<string, MockAssistantSession>();
+  const models = options.models ?? [
+    {
+      id: MOCK_ASSISTANT_MODEL_ID,
+      name: "GPT-4o",
+      provider: "openai",
+      context_window: 128000,
+      max_output_tokens: 4096,
+      supports_vision: true,
+      supports_tools: true,
+    },
+  ];
+  const defaultModelId = options.defaultModelId ?? models[0]?.id ?? "";
+  const availableProviders = options.availableProviders ?? [
+    ...new Set(models.map((model) => model.provider)),
+  ];
 
   await page.route("**/api/v1/assistant/models", async (route) => {
     await route.fulfill(
       jsonResponse({
-        models: [
-          {
-            id: MOCK_ASSISTANT_MODEL_ID,
-            name: "GPT-4o",
-            provider: "openai",
-            context_window: 128000,
-            max_output_tokens: 4096,
-            supports_vision: true,
-            supports_tools: true,
-          },
-        ],
+        models,
       })
     );
   });
@@ -109,8 +130,8 @@ async function installAssistantHarness(
   await page.route("**/api/v1/assistant/config", async (route) => {
     await route.fulfill(
       jsonResponse({
-        default_model_id: MOCK_ASSISTANT_MODEL_ID,
-        available_providers: ["openai"],
+        default_model_id: defaultModelId,
+        available_providers: availableProviders,
         kb_enabled: false,
         web_search_enabled: true,
       })
@@ -398,6 +419,84 @@ test("assistant applies persisted locale + theme before interaction", async ({ p
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   const colorScheme = await page.evaluate(() => document.documentElement.style.colorScheme);
   expect(colorScheme).toBe("dark");
+});
+
+test("assistant route admits permitted users", async ({ page }) => {
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-route-user",
+    email: "assistant-route@example.com",
+    display_name: "Assistant Route",
+    roles: ["user"],
+    permissions: ["console:dashboard:view", "conversation:playground:access"],
+    effective_permissions: ["console:dashboard:view", "conversation:playground:access"],
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+    });
+  });
+
+  await page.goto("/assistant");
+  await expect(page).toHaveURL(/\/assistant/);
+  await expect(page.locator(`#${ASSISTANT_COMPOSER_ID}`)).toBeVisible();
+  await expect(page.locator('a[href="/assistant"]')).toBeVisible();
+});
+
+test("assistant route keeps model testers playground-only", async ({ page }) => {
+  await installClientAuth(page, {
+    user_id: "e2e-model-tester-route-user",
+    email: "model-tester-route@example.com",
+    display_name: "Model Tester Route",
+    roles: ["model_tester"],
+    permissions: ["conversation:playground:access"],
+    effective_permissions: ["conversation:playground:access"],
+  });
+  await installPlaygroundHarness(page);
+
+  await page.goto("/assistant");
+  await expect(page).toHaveURL(/\/playground/);
+  await expect(page.locator('a[href="/assistant"]')).toHaveCount(0);
+  await expect(page.locator(`#${PLAYGROUND_COMPOSER_ID}`)).toBeVisible();
+});
+
+test("assistant disables sending when no models are available", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-no-model-user",
+    email: "assistant-no-model@example.com",
+    display_name: "Assistant No Model",
+    roles: ["user"],
+    permissions: ["console:dashboard:view", "conversation:playground:access"],
+    effective_permissions: ["console:dashboard:view", "conversation:playground:access"],
+  });
+  let streamHits = 0;
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      streamHits += 1;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+      });
+    },
+    { models: [], defaultModelId: "", availableProviders: [] }
+  );
+
+  await page.goto("/assistant");
+  await expect(page).toHaveURL(/\/assistant/);
+
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await expect(composer).toBeVisible();
+  await expect(composer).toBeDisabled();
+  await expect(composer).toHaveAttribute("placeholder", "No models available");
+
+  const sendButton = page.locator('button[aria-keyshortcuts*="Enter"]').last();
+  await expect(sendButton).toBeDisabled();
+  await page.keyboard.press("Enter");
+  expect(streamHits).toBe(0);
 });
 
 test("assistant emits stream telemetry lifecycle on mocked stream", async ({ page }) => {

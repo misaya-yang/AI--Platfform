@@ -28,6 +28,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -56,7 +57,14 @@ def _load_inprocess_spec() -> dict[str, Any] | None:
         if p not in sys.path:
             sys.path.insert(0, p)
     try:
-        from assistant_service.main import app  # type: ignore[import-not-found]
+        # OpenAPI generation does not need request auth. When no gateway
+        # secret is configured, import the app in explicit dev-only mode so
+        # the production startup guard remains intact outside this test path.
+        env_patch = {}
+        if not os.environ.get("GATEWAY_ASSISTANT_SHARED_SECRET"):
+            env_patch["ASSISTANT_APP__ALLOW_ANONYMOUS"] = "true"
+        with patch.dict(os.environ, env_patch, clear=False):
+            from assistant_service.main import app  # type: ignore[import-not-found]
 
         return app.openapi()
     except Exception:

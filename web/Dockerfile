@@ -36,7 +36,7 @@ COPY . .
 ARG VITE_API_URL=
 ARG VITE_API_BASE_URL=
 ARG VITE_AUTH_EMAIL_DOMAIN=example.com
-ARG VITE_SUPPORT_EMAIL=admin@example.com
+ARG VITE_SUPPORT_EMAIL=
 
 # Set environment variables for build
 ENV VITE_API_URL=${VITE_API_URL}
@@ -54,6 +54,8 @@ FROM nginx:alpine AS runtime
 
 # Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf
+COPY docker-entrypoint.d/40-runtime-config.sh /docker-entrypoint.d/40-runtime-config.sh
+RUN chmod +x /docker-entrypoint.d/40-runtime-config.sh
 
 # Copy built assets from builder
 COPY --from=builder /app/dist /usr/share/nginx/html

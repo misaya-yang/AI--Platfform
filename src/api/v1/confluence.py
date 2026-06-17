@@ -14,10 +14,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from ...core.auth.user_resolver import UserContext
-from ai_gateway_core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.confluence.sync_service import (
     ConfluenceAccessDeniedError,
     ConfluenceSyncError,
@@ -72,6 +72,11 @@ def get_confluence_scheduler(request: Request):
     return scheduler
 
 
+def get_optional_confluence_sync_service(request: Request):
+    """Return ConfluenceSyncService when the optional integration is enabled."""
+    return getattr(request.app.state, "confluence_sync_service", None)
+
+
 # ============================================================
 # Connection Management
 # ============================================================
@@ -112,7 +117,9 @@ async def list_connections(
 ):
     """List all Confluence connections for the tenant."""
     try:
-        svc = get_confluence_sync_service(request)
+        svc = get_optional_confluence_sync_service(request)
+        if svc is None:
+            return []
         connections = await svc.list_connections(
             user=user,
             tenant_id=user.tenant_id,
@@ -449,7 +456,9 @@ async def list_all_bindings(
 ):
     """List all space bindings for the current tenant."""
     try:
-        svc = get_confluence_sync_service(request)
+        svc = get_optional_confluence_sync_service(request)
+        if svc is None:
+            return []
         bindings = await svc.list_all_bindings(
             user=user,
             tenant_id=user.tenant_id,

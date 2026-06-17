@@ -10,7 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from ...auth import UserContext, get_user_context
-from ..deps import get_assistant_service, get_model_registry
+from ..deps import get_model_registry
 
 router = APIRouter()
 
@@ -30,9 +30,7 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
         return True
     if access_level == "premium":
         return user.user_tier in ("premium", "enterprise", "admin")
-    if access_level == "admin":
-        return False
-    return True  # unknown → permissive
+    return access_level != "admin"  # unknown → permissive
 
 
 @router.get("/models")
@@ -78,15 +76,18 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     ``{default_model_id, available_providers[], kb_enabled,
        web_search_enabled, tools_available[]}``
     """
-    import os
-
     from ...core.models.model_registry import ModelProvider
 
     mr = get_model_registry(request)
     available_providers: list[str] = []
+    visible_models = []
     if mr:
         available_providers = [
             p.value for p in ModelProvider if mr.is_provider_configured(p)
+        ]
+        visible_models = [
+            m for m in mr.get_available_models()
+            if _user_can_access_model(user, m.access_level.value)
         ]
 
     kb_proxy = getattr(request.app.state, "kb_proxy", None)
@@ -105,7 +106,7 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     # `web_search_20250305`) and ``web_fetch`` is always available as the
     # URL-fetch fallback. Frontend can keep its toggle as a model-pref hint.
     return {
-        "default_model_id": "qwen3.6-plus",
+        "default_model_id": visible_models[0].id if visible_models else "",
         "available_providers": available_providers,
         "kb_enabled": kb_proxy is not None,
         "web_search_enabled": True,

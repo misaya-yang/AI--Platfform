@@ -1,11 +1,12 @@
 import axios, { AxiosError } from "axios";
+import { getApiBaseUrlConfig } from "@/config/runtime";
 import { toast } from "@/hooks/use-toast";
 import i18n from "@/i18n";
 import { useAuthStore } from "@/store/useAuthStore";
 
 // Keep browser requests same-origin by default so local dev and E2E use Vite proxy
 // instead of relying on backend CORS for ephemeral frontend ports.
-const baseURL = import.meta.env.VITE_API_BASE_URL || "";
+const baseURL = getApiBaseUrlConfig();
 const AUTH_STORAGE_KEY = "agent-gateway-auth";
 
 // Rate limit state tracking to avoid toast spam

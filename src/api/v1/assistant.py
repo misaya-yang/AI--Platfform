@@ -140,6 +140,29 @@ def _user_can_access_model(user: UserContext, access_level: str) -> bool:
     return True  # Default allow for unknown levels
 
 
+def _is_missing_artifact_schema_error(exc: Exception) -> bool:
+    """Treat uninitialized artifact storage as an empty artifact list during restore."""
+    exc_type = type(exc)
+    if exc_type.__module__.startswith("asyncpg") and exc_type.__name__ in {
+        "InvalidSchemaNameError",
+        "UndefinedTableError",
+    }:
+        return True
+
+    message = str(exc).lower()
+    return (
+        'relation "assistant.artifacts" does not exist' in message
+        or 'schema "assistant" does not exist' in message
+    )
+
+
+def _raise_artifact_not_found_if_schema_missing(exc: Exception) -> None:
+    """Hide uninitialized artifact schema details behind the public 404 contract."""
+    if _is_missing_artifact_schema_error(exc):
+        logger.warning("Artifact storage schema is not initialized; treating artifact as not found")
+        raise HTTPException(status_code=404, detail="Artifact not found") from None
+
+
 @router.get("/models", response_model=ModelsListResponse)
 async def list_models(
     request: Request,
@@ -784,6 +807,9 @@ async def list_session_artifacts(
 
         return ArtifactListResponse(artifacts=artifact_list, total=len(artifact_list))
     except Exception as e:
+        if _is_missing_artifact_schema_error(e):
+            logger.warning("Artifact storage schema is not initialized; returning empty artifact list")
+            return ArtifactListResponse(artifacts=[], total=0)
         logger.error(f"Failed to list artifacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -842,6 +868,7 @@ async def get_artifact(
     except HTTPException:
         raise
     except Exception as e:
+        _raise_artifact_not_found_if_schema_missing(e)
         logger.error(f"Failed to get artifact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -970,6 +997,7 @@ async def delete_artifact(
     except HTTPException:
         raise
     except Exception as e:
+        _raise_artifact_not_found_if_schema_missing(e)
         logger.error(f"Failed to delete artifact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1030,6 +1058,7 @@ async def download_artifact(
     except HTTPException:
         raise
     except Exception as e:
+        _raise_artifact_not_found_if_schema_missing(e)
         logger.error(f"Failed to download artifact: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

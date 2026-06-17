@@ -28,6 +28,14 @@ cp .env.example .env
 ```
 
 Never commit `.env`.
+If the real env file is managed outside this repository, pass it to Make with
+`ENV_FILE`:
+
+```bash
+make validate-config ENV_FILE=/path/to/.env
+make validate ENV_FILE=/path/to/.env
+make deploy-app ENV_FILE=/path/to/.env ARGS="--no-migrate"
+```
 
 Fill these required values:
 
@@ -35,6 +43,7 @@ Fill these required values:
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
+- `DOCGEN_ARTIFACT_SIGN_KEY`
 - At least one chat provider key
 - `KB_EMBEDDING_PROVIDER`
 - `KB_EMBEDDING_API_KEY`
@@ -55,29 +64,38 @@ Run configuration validation before building:
 make validate-config
 ```
 
+Use `make validate-config ENV_FILE=/path/to/.env` when the env file is stored
+outside the repository.
+
 This checks:
 
 - required secrets are present and not placeholders
 - chat and embedding keys are configured
 - provider names and ports are valid
 - host ports are not duplicated
-- CORS values are JSON arrays
+- `DOCGEN_PUBLIC_URL` uses `https://` and is not localhost or loopback for non-local auth domains
+- `VITE_AUTH_EMAIL_DOMAIN` matches `AUTH_ALLOWED_EMAIL_DOMAIN` when set for non-local auth domains
+- `VITE_SUPPORT_EMAIL` is blank or uses a real non-example mailbox for non-local auth domains
+- explicit frontend API and telemetry runtime URLs use a same-origin path or `https://` and are not localhost or loopback for non-local auth domains
+- CORS values are explicit http(s) origin arrays, without wildcards or
+  non-https or localhost origins for non-local auth domains
 - Docker Compose interpolates successfully
 
 The validator does not print secret values.
 
 ## Start
 
-Build and start everything:
+Build, start, migrate, and validate everything:
 
 ```bash
 make quickstart
 ```
 
-Equivalent lower-level command:
+Lower-level start and migration commands:
 
 ```bash
 docker compose --env-file .env up -d --build --remove-orphans
+bash scripts/new/migrate.sh --env .env --auto
 ```
 
 Validate the running stack:
@@ -86,6 +104,14 @@ Validate the running stack:
 make validate
 make status
 ```
+
+`make status` prints the full health table and exits nonzero if any check is not
+available, so it can be used as a release gate instead of only a visual summary.
+
+Validation, status, deploy, migration, backup, stop/restart/log, and development
+helper Make targets accept `ENV_FILE=/path/to/.env`; the default is `.env`.
+Lower-level deploy, migrate, backup, and setup-dev scripts also accept
+`--env FILE` when called directly.
 
 Expected public endpoints:
 
@@ -101,7 +127,7 @@ Pull or apply the new source, then rebuild:
 make deploy-build
 ```
 
-For app-only updates:
+For app-only updates, restart the public entrypoints and application microservices while leaving infrastructure volumes alone:
 
 ```bash
 make deploy-app
@@ -112,6 +138,14 @@ For infrastructure-only startup:
 ```bash
 make deploy-infra
 ```
+
+`deploy-infra` and `deploy-app` are mutually exclusive. Run them as separate commands if both infrastructure and application services need work.
+`deploy-app` still runs database migrations by default after PostgreSQL is healthy. Use `make deploy-app ARGS="--no-migrate"` when you only want to restart application services.
+Automatic migrations initialize `database/schema.sql` first when the base
+schema is missing, then run pending files from `database/migrations`.
+Automatic migration failures stop deployment; fix the failed migration before rerunning deploy.
+Database restore uses the selected env file and stops on the first SQL error;
+restore against shared data requires a current backup and explicit approval.
 
 ## Stop and Reset
 
@@ -154,7 +188,8 @@ For production-like deployments:
 - Store `.env` in your secret-management system, not in Git.
 - Configure explicit CORS origins for your frontend domain.
 - Use S3-compatible storage by setting `GATEWAY_STORAGE__BACKEND=s3` and filling the S3 variables.
-- Monitor `/health/ready`; it checks DB, Redis, knowledge service, assistant service, and docgen.
+- Monitor gateway `/health/ready`; it checks DB, Redis, knowledge service, assistant service, and docgen. Direct release smoke checks use knowledge-service and assistant-service `/health/ready`; MCP docgen currently exposes `/health`.
+- Scrape gateway `/metrics` from your monitoring system and include it in release smoke checks; `gateway_up` should be present after startup.
 
 ## Troubleshooting
 

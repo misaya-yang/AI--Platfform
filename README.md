@@ -2,7 +2,7 @@
 
 AI Gateway is an open-source AI application platform for gateway routing, a general AI assistant, and a knowledge-base service backed by PostgreSQL, Redis, and Qdrant.
 
-The default Docker setup is intended for a local first run: after you fill your own model keys and embedding key, `make quickstart` builds and starts the frontend, gateway, assistant service, knowledge service, document-generation MCP service, PostgreSQL, Redis, and Qdrant.
+The default Docker setup is intended for a local first run: after you fill your own model keys and embedding key, `make quickstart` builds and starts the frontend, gateway, assistant service, knowledge service, document-generation MCP service, PostgreSQL, Redis, and Qdrant, then runs pending database migrations and runtime validation.
 
 ## Services
 
@@ -39,6 +39,14 @@ openssl rand -hex 32
 ```
 
 Never commit your `.env` file. Only `.env.example` is intended to be committed.
+If your populated env file lives outside this repository, pass it through
+`ENV_FILE` instead of copying it into the working tree:
+
+```bash
+make validate-config ENV_FILE=/path/to/.env
+make validate ENV_FILE=/path/to/.env
+make status ENV_FILE=/path/to/.env
+```
 
 Required values:
 
@@ -46,9 +54,10 @@ Required values:
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
+- `DOCGEN_ARTIFACT_SIGN_KEY`
 - `AUTH_ALLOWED_EMAIL_DOMAIN`
 - `DEFAULT_USER_PASSWORD` (the example value matches the local bootstrap admin; rotate it before shared or non-local deployments)
-- At least one chat key: `DASHSCOPE_CHAT_API_KEY`, `DASHSCOPE_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`
+- At least one chat key: `DASHSCOPE_CHAT_API_KEY`, `DASHSCOPE_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `VERTEX_CHAT_API_KEY`, `VERTEX_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`
 - `KB_EMBEDDING_PROVIDER`: `gemini`, `dashscope`, or `siliconflow`
 - `KB_EMBEDDING_API_KEY`
 - `KB_EMBEDDING_MODEL`
@@ -60,7 +69,7 @@ Required values:
 make validate-config
 ```
 
-4. Build, start, and run runtime validation:
+4. Build, start, run pending database migrations, and run runtime validation:
 
 ```bash
 make quickstart
@@ -71,11 +80,17 @@ make quickstart
 - Frontend: `http://localhost:8081`
 - API docs: `http://localhost:8080/docs`
 - Gateway readiness: `http://localhost:8080/health/ready`
+- Gateway metrics: `http://localhost:8080/metrics`
 
 The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
 The validator allows that documented local bootstrap password but warns about it.
 For non-local deployments, change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own
 administrator, and rotate the bootstrap password immediately.
+If `VITE_AUTH_EMAIL_DOMAIN` is set, keep it equal to
+`AUTH_ALLOWED_EMAIL_DOMAIN`; otherwise username-only login will append a domain
+that the backend rejects.
+Leave `VITE_SUPPORT_EMAIL` blank unless you have a real support mailbox; the
+frontend then defaults it to `admin@AUTH_ALLOWED_EMAIL_DOMAIN`.
 
 The example env also sets generous localhost rate limits such as
 `RATE_LIMIT_IP_LIMIT`, `RATE_LIMIT_NORMAL_LIMIT`, and
@@ -89,11 +104,18 @@ Use these commands when debugging startup or before publishing a deployment:
 ```bash
 make validate-config   # checks .env and docker compose config only
 make validate          # checks .env plus running Postgres, Redis, Qdrant, and services
-make status            # prints compose state and service health
+make status            # prints compose state and service health; exits nonzero if any health check fails
 docker compose ps
 ```
 
-The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, and failed Qdrant/service health checks. The documented local bootstrap admin password is accepted for quickstart and reported as a warning.
+Makefile validation, deploy, status, migration, backup, stop/restart/log, and
+development helper targets accept `ENV_FILE=/path/to/.env`. The default remains
+`.env`.
+
+Lower-level deploy, migrate, backup, and setup-dev scripts also accept
+`--env FILE` when called directly.
+
+The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, failed Qdrant/service health checks, and failed gateway metrics scraping. The documented local bootstrap admin password is accepted for quickstart and reported as a warning.
 
 ## Development Without Rebuilding
 
@@ -112,6 +134,20 @@ knowledge-service, and shared core package source into the existing containers
 and runs the Python services with `uvicorn --reload`. Rebuild only when
 dependencies, Dockerfiles, or image-level system packages change.
 
+Frontend deployment config is runtime-injected. After the image is built once,
+changes to `VITE_API_URL`, `VITE_API_BASE_URL`, `VITE_AUTH_EMAIL_DOMAIN`,
+`VITE_SUPPORT_EMAIL`, `VITE_TELEMETRY_ENDPOINT`, or `VITE_SSE_DEBUG` only need
+`docker compose up -d frontend` to recreate the container with the new values.
+For shared or non-local deployments, `VITE_AUTH_EMAIL_DOMAIN` must match
+`AUTH_ALLOWED_EMAIL_DOMAIN`.
+Leave `VITE_SUPPORT_EMAIL` blank to default to `admin@AUTH_ALLOWED_EMAIL_DOMAIN`,
+or set it to a real non-example support mailbox.
+Leave `VITE_API_URL` and `VITE_API_BASE_URL` blank for the default same-origin
+nginx `/api` proxy. For shared or non-local deployments, explicit absolute API
+URLs and telemetry endpoints must use `https://` and must not point at
+localhost or loopback. Same-origin paths such as `/api` and `/telemetry` remain
+valid.
+
 ## Release Notes
 
 See `CHANGELOG.md` for the module-level summary of the current open-source standalone release cleanup.
@@ -125,6 +161,16 @@ make deploy-infra  # start only postgres, redis, qdrant
 make deploy-app    # start app services and their compose dependencies
 make stop          # stop containers without deleting volumes
 ```
+
+`deploy-infra` and `deploy-app` are separate partial-deploy modes; do not combine them in one command.
+`deploy-app` still runs database migrations by default after PostgreSQL is healthy.
+Use `make deploy-app ARGS="--no-migrate"` for application restarts that must not run migrations.
+Automatic migrations initialize `database/schema.sql` first when the base
+schema is missing, then run pending files from `database/migrations`.
+Automatic migration failures stop deployment; fix the failed migration before rerunning deploy.
+Database restore uses the selected env file and stops on the first SQL error; do
+not run restore against shared data without a current backup and explicit
+approval.
 
 For a destructive local reset, use Docker Compose explicitly and understand that this deletes local database/vector/cache data:
 
@@ -184,7 +230,23 @@ KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON=["http://localhost:8081","http://localhost:300
 ASSISTANT_CORS_ALLOW_ORIGINS_JSON=["http://localhost:8081","http://localhost:3000"]
 ```
 
-Compose startup waits for infrastructure and microservices to become healthy before starting dependent services. Gateway health uses `/health/ready`, not only a shallow process liveness endpoint.
+For shared or non-local deployments, replace those localhost origins with the
+actual `https://` frontend origin. `make validate-config` rejects missing CORS
+values, wildcard origins, non-HTTP origins, and localhost origins once
+`AUTH_ALLOWED_EMAIL_DOMAIN` is no longer the local `example.com` default.
+For the same non-local deployment mode, `DOCGEN_PUBLIC_URL` must not point at
+localhost or loopback and must use `https://`, because generated artifact links
+are opened by users' browsers.
+If you set `VITE_API_URL` or `VITE_API_BASE_URL`, use a same-origin path such as
+`/api` or an `https://` URL for non-local deployments; localhost and `http://`
+absolute API URLs are rejected once `AUTH_ALLOWED_EMAIL_DOMAIN` is non-local.
+If you set `VITE_TELEMETRY_ENDPOINT`, use a same-origin path such as
+`/telemetry` or an `https://` URL under the same non-local deployment rule.
+If you set `VITE_SUPPORT_EMAIL` for a non-local deployment, do not leave it as
+`admin@example.com`; use a real support mailbox or leave it blank for the
+default `admin@AUTH_ALLOWED_EMAIL_DOMAIN`.
+
+Compose startup waits for infrastructure and microservices to become healthy before starting dependent services. Gateway, knowledge-service, and assistant-service checks use `/health/ready`, not only shallow process liveness endpoints.
 
 ## Knowledge Base
 
@@ -215,6 +277,9 @@ Set at least one chat provider key in `.env`. The runtime currently passes these
 - `DASHSCOPE_CHAT_API_KEY`
 - `GOOGLE_API_KEY`
 - `GEMINI_API_KEY`
+- `GOOGLE_CHAT_BACKEND`
+- `VERTEX_CHAT_API_KEY`
+- `VERTEX_API_KEY`
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `DEEPSEEK_API_KEY`
@@ -266,6 +331,7 @@ Microservice communication checks:
 
 ```bash
 curl -fsS http://localhost:8080/health/ready
+curl -fsS -o /dev/null http://localhost:8080/metrics
 curl -fsS http://localhost:8092/health/ready
 docker compose exec gateway printenv INTERNAL_AUTH_VERSION INTERNAL_COMM_STATE_BACKEND
 ```

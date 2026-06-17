@@ -14,9 +14,9 @@ The trio of pieces:
   reference-count an in-flight request.
 - ``DrainMiddleware``: BaseHTTPMiddleware that enters/leaves the DrainState
   context for every non-probe request.
-- ``install_signal_handlers``: wires SIGTERM / SIGINT on the running event
-  loop so the orchestrator's "please stop" signal flips the flag without
-  needing a full asyncio task to be running.
+- ``install_signal_handlers``: wraps SIGTERM / SIGINT so the orchestrator's
+  "please stop" signal flips the flag, then delegates to the previous signal
+  handler (for example Uvicorn's shutdown handler).
 
 Health probe paths (``/health``, ``/health/live``, ``/health/ready``,
 ``/metrics``) are excluded from drain accounting AND from the 503 short-circuit
@@ -52,7 +52,7 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import Iterable
+from collections.abc import Iterable
 
 from fastapi import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -110,7 +110,7 @@ class DrainState:
 
     # ----- request lifecycle -----
 
-    async def __aenter__(self) -> "DrainState":
+    async def __aenter__(self) -> DrainState:
         async with self._lock:
             if self._draining:
                 # Reject before incrementing so the rejected request never
@@ -231,31 +231,43 @@ def install_signal_handlers(
 ) -> None:
     """Wire SIGTERM / SIGINT to ``drain.begin_drain()``.
 
-    Uses ``loop.add_signal_handler`` so the flip happens on the running
-    event loop without requiring a task. No-op on Windows because
-    ``add_signal_handler`` is unsupported there (asyncio raises
-    NotImplementedError on Proactor / Selector loops on win32).
+    The handler wraps the previously installed handler instead of replacing it
+    outright. Uvicorn owns process shutdown; swallowing its handler leaves the
+    process alive but permanently draining, which makes all non-probe routes
+    return 503 after reload or container stop signals.
+
+    ``loop`` is kept for API compatibility with existing service startup code.
+    No-op on Windows where POSIX signals are not supported consistently.
     """
     if sys.platform == "win32":
         logger.debug("signal handlers skipped (win32)")
         return
 
+    del loop
     target = drain if drain is not None else DRAIN
 
-    def _on_signal(sig_name: str) -> None:
-        logger.info("received %s — initiating drain", sig_name)
-        target.begin_drain()
-
     for sig in (signal.SIGTERM, signal.SIGINT):
+        previous_handler = signal.getsignal(sig)
+
+        def _on_signal(signum, frame, previous=previous_handler) -> None:
+            sig_name = signal.Signals(signum).name
+            logger.info("received %s — initiating drain", sig_name)
+            target.begin_drain()
+
+            if callable(previous):
+                previous(signum, frame)
+            elif previous is signal.SIG_IGN:
+                return
+            # Do not invoke SIG_DFL here. In bare unit tests that would kill
+            # the process; under Uvicorn the previous handler is callable.
+
         try:
-            loop.add_signal_handler(sig, _on_signal, sig.name)
-        except (NotImplementedError, RuntimeError) as exc:
-            # Some environments (notebooks, threads-not-main) refuse;
-            # log and keep going. The lifespan shutdown still drains
-            # correctly when uvicorn delivers KeyboardInterrupt.
-            logger.warning(
-                "could not install %s handler: %s", sig.name, exc
-            )
+            signal.signal(sig, _on_signal)
+        except (ValueError, RuntimeError) as exc:
+            # Some environments (threads-not-main, embedded interpreters)
+            # refuse signal.signal; log and keep going. The lifespan shutdown
+            # still drains correctly when the server initiates shutdown.
+            logger.warning("could not install %s handler: %s", sig.name, exc)
 
 
 __all__ = [

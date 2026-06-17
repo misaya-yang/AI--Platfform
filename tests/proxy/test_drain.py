@@ -15,18 +15,16 @@ import signal
 import sys
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse
-
 from ai_gateway_core.proxy.drain import (
     DRAIN,
     DrainMiddleware,
     DrainState,
     install_signal_handlers,
 )
-
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -299,22 +297,43 @@ class TestSignalHandlers:
     async def test_sigterm_triggers_begin_drain(self) -> None:
         d = DrainState()
         loop = asyncio.get_running_loop()
-        install_signal_handlers(loop, drain=d)
-        assert d.draining is False
-        # Send SIGTERM to ourselves; the loop runs the registered handler.
-        signal.raise_signal(signal.SIGTERM)
-        # Yield so the loop can dispatch the signal handler.
-        for _ in range(20):
-            if d.draining:
-                break
-            await asyncio.sleep(0.01)
-        assert d.draining is True
-        # Cleanup so the test doesn't leave global handlers behind.
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.remove_signal_handler(sig)
-            except (NotImplementedError, ValueError):
-                pass
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        try:
+            install_signal_handlers(loop, drain=d)
+            assert d.draining is False
+            # Send SIGTERM to ourselves; the installed handler runs synchronously.
+            signal.raise_signal(signal.SIGTERM)
+            assert d.draining is True
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX signal chaining is not available on Windows",
+    )
+    @pytest.mark.asyncio
+    async def test_sigterm_chains_existing_shutdown_handler(self) -> None:
+        d = DrainState()
+        loop = asyncio.get_running_loop()
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+        called = {"count": 0, "signum": None}
+
+        def existing_handler(signum, frame) -> None:
+            called["count"] += 1
+            called["signum"] = signum
+
+        try:
+            signal.signal(signal.SIGTERM, existing_handler)
+            install_signal_handlers(loop, drain=d)
+
+            signal.raise_signal(signal.SIGTERM)
+
+            assert d.draining is True
+            assert called == {"count": 1, "signum": signal.SIGTERM}
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
     @pytest.mark.skipif(
         sys.platform != "win32", reason="Windows-only no-op check"

@@ -1,6 +1,8 @@
 export type SSEMessage<T = unknown> = { data: T };
 export type SSEEvent<T = unknown> = { event: string; data: T };
 
+import { isSseDebugEnabled } from "@/config/runtime";
+
 export interface SSEFetchOptions extends RequestInit {
   signal?: AbortSignal;
   /** SSE stream timeout in ms. Default: 5 minutes. Set 0 to disable. */
@@ -175,8 +177,7 @@ export async function* sseFetch<T>(
   url: string,
   init: SSEFetchOptions
 ): AsyncGenerator<T, void, void> {
-  const debug =
-    import.meta.env.DEV && import.meta.env.VITE_SSE_DEBUG === "true";
+  const debug = import.meta.env.DEV && isSseDebugEnabled();
   const startTime = performance.now();
   if (debug) {
     console.log(`[SSE] Starting fetch to ${url}`);
@@ -294,8 +295,7 @@ export async function* sseFetchEvents<T>(
   url: string,
   init: SSEFetchOptions
 ): AsyncGenerator<SSEEvent<T>, void, void> {
-  const debug =
-    import.meta.env.DEV && import.meta.env.VITE_SSE_DEBUG === "true";
+  const debug = import.meta.env.DEV && isSseDebugEnabled();
   const startTime = performance.now();
 
   if (debug) console.log(`[SSE-Events] Starting fetch to ${url}`);
@@ -438,8 +438,7 @@ export async function* sseFetchAGUI(
   url: string,
   init: SSEFetchOptions
 ): AsyncGenerator<AGUIEvent, void, void> {
-  const debug =
-    import.meta.env.DEV && import.meta.env.VITE_SSE_DEBUG === "true";
+  const debug = import.meta.env.DEV && isSseDebugEnabled();
   const startTime = performance.now();
 
   if (debug) console.log(`[SSE-AGUI] Starting fetch to ${url}`);

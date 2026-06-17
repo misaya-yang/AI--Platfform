@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ...persistence.database import DatabaseStorage
 
 logger = get_logger(__name__)
@@ -51,12 +52,33 @@ class APIKeyService:
 
     def __init__(self, database: DatabaseStorage):
         self.db = database
+        self._scope_column: str | None = None
 
     @staticmethod
     def _public_key_id_sql(alias: str = "") -> str:
         """Stable public key_id expression compatible with legacy rows."""
         prefix = f"{alias}." if alias else ""
         return f"COALESCE({prefix}key_id, ('ak_legacy_' || {prefix}id::text))"
+
+    async def _api_key_scope_column(self) -> str:
+        """Return the API key permission column exposed as response `scopes`."""
+        if self._scope_column is not None:
+            return self._scope_column
+
+        row = await self.db.fetchrow(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = ANY (current_schemas(FALSE))
+              AND table_name = 'api_keys'
+              AND column_name IN ('scopes', 'permissions')
+            ORDER BY CASE column_name WHEN 'scopes' THEN 0 ELSE 1 END
+            LIMIT 1
+            """
+        )
+        column = row["column_name"] if row else None
+        self._scope_column = column if column in {"scopes", "permissions"} else "scopes"
+        return self._scope_column
 
     async def create_api_key(
         self,
@@ -83,15 +105,16 @@ class APIKeyService:
         if roles is None:
             roles = ["user"]
 
-        query = """
+        scope_column = await self._api_key_scope_column()
+        query = f"""
             INSERT INTO api_keys (
                 key_id, key_hash, key_prefix, name, description,
-                user_id, tenant_id, scopes, roles, tier, rate_limit, expires_at
+                user_id, tenant_id, {scope_column}, roles, tier, rate_limit, expires_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
             )
             RETURNING id, key_id, key_prefix, name, description,
-                      scopes, roles, tier, rate_limit,
+                      {scope_column} AS scopes, roles, tier, rate_limit,
                       created_at, expires_at, enabled
         """
 
@@ -133,12 +156,13 @@ class APIKeyService:
         key_hash = hash_api_key(api_key)
 
         public_key_id_expr = self._public_key_id_sql("ak")
+        scope_column = await self._api_key_scope_column()
         query = f"""
             SELECT
                 ak.id,
                 {public_key_id_expr} AS key_id,
                 ak.name, ak.user_id, ak.tenant_id,
-                ak.scopes, ak.roles, ak.tier, ak.rate_limit,
+                ak.{scope_column} AS scopes, ak.roles, ak.tier, ak.rate_limit,
                 ak.enabled, ak.expires_at
             FROM api_keys ak
             WHERE ak.key_hash = $1
@@ -210,11 +234,12 @@ class APIKeyService:
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 
+        scope_column = await self._api_key_scope_column()
         query = f"""
             SELECT
                 {self._public_key_id_sql()} AS key_id,
                 key_prefix, name, description,
-                user_id, tenant_id, scopes, roles, tier,
+                user_id, tenant_id, {scope_column} AS scopes, roles, tier,
                 rate_limit, enabled as is_active, created_at,
                 ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
                 last_used_at, expires_at, use_count
@@ -229,11 +254,12 @@ class APIKeyService:
     async def get_api_key(self, key_id: str) -> dict[str, Any] | None:
         """获取 API Key 详情（不返回实际的 key）"""
         public_key_id_expr = self._public_key_id_sql()
+        scope_column = await self._api_key_scope_column()
         query = f"""
             SELECT
                 {public_key_id_expr} AS key_id,
                 key_prefix, name, description,
-                user_id, tenant_id, scopes, roles, tier,
+                user_id, tenant_id, {scope_column} AS scopes, roles, tier,
                 rate_limit, enabled as is_active,
                 ('apikey:' || SUBSTRING(key_hash, 1, 16)) AS derived_user_id,
                 created_at, last_used_at, expires_at, use_count
