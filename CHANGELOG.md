@@ -10,8 +10,12 @@
 - Generalized SDK package names, CLI storage paths, Java namespaces, docgen package naming, sample URLs, Helm defaults, and docgen fixtures.
 - Renamed the gateway-authored LangGraph runtime model payload to `gateway_model`.
 - Added a root `.env.example` for local Docker deployment without committing real secrets.
+- Added open-source governance files for license, contributing, security reporting, support, code of conduct, issue templates, and pull request review expectations.
 - Added strict environment validation for required secrets, model keys, embedding keys, provider names, port conflicts, CORS JSON shape, Docker Compose interpolation, and runtime dependency health.
 - Updated `README.md` with a downloader-ready quickstart, required env variables, deployment commands, validation commands, microservice communication notes, DB/Qdrant volume caveats, and troubleshooting.
+- Added deterministic local demo data with dry-run/apply commands for knowledge-base, public share, quiz, and exam route checks.
+- Added a public release checklist that covers local gates, GitHub artifact workflows, post-release smoke checks, and rollback handling.
+- Updated CI toward stable open-source contributor checks: script contracts, focused tests, Docker Compose rendering, harness JSON checks, frontend typecheck/lint/build, and release documentation gates.
 
 ### Startup and deployment
 

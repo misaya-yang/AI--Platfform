@@ -79,8 +79,11 @@ plugins/frontend-design/
 
 # Documentation (managed separately, except named handoff docs)
 docs/*
+!docs/demo-data.md
 !docs/general_ai_assistant_upgrade/
 !docs/general_ai_assistant_upgrade/**
+!docs/open_source_platform_optimization/
+!docs/open_source_platform_optimization/**
 !apps/islamic-content-service/docs/
 !apps/islamic-content-service/docs/**
 !apps/assistant-service/docs/
@@ -148,6 +151,8 @@ apps/islamic-content-service/data/
 *-Spec.md
 !docs/general_ai_assistant_upgrade/reports/
 !docs/general_ai_assistant_upgrade/reports/**
+!docs/open_source_platform_optimization/reports/
+!docs/open_source_platform_optimization/reports/**
 claude-code-*.md
 # plans/ holds migration plans and generated reports. Track .md + .json
 # (committable deliverables); ignore any other scratch/binary artifacts

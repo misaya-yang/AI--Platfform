@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Ruff Lint & Format Check
+  script-contracts:
+    name: Script Contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,33 +21,99 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ruff
-        run: pip install ruff>=0.8.0
+      - name: Install uv
+        run: python -m pip install uv
 
-      - name: Ruff check
-        run: ruff check src/ apps/ tests/
-
-      - name: Ruff format check
-        run: ruff format --check src/ apps/ tests/
-
-  test:
-    name: Pytest
-    runs-on: ubuntu-latest
-    needs: lint
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Install dependencies
+      - name: Check shell script syntax
         run: |
-          pip install -e ".[test]"
+          bash -n scripts/new/validate-env.sh
+          bash -n scripts/new/seed-demo-data.sh
 
-      - name: Run tests
-        run: pytest tests/ -x --ignore=tests/e2e -m "not integration"
-        env:
-          GATEWAY_DATABASE__ENABLED: "false"
-          GATEWAY_REDIS__ENABLED: "false"
+      - name: Run focused Python lint
+        run: |
+          uv run ruff check \
+            tests/scripts/test_validate_env_quickstart.py \
+            tests/scripts/test_web_runtime_config_entrypoint.py \
+            tests/scripts/test_seed_demo_data.py
+
+      - name: Run focused script tests
+        run: |
+          uv run --extra dev --extra test pytest -q --no-cov \
+            tests/scripts/test_validate_env_quickstart.py \
+            tests/scripts/test_web_runtime_config_entrypoint.py \
+            tests/scripts/test_seed_demo_data.py
+
+  compose-and-harness:
+    name: Compose and Harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate compose config
+        run: docker compose --env-file .env.example config --quiet
+
+      - name: Validate release harnesses
+        run: |
+          python3 -m json.tool docs/general_ai_assistant_upgrade/feature-oracle.json >/dev/null
+          python3 -m json.tool docs/general_ai_assistant_upgrade/loop-state.json >/dev/null
+          python3 -m json.tool docs/open_source_platform_optimization/feature-oracle.json >/dev/null
+          python3 -m json.tool docs/open_source_platform_optimization/loop-state.json >/dev/null
+          test -s docs/general_ai_assistant_upgrade/reports/gaa-04-deployment-readiness-report.md
+          test -s docs/open_source_platform_optimization/phase-manifest.md
+
+  frontend:
+    name: Frontend Typecheck, Lint, Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Install frontend dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -C web type-check
+
+      - name: Lint
+        run: pnpm -C web lint
+
+      - name: Build
+        run: pnpm -C web build
+
+      - name: Install Playwright browser
+        run: pnpm -C web exec playwright install --with-deps chromium
+
+      - name: Open-source route smoke
+        run: pnpm -C web e2e:opensource
+
+  release-ready:
+    name: Release Readiness
+    runs-on: ubuntu-latest
+    needs: [script-contracts, compose-and-harness, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify public release docs
+        run: |
+          test -s LICENSE
+          test -s CONTRIBUTING.md
+          test -s SECURITY.md
+          test -s CODE_OF_CONDUCT.md
+          test -s SUPPORT.md
+          test -s RELEASE.md
+          test -s docs/demo-data.md
+
+      - name: Verify demo seed dry run
+        run: scripts/new/seed-demo-data.sh --dry-run

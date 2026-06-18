@@ -48,10 +48,10 @@ async function installDynamicRouteHarness(page: Page) {
     await route.fallback();
   });
 
-  await routeJson(page, "**/api/v1/knowledge/datasets/ds-dynamic-smoke", {
-    dataset_id: "ds-dynamic-smoke",
-    name: "Dynamic Knowledge Smoke",
-    description: "Seedless route smoke dataset",
+  await routeJson(page, "**/api/v1/knowledge/datasets/demo-kb-ai-gateway", {
+    dataset_id: "demo-kb-ai-gateway",
+    name: "AI Gateway Demo Knowledge Base",
+    description: "Small local knowledge base used by the open-source quickstart.",
     visibility: "tenant",
     kb_type: "document",
     use_case: "basic_qa",
@@ -67,11 +67,11 @@ async function installDynamicRouteHarness(page: Page) {
     updated_at: nowIso(),
   });
 
-  await routeJson(page, "**/api/v1/knowledge/ds-dynamic-smoke/documents", [
+  await routeJson(page, "**/api/v1/knowledge/demo-kb-ai-gateway/documents", [
     {
-      document_id: "doc-dynamic-smoke",
-      dataset_id: "ds-dynamic-smoke",
-      title: "Dynamic route source note",
+      document_id: "demo-doc-quickstart-runbook",
+      dataset_id: "demo-kb-ai-gateway",
+      title: "Local Quickstart Runbook",
       status: "completed",
       segment_count: 1,
       word_count: 12,
@@ -83,13 +83,13 @@ async function installDynamicRouteHarness(page: Page) {
     },
   ]);
 
-  await routeJson(page, "**/api/v1/knowledge/ds-dynamic-smoke/segments**", [
+  await routeJson(page, "**/api/v1/knowledge/demo-kb-ai-gateway/segments**", [
     {
-      segment_id: "seg-dynamic-smoke",
-      dataset_id: "ds-dynamic-smoke",
-      document_id: "doc-dynamic-smoke",
+      segment_id: "demo-seg-quickstart-001",
+      dataset_id: "demo-kb-ai-gateway",
+      document_id: "demo-doc-quickstart-runbook",
       position: 1,
-      text: "Dynamic route rendering should work when a dataset record exists.",
+      text: "AI Gateway is a local-first open-source platform for routing AI providers, managing assistant sessions, and testing knowledge-base retrieval.",
       enabled: true,
       status: "completed",
       token_count: 12,
@@ -98,11 +98,11 @@ async function installDynamicRouteHarness(page: Page) {
     },
   ]);
 
-  await routeJson(page, "**/api/v1/exams/exam-dynamic-smoke", {
-    exam_id: "exam-dynamic-smoke",
-    quiz_id: "quiz-dynamic-smoke",
-    title: "Dynamic Exam Smoke",
-    description: "Seedless route smoke exam",
+  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044", {
+    exam_id: "00000000-0000-4000-8000-000000000044",
+    quiz_id: "00000000-0000-4000-8000-000000000041",
+    title: "AI Gateway Demo Exam",
+    description: "A published exam record for local route smoke checks.",
     status: "published",
     published_by: "dynamic-route-user",
     question_count: 1,
@@ -112,18 +112,18 @@ async function installDynamicRouteHarness(page: Page) {
     max_retakes: 1,
     time_limit_minutes: null,
     passing_score: 0.6,
-    share_id: "share-dynamic-smoke",
-    share_code: "quiz-dynamic-smoke",
+    share_id: "00000000-0000-4000-8000-000000000043",
+    share_code: "demo-quiz",
     created_at: nowIso(),
     updated_at: nowIso(),
   });
 
-  await routeJson(page, "**/api/v1/exams/exam-dynamic-smoke/attempts**", {
+  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/attempts**", {
     attempts: [],
     total: 0,
   });
 
-  await routeJson(page, "**/api/v1/exams/exam-dynamic-smoke/stats", {
+  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/stats", {
     total_participants: 0,
     avg_score: null,
     min_score: null,
@@ -144,13 +144,13 @@ async function installDynamicRouteHarness(page: Page) {
     ],
   });
 
-  await routeJson(page, "**/api/v1/exams/exam-dynamic-smoke/reports", {
+  await routeJson(page, "**/api/v1/exams/00000000-0000-4000-8000-000000000044/reports", {
     reports: [],
   });
 
-  await routeJson(page, "**/api/v1/assistant/shares/share-dynamic-smoke", {
-    share_code: "share-dynamic-smoke",
-    title: "Dynamic Share Smoke",
+  await routeJson(page, "**/api/v1/assistant/shares/demo-share", {
+    share_code: "demo-share",
+    title: "Open-source demo conversation",
     snapshot: {
       model_id: "gpt-4o",
       shared_at: nowIso(),
@@ -158,12 +158,12 @@ async function installDynamicRouteHarness(page: Page) {
       messages: [
         {
           role: "user",
-          content: "Can this shared conversation render?",
+          content: "What can this platform do?",
           timestamp: nowIso(),
         },
         {
           role: "assistant",
-          content: "Yes. This public share route renders from mocked seed data.",
+          content: "It routes AI providers, serves a general assistant, and exposes knowledge-base workflows through a local gateway.",
           timestamp: nowIso(),
         },
       ],
@@ -175,22 +175,22 @@ async function installDynamicRouteHarness(page: Page) {
     expires_at: null,
   });
 
-  await routeJson(page, "**/api/v1/quiz/shared/quiz-dynamic-smoke", {
-    quiz_id: "quiz-dynamic-smoke",
-    share_code: "quiz-dynamic-smoke",
-    title: "Dynamic Quiz Smoke",
-    description: "Seedless public quiz route smoke",
+  await routeJson(page, "**/api/v1/quiz/shared/demo-quiz", {
+    quiz_id: "00000000-0000-4000-8000-000000000041",
+    share_code: "demo-quiz",
+    title: "AI Gateway Demo Quiz",
+    description: "A one-question quiz that proves public quiz routes can render after seeding.",
     question_count: 1,
     difficulty: "easy",
     require_name: false,
     questions: [
       {
-        id: "q-dynamic-smoke",
+        id: "00000000-0000-4000-8000-000000000042",
         question_num: 1,
         question_type: "mc_single",
-        question_text: "Which page is this?",
+        question_text: "Which route should render after loading the open-source demo data?",
         options: [
-          { label: "A", text: "A public quiz route" },
+          { label: "A", text: "/quiz/demo-quiz" },
           { label: "B", text: "A settings page" },
         ],
       },
@@ -233,12 +233,12 @@ test.describe("dynamic route render smoke", () => {
     const assertNoRuntimeFailures = watchRuntimeFailures(page);
     await installDynamicRouteHarness(page);
 
-    await page.goto("/knowledge/ds-dynamic-smoke", { waitUntil: "domcontentloaded" });
-    await expect(page.getByText("Dynamic Knowledge Smoke")).toBeVisible();
-    await expect(page.getByText("Dynamic route source note")).toBeVisible();
+    await page.goto("/knowledge/demo-kb-ai-gateway", { waitUntil: "domcontentloaded" });
+    await expect(page.getByText("AI Gateway Demo Knowledge Base")).toBeVisible();
+    await expect(page.getByText("Local Quickstart Runbook")).toBeVisible();
 
-    await page.goto("/exams/exam-dynamic-smoke", { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "Dynamic Exam Smoke" })).toBeVisible();
+    await page.goto("/exams/00000000-0000-4000-8000-000000000044", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "AI Gateway Demo Exam" })).toBeVisible();
     await expect(page.getByText(/0 人参与|暂无考生|No participants/i).first()).toBeVisible();
 
     assertNoRuntimeFailures();
@@ -248,15 +248,15 @@ test.describe("dynamic route render smoke", () => {
     const assertNoRuntimeFailures = watchRuntimeFailures(page);
     await installDynamicRouteHarness(page);
     await page.addInitScript(() => {
-      localStorage.removeItem("quiz_submitted_quiz-dynamic-smoke");
+      localStorage.removeItem("quiz_submitted_demo-quiz");
     });
 
-    await page.goto("/share/share-dynamic-smoke", { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "Dynamic Share Smoke" })).toBeVisible();
-    await expect(page.getByText("This public share route renders from mocked seed data.")).toBeVisible();
+    await page.goto("/share/demo-share", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "Open-source demo conversation" })).toBeVisible();
+    await expect(page.getByText("It routes AI providers, serves a general assistant")).toBeVisible();
 
-    await page.goto("/quiz/quiz-dynamic-smoke", { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "Dynamic Quiz Smoke" }).first()).toBeVisible();
+    await page.goto("/quiz/demo-quiz", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "AI Gateway Demo Quiz" }).first()).toBeVisible();
     await expect(page.getByRole("button", { name: /start quiz/i })).toBeEnabled();
 
     assertNoRuntimeFailures();

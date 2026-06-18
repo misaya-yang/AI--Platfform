@@ -82,6 +82,15 @@ make quickstart
 - Gateway readiness: `http://localhost:8080/health/ready`
 - Gateway metrics: `http://localhost:8080/metrics`
 
+Optional local demo data is available after the stack is running:
+
+```bash
+make seed-demo       # preview the deterministic SQL and routes
+make seed-demo-apply # load the records into the configured local database
+```
+
+See `docs/demo-data.md` for the seeded routes and scope.
+
 The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
 The validator allows that documented local bootstrap password but warns about it.
 For non-local deployments, change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own
@@ -151,6 +160,18 @@ valid.
 ## Release Notes
 
 See `CHANGELOG.md` for the module-level summary of the current open-source standalone release cleanup.
+See `RELEASE.md` for the public release checklist, artifact workflow, and rollback gates.
+
+## Contributing and Security
+
+- Contribution guide: `CONTRIBUTING.md`
+- Security reporting and supported-version policy: `SECURITY.md`
+- Code of conduct: `CODE_OF_CONDUCT.md`
+- Support expectations: `SUPPORT.md`
+
+Do not report vulnerabilities through public issues and do not paste secrets,
+tokens, provider keys, database URLs, private documents, or production data into
+issues, pull requests, logs, or screenshots.
 
 ## Deployment Commands
 
