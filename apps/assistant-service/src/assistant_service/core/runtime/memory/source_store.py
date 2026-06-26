@@ -178,3 +178,18 @@ class MemorySourceStore:
             "file_count": len(files),
             "files": files,
         }
+
+    def delete_source(self, tenant_id: str, user_id: str, source_path: str) -> bool:
+        """Delete a markdown source only when it belongs to this tenant/user."""
+        root = self._user_root(tenant_id, user_id).resolve()
+        target = Path(source_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return False
+
+        if target.suffix != ".md" or not target.exists() or not target.is_file():
+            return False
+
+        target.unlink()
+        return True

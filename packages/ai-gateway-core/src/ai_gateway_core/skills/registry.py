@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .models import SkillManifest
@@ -26,10 +26,20 @@ class SkillRegistry:
         self._skills: dict[str, SkillManifest] = {}
 
     def register(self, manifest: SkillManifest) -> None:
+        manifest = self._safe_manifest_for_storage(manifest)
         errors = manifest.validate()
         if errors:
             raise ValueError(f"Invalid skill manifest: {'; '.join(errors)}")
         self._skills[manifest.name] = manifest
+
+    @staticmethod
+    def _safe_manifest_for_storage(manifest: SkillManifest) -> SkillManifest:
+        """Keep generated skills proposed/disabled until activation gates pass."""
+        if manifest.review_required():
+            return replace(manifest, enabled=False, lifecycle_status="proposed")
+        if manifest.generated and manifest.enabled:
+            return replace(manifest, lifecycle_status="active")
+        return manifest
 
     def unregister(self, skill_name: str) -> bool:
         return self._skills.pop(skill_name, None) is not None
@@ -86,7 +96,7 @@ class SkillRegistry:
 
         rows = await self.database.fetch(
             """
-            SELECT name, title, description, enabled, tags, permissions
+            SELECT name, title, description, enabled, tags, permissions, status
             FROM assistant_skills
             WHERE tenant_id = $1
               AND (user_id = $2 OR user_id = '*')
@@ -108,6 +118,7 @@ class SkillRegistry:
                 tags=list(row.get("tags") or []),
                 permissions=list(row.get("permissions") or []),
                 enabled=bool(row.get("enabled", True)),
+                lifecycle_status=str(row.get("status") or "active"),
             )
             if not manifest.validate():
                 self._skills[manifest.name] = manifest
@@ -124,6 +135,8 @@ class SkillRegistry:
         created_by: str,
     ) -> str:
         """Persist a manifest snapshot in assistant_skills + versions."""
+        manifest = self._safe_manifest_for_storage(manifest)
+        status = "active" if manifest.enabled else manifest.lifecycle_status
         if not self.database:
             self.register(manifest)
             return str(uuid.uuid4())
@@ -134,7 +147,7 @@ class SkillRegistry:
             INSERT INTO assistant_skills (
                 skill_id, tenant_id, user_id, name, title, description,
                 tags, permissions, enabled, status, created_by, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, NOW(), NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
             ON CONFLICT (tenant_id, name)
             DO UPDATE SET
                 title = EXCLUDED.title,
@@ -142,6 +155,7 @@ class SkillRegistry:
                 tags = EXCLUDED.tags,
                 permissions = EXCLUDED.permissions,
                 enabled = EXCLUDED.enabled,
+                status = EXCLUDED.status,
                 updated_at = NOW()
             RETURNING skill_id;
             """,
@@ -154,6 +168,7 @@ class SkillRegistry:
             json.dumps(manifest.tags),
             json.dumps(manifest.permissions),
             manifest.enabled,
+            status,
             created_by,
         )
         if row and row.get("skill_id"):
@@ -165,7 +180,7 @@ class SkillRegistry:
             INSERT INTO assistant_skill_versions (
                 version_id, skill_id, version, manifest, entrypoint,
                 content, status, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW())
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
             """,
             version_id,
             skill_id,
@@ -173,6 +188,7 @@ class SkillRegistry:
             json.dumps(manifest.to_dict()),
             manifest.entrypoint,
             manifest.summary,
+            status,
         )
 
         self.register(manifest)

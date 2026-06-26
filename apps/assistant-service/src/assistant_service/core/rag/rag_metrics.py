@@ -441,10 +441,10 @@ class RAGEvaluator:
         for chunk in chunks:
             content = chunk.get("content", chunk.get("text", ""))
             overlap = self._calculate_overlap(content, response)
-            if overlap > self.grounding_threshold:
-                # Check if this chunk was explicitly cited
-                if not any(re.search(p, response, re.IGNORECASE) for p in citation_patterns[:2]):
-                    implicit += 1
+            if overlap > self.grounding_threshold and not any(
+                re.search(p, response, re.IGNORECASE) for p in citation_patterns[:2]
+            ):
+                implicit += 1
 
         return explicit, implicit
 

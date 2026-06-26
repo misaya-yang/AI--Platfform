@@ -20,6 +20,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from ..prompts.scenario_analysis_prompts import (
     SCENARIO_TYPES,
     build_analysis_prompt,
@@ -357,11 +358,10 @@ class ScenarioAnalyzer:
                 return False
             return True
 
-        if scenario_type in kb_optional_scenarios:
+        if scenario_type in kb_optional_scenarios and len(query) < 50:
             # For general inquiry, default to no KB unless there are enterprise signals
-            if len(query) < 50:
-                logger.debug(f"[KB SKIP] Short general inquiry: '{query}'")
-                return False
+            logger.debug(f"[KB SKIP] Short general inquiry: '{query}'")
+            return False
 
         # =================================================================
         # Tier 4: Default - Conservative strategy

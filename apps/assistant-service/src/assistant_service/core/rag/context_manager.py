@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import tiktoken
-
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)

@@ -25,9 +25,10 @@ class TenantMCPConfig:
     """Per-tenant MCP server access policy."""
 
     tenant_id: str
-    allowed_servers: set[str] = field(default_factory=set)  # empty at filter-time = deny all MCP; DB-miss populates with all known servers
+    allowed_servers: set[str] = field(default_factory=set)  # empty = deny all MCP
     server_overrides: dict[str, Any] | None = None
     max_connections: int = 5
+    policy_source: str = "configured"
 
 
 class TenantMCPConfigService:
@@ -62,7 +63,8 @@ class TenantMCPConfigService:
         if not self._database:
             return TenantMCPConfig(
                 tenant_id=tenant_id,
-                allowed_servers=set(self._all_server_names),
+                allowed_servers=set(),
+                policy_source="default_deny_no_database",
             )
 
         try:
@@ -74,13 +76,15 @@ class TenantMCPConfigService:
             logger.warning(f"Failed to load MCP config for {tenant_id}: {e}")
             return TenantMCPConfig(
                 tenant_id=tenant_id,
-                allowed_servers=set(self._all_server_names),
+                allowed_servers=set(),
+                policy_source="default_deny_config_error",
             )
 
         if not row:
             return TenantMCPConfig(
                 tenant_id=tenant_id,
-                allowed_servers=set(self._all_server_names),
+                allowed_servers=set(),
+                policy_source="default_deny_missing_config",
             )
 
         return TenantMCPConfig(
@@ -88,6 +92,7 @@ class TenantMCPConfigService:
             allowed_servers=set(row["allowed_servers"] or []),
             server_overrides=row.get("server_overrides"),
             max_connections=row.get("max_connections", 5),
+            policy_source="configured",
         )
 
     def invalidate(self, tenant_id: str | None = None) -> None:
@@ -117,8 +122,6 @@ class TenantMCPConfigService:
 
         result = []
         for tool in tools:
-            if not tool.name.startswith("mcp_"):
-                result.append(tool)
-            elif tool.name.startswith(allowed_prefixes):
+            if not tool.name.startswith("mcp_") or tool.name.startswith(allowed_prefixes):
                 result.append(tool)
         return result

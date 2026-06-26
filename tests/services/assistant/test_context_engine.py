@@ -9,11 +9,21 @@ Tests for ContextStructure dataclass and ContextEngine class:
 - Edge cases and empty values handling
 """
 
+from types import SimpleNamespace
+
+import pytest
 from assistant_service.core.context_engine import (
+    ContextBudgetManager,
     ContextEngine,
     ContextStructure,
     create_context_engine,
 )
+from assistant_service.core.files.file_processor import FileProcessor
+from assistant_service.core.rag.scenario_aware_retriever import (
+    RetrievalResult,
+    ScenarioRetrievalContext,
+)
+from assistant_service.core.runtime.context.assembler import ContextAssemblerV2
 
 # =============================================================================
 # ContextStructure Tests
@@ -405,6 +415,202 @@ class TestCreateContextEngine:
         engine = create_context_engine("ANTHROPIC")
 
         assert engine.provider == "anthropic"
+
+
+# =============================================================================
+# RAG Source Scope Tests
+# =============================================================================
+
+
+class TestRAGSourceScope:
+    """Test source-aware RAG context behavior for NGA-F008."""
+
+    @pytest.mark.asyncio
+    async def test_long_uploaded_document_creates_session_kb_with_scope(self, tmp_path):
+        """Long uploaded files create a session-scoped temporary KB when supported."""
+
+        class FakeKnowledgeService:
+            def __init__(self):
+                self.calls = []
+
+            async def create_session_dataset(self, *, user, session_id, documents, metadata):
+                self.calls.append(
+                    {
+                        "user": user,
+                        "session_id": session_id,
+                        "documents": documents,
+                        "metadata": metadata,
+                    }
+                )
+                return {"dataset_id": "session-kb-1"}
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        long_doc = uploads_dir / "long.md"
+        long_doc.write_text(("alpha beta gamma\n" * 20), encoding="utf-8")
+
+        user = SimpleNamespace(tenant_id="tenant-a", user_id="user-a")
+        kb = FakeKnowledgeService()
+        processor = FileProcessor(knowledge_service=kb, storage_base_path=tmp_path)
+
+        async def fake_process_document(file_path, api_path, max_text_chars):
+            return "", True, {
+                "file_path": api_path,
+                "file_name": file_path.name,
+                "file_type": "document",
+                "requires_rag": True,
+            }
+
+        processor._process_document = fake_process_document
+
+        result = await processor.process_files(
+            file_paths=["uploads/long.md"],
+            session_id="session-a",
+            user=user,
+            model_supports_vision=False,
+            max_text_chars=32,
+        )
+
+        assert result.requires_rag is True
+        assert result.session_kb_id == "session-kb-1"
+        assert kb.calls[0]["documents"] == ["uploads/long.md"]
+        assert kb.calls[0]["metadata"]["source_type"] == "session_file"
+        assert kb.calls[0]["metadata"]["scope"] == {
+            "tenant_id": "tenant-a",
+            "user_id": "user-a",
+            "session_id": "session-a",
+        }
+
+    def test_formatted_rag_context_preserves_source_metadata(self):
+        """Formatted RAG snippets carry citation, freshness, dataset, and scope."""
+        context = ScenarioRetrievalContext(
+            user_query="Summarize the uploaded policy",
+            scenario=SimpleNamespace(),
+            results=[
+                RetrievalResult(
+                    content="Policy cancellation requires written notice.",
+                    source="policy.md",
+                    score=0.92,
+                    chunk_id="chunk-1",
+                    dataset_id="session-kb-1",
+                    metadata={
+                        "source_type": "session_file",
+                        "citation": "policy.md#chunk-1",
+                        "freshness": "uploaded:2026-06-25",
+                        "scope": {
+                            "tenant_id": "tenant-a",
+                            "session_id": "session-a",
+                        },
+                    },
+                )
+            ],
+        )
+
+        formatted = context.to_formatted_context()
+
+        assert "source_type: session_file" in formatted
+        assert "citation: policy.md#chunk-1" in formatted
+        assert "freshness: uploaded:2026-06-25" in formatted
+        assert "dataset_id: session-kb-1" in formatted
+        assert "tenant_id: tenant-a" in formatted
+        assert "session_id: session-a" in formatted
+
+
+# =============================================================================
+# Context Packet Budget Tests
+# =============================================================================
+
+
+class TestContextPacketBudget:
+    """Test bounded context packet assembly for NGA-F009."""
+
+    def test_context_packet_includes_bounded_summaries_and_budget_telemetry(self):
+        """Assembler keeps summary context ordered and records contributor cost."""
+        history = [
+            {
+                "role": "user" if idx % 2 == 0 else "assistant",
+                "content": f"older message {idx} " + ("token " * 120),
+            }
+            for idx in range(8)
+        ]
+        context = ContextStructure(
+            system_prompt="Stable system policy.",
+            user_preferences="Prefers concise answers.",
+            long_term_memory="Semantic memory: works on assistant runtime.",
+            task_state="Session state: implementing context telemetry.",
+            conversation_history=history,
+            current_context="RAG snippet: scoped retrieval result.",
+            current_query="What should be assembled next?",
+        )
+        assembler = ContextAssemblerV2(
+            provider="openai",
+            budget_manager=ContextBudgetManager(
+                reserved_output_tokens=0,
+                min_recent_messages=2,
+            ),
+        )
+        long_raw_output = "raw-output " * 100
+
+        messages, budget_event, detail = assembler.build(
+            context=context,
+            model_context_window=1024,
+            tool_definitions=[{"name": "search", "description": "Search"}],
+            skills_metadata=[
+                {
+                    "name": "doc-skill",
+                    "summary": "selected skill metadata only",
+                    "instructions": "full instructions " * 200,
+                }
+            ],
+            memory_snippets=["Scoped semantic memory snippet."],
+            source_summaries=[
+                {
+                    "source_type": "kb",
+                    "citation": "kb://policy#1",
+                    "summary": "KB policy source summary.",
+                }
+            ],
+            tool_result_summaries=[
+                {"tool_name": "search", "summary": long_raw_output},
+            ],
+            artifact_summaries=[
+                {"artifact_id": "artifact-1", "summary": "Generated artifact summary."},
+            ],
+            compaction_summary="Older conversation summarized with URLs preserved.",
+        )
+
+        user_content = messages[-1]["content"]
+        assert user_content.index("RAG snippet") < user_content.index("## Source Summaries")
+        assert user_content.index("## Source Summaries") < user_content.index(
+            "## Recent Tool Results"
+        )
+        assert user_content.index("## Recent Tool Results") < user_content.index(
+            "## Recent Artifacts"
+        )
+        assert user_content.index("## Recent Artifacts") < user_content.index(
+            "## Compaction Summary"
+        )
+        assert user_content.index("## Compaction Summary") < user_content.index(
+            "What should be assembled next?"
+        )
+        assert "full instructions" not in user_content
+        assert len(user_content) < len(long_raw_output) + 800
+
+        assert budget_event["context_packet_order"] == [
+            "stable_system_policy",
+            "current_turn_and_session_state",
+            "selected_capability_metadata",
+            "scoped_memory_snippets",
+            "rag_source_summaries",
+            "recent_tool_artifact_summaries",
+            "compaction_summary",
+            "budget_telemetry",
+        ]
+        assert budget_event["compaction"]["dropped_history_messages"] > 0
+        assert detail["tokens_by_category"]["source_summaries"] > 0
+        assert detail["tokens_by_category"]["tool_results"] > 0
+        assert detail["tokens_by_category"]["artifacts"] > 0
+        assert detail["tokens_by_category"]["compaction"] > 0
 
 
 # =============================================================================

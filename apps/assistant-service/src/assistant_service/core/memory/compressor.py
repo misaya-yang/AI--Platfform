@@ -30,6 +30,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -471,8 +472,6 @@ Summary:"""
 # LLM Adapter — concrete LLMService backed by ModelRegistry
 # =============================================================================
 
-import logging
-
 if TYPE_CHECKING:
     from ..models.model_registry import ModelRegistry
 
@@ -487,7 +486,7 @@ class ModelRegistryLLMService:
 
     def __init__(
         self,
-        model_registry: "ModelRegistry",
+        model_registry: ModelRegistry,
         model_id: str,
         max_tokens: int = 500,
         temperature: float = 0.3,

@@ -52,6 +52,7 @@ from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
+
     from .tools.tool_registry import ToolCallRequest, ToolCallResult, ToolDefinition, ToolRegistry
 
 logger = get_logger(__name__)
@@ -368,6 +369,49 @@ class RegistryToolInvoker(ToolInvoker):
             del self._result_cache[oldest]
         self._result_cache[(session_id, key)] = (result, time.monotonic() + self._cache_ttl)
 
+    async def _deny_tool_call(
+        self,
+        *,
+        call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: ToolInvocationContext,
+        error: str,
+        start_time: float,
+    ) -> Any:
+        """Return a denied tool result and record best-effort audit evidence."""
+        from .tools.tool_registry import ToolCallResult
+
+        duration_ms = (time.time() - start_time) * 1000
+        if self.tool_audit:
+            try:
+                from .audit.tool_audit import ToolAuditEntry
+
+                await self.tool_audit.log(
+                    ToolAuditEntry(
+                        tenant_id=context.tenant_id,
+                        user_id=context.user_id,
+                        session_id=context.session_id,
+                        request_id=context.request_id,
+                        tool_type=self.tool_audit.classify_tool_type(tool_name),
+                        tool_name=tool_name,
+                        input_summary=self.tool_audit.summarize_input(arguments),
+                        output_status="denied",
+                        error_message=error,
+                        latency_ms=duration_ms,
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Denied tool audit failed: {e}")
+
+        return ToolCallResult(
+            call_id=call_id,
+            tool_name=tool_name,
+            success=False,
+            error=error,
+            duration_ms=duration_ms,
+        )
+
     async def invoke(
         self,
         tool_name: str,
@@ -481,16 +525,26 @@ class RegistryToolInvoker(ToolInvoker):
             try:
                 mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
                 allowed_prefixes = tuple(f"mcp_{s}__" for s in mcp_config.allowed_servers)
-                if not tool_name.startswith(allowed_prefixes):
+                if not mcp_config.allowed_servers or not tool_name.startswith(allowed_prefixes):
                     logger.warning(f"MCP policy denied: tool={tool_name} tenant={context.tenant_id}")
-                    return ToolCallResult(
+                    return await self._deny_tool_call(
                         call_id=call_id,
                         tool_name=tool_name,
-                        success=False,
+                        arguments=arguments,
+                        context=context,
                         error=f"MCP tool '{tool_name}' is not available for this tenant.",
+                        start_time=start_time,
                     )
             except Exception as e:
-                logger.warning(f"MCP policy check failed (allowing): {e}")
+                logger.warning(f"MCP policy check failed (denying): {e}")
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error=f"MCP tool '{tool_name}' is not available for this tenant.",
+                    start_time=start_time,
+                )
 
         # Check rate limit
         if self.rate_limiter and self.rate_limiter(context.tenant_id, tool_name):
@@ -864,7 +918,8 @@ class RegistryToolInvoker(ToolInvoker):
                 mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
                 tools = self.tenant_mcp_config.filter_mcp_tools(tools, mcp_config)
             except Exception as e:
-                logger.warning(f"Tenant MCP config filter failed: {e}")
+                logger.warning(f"Tenant MCP config filter failed; hiding MCP tools: {e}")
+                tools = [t for t in tools if not t.name.startswith("mcp_")]
 
         return tools
 
@@ -899,6 +954,10 @@ def create_tool_invoker(
     from .tools.tool_registry import get_tool_registry
 
     registry = tool_registry or get_tool_registry()
+    if tenant_mcp_config is None:
+        from .mcp.tenant_mcp_config import TenantMCPConfigService
+
+        tenant_mcp_config = TenantMCPConfigService(database=None)
 
     return RegistryToolInvoker(
         tool_registry=registry,

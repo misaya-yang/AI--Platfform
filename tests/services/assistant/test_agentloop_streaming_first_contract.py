@@ -8,6 +8,7 @@ required by the Assistant UI (Manus-style task/tool/artifact visualization).
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -68,6 +69,18 @@ class FakeModelRegistry:
                 tool_calls=d.get("tool_calls"),
                 usage=d.get("usage"),
             )
+
+
+class FakeFailingModelRegistry(FakeModelRegistry):
+    def __init__(self, error_message: str):
+        super().__init__(scripted=[])
+        self._error_message = error_message
+
+    async def chat_stream(self, *_args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        self.last_messages = kwargs.get("messages")
+        if False:
+            yield None
+        raise RuntimeError(self._error_message)
 
 
 class FakeToolDef:
@@ -172,6 +185,43 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_first_emits_context_budget_without_prompt_text() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(
+        scripted=[
+            [{"content": "Hello", "usage": {"input_tokens": 1, "output_tokens": 1}}],
+        ]
+    )
+    loop = AgentLoop(model_registry=model)
+    user = MockUserContext(user_id="u1")
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=2)
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi with auth header super-secret-value",
+        config=cfg,
+        history=[],
+    ):
+        events.append(ev)
+
+    event_types = [ev.event_type for ev in events]
+    assert "context_budget" in event_types
+    assert event_types.index("context_budget") < event_types.index("text_delta")
+
+    budget_payload = next(ev.data for ev in events if ev.event_type == "context_budget")
+    assert budget_payload["run_id"]
+    assert budget_payload["thread_id"] == "s1"
+    assert budget_payload["mode"] == "streaming_first"
+    assert budget_payload["message_count"] >= 2
+    assert budget_payload["tool_count"] >= 0
+    assert budget_payload["system_prompt_chars"] > 0
+    assert "super-secret-value" not in json.dumps(budget_payload, default=str)
+
+
+@pytest.mark.asyncio
 async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system() -> None:
     """
     Regression: frontend may send a style-only system_prompt.
@@ -270,7 +320,7 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     user = MockUserContext(user_id="u1")
     cfg = AgentLoopConfig(model_id="test", max_tool_iterations=3)
 
-    got = []
+    got_events = []
     async for ev in loop.execute(
         session_id="s1",
         user=user,  # type: ignore[arg-type]
@@ -278,11 +328,33 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
         config=cfg,
         history=[],
     ):
-        got.append(ev.event_type)
+        got_events.append((ev.event_type, ev.data))
+
+    got = [event_type for event_type, _data in got_events]
 
     # Tool lifecycle events
     assert "tool_call_started" in got
     assert "tool_call_completed" in got
+    assert "tool_call_start" in got
+    assert "tool_call_end" in got
+    assert "tool_call_result" in got
+
+    start_payload = next(
+        data for event_type, data in got_events if event_type == "tool_call_start"
+    )
+    result_payload = next(
+        data for event_type, data in got_events if event_type == "tool_call_result"
+    )
+    end_payload = next(
+        data for event_type, data in got_events if event_type == "tool_call_end"
+    )
+
+    assert start_payload["tool_call_id"] == "tc_1"
+    assert start_payload["name"] == "generate_image"
+    assert result_payload["tool_call_id"] == "tc_1"
+    assert result_payload["status"] == "completed"
+    assert end_payload["tool_call_id"] == "tc_1"
+    assert end_payload["status"] == "completed"
 
     # Manus-style step lifecycle events
     assert "step_started" in got
@@ -298,6 +370,162 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     # Run lifecycle completeness
     assert "run_started" in got
     assert "run_finished" in got
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_trace_activity_records_are_inspectable_and_redacted() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "tc_1",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls, "usage": {"input_tokens": 10}}],
+            [{"content": "Done", "usage": {"output_tokens": 5}}],
+        ]
+    )
+    png_bytes = b"hello"
+    tool_invoker = FakeToolInvoker(
+        results_by_name={
+            "generate_image": {
+                "success": True,
+                "result": "ok",
+                "duration_ms": 50.0,
+                "metadata": {"duration_ms": 50.0},
+                "output_files": [
+                    {
+                        "filename": "x.png",
+                        "mime_type": "image/png",
+                        "size_bytes": len(png_bytes),
+                        "content_base64": base64.b64encode(png_bytes).decode("utf-8"),
+                    }
+                ],
+            }
+        }
+    )
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+        artifact_storage=FakeArtifactStorage(),
+    )
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate with Authorization: Bearer super-secret-value",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=3),
+        history=[],
+    ):
+        events.append(ev)
+
+    def first_payload(event_type: str) -> dict[str, Any]:
+        payload = next(ev.data for ev in events if ev.event_type == event_type)
+        assert isinstance(payload, dict)
+        return payload
+
+    run_started = first_payload("run_started")
+    run_id = run_started["run_id"]
+    thread_id = "s1"
+
+    for event_type in (
+        "run_started",
+        "gateway_decision",
+        "context_budget",
+        "tool_call_start",
+        "tool_call_result",
+        "tool_call_end",
+        "artifact_created",
+        "run_finished",
+    ):
+        payload = first_payload(event_type)
+        assert payload["run_id"] == run_id
+        assert payload["thread_id"] == thread_id
+        assert "super-secret-value" not in json.dumps(payload, default=str)
+
+    artifact_payload = first_payload("artifact_created")
+    assert artifact_payload["tool_call_id"] == "tc_1"
+    assert artifact_payload["tool_name"] == "generate_image"
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_approval_required_event_is_traceable() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+
+    tool_calls = [
+        {
+            "id": "tc_approval",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    model = FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]])
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=FakeToolInvoker(results_by_name={"generate_image": {"success": True}}),
+    )
+    loop.middleware_chain.add(
+        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
+    )
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate with token=super-secret-value",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    run_id = next(ev.data["run_id"] for ev in events if ev.event_type == "run_started")
+    approval_payload = next(ev.data for ev in events if ev.event_type == "approval_required")
+
+    assert approval_payload["run_id"] == run_id
+    assert approval_payload["thread_id"] == "s1"
+    assert approval_payload["tool_id"] == "tc_approval"
+    assert approval_payload["tool_name"] == "generate_image"
+    assert approval_payload["status"] == "pending"
+    assert "super-secret-value" not in json.dumps(approval_payload, default=str)
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_run_error_event_is_traceable_and_redacted() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeFailingModelRegistry(
+        "provider failure with Authorization: Bearer super-secret-value"
+    )
+    loop = AgentLoop(model_registry=model)
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    run_id = next(ev.data["run_id"] for ev in events if ev.event_type == "run_started")
+    run_error_payload = next(ev.data for ev in events if ev.event_type == "run_error")
+    serialized_events = json.dumps([ev.to_dict() for ev in events], default=str)
+
+    assert run_error_payload["run_id"] == run_id
+    assert run_error_payload["thread_id"] == "s1"
+    assert "[redacted]" in run_error_payload["error"]
+    assert "super-secret-value" not in serialized_events
 
 
 @pytest.mark.asyncio

@@ -44,9 +44,113 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+
+class MemoryPolicyError(ValueError):
+    """Raised when a memory operation violates the configured profile policy."""
+
+
+class MemoryProfile(str, Enum):
+    """Supported user-visible memory profiles."""
+
+    OFF = "off"
+    BASIC = "basic"
+    HYBRID = "hybrid"
+
+
+class MemoryType(str, Enum):
+    """Explicit memory taxonomy used by NGA-03."""
+
+    PROCEDURAL = "procedural"
+    SITUATIONAL = "situational"
+    SEMANTIC = "semantic"
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
+_PROMPT_INJECTION_RE = re.compile(
+    r"(?i)\b(?:"
+    r"ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions|"
+    r"reveal\s+(?:the\s+)?system\s+prompt|"
+    r"show\s+(?:the\s+)?system\s+prompt|"
+    r"developer\s+message|"
+    r"system\s+prompt"
+    r")\b"
+)
+
+
+def _normalize_profile(profile: MemoryProfile | str | None) -> MemoryProfile:
+    if isinstance(profile, MemoryProfile):
+        return profile
+    try:
+        return MemoryProfile(str(profile or MemoryProfile.HYBRID.value).lower())
+    except ValueError as exc:
+        raise MemoryPolicyError(f"Unsupported memory profile: {profile}") from exc
+
+
+def _normalize_memory_type(memory_type: MemoryType | str | None) -> MemoryType:
+    if isinstance(memory_type, MemoryType):
+        return memory_type
+    try:
+        return MemoryType(str(memory_type or MemoryType.SEMANTIC.value).lower())
+    except ValueError as exc:
+        raise MemoryPolicyError(f"Unsupported memory type: {memory_type}") from exc
+
+
+def _sanitize_text(value: str) -> tuple[str, dict[str, bool]]:
+    redacted = _EMAIL_RE.sub("[redacted-email]", value)
+    redacted = _PHONE_RE.sub("[redacted-phone]", redacted)
+    pii_filtered = redacted != value
+
+    filtered = _PROMPT_INJECTION_RE.sub("[filtered-prompt-injection]", redacted)
+    return filtered, {
+        "pii_filtered": pii_filtered,
+        "prompt_injection_filtered": filtered != redacted,
+    }
+
+
+def sanitize_memory_value(value: Any) -> tuple[Any, dict[str, bool]]:
+    """Redact PII and neutralize prompt-control text in memory values."""
+    if isinstance(value, str):
+        return _sanitize_text(value)
+
+    if isinstance(value, list):
+        sanitized_items = []
+        pii_filtered = False
+        prompt_filtered = False
+        for item in value:
+            sanitized_item, flags = sanitize_memory_value(item)
+            sanitized_items.append(sanitized_item)
+            pii_filtered = pii_filtered or flags["pii_filtered"]
+            prompt_filtered = prompt_filtered or flags["prompt_injection_filtered"]
+        return sanitized_items, {
+            "pii_filtered": pii_filtered,
+            "prompt_injection_filtered": prompt_filtered,
+        }
+
+    if isinstance(value, dict):
+        sanitized_dict: dict[Any, Any] = {}
+        pii_filtered = False
+        prompt_filtered = False
+        for key, item in value.items():
+            sanitized_item, flags = sanitize_memory_value(item)
+            sanitized_dict[key] = sanitized_item
+            pii_filtered = pii_filtered or flags["pii_filtered"]
+            prompt_filtered = prompt_filtered or flags["prompt_injection_filtered"]
+        return sanitized_dict, {
+            "pii_filtered": pii_filtered,
+            "prompt_injection_filtered": prompt_filtered,
+        }
+
+    return value, {
+        "pii_filtered": False,
+        "prompt_injection_filtered": False,
+    }
 
 
 @runtime_checkable
@@ -507,7 +611,14 @@ class MemoryManager:
         long_term: LongTermMemoryLayer instance
     """
 
-    def __init__(self, db: MemoryDatabase, tenant_id: str, user_id: str, session_id: str) -> None:
+    def __init__(
+        self,
+        db: MemoryDatabase,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        profile: MemoryProfile | str = MemoryProfile.HYBRID,
+    ) -> None:
         """
         Initialize the memory manager with all three layers.
 
@@ -516,6 +627,7 @@ class MemoryManager:
             tenant_id: The tenant ID for multi-tenancy isolation
             user_id: The current user ID
             session_id: The current session ID
+            profile: Memory profile controlling long-term writes and recall
         """
         self.working = WorkingMemoryLayer()
         self.session = SessionMemoryLayer(db=db, tenant_id=tenant_id, session_id=session_id)
@@ -525,6 +637,7 @@ class MemoryManager:
         self._tenant_id = tenant_id
         self._session_id = session_id
         self._user_id = user_id
+        self._profile = _normalize_profile(profile)
 
     async def remember(
         self,
@@ -545,12 +658,19 @@ class MemoryManager:
         Raises:
             ValueError: If an invalid layer name is provided
         """
+        sanitized_value, boundary_metadata = self._apply_boundary_policy(
+            layer=layer,
+            value=value,
+            metadata=metadata,
+            operation="write",
+        )
+
         if layer == "working":
-            await self.working.store(key, value, metadata)
+            await self.working.store(key, sanitized_value, boundary_metadata)
         elif layer == "session":
-            await self.session.store(key, value, metadata)
+            await self.session.store(key, sanitized_value, boundary_metadata)
         elif layer == "long_term":
-            await self.long_term.store(key, value, metadata)
+            await self.long_term.store(key, sanitized_value, boundary_metadata)
         else:
             raise ValueError(
                 f"Invalid memory layer: {layer}. Must be 'working', 'session', or 'long_term'."
@@ -579,9 +699,12 @@ class MemoryManager:
         if value is not None:
             return value
 
-        # Finally check long-term memory
+        # Finally check long-term memory when the active profile allows durable recall.
+        if not self._profile_allows_long_term_read():
+            return None
         value = await self.long_term.retrieve(key)
-        return value
+        sanitized_value, _ = sanitize_memory_value(value)
+        return sanitized_value
 
     async def search_all(
         self,
@@ -608,7 +731,7 @@ class MemoryManager:
         working_results = await self.working.search(query, limit=limit)
         for result in working_results:
             result["layer"] = "working"
-            results.append(result)
+            results.append(self._sanitize_search_result(result))
 
         # Search session memory
         remaining = limit - len(results)
@@ -616,15 +739,15 @@ class MemoryManager:
             session_results = await self.session.search(query, limit=remaining)
             for result in session_results:
                 result["layer"] = "session"
-                results.append(result)
+                results.append(self._sanitize_search_result(result))
 
         # Search long-term memory
         remaining = limit - len(results)
-        if remaining > 0:
+        if remaining > 0 and self._profile_allows_long_term_read():
             long_term_results = await self.long_term.search(query, limit=remaining)
             for result in long_term_results:
                 result["layer"] = "long_term"
-                results.append(result)
+                results.append(self._sanitize_search_result(result))
 
         return results[:limit]
 
@@ -637,6 +760,8 @@ class MemoryManager:
         Returns:
             User preferences dictionary
         """
+        if not self._profile_allows_long_term_read():
+            return {}
         return await self.long_term.get_preferences()
 
     async def update_user_preferences(self, updates: dict[str, Any]) -> dict[str, Any]:
@@ -651,7 +776,11 @@ class MemoryManager:
         Returns:
             The updated preferences dictionary
         """
-        return await self.long_term.update_preferences(updates)
+        if self._profile == MemoryProfile.OFF:
+            raise MemoryPolicyError("Memory profile 'off' blocks long-term preference writes.")
+
+        sanitized_updates, _ = sanitize_memory_value(updates)
+        return await self.long_term.update_preferences(sanitized_updates)
 
     def clear_working_memory(self) -> None:
         """Clear all working memory data."""
@@ -660,6 +789,137 @@ class MemoryManager:
     async def clear_session_memory(self) -> None:
         """Clear all session memory data."""
         await self.session.clear()
+
+    async def delete_memory(self, key: str, layer: str = "long_term") -> bool:
+        """
+        Delete memory from an explicit layer.
+
+        Deletion is allowed even when a profile blocks recall, so users can purge
+        durable memory after switching memory off.
+        """
+        if layer == "working":
+            existed = key in self.working._storage
+            if existed:
+                self.working._storage.pop(key, None)
+                self.working._metadata.pop(key, None)
+                self.working._timestamps.pop(key, None)
+            return existed
+        if layer == "session":
+            return await self.session.delete(key)
+        if layer == "long_term":
+            return await self.long_term.delete(key)
+        raise ValueError(
+            f"Invalid memory layer: {layer}. Must be 'working', 'session', or 'long_term'."
+        )
+
+    def inspect_memory_policy(self) -> dict[str, Any]:
+        """Return storage/retrieval/delete boundaries without exposing values."""
+        return {
+            "profile": self._profile.value,
+            "storage": {
+                "working": {
+                    "memory_type": MemoryType.SITUATIONAL.value,
+                    "scope": {"tenant_id": self._tenant_id, "session_id": self._session_id},
+                    "retention": "active_run_or_process",
+                    "inspect": "keys_and_metadata_only",
+                    "delete": "clear_working_memory_or_delete_memory",
+                },
+                "session": {
+                    "memory_type": MemoryType.SITUATIONAL.value,
+                    "scope": {"tenant_id": self._tenant_id, "session_id": self._session_id},
+                    "retention": "until_session_deleted_or_cleared",
+                    "inspect": "scoped_database_lookup",
+                    "delete": "delete_memory(layer='session')",
+                },
+                "long_term": {
+                    "memory_type": MemoryType.SEMANTIC.value,
+                    "scope": {"tenant_id": self._tenant_id, "user_id": self._user_id},
+                    "retention": "until_explicit_delete",
+                    "inspect": "explicit_key_or_search_only",
+                    "delete": "delete_memory(layer='long_term')",
+                },
+            },
+            "profiles": {
+                MemoryProfile.OFF.value: "session/working only; no long-term write or recall",
+                MemoryProfile.BASIC.value: "semantic facts and preferences only",
+                MemoryProfile.HYBRID.value: "semantic, situational, and proposed procedural memory",
+            },
+            "privacy": {
+                "pii_filter": "email and phone redaction before store/recall",
+                "prompt_boundary": "prompt-control text is treated as untrusted memory data",
+            },
+        }
+
+    def _profile_allows_long_term_read(self) -> bool:
+        return self._profile in {MemoryProfile.BASIC, MemoryProfile.HYBRID}
+
+    def _apply_boundary_policy(
+        self,
+        *,
+        layer: str,
+        value: Any,
+        metadata: dict | None,
+        operation: str,
+    ) -> tuple[Any, dict[str, Any]]:
+        memory_type = self._memory_type_for_layer(layer, metadata)
+        if operation == "write":
+            self._validate_write_allowed(layer=layer, memory_type=memory_type)
+
+        sanitized_value, privacy = sanitize_memory_value(value)
+        boundary_metadata: dict[str, Any] = dict(metadata or {})
+        boundary_metadata["memory_type"] = memory_type.value
+        boundary_metadata["memory_profile"] = self._profile.value
+        boundary_metadata["scope"] = self._scope_for_layer(layer)
+        boundary_metadata["privacy"] = privacy
+        boundary_metadata["trust"] = "untrusted_memory_data"
+        if memory_type == MemoryType.PROCEDURAL:
+            boundary_metadata.setdefault("review_status", "proposed")
+        return sanitized_value, boundary_metadata
+
+    def _validate_write_allowed(self, *, layer: str, memory_type: MemoryType) -> None:
+        if layer == "long_term" and self._profile == MemoryProfile.OFF:
+            raise MemoryPolicyError("Memory profile 'off' blocks long-term memory writes.")
+        if self._profile == MemoryProfile.BASIC and memory_type != MemoryType.SEMANTIC:
+            raise MemoryPolicyError("Memory profile 'basic' allows only semantic memory.")
+
+    def _memory_type_for_layer(self, layer: str, metadata: dict | None) -> MemoryType:
+        if metadata and metadata.get("memory_type"):
+            return _normalize_memory_type(metadata.get("memory_type"))
+        if layer in {"working", "session"}:
+            return MemoryType.SITUATIONAL
+        return MemoryType.SEMANTIC
+
+    def _scope_for_layer(self, layer: str) -> dict[str, str]:
+        if layer == "working":
+            return {
+                "tenant_id": self._tenant_id,
+                "session_id": self._session_id,
+                "layer": layer,
+            }
+        if layer == "session":
+            return {
+                "tenant_id": self._tenant_id,
+                "session_id": self._session_id,
+                "layer": layer,
+            }
+        if layer == "long_term":
+            return {
+                "tenant_id": self._tenant_id,
+                "user_id": self._user_id,
+                "layer": layer,
+            }
+        return {"tenant_id": self._tenant_id, "layer": layer}
+
+    @staticmethod
+    def _sanitize_search_result(result: dict[str, Any]) -> dict[str, Any]:
+        sanitized = dict(result)
+        value, privacy = sanitize_memory_value(sanitized.get("value"))
+        sanitized["value"] = value
+        metadata = dict(sanitized.get("metadata") or {})
+        metadata.setdefault("privacy", privacy)
+        metadata.setdefault("trust", "untrusted_memory_data")
+        sanitized["metadata"] = metadata
+        return sanitized
 
     @property
     def tenant_id(self) -> str:
@@ -675,3 +935,8 @@ class MemoryManager:
     def user_id(self) -> str:
         """Get the current user ID."""
         return self._user_id
+
+    @property
+    def profile(self) -> MemoryProfile:
+        """Get the active memory profile."""
+        return self._profile

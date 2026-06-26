@@ -8,9 +8,10 @@ them into the agent's ToolRegistry with prefix `mcp_{server}:{tool}`.
 from __future__ import annotations
 
 import logging
+import re
+from contextlib import suppress
 from typing import Any
 
-from .client import MCPClient, MCPServerConfig, MCPTool
 from ..tools.tool_registry import (
     ToolCategory,
     ToolDefinition,
@@ -18,6 +19,7 @@ from ..tools.tool_registry import (
     ToolRiskLevel,
     get_tool_registry,
 )
+from .client import MCPClient, MCPServerConfig, MCPTool
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +79,10 @@ class MCPManager:
         # Convert JSON Schema to ToolParameters
         params = self._schema_to_params(mcp_tool.input_schema)
 
-        # Sanitize external tool description (prevent prompt injection)
-        import re
-        safe_desc = re.sub(r"[\x00-\x1f\x7f]", "", mcp_tool.description or "")[:500]
+        # Sanitize external tool description (prevent prompt injection and
+        # credential-shaped leakage from untrusted MCP servers).
+        safe_desc = self._sanitize_external_text(mcp_tool.description or "")
+        keywords = self._relevance_keywords(mcp_tool, safe_desc)
 
         definition = ToolDefinition(
             name=registry_name,
@@ -88,8 +91,16 @@ class MCPManager:
             category=ToolCategory.MCP,
             risk_level=ToolRiskLevel.MEDIUM,
             when_to_use=safe_desc,
+            when_not_to_use="When this tenant has not explicitly enabled the MCP server.",
+            relevance_keywords=keywords,
             timeout_seconds=int(client.config.timeout),
             is_async=True,
+        )
+        definition.capability_metadata = self._capability_metadata(
+            mcp_tool=mcp_tool,
+            registry_name=registry_name,
+            safe_description=safe_desc,
+            keywords=keywords,
         )
 
         # Create executor closure
@@ -188,10 +199,8 @@ class MCPManager:
     async def shutdown(self) -> None:
         """Close all MCP connections."""
         for client in self._clients.values():
-            try:
+            with suppress(Exception):
                 await client.close()
-            except Exception:
-                pass
         self._clients.clear()
 
     @property
@@ -227,3 +236,68 @@ class MCPManager:
                 required=name in required,
             ))
         return params
+
+    def _sanitize_external_text(self, text: str, max_len: int = 500) -> str:
+        """Bound and redact untrusted MCP-provided display text."""
+        sanitized = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+        sanitized = re.sub(
+            r"(?i)(authorization\s*:\s*bearer\s+)[^\s,;]+",
+            r"\1[REDACTED]",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+",
+            r"\1=[REDACTED]",
+            sanitized,
+        )
+        sanitized = " ".join(sanitized.split())
+        return sanitized[:max_len]
+
+    def _relevance_keywords(self, mcp_tool: MCPTool, safe_description: str) -> list[str]:
+        """Build bounded MCP selection keywords from catalog metadata only."""
+        raw_values = [mcp_tool.server_name, mcp_tool.name, safe_description]
+        seen: set[str] = set()
+        keywords: list[str] = []
+        for value in raw_values:
+            for token in re.findall(r"[a-zA-Z0-9_:-]{3,}", str(value).lower()):
+                normalized = token.strip("_:-")
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    keywords.append(normalized)
+        return keywords[:40]
+
+    def _capability_metadata(
+        self,
+        mcp_tool: MCPTool,
+        registry_name: str,
+        safe_description: str,
+        keywords: list[str],
+    ) -> dict[str, Any]:
+        """Expose MCP catalog facts without loading remote schema/resource data."""
+        return {
+            "kind": "mcp",
+            "mcp_server": mcp_tool.server_name,
+            "mcp_tool": mcp_tool.name,
+            "tool_name": registry_name,
+            "summary": safe_description,
+            "setup_state": "ready",
+            "policy_scope": "tenant",
+            "external_service": True,
+            "trigger_examples": keywords[:8],
+            "progressive_disclosure": {
+                "level0": [
+                    "name",
+                    "description",
+                    "category",
+                    "risk_level",
+                    "setup_state",
+                    "trigger_examples",
+                    "mcp_server",
+                    "mcp_tool",
+                    "policy_scope",
+                ],
+                "level1_available": True,
+                "level2_loaded": False,
+                "schema_loaded_on_demand": True,
+            },
+        }

@@ -31,6 +31,10 @@ class ContextCostBreakdown:
         injected_files: list[dict[str, Any]] | None = None,
         skills_metadata: list[dict[str, Any]] | None = None,
         memory_snippets: list[str] | None = None,
+        source_summaries: list[dict[str, Any] | str] | None = None,
+        tool_result_summaries: list[dict[str, Any] | str] | None = None,
+        artifact_summaries: list[dict[str, Any] | str] | None = None,
+        compaction_summary: str | None = None,
     ) -> dict[str, Any]:
         contributors: list[ContextContributor] = []
 
@@ -103,6 +107,46 @@ class ContextCostBreakdown:
                 )
             )
 
+        for idx, summary in enumerate(source_summaries or []):
+            contributors.append(
+                self._make_item(
+                    f"source_summary_{idx}",
+                    "source_summaries",
+                    self._summary_text(summary),
+                    {"index": idx},
+                )
+            )
+
+        for idx, summary in enumerate(tool_result_summaries or []):
+            contributors.append(
+                self._make_item(
+                    f"tool_result_{idx}",
+                    "tool_results",
+                    self._summary_text(summary),
+                    {"index": idx},
+                )
+            )
+
+        for idx, summary in enumerate(artifact_summaries or []):
+            contributors.append(
+                self._make_item(
+                    f"artifact_{idx}",
+                    "artifacts",
+                    self._summary_text(summary),
+                    {"index": idx},
+                )
+            )
+
+        if compaction_summary:
+            contributors.append(
+                self._make_item(
+                    "compaction_summary",
+                    "compaction",
+                    compaction_summary,
+                    {},
+                )
+            )
+
         contributors = [c for c in contributors if c.chars > 0]
         contributors.sort(key=lambda item: item.tokens, reverse=True)
 
@@ -136,3 +180,13 @@ class ContextCostBreakdown:
             tokens=tokens,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _summary_text(item: dict[str, Any] | str) -> str:
+        if isinstance(item, str):
+            return item
+        for key in ("summary", "content", "title", "name"):
+            value = item.get(key)
+            if value:
+                return str(value)
+        return str(item)

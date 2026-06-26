@@ -20,6 +20,7 @@ Supports remote storage backends (S3/OSS) via FileStorageLike:
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import os
 import tempfile
@@ -30,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.auth import UserContext
 from ai_gateway_core.logging import get_logger
+
 from .document_parser import DocumentParseError, DocumentParser
 from .file_strategy import (
     FileProcessingStrategyFactory,
@@ -327,6 +329,7 @@ The description should be detailed enough for someone who hasn't seen the image 
 
         This is designed to be called by a background task immediately after upload.
         """
+        _ = user
         cache_key = self._get_cache_key(file_path, model_supports_vision)
 
         # Check cache first
@@ -984,18 +987,20 @@ The description should be detailed enough for someone who hasn't seen the image 
                     break
 
             # Check for lists
-            if not structure.has_lists:
-                if re.match(r"^[-*+]\s+", line) or re.match(r"^\d+[.)]\s+", line):
-                    structure.has_lists = True
+            if not structure.has_lists and (
+                re.match(r"^[-*+]\s+", line) or re.match(r"^\d+[.)]\s+", line)
+            ):
+                structure.has_lists = True
 
             # Check for tables (simple heuristic)
             if not structure.has_tables and "|" in line and line.count("|") >= 2:
                 structure.has_tables = True
 
             # Check for code blocks
-            if not structure.has_code_blocks:
-                if line.startswith("```") or line.startswith("~~~"):
-                    structure.has_code_blocks = True
+            if not structure.has_code_blocks and (
+                line.startswith("```") or line.startswith("~~~")
+            ):
+                structure.has_code_blocks = True
 
         # Estimate reading time (assuming 250 words/min for English, 400 chars/min for Chinese)
         # Use a blended estimate
@@ -1150,6 +1155,7 @@ The description should be detailed enough for someone who hasn't seen the image 
         """
         result = ProcessedFiles()
         text_parts: list[str] = []
+        session_kb_documents: list[str] = []
 
         # Log file storage status for diagnostics
         logger.info(
@@ -1180,6 +1186,8 @@ The description should be detailed enough for someone who hasn't seen the image 
                     result.image_descriptions.extend(cached["image_descriptions"])
                 if cached.get("requires_rag"):
                     result.requires_rag = True
+                    cached_metadata = cached.get("metadata") or {}
+                    session_kb_documents.append(cached_metadata.get("file_path") or api_path)
                 result.file_metadata.append(cached.get("metadata", {}))
                 continue
 
@@ -1227,6 +1235,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                             text_parts.append(f"### {actual_path.name}\n{fallback_text}")
                         if needs_rag:
                             result.requires_rag = True
+                            session_kb_documents.append(api_path)
                         metadata.update(
                             {
                                 "fallback_mode": "text",
@@ -1254,6 +1263,7 @@ The description should be detailed enough for someone who hasn't seen the image 
                         text_parts.append(f"### {actual_path.name}\n{text}")
                     if needs_rag:
                         result.requires_rag = True
+                        session_kb_documents.append(api_path)
                     result.file_metadata.append(metadata)
 
                 else:
@@ -1306,6 +1316,13 @@ The description should be detailed enough for someone who hasn't seen the image 
                 result.document_structure = self._analyze_document_structure(result.text_content)
             except Exception as e:
                 logger.warning(f"[FileProcessor] Document structure analysis failed: {e}")
+
+        if result.requires_rag and session_kb_documents:
+            result.session_kb_id = await self.create_session_kb(
+                session_id=session_id,
+                user=user,
+                documents=session_kb_documents,
+            )
 
         logger.info(
             f"[FileProcessor] Processed {len(file_paths)} files: "
@@ -1409,9 +1426,6 @@ The description should be detailed enough for someone who hasn't seen the image 
         """
         Create a session-level temporary knowledge base for long documents.
 
-        This is a placeholder for future implementation. Currently returns None
-        and logs the intent.
-
         Args:
             session_id: Session ID for the temporary KB
             user: User context
@@ -1420,14 +1434,11 @@ The description should be detailed enough for someone who hasn't seen the image 
         Returns:
             Session KB ID if created, None otherwise
         """
-        # TODO: Implement session KB creation using KnowledgeClientLike
-        # This would:
-        # 1. Create a temporary dataset with session_id as prefix
-        # 2. Add documents to the dataset
-        # 3. Return the dataset_id for RAG retrieval
-
         if not self.knowledge_service:
             logger.warning("[FileProcessor] Cannot create session KB: no knowledge service")
+            return None
+
+        if not documents:
             return None
 
         logger.info(
@@ -1435,8 +1446,54 @@ The description should be detailed enough for someone who hasn't seen the image 
             f"session={session_id}, documents={len(documents)}"
         )
 
-        # Placeholder: return None, actual KB creation to be implemented
-        # in a future task that integrates with KnowledgeClientLike
+        create_dataset = getattr(self.knowledge_service, "create_session_dataset", None)
+        if not callable(create_dataset):
+            logger.warning(
+                "[FileProcessor] Cannot create session KB: knowledge service "
+                "does not expose create_session_dataset"
+            )
+            return None
+
+        metadata = {
+            "source_type": "session_file",
+            "freshness": "session",
+            "scope": {
+                "tenant_id": getattr(user, "tenant_id", ""),
+                "user_id": getattr(user, "user_id", ""),
+                "session_id": session_id,
+            },
+        }
+
+        try:
+            created = create_dataset(
+                user=user,
+                session_id=session_id,
+                documents=documents,
+                metadata=metadata,
+            )
+            if inspect.isawaitable(created):
+                created = await created
+        except Exception as exc:
+            logger.warning(f"[FileProcessor] Failed to create session KB: {exc}")
+            return None
+
+        return self._extract_session_kb_id(created)
+
+    @staticmethod
+    def _extract_session_kb_id(created: Any) -> str | None:
+        """Extract a dataset ID from supported session-KB proxy responses."""
+        if isinstance(created, str):
+            return created
+        if isinstance(created, dict):
+            for key in ("dataset_id", "kb_id", "id"):
+                value = created.get(key)
+                if value:
+                    return str(value)
+            return None
+        for attr in ("dataset_id", "kb_id", "id"):
+            value = getattr(created, attr, None)
+            if value:
+                return str(value)
         return None
 
 

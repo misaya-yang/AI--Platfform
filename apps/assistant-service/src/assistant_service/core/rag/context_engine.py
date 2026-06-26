@@ -21,6 +21,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+CONTEXT_PACKET_ORDER = [
+    "stable_system_policy",
+    "current_turn_and_session_state",
+    "selected_capability_metadata",
+    "scoped_memory_snippets",
+    "rag_source_summaries",
+    "recent_tool_artifact_summaries",
+    "compaction_summary",
+    "budget_telemetry",
+]
+
 
 @dataclass
 class ContextStructure:
@@ -91,6 +102,8 @@ class ContextAssemblyPlan:
             "budget_tokens": self.budget_tokens,
             "used_tokens": self.used_tokens,
             "compacted": self.compacted,
+            "compaction": self.to_compaction_event(),
+            "context_packet_order": list(CONTEXT_PACKET_ORDER),
         }
 
     def to_compaction_event(self) -> dict[str, Any]:

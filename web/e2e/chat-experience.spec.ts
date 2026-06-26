@@ -48,12 +48,38 @@ type MockAssistantModel = {
   supports_tools: boolean;
 };
 
+type MockAssistantMessage = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type MockAssistantArtifact = {
+  artifact_id: string;
+  type: string;
+  format: string;
+  title: string;
+  filename: string;
+  mime_type?: string;
+  size_bytes?: number;
+  source?: string;
+  download_url?: string;
+  created_at?: string;
+};
+
 function jsonResponse(body: unknown) {
   return {
     status: 200,
     contentType: "application/json",
     body: JSON.stringify(body),
   };
+}
+
+function pathSegmentAfter(url: string, segment: string): string {
+  const parts = new URL(url).pathname.split("/");
+  const index = parts.lastIndexOf(segment);
+  return index >= 0 ? parts[index + 1] || "" : "";
 }
 
 function buildMockPlaygroundSession(
@@ -95,10 +121,21 @@ async function installAssistantHarness(
     models?: MockAssistantModel[];
     defaultModelId?: string;
     availableProviders?: string[];
+    preloadedSessions?: MockAssistantSession[];
+    historyBySessionId?: Record<string, MockAssistantMessage[]>;
+    artifactsBySessionId?: Record<string, MockAssistantArtifact[]>;
+    onCreateShare?: (
+      sessionId: string,
+      payload: { include_artifacts?: boolean }
+    ) => void;
   } = {}
 ) {
   let sessionCounter = 0;
-  const sessions = new Map<string, MockAssistantSession>();
+  const sessions = new Map<string, MockAssistantSession>(
+    (options.preloadedSessions || []).map((session) => [session.session_id, session])
+  );
+  const historyBySessionId = options.historyBySessionId || {};
+  const artifactsBySessionId = options.artifactsBySessionId || {};
   const models = options.models ?? [
     {
       id: MOCK_ASSISTANT_MODEL_ID,
@@ -139,7 +176,28 @@ async function installAssistantHarness(
   });
 
   await page.route("**/api/v1/assistant/sessions/*/artifacts", async (route) => {
-    await route.fulfill(jsonResponse({ artifacts: [], total: 0 }));
+    const sessionId = pathSegmentAfter(route.request().url(), "sessions");
+    const artifacts = artifactsBySessionId[sessionId] || [];
+    await route.fulfill(jsonResponse({ artifacts, total: artifacts.length }));
+  });
+
+  await page.route("**/api/v1/assistant/sessions/*/share", async (route) => {
+    const sessionId = pathSegmentAfter(route.request().url(), "sessions");
+    const payload =
+      (route.request().postDataJSON() as { include_artifacts?: boolean } | null) || {};
+    options.onCreateShare?.(sessionId, payload);
+    const artifacts = payload.include_artifacts ? artifactsBySessionId[sessionId] || [] : [];
+    await route.fulfill(
+      jsonResponse({
+        share_code: "e2e-share",
+        share_url: "/share/e2e-share",
+        title: sessions.get(sessionId)?.metadata?.title || null,
+        message_count: historyBySessionId[sessionId]?.length || 0,
+        artifact_count: artifacts.length,
+        created_at: new Date().toISOString(),
+        expires_at: null,
+      })
+    );
   });
 
   const listAssistantSessions = async (route: Route) => {
@@ -173,7 +231,8 @@ async function installAssistantHarness(
   });
 
   await page.route("**/api/v1/sessions/*/history?*", async (route) => {
-    await route.fulfill(jsonResponse([]));
+    const sessionId = pathSegmentAfter(route.request().url(), "sessions");
+    await route.fulfill(jsonResponse(historyBySessionId[sessionId] || []));
   });
 
   await page.route("**/api/v1/sessions/*", async (route) => {
@@ -548,6 +607,231 @@ test("assistant emits stream telemetry lifecycle on mocked stream", async ({ pag
 
   const finishedEvent = events.find((event) => event.event === "chat.stream.finished");
   expect(finishedEvent?.payload?.outcome).toBe("completed");
+});
+
+test("assistant activity surfaces agent run state approvals context and artifacts", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-agent-state-user",
+    email: "assistant-agent-state@example.com",
+    display_name: "Assistant Agent State",
+    roles: ["user"],
+    permissions: ["console:dashboard:view", "conversation:playground:access"],
+    effective_permissions: ["console:dashboard:view", "conversation:playground:access"],
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "run_started", data: { run_id: "f010-run", timestamp: 1000 } },
+        {
+          event_type: "task_planning",
+          data: {
+            goal: "Prepare deployment review",
+            tasks: [
+              {
+                id: "plan",
+                description: "Review requested change",
+                type: "analysis",
+                dependencies: [],
+              },
+              {
+                id: "execute",
+                description: "Draft final answer",
+                type: "writing",
+                dependencies: ["plan"],
+              },
+            ],
+            parallel_groups: [],
+          },
+        },
+        {
+          event_type: "working_memory_update",
+          data: {
+            goal: "Prepare deployment review",
+            tasks: [
+              {
+                id: "plan",
+                description: "Review requested change",
+                status: "completed",
+                result: "Checklist ready",
+              },
+              {
+                id: "execute",
+                description: "Draft final answer",
+                status: "in_progress",
+              },
+            ],
+            collected_info: [
+              { key: "context", value: "policy", source: "mock" },
+            ],
+            notes: ["Using remembered operator preference"],
+            progress: { total: 2, completed: 1, failed: 0, percentage: 50 },
+          },
+        },
+        {
+          event_type: "tool_call_start",
+          data: {
+            tool_call_id: "approval-tool",
+            tool_name: "shell",
+            arguments: { cmd: "pnpm -C web build" },
+            timestamp: 1100,
+          },
+        },
+        {
+          event_type: "approval_required",
+          data: {
+            tool_id: "approval-tool",
+            tool_name: "shell",
+            approval_id: "approval-1",
+            reason: "Needs operator approval before running command",
+          },
+        },
+        {
+          event_type: "context_budget",
+          data: {
+            used_tokens: 2048,
+            model_context_window: 128000,
+            dropped_history_messages: 1,
+          },
+        },
+        {
+          event_type: "context_compacted",
+          data: { compacted: true, dropped_history_messages: 1 },
+        },
+        {
+          event_type: "artifact_created",
+          data: {
+            artifact_id: "artifact-f010",
+            type: "document",
+            format: "md",
+            title: "Run report",
+            filename: "run-report.md",
+            mime_type: "text/markdown",
+            size_bytes: 2048,
+            download_url: "/mock-artifacts/run-report.md",
+          },
+        },
+        { event_type: "text_delta", data: "Run state ready." },
+        { event_type: "done", data: { duration_ms: 120, total_tokens: 42 } },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await expect(composer).toBeVisible();
+  await composer.fill(`e2e-agent-state-${Date.now()}`);
+  await composer.press("Enter");
+
+  await expect(page.getByText("Run state ready.")).toBeVisible();
+  await expect(page.getByText("Run report").first()).toBeVisible();
+
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("Review requested change")).toBeVisible();
+  await expect(page.getByText("Draft final answer")).toBeVisible();
+  await expect(page.getByText("Needs operator approval before running command")).toBeVisible();
+  await expect(page.getByText("Context used")).toBeVisible();
+  await expect(page.getByText("Context compacted")).toBeVisible();
+});
+
+test("assistant restores session artifacts into unique artifact and share counts", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-session-artifacts-user",
+    email: "assistant-session-artifacts@example.com",
+    display_name: "Assistant Session Artifacts",
+    roles: ["user"],
+    permissions: ["console:dashboard:view", "conversation:playground:access"],
+    effective_permissions: ["console:dashboard:view", "conversation:playground:access"],
+  });
+
+  const sessionId = "e2e-restored-artifacts-session";
+  const artifactId = "artifact-f011";
+  const now = new Date().toISOString();
+  const title = `restored-artifacts-${Date.now()}`;
+  const shareRequests: Array<{ sessionId: string; includeArtifacts?: boolean }> = [];
+
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+      });
+    },
+    {
+      preloadedSessions: [
+        {
+          ...buildMockAssistantSession(sessionId, { title }),
+          created_at: now,
+          updated_at: now,
+        },
+      ],
+      historyBySessionId: {
+        [sessionId]: [
+          {
+            role: "user",
+            content: "Recover my generated plan",
+            timestamp: now,
+          },
+          {
+            role: "assistant",
+            content: "Here is the recovered plan.",
+            timestamp: now,
+            metadata: { artifact_ids: [artifactId] },
+          },
+        ],
+      },
+      artifactsBySessionId: {
+        [sessionId]: [
+          {
+            artifact_id: artifactId,
+            type: "document",
+            format: "md",
+            title: "Recovered plan",
+            filename: "recovered-plan.md",
+            mime_type: "text/markdown",
+            size_bytes: 1024,
+            source: "ai",
+            download_url: "/mock-artifacts/recovered-plan.md",
+            created_at: now,
+          },
+        ],
+      },
+      onCreateShare: (createdSessionId, payload) => {
+        shareRequests.push({
+          sessionId: createdSessionId,
+          includeArtifacts: payload.include_artifacts,
+        });
+      },
+    }
+  );
+
+  await page.goto("/assistant");
+  await page.getByRole("button", { name: title }).click();
+
+  await expect(page.getByText("Recover my generated plan")).toBeVisible();
+  await expect(page.getByText("Here is the recovered plan.")).toBeVisible();
+  await expect(page.getByText("Recovered plan").first()).toBeVisible();
+
+  const artifactsChip = page.getByRole("button", { name: /^Artifacts\s+1$/ });
+  await expect(artifactsChip).toBeVisible();
+  await artifactsChip.click();
+  await expect(page.getByText("recovered-plan.md").first()).toBeVisible();
+
+  await page.getByRole("button", { name: /^Share$/ }).click();
+  const shareDialog = page.locator(".fixed.inset-0").filter({ hasText: "Share Conversation" }).first();
+  await expect(shareDialog.getByText("Share Conversation")).toBeVisible();
+  await expect(shareDialog.getByText("Artifacts")).toBeVisible();
+  await expect(shareDialog.getByText("(1)")).toBeVisible();
+
+  await shareDialog.getByRole("button", { name: "Create Share Link" }).click();
+  await expect(shareDialog.getByText("Share link is ready!")).toBeVisible();
+  expect(shareRequests).toEqual([{ sessionId, includeArtifacts: true }]);
 });
 
 test("assistant escape cancels delayed stream", async ({ page }) => {

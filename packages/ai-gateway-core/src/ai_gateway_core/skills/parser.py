@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 import yaml
 
@@ -74,7 +73,15 @@ def parse_skill_md(content: str) -> SkillManifest:
     except ValueError:
         source = SkillSource.USER
 
-    return SkillManifest(
+    generated = bool(meta.get("generated", source is SkillSource.USER))
+    lifecycle_status = str(
+        meta.get("lifecycle_status")
+        or meta.get("status")
+        or ("proposed" if generated else "active")
+    )
+    enabled_raw = meta.get("enabled")
+
+    manifest = SkillManifest(
         name=name,
         title=title,
         description=description,
@@ -83,7 +90,7 @@ def parse_skill_md(content: str) -> SkillManifest:
         version=str(meta.get("version", "1.0.0")),
         tags=meta.get("tags", []),
         permissions=meta.get("permissions", []),
-        enabled=meta.get("enabled", True),
+        enabled=bool(enabled_raw) if enabled_raw is not None else lifecycle_status == "active",
         instructions=body.strip(),
         trigger=trigger,
         config=meta.get("config", {}),
@@ -91,7 +98,16 @@ def parse_skill_md(content: str) -> SkillManifest:
         tool_schema=meta.get("tool_schema"),
         max_context_tokens=int(meta.get("max_context_tokens", 2000)),
         author=str(meta.get("author", "")),
+        generated=generated,
+        lifecycle_status=lifecycle_status,
+        review=meta.get("review", {}) or {},
+        evaluation=meta.get("evaluation", {}) or {},
+        rollback=meta.get("rollback", {}) or {},
     )
+    if manifest.review_required():
+        manifest.enabled = False
+        manifest.lifecycle_status = "proposed"
+    return manifest
 
 
 def _split_frontmatter(content: str) -> tuple[str, str]:

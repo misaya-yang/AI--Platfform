@@ -67,6 +67,33 @@ import { trackChatHistoryEmptyState } from "@/features/chat/telemetry";
 const ASSISTANT_UI_V2 = import.meta.env.VITE_ASSISTANT_UI_V2 !== "false";
 const ASSISTANT_COMPOSER_ID = "assistant-chat-composer";
 
+function countUniqueArtifactAffordances(
+  artifacts: Array<{ id?: string | null }>,
+  outputFiles: Array<{
+    artifact_id?: string | null;
+    filename?: string | null;
+    download_url?: string | null;
+  }>
+): number {
+  const keys = new Set<string>();
+  for (const artifact of artifacts) {
+    if (artifact.id) {
+      keys.add(`artifact:${artifact.id}`);
+    }
+  }
+  for (const file of outputFiles) {
+    if (file.artifact_id) {
+      keys.add(`artifact:${file.artifact_id}`);
+      continue;
+    }
+    const fallback = file.download_url || file.filename;
+    if (fallback) {
+      keys.add(`file:${fallback}`);
+    }
+  }
+  return keys.size;
+}
+
 /**
  * Top-bar chip for toggling a right-side panel (Activity / Artifacts).
  * Active state shows a 1.5px gold underline stripe; rest state has no
@@ -271,6 +298,10 @@ export function AssistantPage() {
     : showArtifacts
       ? "artifacts"
       : null;
+  const mobilePanelWidth =
+    isMobile && typeof window !== "undefined"
+      ? Math.min(window.innerWidth, 430)
+      : 380;
 
   const activeActivityMessage = useMemo(
     () => (activityMessageId ? messages.find((m) => m.id === activityMessageId) ?? null : null),
@@ -286,10 +317,21 @@ export function AssistantPage() {
       const m = messages[i];
       if (m.role !== "assistant") continue;
       if (m.isStreaming) return m.id;
+      const processSummary = m.processSummary;
+      const hasProcessSignal =
+        Boolean(processSummary) &&
+        ((processSummary?.steps.length ?? 0) > 0 ||
+          (processSummary?.tools.length ?? 0) > 0 ||
+          Boolean(processSummary?.contextBudget) ||
+          Boolean(processSummary?.contextCompacted) ||
+          typeof processSummary?.thinkingDurationMs === "number");
       const hasSignal =
         (m.toolCalls && m.toolCalls.length > 0) ||
         (m.searchStatus && m.searchStatus.length > 0) ||
-        (m.thinkingContent && m.thinkingContent.length > 0);
+        (m.thinkingContent && m.thinkingContent.length > 0) ||
+        hasProcessSignal ||
+        (m.contexts && m.contexts.length > 0) ||
+        (m.generatedArtifacts && m.generatedArtifacts.length > 0);
       if (hasSignal) return m.id;
     }
     return null;
@@ -306,6 +348,10 @@ export function AssistantPage() {
       return 0;
     }
   }, [latestActivityMessageId, messages, t]);
+  const uniqueArtifactCount = useMemo(
+    () => countUniqueArtifactAffordances(artifacts, codeExecution.outputFiles),
+    [artifacts, codeExecution.outputFiles]
+  );
 
   const rightPanelState: RightPanelState = useMemo(
     () => ({
@@ -658,11 +704,11 @@ export function AssistantPage() {
                       }
                     }}
                   />
-                  {(artifacts.length + codeExecution.outputFiles.length) > 0 && (
+                  {uniqueArtifactCount > 0 && (
                     <RightPanelChip
                       icon={<FileText className="h-3.5 w-3.5" />}
                       label={t("assistant.artifacts", "Artifacts")}
-                      count={artifacts.length + codeExecution.outputFiles.length}
+                      count={uniqueArtifactCount}
                       active={rightPanel === "artifacts"}
                       onClick={() => {
                         if (rightPanel === "artifacts") {
@@ -868,6 +914,34 @@ export function AssistantPage() {
             />
           )}
 
+          <AnimatePresence>
+            {isMobile && rightPanel === "activity" && activeActivityMessage && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-40 bg-black/45"
+                onClick={closeActivity}
+              >
+                <motion.div
+                  initial={{ y: "100%" }}
+                  animate={{ y: 0 }}
+                  exit={{ y: "100%" }}
+                  transition={{ type: "spring", damping: 28, stiffness: 260 }}
+                  className="absolute bottom-0 left-0 right-0 h-[78vh] rounded-t-2xl overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <ActivityPanel
+                    open
+                    onClose={closeActivity}
+                    message={activeActivityMessage}
+                    width={mobilePanelWidth}
+                  />
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Artifacts Panel — same 380px width as ActivityPanel so the
               right lane feels uniform when switching chips. */}
           <AnimatePresence>
@@ -930,7 +1004,7 @@ export function AssistantPage() {
     <ShareDialog
       sessionId={activeSessionId || ""}
       messageCount={messages.length}
-      artifactCount={artifacts.length}
+      artifactCount={uniqueArtifactCount}
       isOpen={showShareDialog}
       onClose={() => setShowShareDialog(false)}
     />

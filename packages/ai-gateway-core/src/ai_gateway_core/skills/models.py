@@ -45,6 +45,52 @@ class SkillManifest:
     tool_schema: dict | None = None     # JSON Schema for function calling
     max_context_tokens: int = 2000      # Token budget for instructions
     author: str = ""
+    generated: bool = False
+    lifecycle_status: str = "active"
+    review: dict[str, Any] = field(default_factory=dict)
+    evaluation: dict[str, Any] = field(default_factory=dict)
+    rollback: dict[str, Any] = field(default_factory=dict)
+
+    def activation_requirements(self) -> dict[str, bool]:
+        """Return generated-skill gates required before enablement."""
+        review_verdict = str(
+            self.review.get("verdict") or self.review.get("critic_verdict") or ""
+        ).lower()
+        independent_critic = bool(
+            self.review.get("critic_artifact")
+            or self.review.get("critic_report")
+            or self.review.get("artifact")
+        ) and (
+            not review_verdict
+            or review_verdict in {"approved", "approve", "pass", "passed"}
+        )
+        eval_evidence = bool(
+            self.evaluation.get("evidence")
+            or self.evaluation.get("eval_artifact")
+            or self.evaluation.get("test_command")
+            or self.evaluation.get("passed") is True
+        )
+        rollback_metadata = bool(
+            self.rollback.get("previous_version")
+            or self.rollback.get("strategy")
+            or self.rollback.get("rollback_artifact")
+            or self.rollback.get("restore_from")
+        )
+        return {
+            "independent_critic": independent_critic,
+            "eval_evidence": eval_evidence,
+            "rollback_metadata": rollback_metadata,
+        }
+
+    def activation_requirements_met(self) -> bool:
+        """Generated skills can be enabled only after all gates are present."""
+        if not self.generated:
+            return True
+        return all(self.activation_requirements().values())
+
+    def review_required(self) -> bool:
+        """Whether this skill must stay proposed/disabled before execution."""
+        return self.generated and not self.activation_requirements_met()
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -74,6 +120,11 @@ class SkillManifest:
             "tool_schema": self.tool_schema,
             "max_context_tokens": self.max_context_tokens,
             "author": self.author,
+            "generated": self.generated,
+            "lifecycle_status": self.lifecycle_status,
+            "review": self.review,
+            "evaluation": self.evaluation,
+            "rollback": self.rollback,
         }
 
 

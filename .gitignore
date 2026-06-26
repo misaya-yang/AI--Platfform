@@ -82,6 +82,8 @@ docs/*
 !docs/demo-data.md
 !docs/general_ai_assistant_upgrade/
 !docs/general_ai_assistant_upgrade/**
+!docs/general_ai_assistant_next_gen/
+!docs/general_ai_assistant_next_gen/**
 !docs/open_source_platform_optimization/
 !docs/open_source_platform_optimization/**
 !apps/islamic-content-service/docs/
@@ -151,6 +153,8 @@ apps/islamic-content-service/data/
 *-Spec.md
 !docs/general_ai_assistant_upgrade/reports/
 !docs/general_ai_assistant_upgrade/reports/**
+!docs/general_ai_assistant_next_gen/reports/
+!docs/general_ai_assistant_next_gen/reports/**
 !docs/open_source_platform_optimization/reports/
 !docs/open_source_platform_optimization/reports/**
 claude-code-*.md

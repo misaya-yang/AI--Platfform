@@ -13,12 +13,11 @@ we just confirm each wrapper:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from ai_gateway_core.security import SafeFetchError
-
 
 # ---------------------------------------------------------------------------
 # 1. KS document_service.create_document_from_url
@@ -34,7 +33,7 @@ async def test_ks_document_url_uses_safe_fetch():
     assert hasattr(mod, "DocumentService") or hasattr(mod, "create_document_from_url")
     # Static import-presence check — `safe_fetch` must be importable from
     # ai_gateway_core.security at the call site.
-    src_text = (mod.__file__ and open(mod.__file__).read()) or ""
+    src_text = Path(mod.__file__).read_text() if mod.__file__ else ""
     assert "safe_fetch" in src_text, (
         "KS document_service must use safe_fetch from ai_gateway_core.security"
     )
@@ -55,7 +54,7 @@ async def test_ks_image_extractor_uses_safe_fetch():
         document_image_extractor as mod,
     )
 
-    src_text = (mod.__file__ and open(mod.__file__).read()) or ""
+    src_text = Path(mod.__file__).read_text() if mod.__file__ else ""
     assert "safe_fetch" in src_text, (
         "KS image extractor must use safe_fetch — without it, document URL "
         "ingestion can be redirected through user-controlled <img> tags into "
@@ -124,7 +123,7 @@ async def test_task_manager_callback_validates_before_post():
     """Same SSRF guard for the generic TaskManager callback path."""
     from src.services.task import task_manager as mod
 
-    src_text = (mod.__file__ and open(mod.__file__).read()) or ""
+    src_text = Path(mod.__file__).read_text() if mod.__file__ else ""
     assert "validate_callback_url" in src_text, (
         "task_manager._send_callback must validate callback URLs against "
         "private-IP allowlist before POST."
@@ -151,7 +150,7 @@ async def test_web_fetch_uses_safe_fetch():
         "web_fetch must import safe_fetch_with_response — the local "
         "_fetch_with_manual_redirects has been replaced with this primitive."
     )
-    src_text = (mod.__file__ and open(mod.__file__).read()) or ""
+    src_text = Path(mod.__file__).read_text() if mod.__file__ else ""
     # No more parallel SSRF impl — these were the symptoms of the duplication
     assert "follow_redirects=False" not in src_text, (
         "follow_redirects flag should now live inside safe_fetch_with_response, "

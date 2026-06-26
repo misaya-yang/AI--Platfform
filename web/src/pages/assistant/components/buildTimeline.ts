@@ -201,6 +201,9 @@ function firstResultSummary(result: unknown): string | undefined {
 // ---------------------------------------------------------------------------
 
 type TFn = (key: string, opts?: Record<string, unknown>) => string;
+type ProcessSummary = NonNullable<ChatMessageType["processSummary"]>;
+type ProcessStep = ProcessSummary["steps"][number];
+type ProcessTool = ProcessSummary["tools"][number];
 
 function buildToolTitle(t: TFn, tc: ToolCall, icon: TimelineIcon): string {
   const args = tc.arguments ?? {};
@@ -304,6 +307,89 @@ function buildToolBody(
   return "";
 }
 
+function timelineStatusFromProcessStep(
+  status: ProcessStep["status"],
+): "running" | "completed" | "error" {
+  if (status === "failed") return "error";
+  if (status === "completed") return "completed";
+  return "running";
+}
+
+function timelineStatusFromProcessTool(
+  status: ProcessTool["status"],
+): "running" | "completed" | "error" {
+  if (status === "error") return "error";
+  if (status === "completed") return "completed";
+  return "running";
+}
+
+function buildProcessToolBody(t: TFn, tool?: ProcessTool): string | undefined {
+  if (!tool) return undefined;
+  if (tool.status === "approval_required") {
+    const label = t("assistant.activity.approvalRequired", {
+      defaultValue: "Approval required",
+    });
+    return tool.summary ? `${label}: ${tool.summary}` : label;
+  }
+  if (tool.error) return tool.error;
+  if (tool.summary) return tool.summary;
+  if (tool.queueState) {
+    return t("assistant.activity.queueState", {
+      state: tool.queueState,
+      defaultValue: "Queue: {{state}}",
+    });
+  }
+  return undefined;
+}
+
+function formatCount(value: number | undefined): string | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString()
+    : undefined;
+}
+
+function buildContextStateBody(t: TFn, summary: ProcessSummary): string {
+  const lines: string[] = [];
+  const budget = summary.contextBudget;
+  if (budget) {
+    const used = formatCount(budget.used_tokens) ?? "-";
+    const window = formatCount(budget.model_context_window);
+    const dropped = budget.dropped_history_messages;
+    const base = window
+      ? t("assistant.activity.contextUsedWindow", {
+          used,
+          window,
+          defaultValue: "Context used: {{used}} / {{window}}",
+        })
+      : t("assistant.activity.contextUsed", {
+          used,
+          defaultValue: "Context used: {{used}}",
+        });
+    lines.push(
+      typeof dropped === "number"
+        ? `${base} · ${t("assistant.activity.historyDropped", {
+            count: dropped,
+            defaultValue: "dropped {{count}} history messages",
+          })}`
+        : base,
+    );
+  }
+  if (summary.contextCompacted?.compacted) {
+    const dropped = summary.contextCompacted.dropped_history_messages;
+    lines.push(
+      typeof dropped === "number"
+        ? t("assistant.activity.contextCompactedDropped", {
+            count: dropped,
+            defaultValue: "Context compacted · dropped {{count}} history messages",
+          })
+        : t("assistant.activity.contextCompacted", {
+            defaultValue: "Context compacted",
+          }),
+    );
+  }
+  return lines.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Main entrypoint
 // ---------------------------------------------------------------------------
@@ -318,6 +404,7 @@ export function buildTimeline(
   t: TFn,
 ): TimelineBuildResult {
   const steps: TimelineStepData[] = [];
+  const processSummary = message.processSummary;
 
   // 1. Thinking (single blob)
   const thinkingBody =
@@ -339,22 +426,43 @@ export function buildTimeline(
     });
   }
 
-  // 2. Map tool_call_id → result
+  // 2. Process-summary steps from AG-UI / working-memory events.
+  for (const step of processSummary?.steps ?? []) {
+    const title = step.title?.trim() || step.id;
+    if (!title) continue;
+    steps.push({
+      kind: "tool",
+      id: `process-step-${step.id}`,
+      icon: "other",
+      title,
+      body: step.error || step.description || "",
+      durationMs: step.durationMs,
+      status: timelineStatusFromProcessStep(step.status),
+    });
+  }
+
+  // 3. Map tool_call_id → result
   const resultMap = new Map<string, ToolResult>();
   for (const r of message.toolResults ?? []) {
     if (r?.tool_call_id) resultMap.set(r.tool_call_id, r);
   }
+  const processToolMap = new Map<string, ProcessTool>();
+  for (const tool of processSummary?.tools ?? []) {
+    processToolMap.set(tool.id, tool);
+  }
 
-  // 3. Tool steps
+  // 4. Tool steps
   const toolCalls = message.toolCalls ?? [];
+  const renderedToolIds = new Set<string>();
   let totalToolMs = 0;
 
   for (const tc of toolCalls) {
     const icon = iconForTool(tc.name);
     const tr = resultMap.get(tc.id);
+    const processTool = processToolMap.get(tc.id);
     const title = buildToolTitle(t, tc, icon);
-    const body = buildToolBody(t, tc, tr, icon);
-    const durationMs = tr?.duration_ms;
+    const body = buildProcessToolBody(t, processTool) ?? buildToolBody(t, tc, tr, icon);
+    const durationMs = tr?.duration_ms ?? processTool?.durationMs;
     if (typeof durationMs === "number") totalToolMs += durationMs;
 
     // Primary query-ish argument, rendered as a code block under the tool
@@ -385,8 +493,9 @@ export function buildTimeline(
       }
     }
 
-    const status: "running" | "completed" | "error" =
-      tc.status === "error"
+    const status: "running" | "completed" | "error" = processTool
+      ? timelineStatusFromProcessTool(processTool.status)
+      : tc.status === "error"
         ? "error"
         : tc.status === "completed"
           ? "completed"
@@ -404,10 +513,77 @@ export function buildTimeline(
       toolName: tc.name,
       queryArg: queryArg ?? undefined,
     });
+    renderedToolIds.add(tc.id);
   }
 
-  // 4. Historical fallback: no toolCalls but we have searchStatus
-  if (toolCalls.length === 0 && message.searchStatus && message.searchStatus.length > 0) {
+  for (const tool of processSummary?.tools ?? []) {
+    if (renderedToolIds.has(tool.id)) continue;
+    const icon = iconForTool(tool.name);
+    if (typeof tool.durationMs === "number") totalToolMs += tool.durationMs;
+    steps.push({
+      kind: "tool",
+      id: `process-tool-${tool.id}`,
+      icon,
+      title: tool.name,
+      body: buildProcessToolBody(t, tool) ?? "",
+      durationMs: tool.durationMs,
+      status: timelineStatusFromProcessTool(tool.status),
+      toolName: tool.name,
+    });
+  }
+
+  // 5. Context/memory state, including context compaction.
+  const contextBody = processSummary ? buildContextStateBody(t, processSummary) : "";
+  if (contextBody) {
+    steps.push({
+      kind: "thinking",
+      id: `context-state-${message.id}`,
+      title: t("assistant.activity.contextState", {
+        defaultValue: "Context state",
+      }),
+      body: contextBody,
+    });
+  }
+
+  if (message.contexts && message.contexts.length > 0) {
+    const totalChunks = message.contexts.reduce(
+      (sum, context) => sum + (context.chunks?.length || 0),
+      0,
+    );
+    steps.push({
+      kind: "tool",
+      id: `retrieved-context-${message.id}`,
+      icon: "file_read",
+      title: t("assistant.activity.retrievedContext", {
+        defaultValue: "Retrieved context",
+      }),
+      body: t("assistant.activity.retrievedContextBody", {
+        chunks: totalChunks,
+        datasets: message.contexts.length,
+        defaultValue: "{{chunks}} sources from {{datasets}} datasets",
+      }),
+      status: "completed",
+    });
+  }
+
+  if (message.generatedArtifacts && message.generatedArtifacts.length > 0) {
+    for (const artifact of message.generatedArtifacts) {
+      steps.push({
+        kind: "tool",
+        id: `artifact-${artifact.id}`,
+        icon: artifact.type === "image" ? "image" : "document",
+        title: t("assistant.activity.generatedArtifact", {
+          title: artifact.title || artifact.filename || artifact.id,
+          defaultValue: "Generated {{title}}",
+        }),
+        body: [artifact.format?.toUpperCase(), artifact.filename].filter(Boolean).join(" · "),
+        status: "completed",
+      });
+    }
+  }
+
+  // 6. Historical fallback: no toolCalls but we have searchStatus
+  if (toolCalls.length === 0 && (processSummary?.tools.length ?? 0) === 0 && message.searchStatus && message.searchStatus.length > 0) {
     for (const [idx, s] of message.searchStatus.entries()) {
       const item = s as SearchStatusItem;
       const icon: TimelineIcon =

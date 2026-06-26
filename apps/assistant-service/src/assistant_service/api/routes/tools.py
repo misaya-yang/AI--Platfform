@@ -6,12 +6,82 @@ payloads regardless of whether the flag is ON or OFF.
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Request
 
 from ...auth import UserContext, get_user_context
 from ..deps import get_assistant_service
 
 router = APIRouter()
+
+
+def _enum_value(value: Any) -> str:
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _tool_catalog_entry(tool: Any) -> dict[str, Any]:
+    """Serialize a tool catalog entry with additive capability metadata."""
+    category = _enum_value(tool.category)
+    risk_level = _enum_value(tool.risk_level)
+    metadata = getattr(tool, "capability_metadata", None) or {}
+    capability_kind = metadata.get(
+        "kind",
+        "mcp" if category == "mcp" else "skill" if category == "skill" else "tool",
+    )
+    trigger_examples = metadata.get("trigger_examples")
+    if trigger_examples is None and capability_kind == "skill":
+        trigger_examples = list(getattr(tool, "relevance_keywords", []) or [])[:8]
+
+    entry = {
+        "name": tool.name,
+        "description": tool.description,
+        "category": category,
+        "risk_level": risk_level,
+        "when_to_use": getattr(tool, "when_to_use", None),
+        "when_not_to_use": getattr(tool, "when_not_to_use", None),
+        "requires_confirmation": bool(getattr(tool, "requires_confirmation", False)),
+        "required_permissions": list(getattr(tool, "required_permissions", []) or []),
+        "capability_kind": capability_kind,
+        "setup_state": metadata.get("setup_state", "ready"),
+        "trigger_examples": list(trigger_examples or []),
+    }
+
+    for key in (
+        "skill_name",
+        "title",
+        "summary",
+        "version",
+        "source",
+        "tags",
+        "generated",
+        "lifecycle_status",
+        "review_required",
+        "activation_requirements",
+        "mcp_server",
+        "mcp_tool",
+        "policy_scope",
+        "external_service",
+        "progressive_disclosure",
+    ):
+        if key in metadata:
+            entry[key] = metadata[key]
+
+    if capability_kind == "skill" and "progressive_disclosure" not in entry:
+        entry["progressive_disclosure"] = {
+            "level0": [
+                "name",
+                "description",
+                "category",
+                "risk_level",
+                "setup_state",
+                "trigger_examples",
+            ],
+            "level1_available": bool(getattr(tool, "when_to_use", None)),
+            "level2_loaded": False,
+        }
+
+    return entry
 
 
 @router.get("/tools")
@@ -32,17 +102,7 @@ async def list_tools(request: Request, user: UserContext = Depends(get_user_cont
     tools = registry.list_tools(user=user)
 
     return {
-        "tools": [
-            {
-                "name": t.name,
-                "description": t.description,
-                "category": t.category.value if hasattr(t.category, "value") else str(t.category),
-                "risk_level": t.risk_level.value if hasattr(t.risk_level, "value") else str(t.risk_level),
-                "when_to_use": getattr(t, "when_to_use", None),
-                "when_not_to_use": getattr(t, "when_not_to_use", None),
-            }
-            for t in tools
-        ]
+        "tools": [_tool_catalog_entry(t) for t in tools]
     }
 
 

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from .scenario_analyzer import ScenarioDetectionResult, ScenarioType
 
 if TYPE_CHECKING:
@@ -76,11 +77,47 @@ class ScenarioRetrievalContext:
         sections = []
         for i, result in enumerate(self.results, 1):
             section = f"### 来源 {i}: {result.source}\n\n{result.content}"
+            metadata_lines = self._source_metadata_lines(result)
+            if metadata_lines:
+                section += "\n\n[" + "; ".join(metadata_lines) + "]"
             if result.score:
                 section += f"\n\n[相关度: {result.score:.2f}]"
             sections.append(section)
 
         return "\n\n---\n\n".join(sections)
+
+    @classmethod
+    def _source_metadata_lines(cls, result: RetrievalResult) -> list[str]:
+        """Return bounded source metadata for citation-aware context."""
+        metadata = result.metadata or {}
+        scope = metadata.get("scope") if isinstance(metadata.get("scope"), dict) else {}
+        values = {
+            "source_type": metadata.get("source_type") or metadata.get("type"),
+            "citation": metadata.get("citation") or metadata.get("citation_text"),
+            "freshness": (
+                metadata.get("freshness")
+                or metadata.get("updated_at")
+                or metadata.get("created_at")
+            ),
+            "dataset_id": result.dataset_id,
+            "chunk_id": result.chunk_id,
+            "tenant_id": scope.get("tenant_id") or metadata.get("tenant_id"),
+            "user_id": scope.get("user_id") or metadata.get("user_id"),
+            "session_id": scope.get("session_id") or metadata.get("session_id"),
+        }
+        return [
+            f"{key}: {cls._bounded_metadata_value(value)}"
+            for key, value in values.items()
+            if value
+        ]
+
+    @staticmethod
+    def _bounded_metadata_value(value: Any) -> str:
+        """Normalize source metadata values before adding them to model context."""
+        text = str(value).replace("\n", " ").strip()
+        if len(text) > 160:
+            return f"{text[:157]}..."
+        return text
 
 
 # =============================================================================
@@ -457,6 +494,7 @@ class ScenarioAwareRetriever:
         - Scenario relevance (keywords matching)
         - Source authority (internal docs > general)
         """
+        _ = user_query
         # Get scenario keywords for boosting
         from .prompts.scenario_analysis_prompts import SCENARIO_TYPES
 

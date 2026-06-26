@@ -17,7 +17,6 @@ import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from ai_gateway_core.security.safe_fetch import (
     SafeFetchError,
     _host_matches,
@@ -26,7 +25,6 @@ from ai_gateway_core.security.safe_fetch import (
     safe_fetch,
     validate_callback_url,
 )
-
 
 # ---------------------------------------------------------------------------
 # IP classification

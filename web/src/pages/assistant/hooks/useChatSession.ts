@@ -45,6 +45,7 @@ import type {
   ReActPhase,
   ProcessSummaryState,
   ProcessStepItem,
+  ProcessStepStatus,
   ToolTimelineItem,
   // Agentic types
   TaskPlanningEventData,
@@ -442,6 +443,15 @@ function sanitizeProgressLabel(value: string | undefined): string | undefined {
   const trimmed = value.trim();
   if (!trimmed || isZeroToolNoise(trimmed)) return undefined;
   return trimmed;
+}
+
+function taskStatusToProcessStatus(
+  status: WorkingMemoryUpdateEventData["tasks"][number]["status"] | "pending",
+): ProcessStepStatus {
+  if (status === "completed") return "completed";
+  if (status === "failed" || status === "blocked") return "failed";
+  if (status === "in_progress") return "running";
+  return "pending";
 }
 
 function finalizeProcessSummary(
@@ -1346,22 +1356,24 @@ export function useChatSession() {
               const toolId = typeof approvalData.tool_id === "string" ? approvalData.tool_id : "";
               if (!toolId) return m;
               const existing = prev.tools.find((tool) => tool.id === toolId);
-              if (!existing) return m;
+              const toolName =
+                existing?.name ||
+                (typeof approvalData.tool_name === "string" ? approvalData.tool_name : toolId);
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   collapsed: false,
                   tools: upsertTool(prev.tools, {
-                    id: existing.id,
-                    name: existing.name,
+                    id: toolId,
+                    name: toolName,
                     status: "approval_required",
                     approvalId:
                       typeof approvalData.approval_id === "string"
                         ? approvalData.approval_id
-                        : existing.approvalId,
+                        : existing?.approvalId,
                     summary:
-                      typeof approvalData.reason === "string" ? approvalData.reason : existing.summary,
+                      typeof approvalData.reason === "string" ? approvalData.reason : existing?.summary,
                   }),
                 },
               };
@@ -1375,20 +1387,24 @@ export function useChatSession() {
               const toolId = typeof approvalResultData.tool_id === "string" ? approvalResultData.tool_id : "";
               if (!toolId) return m;
               const existing = prev.tools.find((tool) => tool.id === toolId);
-              if (!existing) return m;
               const approved = approvalResultData.approved === true;
+              const toolName =
+                existing?.name ||
+                (typeof approvalResultData.tool_name === "string"
+                  ? approvalResultData.tool_name
+                  : toolId);
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   tools: upsertTool(prev.tools, {
-                    id: existing.id,
-                    name: existing.name,
+                    id: toolId,
+                    name: toolName,
                     status: approved ? "running" : "error",
                     summary:
                       typeof approvalResultData.reason === "string"
                         ? approvalResultData.reason
-                        : existing.summary,
+                        : existing?.summary,
                   }),
                 },
               };
@@ -1402,17 +1418,19 @@ export function useChatSession() {
               const toolId = typeof decisionData.tool_id === "string" ? decisionData.tool_id : "";
               if (!toolId) return m;
               const existing = prev.tools.find((tool) => tool.id === toolId);
-              if (!existing) return m;
               const reason = typeof decisionData.reason === "string" ? decisionData.reason : undefined;
+              const toolName =
+                existing?.name ||
+                (typeof decisionData.tool_name === "string" ? decisionData.tool_name : toolId);
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   tools: upsertTool(prev.tools, {
-                    id: existing.id,
-                    name: existing.name,
-                    status: existing.status,
-                    summary: reason || existing.summary,
+                    id: toolId,
+                    name: toolName,
+                    status: existing?.status || "running",
+                    summary: reason || existing?.summary,
                   }),
                 },
               };
@@ -1960,6 +1978,27 @@ export function useChatSession() {
               collectedInfo: [],
               notes: []
             });
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  currentStep: planData.goal || prev.currentStep,
+                  steps: planData.tasks.reduce(
+                    (steps, task) =>
+                      upsertStep(steps, {
+                        id: task.id,
+                        title: sanitizeProgressLabel(task.description) || task.id,
+                        description: task.type,
+                        status: "pending",
+                      }),
+                    prev.steps
+                  ),
+                },
+              };
+            });
             setShowTaskPanel(true);
             break;
 
@@ -1970,6 +2009,32 @@ export function useChatSession() {
               tasks: memData.tasks,
               collectedInfo: memData.collected_info,
               notes: memData.notes
+            });
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const inProgressTask = memData.tasks.find((task) => task.status === "in_progress");
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  currentStep:
+                    sanitizeProgressLabel(inProgressTask?.description) ||
+                    memData.goal ||
+                    prev.currentStep,
+                  steps: memData.tasks.reduce(
+                    (steps, task) =>
+                      upsertStep(steps, {
+                        id: task.id,
+                        title: sanitizeProgressLabel(task.description) || task.id,
+                        status: taskStatusToProcessStatus(task.status),
+                        error: task.error,
+                        description: task.result,
+                      }),
+                    prev.steps
+                  ),
+                },
+              };
             });
             setShowTaskPanel(true);
             break;

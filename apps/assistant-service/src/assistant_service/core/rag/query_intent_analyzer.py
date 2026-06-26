@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
-
-import re
 
 from ai_gateway_core.logging import get_logger
 
@@ -474,6 +473,7 @@ class QueryIntentAnalyzer:
         Uses fast model for quick decision.
         Cost: ~50-100ms
         """
+        _ = user_context
         # Check cache with TTL
         cache_key = self._get_cache_key(query, available_datasets)
         cached_result = self._get_from_cache(cache_key)

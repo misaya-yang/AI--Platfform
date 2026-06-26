@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -129,6 +130,31 @@ logger = get_logger(__name__)
 # BOTH sides must import this constant — drifting the literal text in one
 # file silently regresses cross-model context.
 PRIOR_TOOL_RESULTS_MARKER = "[Previous tool results"
+
+_TRACE_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]+"),
+        "Authorization: Bearer [redacted]",
+    ),
+    (
+        re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+        "Bearer [redacted]",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
+            r"\s*[:=]\s*[\"']?[^\"'\s,;}]+"
+        ),
+        r"\1=[redacted]",
+    ),
+)
+
+
+def _redact_trace_text(value: Any) -> str:
+    text = str(value or "")
+    for pattern, replacement in _TRACE_REDACTION_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 # =============================================================================
@@ -785,6 +811,8 @@ class AgentLoop:
                         event_type="gateway_decision",
                         data={
                             "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
                             "execution_profile": ctx.routed_request.execution_profile,
                             "memory_mode": ctx.routed_request.memory_mode,
                             "os_agent_enabled": ctx.routed_request.os_agent_enabled,
@@ -851,7 +879,9 @@ class AgentLoop:
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
                 if had_fatal_error:
                     run_status = "failed"
-                    run_error = fatal_error_message or "AgentLoop streaming-first failed"
+                    run_error = _redact_trace_text(
+                        fatal_error_message or "AgentLoop streaming-first failed"
+                    )
                     yield AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
                         event_type=StreamEventType.RUN_ERROR.value,
@@ -878,7 +908,7 @@ class AgentLoop:
 
             except Exception as loop_error:
                 run_status = "failed"
-                run_error = str(loop_error)
+                run_error = _redact_trace_text(loop_error)
                 raise  # re-raise after recording status
             finally:
                 final_status = run_status
@@ -1325,10 +1355,15 @@ class AgentLoop:
             phase=phase,
             event_type="streaming_first_started",
             data={
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
                 "mode": "streaming_first",
-                "message_preview": ctx.message[:100] + "..."
-                if len(ctx.message) > 100
-                else ctx.message,
+                "message_preview": _redact_trace_text(
+                    ctx.message[:100] + "..."
+                    if len(ctx.message) > 100
+                    else ctx.message
+                ),
             },
         )
 
@@ -1883,6 +1918,27 @@ class AgentLoop:
             logger.info(
                 f"[STREAMING-FIRST] Tool defs: {(t2 - t1) * 1000:.0f}ms, {len(tools)} tools"
             )
+            processed_file_metadata = (
+                getattr(processed_files, "file_metadata", []) if processed_files else []
+            )
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.CONTEXT_BUDGET.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "mode": "streaming_first",
+                    "message_count": len(messages),
+                    "history_message_count": len(trimmed_history),
+                    "tool_count": len(available_tool_names),
+                    "selected_tool_names": available_tool_names,
+                    "system_prompt_chars": len(system_prompt),
+                    "dynamic_context_chars": len(dynamic_context_block),
+                    "file_count": len(processed_file_metadata),
+                    "context_detail_enabled": bool(ctx.config.context_detail),
+                },
+            )
 
             # Step 3: Start streaming loop with tool handling
             max_iterations = ctx.config.max_tool_iterations
@@ -2228,10 +2284,14 @@ class AgentLoop:
                                 phase=phase,
                                 event_type="approval_required",
                                 data={
+                                    "run_id": ctx.run_id,
+                                    "thread_id": ctx.session_id,
+                                    "session_id": ctx.session_id,
                                     "tool_id": tool_id,
                                     "tool_name": tool_name,
-                                    "reason": _verdict.reason,
+                                    "reason": _redact_trace_text(_verdict.reason),
                                     "source": _verdict.source,
+                                    "status": "pending",
                                 },
                             )
                         logger.info(
@@ -2287,10 +2347,25 @@ class AgentLoop:
                         phase=phase,
                         event_type="tool_call_started",
                         data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
                             "tool_id": tool_id,
                             "tool_name": tool_name,
-                            "arguments": tool_args_str,
+                            "arguments": _redact_trace_text(tool_args_str),
                             "step_id": step_id,
+                        },
+                    )
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type=StreamEventType.TOOL_CALL_START.value,
+                        data={
+                            "tool_call_id": tool_id,
+                            "name": tool_name,
+                            "step_id": step_id,
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
                         },
                     )
 
@@ -2480,6 +2555,9 @@ class AgentLoop:
                                     phase=phase,
                                     event_type="queue_state",
                                     data={
+                                        "run_id": ctx.run_id,
+                                        "thread_id": ctx.session_id,
+                                        "session_id": ctx.session_id,
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
                                         "state": queue_state,
@@ -2493,6 +2571,9 @@ class AgentLoop:
                                         phase=phase,
                                         event_type="queue_steered",
                                         data={
+                                            "run_id": ctx.run_id,
+                                            "thread_id": ctx.session_id,
+                                            "session_id": ctx.session_id,
                                             "tool_id": tool_id,
                                             "tool_name": tool_name,
                                             "mode": queue_mode,
@@ -2506,6 +2587,9 @@ class AgentLoop:
                                     phase=phase,
                                     event_type="gateway_decision",
                                     data={
+                                        "run_id": ctx.run_id,
+                                        "thread_id": ctx.session_id,
+                                        "session_id": ctx.session_id,
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
                                         **gateway_decision,
@@ -2518,6 +2602,9 @@ class AgentLoop:
                                     phase=phase,
                                     event_type="sandbox_decision",
                                     data={
+                                        "run_id": ctx.run_id,
+                                        "thread_id": ctx.session_id,
+                                        "session_id": ctx.session_id,
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
                                         **sandbox_decision,
@@ -2529,12 +2616,18 @@ class AgentLoop:
                                     phase=phase,
                                     event_type="approval_required",
                                     data={
+                                        "run_id": ctx.run_id,
+                                        "thread_id": ctx.session_id,
+                                        "session_id": ctx.session_id,
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
                                         "approval_id": tool_metadata.get("approval_id"),
-                                        "reason": gateway_decision.get("reason")
+                                        "reason": _redact_trace_text(
+                                            gateway_decision.get("reason")
+                                        )
                                         if isinstance(gateway_decision, dict)
                                         else None,
+                                        "status": "pending",
                                     },
                                 )
 
@@ -2573,7 +2666,7 @@ class AgentLoop:
                             tool_result_text=tool_result_text,
                             tool_metadata=tool_metadata,
                         )
-                        tool_result_preview = str(tool_result_text)[:500]
+                        tool_result_preview = _redact_trace_text(str(tool_result_text)[:500])
 
                         # Emit KB/Web UI panel events from tool metadata
                         if tool_name == "search_knowledge_base":
@@ -2624,7 +2717,14 @@ class AgentLoop:
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type=StreamEventType.ARTIFACT_CREATED.value,
-                                data=_payload,
+                                data={
+                                    **_payload,
+                                    "run_id": ctx.run_id,
+                                    "thread_id": ctx.session_id,
+                                    "session_id": ctx.session_id,
+                                    "tool_call_id": tool_id,
+                                    "tool_name": tool_name,
+                                },
                             )
 
                         # Append artifact URLs to the model-facing result so the
@@ -2654,6 +2754,9 @@ class AgentLoop:
                         output_files_for_events = _sanitize_output_files(
                             persisted_output_files or []
                         )
+                        tool_error_for_event = (
+                            _redact_trace_text(tool_error) if tool_error else None
+                        )
 
                         # Semantic RESULT events (frontend expects these)
                         if tool_name == "execute_python_code":
@@ -2664,7 +2767,7 @@ class AgentLoop:
                                     "execution_id": tool_id,
                                     "success": tool_success,
                                     "result": tool_result_text,
-                                    "error": tool_error,
+                                    "error": tool_error_for_event,
                                     "duration_ms": tool_duration_ms,
                                     "output_files": output_files_for_events,
                                 },
@@ -2677,7 +2780,7 @@ class AgentLoop:
                                     "execution_id": tool_id,
                                     "success": tool_success,
                                     "result": tool_result_text,
-                                    "error": tool_error,
+                                    "error": tool_error_for_event,
                                     "duration_ms": tool_duration_ms,
                                     "output_files": output_files_for_events,
                                 },
@@ -2696,7 +2799,7 @@ class AgentLoop:
                                     "execution_id": tool_id,
                                     "success": tool_success,
                                     "result": tool_result_text,
-                                    "error": tool_error,
+                                    "error": tool_error_for_event,
                                     "duration_ms": tool_duration_ms,
                                     "title": title,
                                     "format": fmt,
@@ -2709,13 +2812,44 @@ class AgentLoop:
                             phase=phase,
                             event_type="tool_call_completed",
                             data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
                                 "tool_id": tool_id,
                                 "tool_name": tool_name,
                                 "success": tool_success,
                                 "result_preview": tool_result_preview,
                                 "metadata": tool_metadata or {},
                                 "duration_ms": tool_duration_ms,
-                                "error": tool_error,
+                                "error": tool_error_for_event,
+                            },
+                        )
+                        tool_status = "completed" if tool_success else "error"
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "tool_call_id": tool_id,
+                                "status": tool_status,
+                                "result_preview": tool_result_preview,
+                                "error": tool_error_for_event,
+                            },
+                        )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_END.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "status": tool_status,
+                                "duration_ms": tool_duration_ms,
+                                "error": tool_error_for_event,
                             },
                         )
                         # Turn-level persistence: update call status + record
@@ -2732,19 +2866,24 @@ class AgentLoop:
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
                                 "result": _stored_result,
-                                "error": tool_error,
+                                "error": tool_error_for_event,
                                 "duration_ms": tool_duration_ms,
                             }
                         )
                         step_success = tool_success
-                        step_error = tool_error
+                        step_error = tool_error_for_event
                         step_result_preview = tool_result_preview or None
                         last_tool_failed = not tool_success
 
                     except Exception as e:
-                        logger.exception("[STREAMING-FIRST] Tool %s failed", tool_name)
+                        safe_error = _redact_trace_text(e)
+                        logger.error(
+                            "[STREAMING-FIRST] Tool %s failed: %s",
+                            tool_name,
+                            safe_error,
+                        )
                         last_tool_failed = True
-                        tool_result = f"Error executing {tool_name}: {str(e)}"
+                        tool_result = f"Error executing {tool_name}: {safe_error}"
                         tool_result_for_model = _compact_tool_result_for_model(
                             tool_name=tool_name,
                             tool_result_text=tool_result,
@@ -2754,10 +2893,40 @@ class AgentLoop:
                             phase=phase,
                             event_type="tool_call_completed",
                             data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
                                 "tool_id": tool_id,
                                 "tool_name": tool_name,
                                 "success": False,
-                                "error": str(e),
+                                "error": safe_error,
+                            },
+                        )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_RESULT.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "tool_call_id": tool_id,
+                                "status": "error",
+                                "result_preview": None,
+                                "error": safe_error,
+                            },
+                        )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type=StreamEventType.TOOL_CALL_END.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": ctx.session_id,
+                                "session_id": ctx.session_id,
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "status": "error",
+                                "duration_ms": None,
+                                "error": safe_error,
                             },
                         )
                         # Turn-level persistence — record the failure too.
@@ -2767,12 +2936,12 @@ class AgentLoop:
                                 "tool_call_id": tool_id,
                                 "name": tool_name,
                                 "result": None,
-                                "error": str(e),
+                                "error": safe_error,
                                 "duration_ms": None,
                             }
                         )
                         step_success = False
-                        step_error = str(e)
+                        step_error = safe_error
                         step_result_preview = str(tool_result)[:500] if tool_result else None
 
                     finally:
@@ -2868,6 +3037,9 @@ class AgentLoop:
                                 event_type=StreamEventType.CONTEXT_COMPACTED.value,
                                 data={
                                     **_stats,
+                                    "run_id": ctx.run_id,
+                                    "thread_id": ctx.session_id,
+                                    "session_id": ctx.session_id,
                                     "trigger": "tool:context_compact",
                                     "reason": _compact_signal.get("reason", ""),
                                 },
@@ -3050,6 +3222,9 @@ class AgentLoop:
                     phase=phase,
                     event_type=StreamEventType.RUN_ERROR.value,
                     data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
                         "error": "model_produced_no_text",
                         "reason": (
                             "The model completed tool calls but did not "
@@ -3265,13 +3440,17 @@ class AgentLoop:
             )
 
         except Exception as e:
-            logger.exception("[STREAMING-FIRST] Error")
+            safe_error = _redact_trace_text(e)
+            logger.error("[STREAMING-FIRST] Error: %s", safe_error)
             yield AgentLoopEvent(
                 phase=phase,
                 event_type="error",
                 data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
                     "code": "STREAMING_FIRST_ERROR",
-                    "message": str(e),
+                    "message": safe_error,
                     "phase": phase.value,
                 },
             )
