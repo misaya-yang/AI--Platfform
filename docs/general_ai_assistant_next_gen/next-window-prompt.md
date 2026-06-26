@@ -51,15 +51,17 @@ Current waiver:
 
 - `NGA-F012` was blocked because both external env release gates fail before
   runtime checks:
-  - `make validate-config ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env`
-  - `make validate ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env`
+  - `make validate-config ENV_FILE=/path/to/release.env`
+  - `make validate ENV_FILE=/path/to/release.env`
 - The missing or placeholder release settings reported by name are:
   `REDIS_PASSWORD`, `DOCGEN_ARTIFACT_SIGN_KEY`,
   `DEFAULT_USER_PASSWORD`, `AUTH_ALLOWED_EMAIL_DOMAIN`,
   `KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON`, and
   `ASSISTANT_CORS_ALLOW_ORIGINS_JSON`.
-- A continuation recheck reran both commands with the same `ENV_FILE` path and
-  confirmed the blocker is unchanged.
+- Open-source repository validation should first run `make validate-example-config`;
+  do not use a maintainer-private env file as a public gate.
+- A continuation recheck reran both release commands with the same maintainer
+  `ENV_FILE` path and confirmed the blocker is unchanged.
 - A third consecutive goal-turn recheck confirmed the blocker is still
   unchanged.
 - User instructed "那先不管", so this external env gate is waived/deferred for

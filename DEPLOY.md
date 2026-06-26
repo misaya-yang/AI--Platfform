@@ -67,6 +67,17 @@ make validate-config
 Use `make validate-config ENV_FILE=/path/to/.env` when the env file is stored
 outside the repository.
 
+For repository-only or CI checks that must not depend on private secrets, run:
+
+```bash
+make validate-example-config
+```
+
+That target validates the committed `.env.example` shape and Docker Compose
+rendering. It does not prove a deployment is release-ready; production and
+shared environments must still pass `make validate-config` and `make validate`
+with a populated real env file.
+
 This checks:
 
 - required secrets are present and not placeholders

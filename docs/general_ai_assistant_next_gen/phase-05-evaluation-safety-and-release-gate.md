@@ -185,6 +185,13 @@
         "required": true
       },
       {
+        "id": "public-example-config",
+        "cwd": ".",
+        "command": "make validate-example-config",
+        "expected": "Committed .env.example passes the public open-source shape and compose-rendering gate without private secrets.",
+        "required": true
+      },
+      {
         "id": "compose-config",
         "cwd": ".",
         "command": "docker compose --env-file .env.example config --quiet",
@@ -194,14 +201,14 @@
       {
         "id": "external-env-config-gate",
         "cwd": ".",
-        "command": "make validate-config ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env",
-        "expected": "External env config validation passes, or the report records the exact missing variable names without secret values.",
+        "command": "make validate-config ENV_FILE=/path/to/release.env",
+        "expected": "Real release env config validation passes, or the report records the exact missing variable names without secret values.",
         "required": true
       },
       {
         "id": "external-env-runtime-gate",
         "cwd": ".",
-        "command": "make validate ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env",
+        "command": "make validate ENV_FILE=/path/to/release.env",
         "expected": "Runtime validation passes, or the report records the exact release blocker without secret values.",
         "required": true
       },
@@ -284,7 +291,7 @@
 - LIKELY_EDIT_PATHS: assistant safety/integration tests, frontend smoke specs, README/RELEASE notes, `docs/general_ai_assistant_next_gen/**`
 - DO_NOT_EDIT: real env files, production deployment targets, package registry credentials, production migrations, git history
 - EXECUTION_MODE: plan-first; execute terminal gates; verify before completion; write evidence before handoff
-- VALIDATION_COMMANDS: `uv run --extra dev --extra test pytest -q --no-cov tests/services/assistant/test_eval_safety_contracts.py tests/services/assistant/test_guardrails.py tests/services/assistant/test_safe_fetch.py tests/services/assistant/test_safe_fetch_callsites.py tests/services/assistant/test_tool_orchestrator.py`; `uv run --extra dev --extra test pytest -q --no-cov tests/integration/test_assistant_openapi_contract.py tests/integration/test_assistant_core_isolation.py tests/integration/test_service_failure_isolation.py`; `pnpm -C web type-check && pnpm -C web lint && pnpm -C web build && pnpm -C web e2e:opensource`; `docker compose --env-file .env.example config --quiet`; `make validate-config ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env`; `make validate ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env`; `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/general_ai_assistant_next_gen --strict --quality-score`
+- VALIDATION_COMMANDS: `uv run --extra dev --extra test pytest -q --no-cov tests/services/assistant/test_eval_safety_contracts.py tests/services/assistant/test_guardrails.py tests/services/assistant/test_safe_fetch.py tests/services/assistant/test_safe_fetch_callsites.py tests/services/assistant/test_tool_orchestrator.py`; `uv run --extra dev --extra test pytest -q --no-cov tests/integration/test_assistant_openapi_contract.py tests/integration/test_assistant_core_isolation.py tests/integration/test_service_failure_isolation.py`; `pnpm -C web type-check && pnpm -C web lint && pnpm -C web build && pnpm -C web e2e:opensource`; `make validate-example-config`; `docker compose --env-file .env.example config --quiet`; `make validate-config ENV_FILE=/path/to/release.env`; `make validate ENV_FILE=/path/to/release.env`; `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/general_ai_assistant_next_gen --strict --quality-score`
 - BROWSER_CHECKS: public route smoke, assistant browser smoke if UI changed, Playwright artifact path capture.
 - REGRESSION_SCOPE: Whole-demand regression for NGA-F001 through NGA-F012; continuity ledger links agent-loop, skills, MCP, memory, RAG, context, UI, session, eval, and release.
 - COMPLIANCE_GATES: No secrets; approval gates for deploy/publish/migrations; safety gates for prompt injection, tool boundary, SSRF, tenant isolation, and service failure.

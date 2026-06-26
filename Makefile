@@ -7,6 +7,7 @@
 #   make deploy-build    部署并强制重新构建镜像
 #   make deploy-cn       使用国内镜像构建部署
 #   make validate-config 校验 .env 和 Compose 配置
+#   make validate-example-config 校验开源示例配置和 Compose 渲染
 #   make validate        校验 .env、Compose 配置和运行时依赖
 #   make seed-demo       预览本地 demo 数据
 #   make seed-demo-apply 写入本地 demo 数据
@@ -43,7 +44,7 @@ DEV_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: quickstart validate-config validate seed-demo seed-demo-apply
+.PHONY: quickstart validate-config validate-example-config validate seed-demo seed-demo-apply
 
 quickstart:                 ## 零配置一键部署 (首次使用: 启动+迁移+校验)
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
@@ -61,6 +62,9 @@ validate:                   ## 校验 .env、Compose 配置和运行时依赖
 
 validate-config:            ## 仅校验 .env 和 Compose 配置
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
+
+validate-example-config:    ## 校验提交的 .env.example 和 Compose 示例配置
+	@bash $(SCRIPTS)/validate-env.sh --env ".env.example" --example
 
 seed-demo:                  ## 预览本地 demo 数据 SQL 和路由 (不写数据库)
 	@bash $(SCRIPTS)/seed-demo-data.sh --env "$(ENV_FILE)" --dry-run

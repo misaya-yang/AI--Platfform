@@ -53,6 +53,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Validate public example config
+        run: make validate-example-config
+
       - name: Validate compose config
         run: docker compose --env-file .env.example config --quiet
 

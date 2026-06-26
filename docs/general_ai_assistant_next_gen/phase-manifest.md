@@ -137,7 +137,8 @@ pnpm -C web e2e:opensource
 Release/readiness phase checks:
 
 ```bash
+make validate-example-config
 docker compose --env-file .env.example config --quiet
-make validate-config ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env
-make validate ENV_FILE=/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/.env
+make validate-config ENV_FILE=/path/to/release.env
+make validate ENV_FILE=/path/to/release.env
 ```

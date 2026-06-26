@@ -9,7 +9,7 @@ exact commit being tagged.
 Run these checks locally before creating a tag:
 
 ```bash
-scripts/new/validate-env.sh --env .env.example --config-only
+make validate-example-config
 docker compose --env-file .env.example config --quiet
 pnpm -C web type-check
 pnpm -C web lint
@@ -31,6 +31,14 @@ python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts
 
 The absolute Codex path above is a maintainer-local gate and is not required for
 external contributors.
+
+`make validate-example-config` is the public repository gate for `.env.example`.
+Do not replace the real deployment gate with it. Before deploying a shared or
+production environment, run `make validate-config ENV_FILE=/path/to/.env` and
+`make validate ENV_FILE=/path/to/.env` against a populated env file with real
+secrets, domains, provider keys, and CORS origins.
+The open-source env-readiness TODO is tracked in
+`docs/open_source_platform_optimization/env-readiness-todo.md`.
 
 ## Versioning
 

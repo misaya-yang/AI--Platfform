@@ -12,12 +12,13 @@ ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/.env}"
 RUNTIME_CHECK=false
 CONFIG_CHECK=true
 INFRA_ONLY=false
+EXAMPLE_CHECK=false
 ERRORS=0
 WARNINGS=0
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/new/validate-env.sh [--env FILE] [--config-only] [--runtime] [--infra-only]
+Usage: scripts/new/validate-env.sh [--env FILE] [--config-only] [--runtime] [--infra-only] [--example]
 
 Checks the local .env file without printing secret values.
 
@@ -25,6 +26,7 @@ Modes:
   --config-only   Validate required variables and value shape only (default)
   --runtime       Validate config, then verify Docker runtime dependencies
   --infra-only    Validate only PostgreSQL, Redis, and Qdrant requirements
+  --example       Validate a committed example env file for public shape and compose rendering
   --env FILE      Use a specific env file instead of .env
 USAGE
 }
@@ -51,6 +53,12 @@ while [ $# -gt 0 ]; do
             ;;
         --infra-only)
             INFRA_ONLY=true
+            shift
+            ;;
+        --example)
+            EXAMPLE_CHECK=true
+            CONFIG_CHECK=true
+            RUNTIME_CHECK=false
             shift
             ;;
         -h|--help)
@@ -109,6 +117,26 @@ load_env_file() {
 env_value() {
     local key="$1"
     printf '%s' "${!key:-}"
+}
+
+env_file_has_key() {
+    local key="$1"
+    grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE"
+}
+
+require_example_key() {
+    local key="$1"
+    if ! env_file_has_key "$key"; then
+        fail "$key must be declared in the example env file."
+    fi
+}
+
+require_example_value() {
+    local key="$1"
+    require_example_key "$key"
+    if [ -z "$(env_value "$key")" ]; then
+        fail "$key must have an example value."
+    fi
 }
 
 is_placeholder() {
@@ -594,6 +622,93 @@ validate_config() {
     fi
 }
 
+validate_example_config() {
+    log_step "Validating public example configuration"
+    load_env_file
+
+    if [ "$ERRORS" -gt 0 ]; then
+        return
+    fi
+
+    local required_values=(
+        POSTGRES_PASSWORD
+        REDIS_PASSWORD
+        JWT_SECRET
+        GATEWAY_ASSISTANT_SHARED_SECRET
+        INTERNAL_COMM_REDIS_URL
+        AUTH_ALLOWED_EMAIL_DOMAIN
+        DEFAULT_USER_PASSWORD
+        ASSISTANT_SERVICE_URL
+        KB_SERVICE_URL
+        MCP_DOCGEN_SERVICE_URL
+        DOCGEN_PUBLIC_URL
+        DOCGEN_ARTIFACT_SIGN_KEY
+        KB_EMBEDDING_PROVIDER
+        KB_EMBEDDING_API_KEY
+        KB_EMBEDDING_MODEL
+        KB_EMBEDDING_DIMENSION
+        KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
+        ASSISTANT_CORS_ALLOW_ORIGINS_JSON
+    )
+    local provider_keys=(
+        DASHSCOPE_CHAT_API_KEY
+        DASHSCOPE_API_KEY
+        GOOGLE_API_KEY
+        GEMINI_API_KEY
+        VERTEX_CHAT_API_KEY
+        VERTEX_API_KEY
+        OPENAI_API_KEY
+        ANTHROPIC_API_KEY
+        DEEPSEEK_API_KEY
+    )
+    local key
+
+    for key in "${required_values[@]}"; do
+        require_example_value "$key"
+    done
+    for key in "${provider_keys[@]}"; do
+        require_example_key "$key"
+    done
+
+    require_positive_int POSTGRES_PORT 5432
+    require_positive_int REDIS_PORT 6379
+    require_positive_int QDRANT_HTTP_PORT 6333
+    require_positive_int QDRANT_GRPC_PORT 6334
+    require_positive_int GATEWAY_PORT 8080
+    require_positive_int FRONTEND_PORT 8081
+    require_positive_int KNOWLEDGE_SERVICE_PORT 8092
+    require_positive_int KB_EMBEDDING_DIMENSION 1024
+
+    require_domain AUTH_ALLOWED_EMAIL_DOMAIN
+    require_frontend_auth_domain_alignment
+    require_support_email_release_ready
+    require_url ASSISTANT_SERVICE_URL
+    require_url KB_SERVICE_URL
+    require_url MCP_DOCGEN_SERVICE_URL
+    require_public_url DOCGEN_PUBLIC_URL
+    require_frontend_runtime_url VITE_API_URL
+    require_frontend_runtime_url VITE_API_BASE_URL
+    require_frontend_runtime_url VITE_TELEMETRY_ENDPOINT
+    require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
+    require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
+
+    local embedding_provider="${KB_EMBEDDING_PROVIDER:-gemini}"
+    case "$embedding_provider" in
+        gemini|dashscope|siliconflow)
+            ;;
+        *)
+            fail "KB_EMBEDDING_PROVIDER must be one of: gemini, dashscope, siliconflow."
+            ;;
+    esac
+
+    validate_ports
+    validate_compose_config
+
+    if [ "$ERRORS" -eq 0 ]; then
+        log_success "Example configuration validation passed"
+    fi
+}
+
 validate_runtime() {
     log_step "Validating runtime dependencies"
     require_docker
@@ -623,7 +738,9 @@ validate_runtime() {
 }
 
 main() {
-    if [ "$CONFIG_CHECK" = true ]; then
+    if [ "$EXAMPLE_CHECK" = true ]; then
+        validate_example_config
+    elif [ "$CONFIG_CHECK" = true ]; then
         validate_config
     fi
 

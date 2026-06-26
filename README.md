@@ -111,6 +111,7 @@ do not trip 429s. Tighten them for shared or production deployments.
 Use these commands when debugging startup or before publishing a deployment:
 
 ```bash
+make validate-example-config # checks committed .env.example shape and compose rendering
 make validate-config   # checks .env and docker compose config only
 make validate          # checks .env plus running Postgres, Redis, Qdrant, and services
 make status            # prints compose state and service health; exits nonzero if any health check fails
@@ -120,6 +121,12 @@ docker compose ps
 Makefile validation, deploy, status, migration, backup, stop/restart/log, and
 development helper targets accept `ENV_FILE=/path/to/.env`. The default remains
 `.env`.
+
+`make validate-example-config` is the portable open-source check for contributors
+and CI. It proves the committed example configuration is structurally usable
+without requiring private secrets. It is not a production release gate.
+The tracked follow-up checklist lives in
+`docs/open_source_platform_optimization/env-readiness-todo.md`.
 
 Lower-level deploy, migrate, backup, and setup-dev scripts also accept
 `--env FILE` when called directly.

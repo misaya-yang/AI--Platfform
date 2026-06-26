@@ -135,6 +135,46 @@ def test_validate_env_accepts_documented_local_bootstrap_password(tmp_path: Path
     assert chat_key not in output
 
 
+def test_validate_env_example_mode_accepts_committed_example(tmp_path: Path) -> None:
+    example_text = Path(".env.example").read_text()
+    result = _run_validate_env(tmp_path, example_text, args=["--example"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Example configuration validation passed" in output
+    assert "change_me_generate_with_openssl" not in output
+    assert "change_me_embedding_provider_key" not in output
+
+
+def test_validate_env_config_still_rejects_committed_example_for_release(
+    tmp_path: Path,
+) -> None:
+    example_text = Path(".env.example").read_text()
+    result = _run_validate_env(tmp_path, example_text, args=["--config-only"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "POSTGRES_PASSWORD must be set to a non-placeholder secret" in output
+    assert "REDIS_PASSWORD must be set to a non-placeholder secret" in output
+    assert "Example configuration validation passed" not in output
+    assert "change_me_generate_with_openssl" not in output
+
+
+def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> None:
+    example_text = re.sub(
+        r"^DOCGEN_ARTIFACT_SIGN_KEY=.*\n",
+        "",
+        Path(".env.example").read_text(),
+        flags=re.MULTILINE,
+    )
+    result = _run_validate_env(tmp_path, example_text, args=["--example"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "DOCGEN_ARTIFACT_SIGN_KEY must be declared in the example env file" in output
+    assert "change_me_generate_with_openssl" not in output
+
+
 def test_validate_env_runtime_rejects_enabled_models_without_configured_provider(
     tmp_path: Path,
 ) -> None:
