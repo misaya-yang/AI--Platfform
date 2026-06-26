@@ -1,9 +1,0 @@
-{
-  "schema_version": "prd-phase-harness/loop-state/v1",
-  "active_phase": "OSP-04",
-  "active_feature": "OSP-F005",
-  "iteration": 4,
-  "status": "verified",
-  "last_decision": "OSP-00 through OSP-04 repository-only implementation is complete: governance files, stable CI, demo data, mocked route smoke, release docs, and evidence writeback were added without production mutation or package publishing.",
-  "next_action": "Run final repository-only verification, then commit and push the open-source readiness changes if all required checks pass."
-}

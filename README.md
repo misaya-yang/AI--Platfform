@@ -89,7 +89,8 @@ make seed-demo       # preview the deterministic SQL and routes
 make seed-demo-apply # load the records into the configured local database
 ```
 
-See `docs/demo-data.md` for the seeded routes and scope.
+Run `make seed-demo` to preview the seeded routes and scope without writing to
+the database.
 
 The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
 The validator allows that documented local bootstrap password but warns about it.
@@ -126,7 +127,7 @@ development helper targets accept `ENV_FILE=/path/to/.env`. The default remains
 and CI. It proves the committed example configuration is structurally usable
 without requiring private secrets. It is not a production release gate.
 The tracked follow-up checklist lives in
-`docs/open_source_platform_optimization/env-readiness-todo.md`.
+`deploy/runbooks/open-source-env-readiness-todo.md`.
 
 Lower-level deploy, migrate, backup, and setup-dev scripts also accept
 `--env FILE` when called directly.

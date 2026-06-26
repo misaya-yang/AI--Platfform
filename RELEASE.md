@@ -22,23 +22,13 @@ uv run --extra dev --extra test pytest -q --no-cov \
 scripts/new/seed-demo-data.sh --dry-run
 ```
 
-For Codex-assisted release work, also validate the phase harnesses locally:
-
-```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/general_ai_assistant_upgrade --strict --quality-score
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/open_source_platform_optimization --strict --quality-score
-```
-
-The absolute Codex path above is a maintainer-local gate and is not required for
-external contributors.
-
 `make validate-example-config` is the public repository gate for `.env.example`.
 Do not replace the real deployment gate with it. Before deploying a shared or
 production environment, run `make validate-config ENV_FILE=/path/to/.env` and
 `make validate ENV_FILE=/path/to/.env` against a populated env file with real
 secrets, domains, provider keys, and CORS origins.
 The open-source env-readiness TODO is tracked in
-`docs/open_source_platform_optimization/env-readiness-todo.md`.
+`deploy/runbooks/open-source-env-readiness-todo.md`.
 
 ## Versioning
 

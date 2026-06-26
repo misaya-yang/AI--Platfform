@@ -73,6 +73,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+if [ "$EXAMPLE_CHECK" = true ]; then
+    RUNTIME_CHECK=false
+    INFRA_ONLY=false
+fi
+
 fail() {
     log_error "$1"
     ERRORS=$((ERRORS + 1))

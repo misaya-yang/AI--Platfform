@@ -77,15 +77,8 @@ plugins/frontend-design/
 # AI Agent Skills (local development only)
 .agents/
 
-# Documentation (managed separately, except named handoff docs)
+# Documentation (managed separately)
 docs/*
-!docs/demo-data.md
-!docs/general_ai_assistant_upgrade/
-!docs/general_ai_assistant_upgrade/**
-!docs/general_ai_assistant_next_gen/
-!docs/general_ai_assistant_next_gen/**
-!docs/open_source_platform_optimization/
-!docs/open_source_platform_optimization/**
 !apps/islamic-content-service/docs/
 !apps/islamic-content-service/docs/**
 !apps/assistant-service/docs/
@@ -151,12 +144,6 @@ apps/islamic-content-service/data/
 *-Report*.docx
 *-Report*.js
 *-Spec.md
-!docs/general_ai_assistant_upgrade/reports/
-!docs/general_ai_assistant_upgrade/reports/**
-!docs/general_ai_assistant_next_gen/reports/
-!docs/general_ai_assistant_next_gen/reports/**
-!docs/open_source_platform_optimization/reports/
-!docs/open_source_platform_optimization/reports/**
 claude-code-*.md
 # plans/ holds migration plans and generated reports. Track .md + .json
 # (committable deliverables); ignore any other scratch/binary artifacts
@@ -167,8 +154,6 @@ plans/*
 # Verify scripts belong with their design docs so "the gate the user
 # runs" is always reviewable next to the spec it enforces.
 !plans/verify-*.sh
-docs/plans/
-docs/architecture/
 
 # ======================== Temporary Upload/Data ========================
 tmp-*/
@@ -176,12 +161,9 @@ demo-screenshots/
 Users/
 code-review-recommended-questions.md
 deploy-checklist-recommended-questions.md
-code-review-recommended-questions.md
-docs/screenshots/
 
 # ======================== Generated / Temp ========================
 web/package-lock.json
-docs/reviews/
 # Generated data files
 data/hadith_registry.json
 

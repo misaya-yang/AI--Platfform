@@ -146,6 +146,16 @@ def test_validate_env_example_mode_accepts_committed_example(tmp_path: Path) -> 
     assert "change_me_embedding_provider_key" not in output
 
 
+def test_validate_env_example_mode_ignores_runtime_flag_order(tmp_path: Path) -> None:
+    example_text = Path(".env.example").read_text()
+    result = _run_validate_env(tmp_path, example_text, args=["--example", "--runtime"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "Example configuration validation passed" in output
+    assert "Validating runtime dependencies" not in output
+
+
 def test_validate_env_config_still_rejects_committed_example_for_release(
     tmp_path: Path,
 ) -> None:

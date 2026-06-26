@@ -1,9 +1,0 @@
-{
-  "schema_version": "prd-phase-harness/loop-state/v1",
-  "active_phase": "NGA-05",
-  "active_feature": "NGA-F012",
-  "iteration": 14,
-  "status": "waived",
-  "last_decision": "NGA-F012 is waived for harness completion after user instructed \"那先不管\" for the repeated external env release gate. Assistant safety pytest passed with 122 tests; assistant integration passed with 3 passed and 5 environment-specific skips; exact frontend release command passed; docker compose config passed with .env.example; strict harness validation passed with quality score 100; terminal completion gate passed with quality score 100 after waiver writeback. External env gates still fail for REDIS_PASSWORD, DOCGEN_ARTIFACT_SIGN_KEY, DEFAULT_USER_PASSWORD, AUTH_ALLOWED_EMAIL_DOMAIN, KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON, and ASSISTANT_CORS_ALLOW_ORIGINS_JSON, and production release readiness remains unproven until make validate-config and make validate pass.",
-  "next_action": "No further PRD harness execution is required for this goal after waiver completion. Do not deploy or mark production release-ready until the external env gates pass."
-}

@@ -1,9 +1,0 @@
-{
-  "schema_version": "prd-phase-harness/loop-state/v1",
-  "active_phase": "GAA-04",
-  "active_feature": "GAA-F005",
-  "iteration": 61,
-  "status": "blocked",
-  "last_decision": "GAA-04 is still blocked. Gateway metrics release gate now requires Prometheus markers and gateway_up, and rejects empty or generic metrics output; current local /metrics exposes gateway_up and status remains healthy. Script tests pass 58/58, combined script/runtime-config tests pass 62/62, static compose config passes, and the supplied external env still stops at the same six release config blockers without printing secret values.",
-  "next_action": "Set valid REDIS_PASSWORD, DOCGEN_ARTIFACT_SIGN_KEY, DEFAULT_USER_PASSWORD, AUTH_ALLOWED_EMAIL_DOMAIN, KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON, and ASSISTANT_CORS_ALLOW_ORIGINS_JSON in a complete release env, align provider/model rows, create seed records or document a waiver for knowledge/exam detail, public share, and quiz-taking route families, then rerun full release validation before any launch decision."
-}

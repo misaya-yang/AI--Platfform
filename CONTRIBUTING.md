@@ -33,12 +33,8 @@ pnpm -C web lint
 pnpm -C web build
 ```
 
-For harness work:
-
-```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/open_source_platform_optimization --strict --quality-score
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py docs/general_ai_assistant_upgrade --strict --quality-score
-```
+Generated planning and harness files under root `docs/` are ignored by Git. Keep
+durable operational follow-ups in tracked locations such as `deploy/runbooks/`.
 
 If a check cannot run locally, include the exact command, the blocker, and what a passing result would prove.
 

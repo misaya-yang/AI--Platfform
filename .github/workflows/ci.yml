@@ -59,14 +59,9 @@ jobs:
       - name: Validate compose config
         run: docker compose --env-file .env.example config --quiet
 
-      - name: Validate release harnesses
+      - name: Verify tracked release runbook
         run: |
-          python3 -m json.tool docs/general_ai_assistant_upgrade/feature-oracle.json >/dev/null
-          python3 -m json.tool docs/general_ai_assistant_upgrade/loop-state.json >/dev/null
-          python3 -m json.tool docs/open_source_platform_optimization/feature-oracle.json >/dev/null
-          python3 -m json.tool docs/open_source_platform_optimization/loop-state.json >/dev/null
-          test -s docs/general_ai_assistant_upgrade/reports/gaa-04-deployment-readiness-report.md
-          test -s docs/open_source_platform_optimization/phase-manifest.md
+          test -s deploy/runbooks/open-source-env-readiness-todo.md
 
   frontend:
     name: Frontend Typecheck, Lint, Build
@@ -116,7 +111,7 @@ jobs:
           test -s CODE_OF_CONDUCT.md
           test -s SUPPORT.md
           test -s RELEASE.md
-          test -s docs/demo-data.md
+          test -s deploy/runbooks/open-source-env-readiness-todo.md
 
       - name: Verify demo seed dry run
         run: scripts/new/seed-demo-data.sh --dry-run
