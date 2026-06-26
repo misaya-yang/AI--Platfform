@@ -1621,6 +1621,8 @@ def test_setup_dev_rejects_missing_explicit_env_file_before_action(tmp_path: Pat
 
 def test_setup_dev_start_still_requires_dev_passwords(tmp_path: Path) -> None:
     fake_bin = _write_fake_runtime_commands(tmp_path)
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("", encoding="utf-8")
     env = {
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -1629,7 +1631,7 @@ def test_setup_dev_start_still_requires_dev_passwords(tmp_path: Path) -> None:
     env.pop("REDIS_PASSWORD", None)
 
     result = subprocess.run(
-        ["bash", "scripts/new/setup-dev.sh", "--start"],
+        ["bash", "scripts/new/setup-dev.sh", "--env", str(env_file), "--start"],
         text=True,
         capture_output=True,
         env=env,

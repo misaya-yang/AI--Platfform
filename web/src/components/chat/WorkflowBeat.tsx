@@ -90,6 +90,16 @@ function buildSummary(
   return joined.charAt(0).toUpperCase() + joined.slice(1);
 }
 
+function uniqueToolNames(tools: ToolCallWithResult[]): string[] {
+  return Array.from(
+    new Set(
+      tools
+        .map((tc) => tc.toolCall.name?.trim())
+        .filter((name): name is string => Boolean(name))
+    )
+  );
+}
+
 // ---------------------------------------------------------------------------
 // ElapsedTimer — small live counter shown in the row while streaming
 // ---------------------------------------------------------------------------
@@ -159,6 +169,7 @@ export function WorkflowBeat({
   // past the beat (it's noisy). Show the counter only when running.
   const showTimer = isRunning && (hasTools || hasNoVisibleText);
   const showSpinner = isRunning && (toolsRunning || !hasTools);
+  const toolNames = hasTools ? uniqueToolNames(toolCalls) : [];
 
   return (
     <div data-message-supplemental="workflow-beat" className="w-full">
@@ -200,6 +211,12 @@ export function WorkflowBeat({
         >
           {summary}
         </span>
+
+        {toolNames.length > 0 && (
+          <span className="max-w-[45%] shrink-0 truncate rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 dark:bg-white/6 dark:text-slate-400">
+            {toolNames.join(", ")}
+          </span>
+        )}
 
         {/* Elapsed timer (running only) */}
         {showTimer && <ElapsedTimer />}

@@ -5,7 +5,13 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request
 
 from src.api.v1.exams import list_exams
-from src.api.v1.quiz import QuizGenerateRequest, generate_quiz, list_quizzes
+from src.api.v1.quiz import (
+    QuizGenerateRequest,
+    _get_quiz_service,
+    _UnavailableModelRegistry,
+    generate_quiz,
+    list_quizzes,
+)
 from src.core.auth.user_resolver import UserContext
 
 
@@ -84,7 +90,7 @@ async def test_quiz_list_returns_empty_when_quiz_tables_are_missing():
 
 
 @pytest.mark.asyncio
-async def test_quiz_generation_still_requires_model_registry():
+async def test_quiz_generation_uses_assistant_adapter_when_gateway_registry_missing():
     with pytest.raises(HTTPException) as exc_info:
         await generate_quiz(
             QuizGenerateRequest(dataset_ids=["dataset_1"]),
@@ -92,5 +98,16 @@ async def test_quiz_generation_still_requires_model_registry():
             user=_admin_user(),
         )
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "Model registry not available"
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail.startswith("No content retrieved")
+
+
+def test_quiz_generation_uses_local_fallback_registry_when_enabled(monkeypatch):
+    monkeypatch.setenv("QUIZ_DETERMINISTIC_FALLBACK_ENABLED", "1")
+
+    service = _get_quiz_service(
+        _request_with_state(database=_EmptyQuizDb()),
+        user=_admin_user(),
+    )
+
+    assert isinstance(service.generator.model_registry, _UnavailableModelRegistry)

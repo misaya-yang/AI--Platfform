@@ -40,8 +40,21 @@ from .image_state import (
     update_turn_status,
     upsert_image_session,
 )
-from .thumbnail import make_thumbnail
-from .watermark import apply_watermark_b64
+
+
+def apply_watermark_b64(*args, **kwargs):
+    """Lazy wrapper so importing ``ai_gateway_core.image`` does not import PIL."""
+    from .watermark import apply_watermark_b64 as _apply_watermark_b64
+
+    return _apply_watermark_b64(*args, **kwargs)
+
+
+def make_thumbnail(*args, **kwargs):
+    """Lazy wrapper so non-image services do not block on Pillow startup."""
+    from .thumbnail import make_thumbnail as _make_thumbnail
+
+    return _make_thumbnail(*args, **kwargs)
+
 
 __all__ = [
     "STYLE_MAP",

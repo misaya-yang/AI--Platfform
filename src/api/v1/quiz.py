@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any
 
 import asyncpg
+import httpx
+from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.quiz import (
     QuizGenerator,
     QuizGrader,
@@ -36,6 +39,7 @@ from ..deps import get_user_context
 
 router = APIRouter(prefix="/assistant/quiz", tags=["quiz"])
 logger = logging.getLogger(__name__)
+ASSISTANT_CHAT_PATH = "/api/v1/assistant/chat"
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +101,110 @@ class QuizAttemptResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_quiz_service(request: Request, *, require_model_registry: bool = True) -> QuizService:
+class _AssistantServiceModelRegistry:
+    """Narrow model-registry adapter backed by assistant-service HTTP chat."""
+
+    def __init__(self, *, user: UserContext, base_url: str | None = None) -> None:
+        self.user = user
+        self.base_url = (base_url or os.getenv("ASSISTANT_SERVICE_URL", "http://assistant-service:8093")).rstrip("/")
+
+    async def chat(
+        self,
+        *,
+        model_id: str,
+        messages: list[Any],
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        **_kwargs: Any,
+    ) -> tuple[str, dict[str, int]]:
+        prompt = "\n\n".join(str(getattr(message, "content", "")) for message in messages).strip()
+        body = {
+            "message": prompt,
+            "model_id": model_id,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "kb_mode": "off",
+            "memory_mode": "off",
+            "web_search_enabled": False,
+        }
+        encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        headers = self._headers(encoded)
+
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=10.0),
+        ) as client:
+            response = await client.post(ASSISTANT_CHAT_PATH, headers=headers, content=encoded)
+
+        if response.status_code >= 400:
+            logger.warning(
+                "quiz_assistant_chat_failed",
+                extra={"status_code": response.status_code},
+            )
+            raise RuntimeError(f"assistant-service returned HTTP {response.status_code}")
+
+        payload = response.json()
+        content = str(payload.get("content") or "")
+        usage = payload.get("usage")
+        return content, usage if isinstance(usage, dict) else {}
+
+    def _headers(self, body: bytes) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-User-Id": self.user.user_id,
+            "X-Tenant-Id": self.user.tenant_id,
+            "X-User-Tier": getattr(self.user, "tier", "normal"),
+            "X-User-Type": getattr(self.user, "user_type", "user"),
+            "X-User-Roles": ",".join(getattr(self.user, "roles", []) or []),
+        }
+        email = getattr(self.user, "email", "")
+        if email:
+            headers["X-User-Email"] = email
+        name = getattr(self.user, "name", "")
+        if name:
+            headers["X-User-Name"] = name
+
+        signer = _build_assistant_signer()
+        if signer is not None:
+            headers[signer.header_name] = signer.sign(
+                method="POST",
+                path=ASSISTANT_CHAT_PATH,
+                query="",
+                body=body,
+            )
+        return headers
+
+
+class _UnavailableModelRegistry:
+    """Model-registry placeholder that lets QuizGenerator use local fallback."""
+
+    async def chat(self, **_kwargs: Any) -> tuple[str, dict[str, int]]:
+        raise RuntimeError("model registry unavailable")
+
+
+def _quiz_deterministic_fallback_enabled() -> bool:
+    return os.getenv("QUIZ_DETERMINISTIC_FALLBACK_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _build_assistant_signer() -> GatewaySecret | None:
+    secret = os.getenv("GATEWAY_ASSISTANT_SHARED_SECRET", "").strip()
+    if not secret:
+        return None
+    return GatewaySecret(secret=secret)
+
+
+def _get_quiz_service(
+    request: Request,
+    *,
+    user: UserContext | None = None,
+    require_model_registry: bool = True,
+) -> QuizService:
     """Build a QuizService from app state."""
     db = getattr(request.app.state, "database", None)
     if db is None:
@@ -105,7 +212,12 @@ def _get_quiz_service(request: Request, *, require_model_registry: bool = True) 
 
     registry = getattr(request.app.state, "model_registry", None)
     if registry is None and require_model_registry:
-        raise HTTPException(503, "Model registry not available")
+        if _quiz_deterministic_fallback_enabled():
+            registry = _UnavailableModelRegistry()
+        elif user is None:
+            raise HTTPException(503, "Model registry not available")
+        else:
+            registry = _AssistantServiceModelRegistry(user=user)
 
     generator = QuizGenerator(registry)
     grader = QuizGrader(model_registry=registry)
@@ -124,7 +236,7 @@ async def generate_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Generate a quiz from KB datasets."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, user=user)
 
     # Retrieve KB chunks for quiz generation (local service or HTTP proxy)
     kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
@@ -187,7 +299,7 @@ async def generate_quiz_stream(
     user: UserContext = Depends(get_user_context),
 ):
     """Generate a quiz with SSE progress events."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, user=user)
     kb_service = getattr(request.app.state, "knowledge_service", None) or getattr(request.app.state, "kb_proxy", None)
     if kb_service is None:
         raise HTTPException(503, "Knowledge service not available")
@@ -277,7 +389,7 @@ async def get_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Get quiz details (questions without answers)."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, require_model_registry=False)
     quiz = await svc.get_quiz(quiz_id, user.tenant_id, include_answers=False)
     if not quiz:
         raise HTTPException(404, "Quiz not found")
@@ -292,7 +404,7 @@ async def submit_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Submit quiz answers and receive grading results."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, user=user)
     try:
         result = await svc.submit_attempt(
             quiz_id=quiz_id,
@@ -315,7 +427,7 @@ async def list_attempts(
     user: UserContext = Depends(get_user_context),
 ):
     """List all attempts for a quiz (creator sees all, others see own). Paginated."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, require_model_registry=False)
     return await svc.list_attempts(
         quiz_id, user.tenant_id, user.user_id, limit=limit, offset=offset,
     )
@@ -331,7 +443,7 @@ async def export_attempts_csv(
     import csv
     import io
 
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, require_model_registry=False)
     data = await svc.list_attempts(quiz_id, user.tenant_id, user.user_id, limit=10000, offset=0)
     attempts = data.get("attempts", [])
 
@@ -366,7 +478,7 @@ async def delete_quiz(
     user: UserContext = Depends(get_user_context),
 ):
     """Delete a quiz (only by creator)."""
-    svc = _get_quiz_service(request)
+    svc = _get_quiz_service(request, require_model_registry=False)
     deleted = await svc.delete_quiz(quiz_id, user.tenant_id, user.user_id)
     if not deleted:
         raise HTTPException(404, "Quiz not found or not authorized to delete")

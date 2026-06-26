@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -118,19 +119,154 @@ class QuizGenerator:
             f"prompt_len={len(prompt)}"
         )
 
-        content, usage = await self.model_registry.chat(
-            model_id=target_model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=4096,
-        )
+        try:
+            content, usage = await self.model_registry.chat(
+                model_id=target_model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=4096,
+            )
+        except Exception:
+            if self._deterministic_fallback_enabled():
+                logger.warning("Quiz model call failed; using deterministic local fallback")
+                return self._generate_deterministic(
+                    kb_chunks=kb_chunks,
+                    topic=topic_str,
+                    question_count=question_count,
+                    question_types=question_types,
+                )
+            raise
 
         logger.info(f"Quiz LLM response: {len(content)} chars, usage={usage}")
 
-        quiz_data = self._parse_response(content)
-        self._validate(quiz_data, question_count)
+        try:
+            quiz_data = self._parse_response(content)
+            self._validate(quiz_data, question_count)
+        except ValueError:
+            if self._deterministic_fallback_enabled():
+                logger.warning("Quiz model response was invalid; using deterministic local fallback")
+                return self._generate_deterministic(
+                    kb_chunks=kb_chunks,
+                    topic=topic_str,
+                    question_count=question_count,
+                    question_types=question_types,
+                )
+            raise
 
         return quiz_data
+
+    def _deterministic_fallback_enabled(self) -> bool:
+        return os.getenv("QUIZ_DETERMINISTIC_FALLBACK_ENABLED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _generate_deterministic(
+        self,
+        *,
+        kb_chunks: list[dict[str, Any]],
+        topic: str,
+        question_count: int,
+        question_types: list[str],
+    ) -> dict:
+        """Generate a source-backed quiz without a live model for local E2E."""
+        facts = self._fact_snippets(kb_chunks)
+        valid_types = [kind for kind in question_types if kind in _TYPE_RULES] or ["mc_single"]
+        questions: list[dict[str, Any]] = []
+
+        for index in range(question_count):
+            fact = facts[index % len(facts)]
+            kind = valid_types[index % len(valid_types)]
+            if kind == "true_false":
+                question = self._deterministic_true_false(index + 1, fact)
+            elif kind == "mc_multi":
+                second_fact = facts[(index + 1) % len(facts)]
+                question = self._deterministic_mc_multi(index + 1, fact, second_fact)
+            elif kind == "short_answer":
+                question = self._deterministic_short_answer(index + 1, fact)
+            else:
+                question = self._deterministic_mc_single(index + 1, topic, fact)
+            questions.append(question)
+
+        quiz_data = {
+            "title": f"Quiz: {topic}",
+            "description": "Deterministic local quiz generated from retrieved knowledge content.",
+            "questions": questions,
+        }
+        self._validate(quiz_data, question_count)
+        return quiz_data
+
+    def _fact_snippets(self, chunks: list[dict[str, Any]]) -> list[str]:
+        facts: list[str] = []
+        for chunk in chunks:
+            text = str(chunk.get("content") or chunk.get("text") or "").strip()
+            if not text:
+                continue
+            for sentence in re.split(r"(?<=[.!?。！？])\s+", text):
+                normalized = re.sub(r"\s+", " ", sentence).strip()
+                if normalized:
+                    facts.append(self._clip(normalized, 180))
+                if len(facts) >= 12:
+                    return facts
+        return facts or ["The source content contains knowledge that can be reviewed."]
+
+    def _clip(self, text: str, limit: int) -> str:
+        return text if len(text) <= limit else f"{text[: limit - 3].rstrip()}..."
+
+    def _deterministic_mc_single(self, question_num: int, topic: str, fact: str) -> dict:
+        return {
+            "question_num": question_num,
+            "question_type": "mc_single",
+            "question_text": f"Which statement is supported by the source content about {topic}?",
+            "options": [
+                {"label": "A", "text": fact},
+                {"label": "B", "text": "The source content says this topic is unavailable."},
+                {"label": "C", "text": "The source content only includes unrelated metadata."},
+                {"label": "D", "text": "The source content contradicts all listed statements."},
+            ],
+            "correct_answer": ["A"],
+            "explanation": f"The retrieved content states: {fact}",
+        }
+
+    def _deterministic_mc_multi(self, question_num: int, fact: str, second_fact: str) -> dict:
+        return {
+            "question_num": question_num,
+            "question_type": "mc_multi",
+            "question_text": "Select all statements supported by the source content.",
+            "options": [
+                {"label": "A", "text": fact},
+                {"label": "B", "text": second_fact},
+                {"label": "C", "text": "The source content was empty."},
+                {"label": "D", "text": "The retrieved passages were not used."},
+            ],
+            "correct_answer": ["A", "B"],
+            "explanation": "Options A and B are copied from retrieved source content.",
+        }
+
+    def _deterministic_true_false(self, question_num: int, fact: str) -> dict:
+        return {
+            "question_num": question_num,
+            "question_type": "true_false",
+            "question_text": f"True or false: {fact}",
+            "options": [
+                {"label": "true", "text": "True"},
+                {"label": "false", "text": "False"},
+            ],
+            "correct_answer": ["true"],
+            "explanation": "The statement is drawn from retrieved source content.",
+        }
+
+    def _deterministic_short_answer(self, question_num: int, fact: str) -> dict:
+        return {
+            "question_num": question_num,
+            "question_type": "short_answer",
+            "question_text": "Summarize one key fact from the source content.",
+            "options": [],
+            "correct_answer": [fact],
+            "explanation": "The answer is a bounded excerpt from retrieved source content.",
+        }
 
     def _format_kb_chunks(self, chunks: list[dict[str, Any]]) -> str:
         """Format KB chunks concisely — no redundant headers."""
@@ -165,7 +301,7 @@ class QuizGenerator:
 
         return data
 
-    def _validate(self, data: dict, expected_count: int) -> None:
+    def _validate(self, data: dict, _expected_count: int) -> None:
         """Validate quiz structure."""
         if "questions" not in data:
             raise ValueError("Quiz response missing 'questions' key")

@@ -15,10 +15,18 @@ SET client_encoding TO 'UTF8';
 -- Drop the old unique constraint (user_id, key) which doesn't include tenant_id
 ALTER TABLE user_memory DROP CONSTRAINT IF EXISTS user_memory_user_id_key_key;
 
--- Add new composite unique constraint including tenant_id
--- This ensures (tenant_id, user_id, key) combinations are unique
-ALTER TABLE user_memory ADD CONSTRAINT user_memory_tenant_user_key_unique
-    UNIQUE (tenant_id, user_id, key);
+-- Add new composite unique constraint including tenant_id.
+-- This ensures (tenant_id, user_id, key) combinations are unique.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'user_memory_tenant_user_key_unique'
+    ) THEN
+        ALTER TABLE user_memory ADD CONSTRAINT user_memory_tenant_user_key_unique
+            UNIQUE (tenant_id, user_id, key);
+    END IF;
+END $$;
 
 -- Update the ON CONFLICT target in application code to use the new constraint
 COMMENT ON CONSTRAINT user_memory_tenant_user_key_unique ON user_memory IS
@@ -32,8 +40,16 @@ COMMENT ON CONSTRAINT user_memory_tenant_user_key_unique ON user_memory IS
 ALTER TABLE session_memory DROP CONSTRAINT IF EXISTS session_memory_session_id_key_key;
 
 -- Add new composite unique constraint including tenant_id
-ALTER TABLE session_memory ADD CONSTRAINT session_memory_tenant_session_key_unique
-    UNIQUE (tenant_id, session_id, key);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'session_memory_tenant_session_key_unique'
+    ) THEN
+        ALTER TABLE session_memory ADD CONSTRAINT session_memory_tenant_session_key_unique
+            UNIQUE (tenant_id, session_id, key);
+    END IF;
+END $$;
 
 COMMENT ON CONSTRAINT session_memory_tenant_session_key_unique ON session_memory IS
     'Ensures unique memory entries per tenant+session+key combination for multi-tenant isolation';

@@ -27,6 +27,7 @@ dependencies = [
     "structlog>=25.1.0",
     "orjson>=3.11.0",
     "python-dotenv>=1.2.0",
+    "bcrypt>=4.2.0",
     "cachetools>=5.5.0",
     "dashscope>=1.25.0",
     "google-genai>=1.0.0",

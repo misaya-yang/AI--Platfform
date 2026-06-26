@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -51,7 +52,7 @@ from ai_gateway_core.storage import (
 )
 from cachetools import TTLCache
 
-from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent
+from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent, AgentLoopPhase
 from .code_executor import CodeExecutorService
 from .content.structured_output import (
     OutputFormat,
@@ -90,6 +91,8 @@ from .rag.scenario_analyzer import (
 from .tasks.task_planner import TaskPlanner
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
+from .trace_payloads import build_rag_trace_payload as _rag_trace_payload
+from .trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
 from .working_memory import WorkingMemory
 
 if TYPE_CHECKING:
@@ -130,6 +133,9 @@ class StreamEventType(str, Enum):
 
     # Context and retrieval events
     CONTEXT_RETRIEVED = "context_retrieved"
+    RAG_RETRIEVAL_STARTED = "rag_retrieval_started"
+    RAG_RETRIEVAL_COMPLETED = "rag_retrieval_completed"
+    RAG_RETRIEVAL_FAILED = "rag_retrieval_failed"
     WEB_SEARCH_RESULTS = "web_search_results"
     RAG_EVALUATION = "rag_evaluation"
     CONTEXT_BUDGET = "context_budget"
@@ -272,6 +278,10 @@ class AssistantConfig:
     context_detail: bool = False  # emit detailed context cost breakdown
     skills_enabled: bool | None = None  # per-request skill toggle
     memory_profile: str | None = None  # off | basic | hybrid
+
+    # Distributed trace correlation (W3C traceparent from gateway)
+    traceparent: str | None = None
+    otel_trace_id: str | None = None
 
 
 @dataclass
@@ -603,6 +613,7 @@ Please use this web search context to inform your response when relevant."""
         task_planner: TaskPlanner | None = None,
         tool_orchestrator: ToolOrchestrator | None = None,
         db: Any | None = None,  # DatabaseStorage for MemoryManager
+        trace_writer: AssistantTraceWriter | None = None,
         vlm_service: Any | None = None,  # DashScopeVLMService for image descriptions
         redis_client: Any | None = None,  # Redis client for caching
         memory_service: MemoryService | None = None,
@@ -635,6 +646,7 @@ Please use this web search context to inform your response when relevant."""
         self.db = db  # Database storage for MemoryManager
         self.redis = redis_client
         self.memory_service = memory_service
+        self.trace_writer = trace_writer or AssistantTraceWriter(database=db)
 
         # Background task registry — keeps fire-and-forget tasks alive.
         # Python 3.11+ will GC tasks that have no strong reference, so any
@@ -1195,7 +1207,103 @@ Please use this web search context to inform your response when relevant."""
             - duration_ms: Total time
         """
         start_time = time.time()
-        await self._ensure_session_exists(user=user, session_id=session_id)
+        run_id = str(uuid.uuid4())
+        request_id = str(uuid.uuid4())
+        provider = getattr(config.model_provider, "value", str(config.model_provider))
+        initial_history = history or []
+        trace_ctx = AssistantTraceContext.from_chat_request(
+            run_id=run_id,
+            request_id=request_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=message,
+            model_id=config.model_id,
+            provider=provider,
+            started_at=start_time,
+            transcript_locator=build_transcript_locator(
+                session_id=session_id,
+                run_id=run_id,
+                request_id=request_id,
+                message=message,
+                history=initial_history,
+            ),
+            traceparent=config.traceparent,
+            otel_trace_id=config.otel_trace_id,
+        )
+        trace_sequence_no = 0
+        trace_finished = False
+
+        def _next_trace_sequence() -> int:
+            nonlocal trace_sequence_no
+            trace_sequence_no += 1
+            return trace_sequence_no
+
+        def _record_trace_event(event_type: str, payload: Any) -> None:
+            self.trace_writer.record_event(
+                ctx=trace_ctx,
+                event_type=event_type,
+                sequence_no=_next_trace_sequence(),
+                payload=payload,
+                phase=AgentLoopPhase.GENERATION_STORAGE.value,
+            )
+
+        def _finish_trace(
+            *,
+            status: str,
+            output_preview: Any = "",
+            usage: dict[str, Any] | None = None,
+            error: Any = None,
+            terminal_event_type: str,
+        ) -> None:
+            nonlocal trace_finished
+            if trace_finished:
+                return
+            trace_finished = True
+            self.trace_writer.finish_trace(
+                ctx=trace_ctx,
+                status=status,
+                output_preview=output_preview,
+                usage=usage,
+                error=error,
+                total_latency_ms=int((time.time() - start_time) * 1000),
+                terminal_event_type=terminal_event_type,
+                terminal_sequence_no=_next_trace_sequence(),
+            )
+
+        def _fail_trace(error: Exception) -> None:
+            _finish_trace(
+                status="failed",
+                error=error,
+                terminal_event_type=StreamEventType.RUN_ERROR.value,
+            )
+
+        async def _guard_trace_await(awaitable: Any) -> Any:
+            try:
+                return await awaitable
+            except Exception as exc:
+                _fail_trace(exc)
+                raise
+
+        def _guard_trace_call(callback: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                return callback(*args, **kwargs)
+            except Exception as exc:
+                _fail_trace(exc)
+                raise
+
+        self.trace_writer.start_trace(trace_ctx)
+        _record_trace_event(
+            StreamEventType.RUN_STARTED.value,
+            {
+                "run_id": run_id,
+                "thread_id": session_id,
+                "session_id": session_id,
+                "request_id": request_id,
+                "mode": "non_stream",
+            },
+        )
+        await _guard_trace_await(self._ensure_session_exists(user=user, session_id=session_id))
 
         if history is None and self.session_manager:
             try:
@@ -1209,6 +1317,28 @@ Please use this web search context to inform your response when relevant."""
                 history = []
         else:
             history = history or []
+
+        trace_ctx = AssistantTraceContext.from_chat_request(
+            run_id=run_id,
+            request_id=request_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+            message=message,
+            model_id=config.model_id,
+            provider=provider,
+            started_at=start_time,
+            transcript_locator=build_transcript_locator(
+                session_id=session_id,
+                run_id=run_id,
+                request_id=request_id,
+                message=message,
+                history=history,
+            ),
+            traceparent=config.traceparent,
+            otel_trace_id=config.otel_trace_id,
+        )
+        self.trace_writer.start_trace(trace_ctx)
 
         if persist_messages and self.session_manager:
             try:
@@ -1241,30 +1371,81 @@ Please use this web search context to inform your response when relevant."""
             except Exception as exc:
                 logger.warning(f"Failed to persist assistant message (chat): {exc}")
 
-        domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
+        domain_policy, _ = await _guard_trace_await(
+            self._resolve_domain_policy(user, config.kb_dataset_ids)
+        )
         if domain_policy:
-            decision = domain_policy.precheck_query(message)
+            decision = _guard_trace_call(domain_policy.precheck_query, message)
             if decision and decision.action == "decline":
                 await _persist_assistant_chat_message(decision.response or "")
+                _finish_trace(
+                    status="succeeded",
+                    output_preview=decision.response or "",
+                    usage={},
+                    terminal_event_type=StreamEventType.RUN_FINISHED.value,
+                )
                 return {
                     "content": decision.response or "",
                     "usage": {},
                     "contexts": [],
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
-                    "run_id": None,
+                    "run_id": run_id,
                 }
 
         # Retrieve KB context
         retrieved_contexts: list[RetrievedContext] = []
         if config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service:
-            retrieved_contexts = await self._retrieve_context(
-                user=user,
-                query=message,
-                dataset_ids=config.kb_dataset_ids,
-                top_k=config.kb_top_k,
-                score_threshold=config.kb_score_threshold,
-                include_images=config.kb_include_images,
+            retrieval_started = time.time()
+            _record_trace_event(
+                StreamEventType.RAG_RETRIEVAL_STARTED.value,
+                _rag_trace_payload(
+                    query=message,
+                    dataset_ids=config.kb_dataset_ids,
+                    top_k=config.kb_top_k,
+                    score_threshold=config.kb_score_threshold,
+                    include_images=config.kb_include_images,
+                    started_at=retrieval_started,
+                ),
+            )
+            try:
+                retrieved_contexts = await _guard_trace_await(
+                    self._retrieve_context(
+                        user=user,
+                        query=message,
+                        dataset_ids=config.kb_dataset_ids,
+                        top_k=config.kb_top_k,
+                        score_threshold=config.kb_score_threshold,
+                        include_images=config.kb_include_images,
+                    )
+                )
+            except Exception as exc:
+                _record_trace_event(
+                    StreamEventType.RAG_RETRIEVAL_FAILED.value,
+                    _rag_trace_payload(
+                        query=message,
+                        dataset_ids=config.kb_dataset_ids,
+                        top_k=config.kb_top_k,
+                        score_threshold=config.kb_score_threshold,
+                        include_images=config.kb_include_images,
+                        started_at=retrieval_started,
+                        ended_at=time.time(),
+                        error=exc,
+                    ),
+                )
+                raise
+            _record_trace_event(
+                StreamEventType.RAG_RETRIEVAL_COMPLETED.value,
+                _rag_trace_payload(
+                    query=message,
+                    dataset_ids=config.kb_dataset_ids,
+                    top_k=config.kb_top_k,
+                    score_threshold=config.kb_score_threshold,
+                    include_images=config.kb_include_images,
+                    started_at=retrieval_started,
+                    ended_at=time.time(),
+                    contexts=retrieved_contexts,
+                ),
             )
 
         if domain_policy:
@@ -1276,20 +1457,27 @@ Please use this web search context to inform your response when relevant."""
                 }
                 for ctx in retrieved_contexts
             ]
-            decision = domain_policy.precheck_context(message, ctx_payload)
+            decision = _guard_trace_call(domain_policy.precheck_context, message, ctx_payload)
             if decision and decision.action == "decline":
                 await _persist_assistant_chat_message(decision.response or "", contexts=ctx_payload)
+                _finish_trace(
+                    status="succeeded",
+                    output_preview=decision.response or "",
+                    usage={},
+                    terminal_event_type=StreamEventType.RUN_FINISHED.value,
+                )
                 return {
                     "content": decision.response or "",
                     "usage": {},
                     "contexts": ctx_payload,
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
-                    "run_id": None,
+                    "run_id": run_id,
                 }
 
         # Build messages
-        messages = self._build_messages(
+        messages = _guard_trace_call(
+            self._build_messages,
             message=message,
             history=history,
             config=config,
@@ -1300,11 +1488,33 @@ Please use this web search context to inform your response when relevant."""
         )
 
         # Get response
-        content, usage = await self.model_registry.chat(
-            model_id=config.model_id,
-            messages=messages,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
+        model_started = time.time()
+        try:
+            content, usage = await self.model_registry.chat(
+                model_id=config.model_id,
+                messages=messages,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+            )
+        except Exception as exc:
+            _finish_trace(
+                status="failed",
+                error=exc,
+                terminal_event_type=StreamEventType.RUN_ERROR.value,
+            )
+            raise
+        self.trace_writer.record_span(
+            ctx=trace_ctx,
+            span_key="non_stream:model_invocation",
+            span_kind="model_invocation",
+            name="non_stream_model_invocation",
+            status="succeeded",
+            sequence_no=_next_trace_sequence(),
+            started_at=model_started,
+            ended_at=time.time(),
+            input_preview=message,
+            output_preview=content,
+            attributes={"model_id": config.model_id, "provider": provider},
         )
 
         if domain_policy:
@@ -1315,15 +1525,17 @@ Please use this web search context to inform your response when relevant."""
                     retrieved_contexts,
                     include_citations=True,
                 )
-                repaired = await self._repair_with_policy(
-                    policy=domain_policy,
-                    user_message=message,
-                    context_text=context_text,
-                    answer=content,
-                    model_id=config.model_id,
-                    temperature=min(config.temperature, 0.3),
-                    max_tokens=config.max_tokens,
-                    issues=issues,
+                repaired = await _guard_trace_await(
+                    self._repair_with_policy(
+                        policy=domain_policy,
+                        user_message=message,
+                        context_text=context_text,
+                        answer=content,
+                        model_id=config.model_id,
+                        temperature=min(config.temperature, 0.3),
+                        max_tokens=config.max_tokens,
+                        issues=issues,
+                    )
                 )
                 repaired = domain_policy.sanitize_answer(repaired)
                 if not domain_policy.validate_answer(repaired):
@@ -1367,6 +1579,7 @@ Please use this web search context to inform your response when relevant."""
             except Exception as e:
                 logger.warning(f"Failed to update realtime metrics: {e}")
 
+        finalization_started = time.time()
         await _persist_assistant_chat_message(
             content,
             contexts=[
@@ -1376,6 +1589,24 @@ Please use this web search context to inform your response when relevant."""
                 }
                 for ctx in retrieved_contexts
             ],
+        )
+        self.trace_writer.record_span(
+            ctx=trace_ctx,
+            span_key="non_stream:response_finalization",
+            span_kind="response_finalization",
+            name="non_stream_response_finalization",
+            status="succeeded",
+            sequence_no=_next_trace_sequence(),
+            started_at=finalization_started,
+            ended_at=time.time(),
+            output_preview=content,
+            attributes={"persist_messages": persist_messages},
+        )
+        _finish_trace(
+            status="succeeded",
+            output_preview=content,
+            usage=usage,
+            terminal_event_type=StreamEventType.RUN_FINISHED.value,
         )
 
         return {
@@ -1391,7 +1622,7 @@ Please use this web search context to inform your response when relevant."""
             ],
             "duration_ms": elapsed_ms,
             "model_id": config.model_id,
-            "run_id": None,
+            "run_id": run_id,
         }
 
     async def _retrieve_context(
@@ -1587,6 +1818,7 @@ Please use this web search context to inform your response when relevant."""
             execution_gateway=self.execution_gateway,
             request_router=self.request_router,
             database=self.db,
+            trace_writer=self.trace_writer,
             tool_invoker=create_tool_invoker(
                 tenant_tool_policy=self.tenant_tool_policy,
                 tenant_mcp_config=self.tenant_mcp_config,
@@ -1613,6 +1845,7 @@ Please use this web search context to inform your response when relevant."""
             message=message,
             config=loop_config,
             history=history,
+            traceparent=config.traceparent,
         ):
             # Special handling for streaming_first_completed event
             # Split into usage and done events for frontend compatibility
@@ -2353,6 +2586,7 @@ Please use this web search context to inform your response when relevant."""
 
     async def close(self) -> None:
         """Cleanup resources."""
+        await self.trace_writer.drain(timeout_s=0.5)
         await self.model_registry.close()
 
     def _register_code_executor_tool(self) -> None:

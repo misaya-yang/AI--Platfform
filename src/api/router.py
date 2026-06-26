@@ -5,34 +5,36 @@ from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
 from .v1.config import router as config_router
 from .v1.confluence import router as confluence_router
-from .v1.tool_inventory import router as debug_tools_router
+from .v1.connectors import router as connectors_router
+from .v1.conversation_shares import router as conversation_shares_router
 from .v1.conversations import router as conversations_router
 from .v1.dashboard import router as dashboard_router
+from .v1.eval import router as eval_router
+from .v1.exams import router as exams_router
 from .v1.files import router as files_router
 from .v1.health import router as health_router
 from .v1.invoke import router as invoke_router
 from .v1.kb_tools import router as kb_tools_router
 from .v1.knowledge import router as knowledge_router
 from .v1.langgraph import router as langgraph_router
+from .v1.mcp import router as mcp_router
 from .v1.metrics import router as metrics_router
 from .v1.models import router as models_router
 from .v1.presign import router as presign_router
 from .v1.providers import router as providers_router
 from .v1.proxy import router as proxy_router
-from .v1.quiz import router as quiz_router, public_router as quiz_public_router
-from .v1.exams import router as exams_router
-from .v1.skills import router as skills_router
-from .v1.mcp import router as mcp_router
-from .v1.tenant_policies import router as tenant_policies_router
-from .v1.conversation_shares import router as conversation_shares_router
-from .v1.connectors import router as connectors_router
+from .v1.quiz import public_router as quiz_public_router
+from .v1.quiz import router as quiz_router
 from .v1.quota import router as quota_router
 from .v1.roles import router as roles_router
 from .v1.services import router as services_router
 from .v1.sessions import router as sessions_router
+from .v1.skills import router as skills_router
 from .v1.stream import router as stream_router
 from .v1.submit import router as submit_router
 from .v1.tasks import router as tasks_router
+from .v1.tenant_policies import router as tenant_policies_router
+from .v1.tool_inventory import router as debug_tools_router
 from .v1.usage import router as usage_router
 from .v1.users import router as users_router
 
@@ -64,6 +66,7 @@ api_router.include_router(metrics_router)  # 系统指标统计
 api_router.include_router(usage_router)  # 使用量追踪与分析
 api_router.include_router(quota_router)  # 用户配额管理
 api_router.include_router(dashboard_router)  # LangSmith-style 实时监控仪表盘
+api_router.include_router(eval_router)  # Agent trace eval console APIs
 api_router.include_router(files_router)  # 文件上传 API
 api_router.include_router(presign_router)  # P2: Presigned URL 直传 API
 api_router.include_router(assistant_router)  # GPT-like Assistant API

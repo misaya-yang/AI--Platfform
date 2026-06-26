@@ -1,6 +1,7 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 
+import evalEnUS from "./locales/eval-en-US.json";
 import zhCN from "./locales/zh-CN.json";
 import enUS from "./locales/en-US.json";
 
@@ -25,10 +26,10 @@ export function resolveAppLocale(input?: string): AppLocale {
 
 const resources = {
   "zh-CN": {
-    translation: zhCN,
+    translation: { ...zhCN, eval: evalEnUS },
   },
   "en-US": {
-    translation: enUS,
+    translation: { ...enUS, eval: evalEnUS },
   },
 };
 

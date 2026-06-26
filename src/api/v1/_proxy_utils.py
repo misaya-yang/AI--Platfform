@@ -10,14 +10,16 @@ Public entry point: ``proxy_to_kb_service(request, user, ...)``.
 from __future__ import annotations
 
 import os
+import time
 from typing import Final
 
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.proxy import ServiceProxy, ServiceProxyConfig
-from fastapi import Request
+from fastapi import HTTPException, Request
 from starlette.responses import Response
 
 from ...core.auth.user_resolver import UserContext
+from ...services.eval.rag_trace_capture import is_retrieve_path, record_rag_retrieval_trace
 
 KB_SERVICE_URL: Final[str] = os.getenv(
     "KB_SERVICE_URL", "http://knowledge-service:8092"
@@ -75,6 +77,38 @@ _proxy = ServiceProxy(
 )
 
 
+def _record_rag_proxy_trace(
+    request: Request,
+    user: UserContext,
+    *,
+    path: str,
+    body: bytes,
+    response_status: int,
+    response_body: bytes,
+    started_at: float,
+) -> None:
+    if not is_retrieve_path(path):
+        return
+    database = getattr(getattr(request, "app", None), "state", None)
+    database = getattr(database, "database", None)
+    if database is None:
+        return
+    request_state = getattr(request, "state", None)
+    record_rag_retrieval_trace(
+        database,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        request_id=str(getattr(request_state, "request_id", "") or ""),
+        path=path,
+        body=body,
+        response_status=response_status,
+        response_body=response_body,
+        started_at=started_at,
+        traceparent=getattr(request_state, "traceparent", None)
+        or request.headers.get("traceparent"),
+    )
+
+
 async def proxy_to_kb_service(
     request: Request,
     user: UserContext,
@@ -98,8 +132,38 @@ async def proxy_to_kb_service(
     if name:
         user_headers["X-User-Name"] = name
 
-    return await _proxy.forward(
+    started_at = time.time()
+    body: bytes | None = None
+    if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        body = await request.body()
+
+    try:
+        response = await _proxy.forward(
+            request,
+            user_headers,
+            upstream_path=upstream_path,
+            body=body,
+        )
+    except HTTPException as exc:
+        _record_rag_proxy_trace(
+            request,
+            user,
+            path=path,
+            body=body or b"",
+            response_status=exc.status_code,
+            response_body=b"",
+            started_at=started_at,
+        )
+        raise
+
+    response_body = getattr(response, "body", b"") or b""
+    _record_rag_proxy_trace(
         request,
-        user_headers,
-        upstream_path=upstream_path,
+        user,
+        path=path,
+        body=body or b"",
+        response_status=response.status_code,
+        response_body=response_body,
+        started_at=started_at,
     )
+    return response

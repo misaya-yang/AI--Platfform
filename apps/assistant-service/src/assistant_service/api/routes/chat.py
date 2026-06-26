@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import time
 import uuid
-from typing import Any
+from collections.abc import AsyncIterator
 
 from ai_gateway_core.proxy.sse_heartbeat import (
     DEFAULT_HEARTBEAT_INTERVAL_S,
     with_sse_heartbeat,
 )
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from ...auth import UserContext, get_user_context
+from ..deps import get_assistant_service, get_model_registry
 
 # Tests override this attribute to shorten the heartbeat interval —
 # don't inline the constant.
@@ -19,21 +27,15 @@ _SSE_HEARTBEAT_INTERVAL_S = DEFAULT_HEARTBEAT_INTERVAL_S
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-
-from ...auth import UserContext, get_user_context
-from ..deps import get_assistant_service, get_model_registry
-
 router = APIRouter()
+_E2E_MEMORY_BY_USER: dict[str, dict[str, str]] = {}
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     history: list[dict[str, str]] | None = None
-    model_id: str = "qwen3.5-plus"
+    model_id: str = "qwen3.6-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
     system_prompt: str | None = None
@@ -58,6 +60,44 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _user_memory_key(user: UserContext) -> str:
+    return f"{user.tenant_id}:{user.user_id}"
+
+
+def _build_e2e_memory_stub_response(body: ChatRequest, user: UserContext) -> str | None:
+    """Deterministic local-E2E memory path when no live model key is available."""
+    if not _env_truthy("ASSISTANT_E2E_STUB_LLM"):
+        return None
+
+    message = body.message.strip()
+    remember_match = re.search(r"我的名字是([^，,。]+)[，,]\s*我来自([^。\.]+)", message)
+    memory_key = _user_memory_key(user)
+    if remember_match:
+        _E2E_MEMORY_BY_USER[memory_key] = {
+            "name": remember_match.group(1).strip(),
+            "location": remember_match.group(2).strip(),
+        }
+        return "已记住"
+
+    if "还记得我的名字" in message:
+        memory = _E2E_MEMORY_BY_USER.get(memory_key)
+        if memory:
+            return f"你的名字是{memory['name']}，你来自{memory['location']}。"
+
+    return None
+
+
+async def _stub_stream_lines(text: str) -> AsyncIterator[str]:
+    payload = {"event_type": "text_delta", "data": text, "timestamp": time.time()}
+    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    done = {"event_type": "done", "data": {"usage": {}}, "timestamp": time.time()}
+    yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
+
+
 def _build_config(body: ChatRequest, model_registry):
     """Build AssistantConfig from request body."""
     from ...core.assistant_service import AssistantConfig, RAGMode
@@ -69,15 +109,35 @@ def _build_config(body: ChatRequest, model_registry):
     elif body.kb_mode == "off":
         kb_mode = RAGMode.DISABLED
 
+    model_id = body.model_id
     model_provider = ModelProvider.OPENAI
     if model_registry:
-        mi = model_registry.get_model(body.model_id)
+        mi = model_registry.get_model(model_id)
+        provider_configured = (
+            bool(mi)
+            and (
+                not hasattr(model_registry, "is_provider_configured")
+                or model_registry.is_provider_configured(mi.provider)
+            )
+        )
+        if mi is None or not provider_configured:
+            available = model_registry.get_available_models()
+            if available:
+                mi = available[0]
+                model_id = mi.id
+                logger.warning(
+                    "chat_requested_model_unavailable_falling_back",
+                    extra={
+                        "requested_model_id": body.model_id,
+                        "fallback_model_id": model_id,
+                    },
+                )
         if mi:
             model_provider = mi.provider
 
     return AssistantConfig(
         model_provider=model_provider,
-        model_id=body.model_id,
+        model_id=model_id,
         temperature=body.temperature,
         max_tokens=body.max_tokens,
         kb_dataset_ids=body.kb_dataset_ids or [],
@@ -142,10 +202,30 @@ async def chat_stream(
     user: UserContext = Depends(get_user_context),
 ):
     """SSE streaming chat completion."""
+    session_id = body.session_id or str(uuid.uuid4())
+    stub_text = _build_e2e_memory_stub_response(body, user)
+    if stub_text is not None:
+        def stub_event_generator():
+            return with_sse_heartbeat(
+                _stub_stream_lines(stub_text),
+                interval_seconds=_SSE_HEARTBEAT_INTERVAL_S,
+                as_str=True,
+            )
+
+        return StreamingResponse(
+            stub_event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Session-Id": session_id,
+            },
+        )
+
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
     config = _build_config(body, model_registry)
-    session_id = body.session_id or str(uuid.uuid4())
     history = body.history
 
     async def _agent_lines():
@@ -183,11 +263,12 @@ async def chat_stream(
     # KB queries 30s+) don't trip nginx / ALB / NAT idle timeouts. The
     # helper is the canonical implementation; this route used to inline
     # the same pattern (deduped 2026-04-28).
-    event_generator = lambda: with_sse_heartbeat(
-        _agent_lines(),
-        interval_seconds=_SSE_HEARTBEAT_INTERVAL_S,
-        as_str=True,
-    )
+    def event_generator():
+        return with_sse_heartbeat(
+            _agent_lines(),
+            interval_seconds=_SSE_HEARTBEAT_INTERVAL_S,
+            as_str=True,
+        )
 
     return StreamingResponse(
         event_generator(),

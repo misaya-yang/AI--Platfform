@@ -5,6 +5,8 @@ import { chromium, type FullConfig } from "@playwright/test";
 
 const AUTH_STORAGE_KEY = "agent-gateway-auth";
 const APP_STORAGE_KEY = "agent-gateway-storage";
+const MODEL_TESTER_PASSWORD =
+  process.env.E2E_MODEL_TESTER_PASSWORD || "ModelTester-ChangeMe-2026!";
 const setupDir = path.dirname(fileURLToPath(import.meta.url));
 const ARTIFACT_DIR = path.resolve(setupDir, "../.playwright");
 const USER_FILE = path.join(ARTIFACT_DIR, "e2e-user.json");
@@ -154,6 +156,109 @@ async function createE2EAdminUser(
   }
 }
 
+async function updateE2EUser(
+  apiURL: string,
+  adminToken: string,
+  userId: string,
+  body: Record<string, unknown>
+) {
+  const response = await fetch(`${apiURL}/api/v1/users/${userId}`, {
+    method: "PUT",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${adminToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update E2E user ${userId} (${response.status}): ${text}`);
+  }
+}
+
+async function resetE2EUserPassword(
+  apiURL: string,
+  adminToken: string,
+  userId: string
+) {
+  const response = await fetch(`${apiURL}/api/v1/users/${userId}/reset-password`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to reset E2E user ${userId} (${response.status}): ${text}`);
+  }
+}
+
+async function createOrResetModelTesterUsers(
+  apiURL: string,
+  adminToken: string,
+  authEmailDomain: string,
+  defaultPassword: string
+) {
+  for (let index = 1; index <= 5; index += 1) {
+    const userId = `model_tester_${index}`;
+    const email = `${userId}@${authEmailDomain}`;
+    const displayName = `Model Tester ${index}`;
+
+    const createResponse = await fetch(`${apiURL}/api/v1/users`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        email,
+        display_name: displayName,
+        roles: ["model_tester"],
+      }),
+    });
+
+    if (!createResponse.ok && createResponse.status !== 400) {
+      const text = await createResponse.text();
+      throw new Error(`Failed to provision ${email} (${createResponse.status}): ${text}`);
+    }
+
+    await updateE2EUser(apiURL, adminToken, userId, {
+      display_name: displayName,
+      roles: ["model_tester"],
+      status: "active",
+    });
+    await resetE2EUserPassword(apiURL, adminToken, userId);
+
+    let loginPayload = await login(apiURL, email, defaultPassword);
+    if (defaultPassword === MODEL_TESTER_PASSWORD && loginPayload.force_password_change === true) {
+      const temporaryPassword = `${MODEL_TESTER_PASSWORD}-Tmp1!`;
+      await changePassword(
+        apiURL,
+        String(loginPayload.access_token || ""),
+        defaultPassword,
+        temporaryPassword
+      );
+      loginPayload = await login(apiURL, email, temporaryPassword);
+      await changePassword(
+        apiURL,
+        String(loginPayload.access_token || ""),
+        temporaryPassword,
+        MODEL_TESTER_PASSWORD
+      );
+    } else if (
+      defaultPassword !== MODEL_TESTER_PASSWORD ||
+      loginPayload.force_password_change === true
+    ) {
+      await changePassword(
+        apiURL,
+        String(loginPayload.access_token || ""),
+        defaultPassword,
+        MODEL_TESTER_PASSWORD
+      );
+    }
+  }
+}
+
 async function changePassword(
   apiURL: string,
   token: string,
@@ -209,6 +314,7 @@ export default async function globalSetup(config: FullConfig) {
   const email = providedEmail || `assistant.e2e.${Date.now()}@${authEmailDomain}`;
   let password = providedPassword || defaultPassword;
   let loginPayload: Record<string, unknown>;
+  let provisioningToken: string | null = null;
 
   if (providedEmail && providedPassword) {
     loginPayload = await login(apiURL, email, password);
@@ -216,10 +322,11 @@ export default async function globalSetup(config: FullConfig) {
     const bootstrapEmail = process.env.E2E_BOOTSTRAP_EMAIL || `admin@${authEmailDomain}`;
     const bootstrapPasswords = await detectBootstrapPasswords(defaultPassword);
     const bootstrapLogin = await loginWithCandidates(apiURL, bootstrapEmail, bootstrapPasswords);
+    provisioningToken = String(bootstrapLogin.payload.access_token || "");
 
     await createE2EAdminUser(
       apiURL,
-      String(bootstrapLogin.payload.access_token || ""),
+      provisioningToken,
       email
     );
 
@@ -240,6 +347,12 @@ export default async function globalSetup(config: FullConfig) {
   }
 
   const currentUser = await validateToken(apiURL, token);
+  await createOrResetModelTesterUsers(
+    apiURL,
+    provisioningToken || token,
+    authEmailDomain,
+    defaultPassword
+  );
   const authPayload = {
     state: {
       token,

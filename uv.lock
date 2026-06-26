@@ -1907,6 +1907,7 @@ source = { editable = "apps/knowledge-service" }
 dependencies = [
     { name = "aioboto3" },
     { name = "asyncpg" },
+    { name = "bcrypt" },
     { name = "boto3" },
     { name = "cachetools" },
     { name = "dashscope" },
@@ -1936,6 +1937,7 @@ dev = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=14.0.0" },
     { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "bcrypt", specifier = ">=4.2.0" },
     { name = "boto3", specifier = ">=1.38.0" },
     { name = "cachetools", specifier = ">=5.5.0" },
     { name = "dashscope", specifier = ">=1.25.0" },

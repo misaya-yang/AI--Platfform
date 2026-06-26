@@ -190,3 +190,18 @@ def usd_to_microcents(value: Decimal | float | int | str) -> int:
 def microcents_to_usd(value: int | float | Decimal | str) -> float:
     """Convert microcents to USD."""
     return float(Decimal(str(value)) / MICROCENTS_PER_USD)
+
+
+def calculate_token_cost_cents(
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> tuple[int, str]:
+    """Return total token cost in USD cents and pricing match status."""
+    pricing, status = resolve_pricing_with_status(model_id)
+    input_rate = Decimal(str(pricing.get("input", 0)))
+    output_rate = Decimal(str(pricing.get("output", 0)))
+    cost_usd = (Decimal(max(0, input_tokens)) / 1000) * input_rate + (
+        Decimal(max(0, output_tokens)) / 1000
+    ) * output_rate
+    return max(0, int(round(cost_usd * 100))), status

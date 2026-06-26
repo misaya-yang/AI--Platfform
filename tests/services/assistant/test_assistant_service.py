@@ -65,6 +65,7 @@ class TestAssistantServiceInit:
         """Should initialize with session manager."""
         from assistant_service.core.assistant_service import AssistantService
         from assistant_service.core.models.model_registry import ModelRegistry
+
         from src.services.session.database_session_manager import DatabaseSessionManager
 
         mock_registry = MagicMock(spec=ModelRegistry)
@@ -148,11 +149,82 @@ class TestAssistantConfig:
         )
 
         assert config.model_id == "gpt-4"
+
+    def test_route_config_falls_back_when_model_provider_is_not_configured(self):
+        """HTTP route should not pass a model whose provider has no runtime key."""
+        from assistant_service.api.routes.chat import ChatRequest, _build_config
+        from assistant_service.core.models.model_registry import ModelInfo, ModelProvider
+
+        dashscope_model = ModelInfo(
+            id="qwen3.6-plus",
+            name="Qwen 3.6 Plus",
+            provider=ModelProvider.DASHSCOPE,
+        )
+        openai_model = ModelInfo(
+            id="gpt-4o-mini",
+            name="GPT-4o mini",
+            provider=ModelProvider.OPENAI,
+        )
+        registry = MagicMock()
+        registry.get_model.return_value = dashscope_model
+        registry.is_provider_configured.return_value = False
+        registry.get_available_models.return_value = [openai_model]
+
+        config = _build_config(
+            ChatRequest(
+                message="hello",
+                temperature=0.5,
+                max_tokens=2000,
+                kb_dataset_ids=["docs", "wiki"],
+                kb_top_k=10,
+                web_search_enabled=True,
+            ),
+            registry,
+        )
+
+        assert config.model_id == "gpt-4o-mini"
+        assert config.model_provider == ModelProvider.OPENAI
         assert config.temperature == 0.5
         assert config.max_tokens == 2000
         assert config.kb_dataset_ids == ["docs", "wiki"]
         assert config.kb_top_k == 10
         assert config.web_search_enabled is True
+
+
+class TestAssistantE2EStub:
+    """Tests for explicit local-E2E deterministic assistant behavior."""
+
+    def test_e2e_memory_stub_is_disabled_by_default(self, monkeypatch):
+        from assistant_service.api.routes import chat as chat_routes
+
+        monkeypatch.delenv("ASSISTANT_E2E_STUB_LLM", raising=False)
+        chat_routes._E2E_MEMORY_BY_USER.clear()
+
+        response = chat_routes._build_e2e_memory_stub_response(
+            chat_routes.ChatRequest(message="请记住：我的名字是小明，我来自悉尼。"),
+            MockUserContext(user_id="user-a", tenant_id="tenant-a"),
+        )
+
+        assert response is None
+
+    def test_e2e_memory_stub_recalls_per_user(self, monkeypatch):
+        from assistant_service.api.routes import chat as chat_routes
+
+        monkeypatch.setenv("ASSISTANT_E2E_STUB_LLM", "1")
+        chat_routes._E2E_MEMORY_BY_USER.clear()
+        user = MockUserContext(user_id="user-a", tenant_id="tenant-a")
+
+        remember = chat_routes._build_e2e_memory_stub_response(
+            chat_routes.ChatRequest(message="请记住：我的名字是小明，我来自悉尼-abc。"),
+            user,
+        )
+        recall = chat_routes._build_e2e_memory_stub_response(
+            chat_routes.ChatRequest(message="你还记得我的名字和城市吗？直接回答。"),
+            user,
+        )
+
+        assert remember == "已记住"
+        assert recall == "你的名字是小明，你来自悉尼-abc。"
 
 
 class TestAssistantServiceChatStream:

@@ -197,6 +197,35 @@ check_docgen_health() {
     docker exec "$(docgen_container)" curl -sf "http://127.0.0.1:8765/health" &>/dev/null
 }
 
+# -- Python workspace packages -----------------------------------------------
+sync_workspace_packages() {
+    log_step "Syncing workspace Python packages"
+
+    if command -v uv >/dev/null 2>&1; then
+        (
+            cd "$PROJECT_ROOT"
+            uv sync --quiet
+        ) && log_success "Workspace packages synced via uv" && return 0
+    fi
+
+    local pip_cmd=""
+    if command -v pip >/dev/null 2>&1; then
+        pip_cmd="pip"
+    elif command -v pip3 >/dev/null 2>&1; then
+        pip_cmd="pip3"
+    fi
+
+    if [ -n "$pip_cmd" ]; then
+        (
+            cd "$PROJECT_ROOT"
+            "$pip_cmd" install -e packages/ai-gateway-core -e apps/assistant-service -q
+        ) && log_success "Workspace packages synced via editable pip installs" && return 0
+    fi
+
+    log_warn "uv/pip not found; skipped workspace package sync"
+    return 0
+}
+
 # -- Confirmation prompt -----------------------------------------------------
 confirm() {
     local msg="${1:-Continue?}"

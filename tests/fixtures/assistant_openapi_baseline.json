@@ -157,7 +157,7 @@
             "type": "string"
           },
           "model_id": {
-            "default": "qwen3.5-plus",
+            "default": "qwen3.6-plus",
             "title": "Model Id",
             "type": "string"
           },

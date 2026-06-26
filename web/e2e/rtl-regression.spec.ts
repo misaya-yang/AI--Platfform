@@ -29,7 +29,7 @@ const ARABIC_RESPONSE = `توضح سياسة النشر أن الرجوع إلى
 
 [1] Deployment Runbook - Rollback Procedure
 
-تم الاعتماد على مواد قاعدة المعرفة المتاحة فقط.`;
+جميع المعلومات المقدمة مستمدة من مصادر إسلامية موثقة.`;
 
 const ENGLISH_RESPONSE = `The rollback procedure should start after the health check fails.
 
@@ -81,10 +81,10 @@ async function installMockRoutes(page: Page, responseText: string) {
   });
 
   // Mock stream response
-  await page.route("**/api/v1/assistant/chat", async (route) => {
+  await page.route("**/api/v1/assistant/chat/stream", async (route) => {
     const sseChunks = [
-      `data: ${JSON.stringify({ type: "text", content: responseText })}\n\n`,
-      `data: ${JSON.stringify({ type: "done", usage: { prompt_tokens: 100, completion_tokens: 200 } })}\n\n`,
+      `data: ${JSON.stringify({ event_type: "text_delta", data: responseText, timestamp: Date.now() / 1000 })}\n\n`,
+      `data: ${JSON.stringify({ event_type: "done", data: { usage: { prompt_tokens: 100, completion_tokens: 200 } }, timestamp: Date.now() / 1000 })}\n\n`,
     ];
     await route.fulfill({
       status: 200,

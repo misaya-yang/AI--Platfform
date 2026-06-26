@@ -58,8 +58,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from ai_gateway_core.logging import get_logger
 from ai_gateway_core.enums import StreamEventType
+from ai_gateway_core.logging import get_logger
+
+from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
+from ..memory.compressor import (
+    ContextCompressor,
+    ModelRegistryLLMService,
+)
 from ..rag.context_engine import (
     ContextBudgetManager,
     ContextEngine,
@@ -68,56 +74,70 @@ from ..rag.context_engine import (
     format_long_term_memory,
 )
 from ..rag.context_metrics import ContextMetricsBuilder
-from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
-from ..memory.compressor import (
-    ContextCompressor,
-    ModelRegistryLLMService,
+from ..rag.query_intent_analyzer import (
+    QueryIntent,
+    QueryIntentAnalyzer,
+    create_query_intent_analyzer,
 )
-from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
-from ..rag.query_intent_analyzer import QueryIntent, QueryIntentAnalyzer, create_query_intent_analyzer
 from ..rag.rag_metrics import (
     RAGMetrics,
     RAGMetricsCollector,
     RetrievalMetrics,
     get_rag_metrics_collector,
 )
-from .stream_helpers import merge_stream_tool_calls
-from .subagent_manager import SubAgentManager
-from .subagent_types import SubAgentConfig, SubAgentType
+from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult
+from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
+from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+from ..tasks.task_manager import TaskManager, get_task_manager
+from ..tasks.task_planner import ExecutionPlan, TaskPlanner
+from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
+from ..tool_orchestrator import ToolExecutionResult
+from ..tools.tool_selector import select_tools
+from ..trace_payloads import build_rag_trace_payload
+from ..trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
+from ..working_memory import WorkingMemory
 from .artifact_persister import (
     persist_and_collect_events as _artifact_persist_and_collect_events,
+)
+from .artifact_persister import (
     sanitize_output_files as _artifact_sanitize_output_files,
 )
 from .middleware import MiddlewareChain, VerdictKind
-from .middlewares.runtime_memory import RuntimeMemoryMiddleware
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
+from .middlewares.runtime_memory import RuntimeMemoryMiddleware
+from .stream_helpers import merge_stream_tool_calls
+from .subagent_manager import SubAgentManager
+from .subagent_types import SubAgentConfig, SubAgentType
 from .tool_dedup import (
     KB_REUSE_MESSAGE,
     KBDedupState,
 )
 from .tool_result_formatter import (
     compact_context_payload as _fmt_compact_context_payload,
+)
+from .tool_result_formatter import (
     compact_tool_result_for_model as _fmt_compact_tool_result_for_model,
+)
+from .tool_result_formatter import (
     kb_query_fingerprint as _fmt_kb_query_fingerprint,
+)
+from .tool_result_formatter import (
     split_text_for_stream as _fmt_split_text_for_stream,
+)
+from .tool_result_formatter import (
     tool_schema_name as _fmt_tool_schema_name,
+)
+from .tool_result_formatter import (
     truncate_chars as _fmt_truncate_chars,
 )
-from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult
-from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
-from ..tasks.task_manager import TaskManager, get_task_manager
-from ..tasks.task_planner import ExecutionPlan, TaskPlanner
-from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
-from ..tools.tool_selector import select_tools
-from ..tool_orchestrator import ToolExecutionResult
-from ..working_memory import WorkingMemory
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
     from ai_gateway_core.knowledge import KnowledgeClientLike
-    from ..models.model_registry import ModelRegistry
+
     from ..memory_service import MemoryService
+    from ..models.model_registry import ModelRegistry
 
 logger = get_logger(__name__)
 
@@ -447,6 +467,11 @@ class AgentLoopContext:
 
     # Observability: Context Metrics
     metrics_builder: ContextMetricsBuilder | None = None
+    transcript_locator: dict[str, Any] = field(default_factory=dict)
+    trace_started_at: float = field(default_factory=time.time)
+    trace_sequence_no: int = 0
+    traceparent: str | None = None
+    otel_trace_id: str | None = None
 
 
 # =============================================================================
@@ -487,6 +512,7 @@ class AgentLoop:
         execution_gateway: AssistantExecutionGateway | None = None,
         request_router: AssistantRequestRouter | None = None,
         database: Any | None = None,
+        trace_writer: AssistantTraceWriter | None = None,
         runtime_adapter: AssistantRuntimeAdapter | None = None,
         # System prompt
         system_prompt: str = "",
@@ -533,6 +559,7 @@ class AgentLoop:
         self.request_router = request_router or AssistantRequestRouter()
         self.context_budget_manager = ContextBudgetManager()
         self.database = database
+        self.trace_writer = trace_writer
         self.assistant_runtime = runtime_adapter
         if self.assistant_runtime is None and self.database is not None:
             with contextlib.suppress(Exception):
@@ -571,6 +598,69 @@ class AgentLoop:
         # earlier middlewares see the untruncated payload.
         chain.add(ResponseCapMiddleware())
         return chain
+
+    def _next_trace_sequence(self, ctx: AgentLoopContext) -> int:
+        ctx.trace_sequence_no += 1
+        return ctx.trace_sequence_no
+
+    def _trace_context(self, ctx: AgentLoopContext) -> AssistantTraceContext:
+        return AssistantTraceContext.from_agent_context(ctx)
+
+    def _capture_trace_start(self, ctx: AgentLoopContext) -> None:
+        if not self.trace_writer:
+            return
+        self.trace_writer.start_trace(self._trace_context(ctx))
+
+    def _capture_trace_event(self, ctx: AgentLoopContext, event: AgentLoopEvent) -> None:
+        if not self.trace_writer:
+            return
+        phase = event.phase.value if hasattr(event.phase, "value") else str(event.phase)
+        self.trace_writer.record_event(
+            ctx=self._trace_context(ctx),
+            event_type=event.event_type,
+            sequence_no=self._next_trace_sequence(ctx),
+            payload=event.data,
+            phase=phase,
+            occurred_at=event.timestamp,
+        )
+
+    def _capture_rag_retrieval_trace(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if not self.trace_writer:
+            return
+        self.trace_writer.record_event(
+            ctx=self._trace_context(ctx),
+            event_type=event_type,
+            sequence_no=self._next_trace_sequence(ctx),
+            payload=payload,
+            phase=AgentLoopPhase.RAG_RETRIEVAL.value,
+        )
+
+    def _finish_trace(
+        self,
+        *,
+        ctx: AgentLoopContext,
+        status: str,
+        error: Any = None,
+        terminal_event_type: str | None = None,
+    ) -> None:
+        if not self.trace_writer:
+            return
+        self.trace_writer.finish_trace(
+            ctx=self._trace_context(ctx),
+            status=status,
+            output_preview=ctx.generated_content,
+            usage=ctx.usage,
+            error=error,
+            total_latency_ms=int((time.time() - ctx.trace_started_at) * 1000),
+            terminal_event_type=terminal_event_type,
+            terminal_sequence_no=self._next_trace_sequence(ctx) if terminal_event_type else None,
+        )
 
     def _get_subagent_manager(self) -> SubAgentManager:
         """Return a reusable SubAgentManager, creating it on first access."""
@@ -712,6 +802,7 @@ class AgentLoop:
         message: str,
         config: AgentLoopConfig,
         history: list[dict[str, Any]] | None = None,
+        traceparent: str | None = None,
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         """
         Execute the complete 8-step agent loop.
@@ -726,6 +817,13 @@ class AgentLoop:
         Yields:
             AgentLoopEvent for each significant step/action
         """
+        resolved_traceparent = str(traceparent or "") or None
+        resolved_otel_trace_id: str | None = None
+        if resolved_traceparent and resolved_traceparent.startswith("00-"):
+            parts = resolved_traceparent.split("-")
+            if len(parts) >= 2 and parts[1]:
+                resolved_otel_trace_id = parts[1]
+
         # Initialize context
         ctx = AgentLoopContext(
             session_id=session_id,
@@ -734,6 +832,8 @@ class AgentLoop:
             message=message,
             config=config,
             user=user,
+            traceparent=resolved_traceparent,
+            otel_trace_id=resolved_otel_trace_id,
         )
 
         # Initialize metrics builder for observability
@@ -754,6 +854,14 @@ class AgentLoop:
         config.memory_profile = ctx.routed_request.memory_profile
 
         history = history or []
+        ctx.transcript_locator = build_transcript_locator(
+            session_id=session_id,
+            run_id=ctx.run_id,
+            request_id=ctx.request_id,
+            message=message,
+            history=history,
+        )
+        self._capture_trace_start(ctx)
 
         # Proactive history trimming to prevent context overflow
         if config.enable_history_trimming and history:
@@ -780,6 +888,7 @@ class AgentLoop:
 
             run_status = "running"
             run_error: str | None = None
+            terminal_event_recorded = False
 
             try:
                 if self.execution_gateway and self.execution_gateway.enabled:
@@ -806,7 +915,7 @@ class AgentLoop:
                     )
 
                 if ctx.routed_request:
-                    yield AgentLoopEvent(
+                    gateway_event = AgentLoopEvent(
                         phase=AgentLoopPhase.MEMORY_LOADING,
                         event_type="gateway_decision",
                         data={
@@ -822,9 +931,11 @@ class AgentLoop:
                             "context_detail": ctx.routed_request.context_detail,
                         },
                     )
+                    self._capture_trace_event(ctx, gateway_event)
+                    yield gateway_event
 
                 # Emit run_started with task_id for cancellation
-                yield AgentLoopEvent(
+                run_started_event = AgentLoopEvent(
                     phase=AgentLoopPhase.MEMORY_LOADING,
                     event_type="run_started",
                     data={
@@ -837,8 +948,10 @@ class AgentLoop:
                         "mode": "streaming_first",
                     },
                 )
+                self._capture_trace_event(ctx, run_started_event)
+                yield run_started_event
                 if config.queue_mode != "collect":
-                    yield AgentLoopEvent(
+                    queue_event = AgentLoopEvent(
                         phase=AgentLoopPhase.MEMORY_LOADING,
                         event_type="queue_steered",
                         data={
@@ -847,6 +960,8 @@ class AgentLoop:
                             "run_id": ctx.run_id,
                         },
                     )
+                    self._capture_trace_event(ctx, queue_event)
+                    yield queue_event
 
                 # Model-driven streaming loop (Manus-style).
                 # Pre-processing is opt-in via tool calls; the model decides when
@@ -874,6 +989,7 @@ class AgentLoop:
                             )
                         else:
                             fatal_error_message = str(event.data)
+                    self._capture_trace_event(ctx, event)
                     yield event
 
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
@@ -882,7 +998,7 @@ class AgentLoop:
                     run_error = _redact_trace_text(
                         fatal_error_message or "AgentLoop streaming-first failed"
                     )
-                    yield AgentLoopEvent(
+                    run_error_event = AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
                         event_type=StreamEventType.RUN_ERROR.value,
                         data={
@@ -891,9 +1007,12 @@ class AgentLoop:
                             "error": run_error,
                         },
                     )
+                    self._capture_trace_event(ctx, run_error_event)
+                    terminal_event_recorded = True
+                    yield run_error_event
                 else:
                     run_status = "succeeded"
-                    yield AgentLoopEvent(
+                    run_finished_event = AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
                         event_type=StreamEventType.RUN_FINISHED.value,
                         data={
@@ -905,6 +1024,9 @@ class AgentLoop:
                             },
                         },
                     )
+                    self._capture_trace_event(ctx, run_finished_event)
+                    terminal_event_recorded = True
+                    yield run_finished_event
 
             except Exception as loop_error:
                 run_status = "failed"
@@ -927,8 +1049,21 @@ class AgentLoop:
                             usage=ctx.usage,
                             error=run_error,
                         )
-                    except Exception as gateway_err:
+                    except Exception:
                         logger.exception("Failed to persist run completion")
+                terminal_event_type = None
+                if not terminal_event_recorded:
+                    terminal_event_type = (
+                        StreamEventType.RUN_FINISHED.value
+                        if final_status == "succeeded"
+                        else StreamEventType.RUN_ERROR.value
+                    )
+                self._finish_trace(
+                    ctx=ctx,
+                    status=final_status,
+                    error=run_error,
+                    terminal_event_type=terminal_event_type,
+                )
 
                 # Persist Working Memory to session memory
                 if ctx.working_memory and self.memory_service:
@@ -942,7 +1077,7 @@ class AgentLoop:
                         logger.debug(
                             f"Persisted working memory with {len(ctx.working_memory.tasks)} tasks"
                         )
-                    except Exception as persist_error:
+                    except Exception:
                         logger.exception("Failed to persist working memory")
 
                 # Complete task registration
@@ -1254,7 +1389,7 @@ class AgentLoop:
 
             return response.content if response else None
 
-        except Exception as e:
+        except Exception:
             logger.exception("Summarization failed")
             return None
 
@@ -1291,7 +1426,7 @@ class AgentLoop:
                 json.dumps(detail.get("tokens_by_category") or {}),
                 json.dumps((detail.get("contributors") or [])[:20]),
             )
-        except Exception as exc:
+        except Exception:
             try:
                 await self.database.execute(
                     """
@@ -1512,7 +1647,7 @@ class AgentLoop:
                                 content=ctx.message,
                                 metadata=user_msg_metadata,
                             )
-                        except Exception as persist_err:
+                        except Exception:
                             logger.exception(
                                 "[CRITICAL] User message persistence failed for session %s",
                                 ctx.session_id,
@@ -1561,7 +1696,7 @@ class AgentLoop:
                             "file_metadata": getattr(processed_files, "file_metadata", []) or [],
                         },
                     )
-                except Exception as e:
+                except Exception:
                     logger.exception("File processing failed (streaming-first)")
                     yield AgentLoopEvent(
                         phase=phase,
@@ -1725,7 +1860,7 @@ class AgentLoop:
                             ),
                         },
                     )
-                except Exception as exc:
+                except Exception:
                     logger.exception("Failed to load long-term memory in streaming-first mode")
 
             # System prompt is kept BYTE-IDENTICAL across requests for the same
@@ -1875,7 +2010,7 @@ class AgentLoop:
                         )
                         if descriptions:
                             final_message += f"\n\n---\n[图像描述]\n{descriptions}"
-                except Exception as e:
+                except Exception:
                     logger.exception("Failed to inject processed files into prompt")
 
             # Add current user message
@@ -2463,6 +2598,11 @@ class AgentLoop:
                         tool_success = False
                         tool_output_files: list[dict[str, Any]] = []
                         tool_result_for_model = ""
+                        kb_rag_started_at: float | None = None
+                        kb_rag_query = ""
+                        kb_rag_dataset_ids: list[str] = []
+                        kb_rag_top_k = ctx.config.kb_top_k
+                        kb_rag_score_threshold = ctx.config.kb_min_relevance
 
                         # Guardrail: avoid repeated KB searches before producing any answer text.
                         # Keep at most `kb_max_queries` KB calls in a turn to avoid latency loops.
@@ -2497,6 +2637,33 @@ class AgentLoop:
                         elif self.tool_invoker:
                             if tool_name == "search_knowledge_base":
                                 kb_call_count += 1
+                                if not short_circuit_kb:
+                                    kb_rag_started_at = time.time()
+                                    kb_rag_query = str(tool_args.get("query") or ctx.message)
+                                    raw_dataset_ids = tool_args.get("dataset_ids")
+                                    if isinstance(raw_dataset_ids, list) and raw_dataset_ids:
+                                        kb_rag_dataset_ids = [str(value) for value in raw_dataset_ids]
+                                    else:
+                                        kb_rag_dataset_ids = list(ctx.config.kb_dataset_ids or [])
+                                    kb_rag_top_k = int(tool_args.get("top_k") or ctx.config.kb_top_k)
+                                    kb_rag_score_threshold = float(
+                                        tool_args.get("score_threshold")
+                                        if tool_args.get("score_threshold") is not None
+                                        else ctx.config.kb_min_relevance
+                                    )
+                                    self._capture_rag_retrieval_trace(
+                                        ctx,
+                                        event_type="rag_retrieval_started",
+                                        payload=build_rag_trace_payload(
+                                            query=kb_rag_query,
+                                            dataset_ids=kb_rag_dataset_ids,
+                                            top_k=kb_rag_top_k,
+                                            score_threshold=kb_rag_score_threshold,
+                                            include_images=False,
+                                            started_at=kb_rag_started_at,
+                                            tool_id=tool_id,
+                                        ),
+                                    )
                             result = await self._invoke_tool(
                                 ctx=ctx,
                                 user=user,
@@ -2675,6 +2842,40 @@ class AgentLoop:
                                 if isinstance(tool_metadata, dict)
                                 else None
                             )
+                            if kb_rag_started_at is not None:
+                                ended_at = time.time()
+                                if tool_success:
+                                    self._capture_rag_retrieval_trace(
+                                        ctx,
+                                        event_type="rag_retrieval_completed",
+                                        payload=build_rag_trace_payload(
+                                            query=kb_rag_query,
+                                            dataset_ids=kb_rag_dataset_ids,
+                                            top_k=kb_rag_top_k,
+                                            score_threshold=kb_rag_score_threshold,
+                                            include_images=False,
+                                            started_at=kb_rag_started_at,
+                                            ended_at=ended_at,
+                                            contexts=contexts if isinstance(contexts, list) else [],
+                                            tool_id=tool_id,
+                                        ),
+                                    )
+                                else:
+                                    self._capture_rag_retrieval_trace(
+                                        ctx,
+                                        event_type="rag_retrieval_failed",
+                                        payload=build_rag_trace_payload(
+                                            query=kb_rag_query,
+                                            dataset_ids=kb_rag_dataset_ids,
+                                            top_k=kb_rag_top_k,
+                                            score_threshold=kb_rag_score_threshold,
+                                            include_images=False,
+                                            started_at=kb_rag_started_at,
+                                            ended_at=ended_at,
+                                            error=tool_error or "knowledge base search failed",
+                                            tool_id=tool_id,
+                                        ),
+                                    )
                             if isinstance(contexts, list):
                                 for ctx_item in contexts:
                                     if isinstance(ctx_item, dict):
@@ -2877,6 +3078,22 @@ class AgentLoop:
 
                     except Exception as e:
                         safe_error = _redact_trace_text(e)
+                        if tool_name == "search_knowledge_base" and kb_rag_started_at is not None:
+                            self._capture_rag_retrieval_trace(
+                                ctx,
+                                event_type="rag_retrieval_failed",
+                                payload=build_rag_trace_payload(
+                                    query=kb_rag_query,
+                                    dataset_ids=kb_rag_dataset_ids,
+                                    top_k=kb_rag_top_k,
+                                    score_threshold=kb_rag_score_threshold,
+                                    include_images=False,
+                                    started_at=kb_rag_started_at,
+                                    ended_at=time.time(),
+                                    error=safe_error,
+                                    tool_id=tool_id,
+                                ),
+                            )
                         logger.error(
                             "[STREAMING-FIRST] Tool %s failed: %s",
                             tool_name,
@@ -3345,7 +3562,7 @@ class AgentLoop:
                         content=ctx.generated_content,
                         metadata=_metadata,
                     )
-                except Exception as e:
+                except Exception:
                     logger.exception("Failed to persist assistant message (streaming-first)")
 
             if self.memory_service and ctx.message:
@@ -3381,7 +3598,7 @@ class AgentLoop:
                             value=value,
                             metadata={"source": "auto_extract", "namespace": "profile"},
                         )
-                except Exception as exc:
+                except Exception:
                     logger.exception("Failed to persist structured user memory")
 
             if (
@@ -3419,7 +3636,7 @@ class AgentLoop:
                             "pii_findings": [finding.pattern for finding in findings],
                         },
                     )
-                except Exception as exc:
+                except Exception:
                     logger.exception("Failed to persist assistant runtime daily memory")
 
             yield AgentLoopEvent(

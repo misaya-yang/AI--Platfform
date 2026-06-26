@@ -14,6 +14,10 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { buildAuthHeaders, ensureAuthenticatedPage, getApiUrl } from "./support/helpers";
 
+function sessionButtonName(title: string): RegExp {
+  return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s·|$)`);
+}
+
 async function seedSessionWithQuiz(request: APIRequestContext) {
   const headers = await buildAuthHeaders(request);
   const apiUrl = getApiUrl();
@@ -106,7 +110,7 @@ test.describe("Quiz history persistence", () => {
     await ensureAuthenticatedPage(page, "/assistant");
 
     // Find and click the seeded session in sidebar
-    const sessionBtn = page.getByRole("button", { name: new RegExp(seed.title + "\\s·") });
+    const sessionBtn = page.getByRole("button", { name: sessionButtonName(seed.title) });
     await expect(sessionBtn).toBeVisible({ timeout: 15_000 });
     await sessionBtn.click();
 
@@ -115,7 +119,9 @@ test.describe("Quiz history persistence", () => {
 
     // QuizCard should render after async hydration
     // QuizCard contains the quiz title and question elements
-    await expect(page.getByText(seed.quizTitle)).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByRole("heading", { name: seed.quizTitle, level: 2 }),
+    ).toBeVisible({ timeout: 15_000 });
 
     // Verify quiz questions are rendered (QuizCard shows question text)
     const questionElements = page.locator("[data-testid='quiz-question'], .quiz-question");
@@ -125,6 +131,9 @@ test.describe("Quiz history persistence", () => {
     const hasQuestions = await questionElements.count().catch(() => 0);
 
     // At least the quiz title should be visible — that proves hydration worked
-    expect(hasQuizCard > 0 || hasQuestions > 0 || await page.getByText(seed.quizTitle).isVisible()).toBeTruthy();
+    const titleVisible = await page
+      .getByRole("heading", { name: seed.quizTitle, level: 2 })
+      .isVisible();
+    expect(hasQuizCard > 0 || hasQuestions > 0 || titleVisible).toBeTruthy();
   });
 });

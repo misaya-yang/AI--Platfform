@@ -631,6 +631,23 @@ def create_app() -> FastAPI:
             app.state.usage_scheduler = usage_scheduler
             logger.info("使用量调度器已启动")
 
+            from .services.eval import (
+                init_eval_outbox_worker,
+                init_trace_retention_scheduler,
+            )
+
+            eval_outbox_worker = init_eval_outbox_worker(container.database)
+            if eval_outbox_worker is not None:
+                await eval_outbox_worker.start(concurrency=2)
+                app.state.eval_outbox_worker = eval_outbox_worker
+                logger.info("Eval outbox worker 已启动")
+
+            trace_retention_scheduler = init_trace_retention_scheduler(container.database)
+            if trace_retention_scheduler is not None:
+                await trace_retention_scheduler.start()
+                app.state.trace_retention_scheduler = trace_retention_scheduler
+                logger.info("Agent trace retention scheduler 已启动")
+
             # 启动使用量记录器后台任务
             from .services.metrics import get_usage_recorder
 
@@ -665,7 +682,6 @@ def create_app() -> FastAPI:
                 from ai_gateway_core.events import (
                     EventConsumer,
                     UsageRecordedV1,
-                    parse_envelope,
                 )
                 from ai_gateway_core.events.registry import get_stream
 
@@ -743,6 +759,14 @@ def create_app() -> FastAPI:
         file_cleanup_service = getattr(app.state, "file_cleanup_service", None)
         if file_cleanup_service is not None:
             await file_cleanup_service.stop()
+
+        eval_outbox_worker = getattr(app.state, "eval_outbox_worker", None)
+        if eval_outbox_worker is not None:
+            await eval_outbox_worker.stop()
+
+        trace_retention_scheduler = getattr(app.state, "trace_retention_scheduler", None)
+        if trace_retention_scheduler is not None:
+            await trace_retention_scheduler.stop()
 
         # Stop usage scheduler
         usage_scheduler = getattr(app.state, "usage_scheduler", None)

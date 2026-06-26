@@ -1,0 +1,289 @@
+#!/bin/bash
+# =============================================================================
+# AI Gateway - Local Env Initializer
+# =============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/.env}"
+FORCE=false
+IF_MISSING=false
+
+usage() {
+    cat <<'USAGE'
+Usage: scripts/new/init-env.sh [--env FILE] [--force] [--if-missing]
+
+Creates a local env file from .env.example without printing secret values.
+
+Options:
+  --env FILE     Destination env file. Defaults to .env
+  --force        Replace an existing env file
+  --if-missing   Exit successfully when the env file already exists
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --env)
+            if [ -z "${2:-}" ] || [[ "${2:-}" =~ ^-- ]]; then
+                log_error "--env requires a file path"
+                exit 2
+            fi
+            ENV_FILE="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=true
+            shift
+            ;;
+        --if-missing)
+            IF_MISSING=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            log_error "Unknown argument: $1"
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+EXAMPLE_FILE="${PROJECT_ROOT}/.env.example"
+
+if [ ! -r "$EXAMPLE_FILE" ]; then
+    log_error "Example env file not found: $EXAMPLE_FILE"
+    exit 1
+fi
+
+if [ -e "$ENV_FILE" ] && [ "$FORCE" != true ]; then
+    if [ "$IF_MISSING" = true ]; then
+        log_success "Env file already exists: $ENV_FILE"
+        exit 0
+    fi
+    log_error "Env file already exists: $ENV_FILE. Use --force to replace it."
+    exit 1
+fi
+
+env_value() {
+    local key="$1"
+    eval "printf '%s' \"\${${key}:-}\""
+}
+
+is_placeholder() {
+    local raw="$1"
+    local value
+    value="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+
+    case "$value" in
+        ""|change_me*|changeme*|change-me*|replace_me*|replace-me*|your_*|your-*|*_here|example|example_*|demo|test|password|secret|123456|111111)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+generate_secret() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+        return
+    fi
+
+    dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
+}
+
+copy_env_or_default() {
+    local key="$1"
+    local default_value="$2"
+    local value
+    value="$(env_value "$key")"
+
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+        return
+    fi
+
+    printf '%s' "$default_value"
+}
+
+POSTGRES_PASSWORD_VALUE="$(copy_env_or_default POSTGRES_PASSWORD "$(generate_secret)")"
+REDIS_PASSWORD_VALUE="$(copy_env_or_default REDIS_PASSWORD "$(generate_secret)")"
+JWT_SECRET_VALUE="$(copy_env_or_default JWT_SECRET "$(generate_secret)")"
+GATEWAY_ASSISTANT_SHARED_SECRET_VALUE="$(copy_env_or_default GATEWAY_ASSISTANT_SHARED_SECRET "$(generate_secret)")"
+DOCGEN_ARTIFACT_SIGN_KEY_VALUE="$(copy_env_or_default DOCGEN_ARTIFACT_SIGN_KEY "$(generate_secret)")"
+
+choose_embedding_provider() {
+    local configured
+    configured="$(env_value KB_EMBEDDING_PROVIDER)"
+    if [ -n "$configured" ]; then
+        printf '%s' "$configured"
+    elif [ -n "$(env_value GEMINI_API_KEY)" ] || [ -n "$(env_value GOOGLE_API_KEY)" ]; then
+        printf 'gemini'
+    elif [ -n "$(env_value DASHSCOPE_API_KEY)" ]; then
+        printf 'dashscope'
+    elif [ -n "$(env_value SILICONFLOW_API_KEY)" ]; then
+        printf 'siliconflow'
+    else
+        printf 'gemini'
+    fi
+}
+
+EMBEDDING_PROVIDER_VALUE="$(choose_embedding_provider)"
+
+choose_embedding_key() {
+    local configured
+    configured="$(env_value KB_EMBEDDING_API_KEY)"
+    if [ -n "$configured" ]; then
+        printf '%s' "$configured"
+        return
+    fi
+
+    case "$EMBEDDING_PROVIDER_VALUE" in
+        gemini)
+            if [ -n "$(env_value GEMINI_API_KEY)" ]; then
+                env_value GEMINI_API_KEY
+                return
+            fi
+            if [ -n "$(env_value GOOGLE_API_KEY)" ]; then
+                env_value GOOGLE_API_KEY
+                return
+            fi
+            ;;
+        dashscope)
+            if [ -n "$(env_value DASHSCOPE_API_KEY)" ]; then
+                env_value DASHSCOPE_API_KEY
+                return
+            fi
+            ;;
+        siliconflow)
+            if [ -n "$(env_value SILICONFLOW_API_KEY)" ]; then
+                env_value SILICONFLOW_API_KEY
+                return
+            fi
+            ;;
+    esac
+
+    printf 'change_me_embedding_provider_key'
+}
+
+KB_EMBEDDING_API_KEY_VALUE="$(choose_embedding_key)"
+
+value_for_key() {
+    local key="$1"
+    local current="$2"
+
+    case "$key" in
+        POSTGRES_PASSWORD)
+            printf '%s' "$POSTGRES_PASSWORD_VALUE"
+            ;;
+        REDIS_PASSWORD)
+            printf '%s' "$REDIS_PASSWORD_VALUE"
+            ;;
+        JWT_SECRET)
+            printf '%s' "$JWT_SECRET_VALUE"
+            ;;
+        GATEWAY_ASSISTANT_SHARED_SECRET)
+            printf '%s' "$GATEWAY_ASSISTANT_SHARED_SECRET_VALUE"
+            ;;
+        DOCGEN_ARTIFACT_SIGN_KEY)
+            printf '%s' "$DOCGEN_ARTIFACT_SIGN_KEY_VALUE"
+            ;;
+        INTERNAL_COMM_REDIS_URL)
+            printf 'redis://:%s@redis:6379/3' "$REDIS_PASSWORD_VALUE"
+            ;;
+        KB_EMBEDDING_PROVIDER)
+            printf '%s' "$EMBEDDING_PROVIDER_VALUE"
+            ;;
+        KB_EMBEDDING_API_KEY)
+            printf '%s' "$KB_EMBEDDING_API_KEY_VALUE"
+            ;;
+        DASHSCOPE_API_KEY|DASHSCOPE_CHAT_API_KEY|DASHSCOPE_CHAT_BASE_URL|GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_API_BACKEND|GOOGLE_CHAT_BACKEND|VERTEX_API_KEY|VERTEX_CHAT_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|DEEPSEEK_API_KEY|TAVILY_API_KEY|SILICONFLOW_API_KEY|KB_EMBEDDING_MODEL|KB_EMBEDDING_DIMENSION|AUTH_ALLOWED_EMAIL_DOMAIN|DEFAULT_USER_PASSWORD|DOCGEN_LLM_MODEL)
+            copy_env_or_default "$key" "$current"
+            ;;
+        *)
+            printf '%s' "$current"
+            ;;
+    esac
+}
+
+destination_dir="$(dirname "$ENV_FILE")"
+mkdir -p "$destination_dir"
+tmp_file="$(mktemp "${ENV_FILE}.tmp.XXXXXX")"
+cleanup() {
+    rm -f "$tmp_file"
+}
+trap cleanup EXIT
+
+umask 077
+while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+        key="${BASH_REMATCH[1]}"
+        current="${BASH_REMATCH[2]}"
+        printf '%s=%s\n' "$key" "$(value_for_key "$key" "$current")"
+    else
+        printf '%s\n' "$line"
+    fi
+done < "$EXAMPLE_FILE" > "$tmp_file"
+
+generated_value() {
+    local key="$1"
+    awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "$tmp_file"
+}
+
+upsert_generated_value() {
+    local key="$1"
+    local value="$2"
+    local next_file
+    next_file="$(mktemp "${ENV_FILE}.tmp.XXXXXX")"
+    awk -F= -v key="$key" '$1 != key {print}' "$tmp_file" > "$next_file"
+    printf '%s=%s\n' "$key" "$value" >> "$next_file"
+    mv "$next_file" "$tmp_file"
+}
+
+POSTGRES_USER_VALUE="$(generated_value POSTGRES_USER)"
+POSTGRES_DB_VALUE="$(generated_value POSTGRES_DB)"
+POSTGRES_PORT_VALUE="$(generated_value POSTGRES_PORT)"
+REDIS_PORT_VALUE="$(generated_value REDIS_PORT)"
+
+upsert_generated_value GATEWAY_DATABASE__ENABLED true
+upsert_generated_value GATEWAY_DATABASE__DSN "postgresql://${POSTGRES_USER_VALUE:-postgres}:${POSTGRES_PASSWORD_VALUE}@127.0.0.1:${POSTGRES_PORT_VALUE:-5432}/${POSTGRES_DB_VALUE:-gateway}"
+upsert_generated_value GATEWAY_REDIS__ENABLED true
+upsert_generated_value GATEWAY_REDIS__URL "redis://:${REDIS_PASSWORD_VALUE}@127.0.0.1:${REDIS_PORT_VALUE:-6379}/0"
+upsert_generated_value GATEWAY_AUTHENTICATION__JWT__ENABLED true
+upsert_generated_value GATEWAY_AUTHENTICATION__JWT__SECRET "$JWT_SECRET_VALUE"
+
+mv "$tmp_file" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+trap - EXIT
+
+log_success "Created env file: $ENV_FILE"
+log_info "Generated local secrets for: POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY"
+
+COPIED_KEYS=""
+for key in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY DASHSCOPE_API_KEY DASHSCOPE_CHAT_API_KEY DASHSCOPE_CHAT_BASE_URL GOOGLE_API_KEY GEMINI_API_KEY GOOGLE_API_BACKEND GOOGLE_CHAT_BACKEND VERTEX_API_KEY VERTEX_CHAT_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY DEEPSEEK_API_KEY TAVILY_API_KEY SILICONFLOW_API_KEY KB_EMBEDDING_PROVIDER KB_EMBEDDING_API_KEY KB_EMBEDDING_MODEL KB_EMBEDDING_DIMENSION AUTH_ALLOWED_EMAIL_DOMAIN DEFAULT_USER_PASSWORD DOCGEN_LLM_MODEL; do
+    if [ -n "$(env_value "$key")" ]; then
+        COPIED_KEYS="${COPIED_KEYS}${COPIED_KEYS:+ }${key}"
+    fi
+done
+
+if [ -n "$COPIED_KEYS" ]; then
+    unique_copied_keys="$(printf '%s\n' $COPIED_KEYS | awk '!seen[$0]++' | xargs)"
+    log_info "Copied user-supplied values from the current environment for: $unique_copied_keys"
+fi
+
+if is_placeholder "$KB_EMBEDDING_API_KEY_VALUE"; then
+    log_warn "Set KB_EMBEDDING_API_KEY before running full config validation."
+fi
+
+if ! grep -Eq '^(DASHSCOPE_CHAT_API_KEY|DASHSCOPE_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|VERTEX_API_KEY|VERTEX_CHAT_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|DEEPSEEK_API_KEY)=[^[:space:]]+' "$ENV_FILE"; then
+    log_warn "Set at least one chat model API key before running full config validation."
+fi
+
+log_info "Next: make validate-config ENV_FILE=\"$ENV_FILE\""

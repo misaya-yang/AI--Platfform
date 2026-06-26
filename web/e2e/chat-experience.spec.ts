@@ -446,6 +446,7 @@ test("assistant stream path keeps a11y and performance budget", async ({ page })
   await ensureAuthenticatedPage(page, "/assistant");
   const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
   await expect(composer).toBeVisible();
+  await expect(composer).toBeEnabled();
 
   await page.keyboard.press(`${modKey()}+K`);
   await expect(composer).toBeFocused();

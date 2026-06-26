@@ -23,6 +23,8 @@ class Capability(str, Enum):
     GATEWAY_PROVIDER_CONFIG_WRITE = "GatewayProviderConfigWrite"
     GATEWAY_MODEL_CONFIG_WRITE = "GatewayModelConfigWrite"
     GATEWAY_SERVICE_CONFIG_WRITE = "GatewayServiceConfigWrite"
+    GATEWAY_EVAL_TRACE_READ = "GatewayEvalTraceRead"
+    GATEWAY_EVAL_RUN = "GatewayEvalRun"
 
 
 _CAPABILITY_PERMISSIONS: dict[Capability, str] = {
@@ -37,6 +39,8 @@ _CAPABILITY_PERMISSIONS: dict[Capability, str] = {
     Capability.GATEWAY_PROVIDER_CONFIG_WRITE: "console:providers:edit",
     Capability.GATEWAY_MODEL_CONFIG_WRITE: "console:models:edit",
     Capability.GATEWAY_SERVICE_CONFIG_WRITE: "console:services:edit",
+    Capability.GATEWAY_EVAL_TRACE_READ: "console:eval:view",
+    Capability.GATEWAY_EVAL_RUN: "console:eval:run",
 }
 
 _CAPABILITY_LEGACY_ALIASES: dict[Capability, tuple[str, ...]] = {

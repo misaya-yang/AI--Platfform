@@ -79,6 +79,7 @@ plugins/frontend-design/
 
 # Documentation (managed separately)
 docs/*
+docs_project/
 !apps/islamic-content-service/docs/
 !apps/islamic-content-service/docs/**
 !apps/assistant-service/docs/

@@ -2,7 +2,7 @@ import { expect, test, type APIRequestContext } from "@playwright/test";
 import { buildAuthHeaders, ensureAuthenticatedPage } from "./support/helpers";
 
 function sessionButtonName(title: string): RegExp {
-  return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s·`);
+  return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s·|$)`);
 }
 
 async function seedAssistantSession(request: APIRequestContext) {

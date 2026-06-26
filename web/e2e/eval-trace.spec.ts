@@ -1,0 +1,784 @@
+import fs from "node:fs/promises";
+import { expect, test, type Page } from "@playwright/test";
+
+import { installClientAuth } from "./support/helpers";
+
+const permissions = [
+  "console:dashboard:view",
+  "console:eval:view",
+  "console:eval:run",
+  "conversation:playground:access",
+];
+
+function jsonResponse(body: unknown, status = 200) {
+  return {
+    status,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  };
+}
+
+function nowIso() {
+  return new Date("2026-06-26T08:00:00.000Z").toISOString();
+}
+
+function traceSummary(overrides: Record<string, unknown> = {}) {
+  return {
+    trace_id: "11111111-1111-4111-8111-111111111111",
+    trace_family: "assistant",
+    workflow_kind: "ai_assistant_chat",
+    tenant_id: "tenant-a",
+    user_id: "eval-user",
+    session_id: "session-a",
+    run_id: "run-a",
+    request_id: "request-a",
+    model_id: "qwen3.6-plus",
+    provider: "dashscope",
+    status: "succeeded",
+    started_at: nowIso(),
+    ended_at: nowIso(),
+    first_token_latency_ms: 120,
+    total_latency_ms: 980,
+    input_tokens: 10,
+    output_tokens: 20,
+    total_tokens: 30,
+    total_cost_cents: 0,
+    input_preview: "hello Authorization: Bearer [redacted]",
+    output_preview: "safe assistant answer",
+    redaction_state: { input_preview: "redacted_truncated", payloads: "redacted_truncated" },
+    metadata: {
+      mode: "streaming_first",
+      transcript_locator: {
+        locator_version: "assistant-transcript-v1",
+        session_id: "session-a",
+        run_id: "run-a",
+        request_id: "request-a",
+        turn_index: 4,
+        turn_id: "session-a:turn:4",
+        previous_user_turns: 3,
+        history_message_count: 6,
+        message_index: 7,
+        current_message_preview: "hello refund transcript anchor",
+        transcript_excerpt:
+          "user: previous refund policy question\nassistant: prior answer\nuser: hello refund transcript anchor",
+        transcript_fingerprint: "abc123locator",
+        excerpt_message_count: 3,
+        bounded: true,
+      },
+    },
+    scores_count: 1,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+    ...overrides,
+  };
+}
+
+async function installEvalHarness(page: Page) {
+  await installClientAuth(page, {
+    user_id: "eval-user",
+    email: "eval@example.com",
+    display_name: "Eval User",
+    permissions,
+    effective_permissions: permissions,
+  });
+
+  let scores = [
+    {
+      score_id: "22222222-2222-4222-8222-222222222222",
+      trace_id: "11111111-1111-4111-8111-111111111111",
+      span_id: null,
+      score_name: "quality",
+      score_type: "numeric",
+      numeric_value: 0.9,
+      boolean_value: null,
+      categorical_value: null,
+      text_value: null,
+      label: "good",
+      explanation: "Grounded answer",
+      scorer_type: "human",
+      evaluator_version: null,
+      created_by: "eval-user",
+      metadata: {},
+      created_at: nowIso(),
+    },
+  ];
+  const datasetId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const evaluatorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const experimentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const observedTraceFamilies: string[] = [];
+
+  await page.route("**/api/v1/eval/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/summary")) {
+      await route.fulfill(
+        jsonResponse({
+          total_traces: 4,
+          failed_traces: 1,
+          succeeded_traces: 3,
+          assistant_traces: 2,
+          langgraph_traces: 1,
+          rag_traces: 1,
+          avg_latency_ms: 980,
+          p95_latency_ms: 1610,
+          total_tokens: 60,
+          total_cost_cents: 0,
+          scored_traces: 1,
+          window_days: Number(url.searchParams.get("days") || 7),
+        })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/datasets")) {
+      await route.fulfill(
+        jsonResponse({
+          datasets: [],
+          total: 0,
+          limit: Number(url.searchParams.get("limit") || 50),
+          offset: Number(url.searchParams.get("offset") || 0),
+        })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/evaluators")) {
+      await route.fulfill(
+        jsonResponse({
+          evaluators: [],
+          total: 0,
+          limit: Number(url.searchParams.get("limit") || 50),
+          offset: Number(url.searchParams.get("offset") || 0),
+        })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/experiments")) {
+      await route.fulfill(
+        jsonResponse({
+          experiments: [],
+          total: 0,
+          limit: Number(url.searchParams.get("limit") || 50),
+          offset: Number(url.searchParams.get("offset") || 0),
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/experiment-runs/ffffffff-ffff-4fff-8fff-ffffffffffff")
+    ) {
+      await route.fulfill(
+        jsonResponse({
+          run_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          experiment_id: experimentId,
+          tenant_id: "tenant-a",
+          evaluator_id: evaluatorId,
+          dataset_id: datasetId,
+          status: "succeeded",
+          target_snapshot: { trace_family: "assistant" },
+          score_summary: { quality: 0.9 },
+          metrics: { trace_count: 1 },
+          error_message: null,
+          created_by: "eval-user",
+          started_at: nowIso(),
+          finished_at: nowIso(),
+          created_at: nowIso(),
+          updated_at: nowIso(),
+        })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/traces")) {
+      const traceFamily = url.searchParams.get("trace_family") || "assistant";
+      observedTraceFamilies.push(traceFamily);
+      const traces =
+        traceFamily === "rag"
+          ? [
+              traceSummary({
+                trace_id: "55555555-5555-4555-8555-555555555555",
+                trace_family: "rag",
+                workflow_kind: "rag_retrieval",
+                run_id: "rag-run-a",
+                request_id: "rag-request-a",
+                model_id: null,
+                provider: "knowledge-service",
+                output_preview: "2 retrieved documents",
+                metadata: { retrieval: { dataset_ids: ["support-kb"], document_count: 2 } },
+                scores_count: 0,
+              }),
+            ]
+          : traceFamily === "langgraph_proxy"
+            ? [
+                traceSummary({
+                  trace_id: "66666666-6666-4666-8666-666666666666",
+                  trace_family: "langgraph_proxy",
+                  workflow_kind: "langgraph_agent_run",
+                  session_id: "thread-a",
+                  run_id: "lg-run-a",
+                  request_id: "lg-request-a",
+                  model_id: null,
+                  provider: "langgraph",
+                  output_preview: "upstream_status=200 streaming=true",
+                  metadata: { upstream_route: "/threads/thread-a/runs/stream" },
+                  scores_count: 0,
+                }),
+              ]
+          : [
+              traceSummary(),
+              traceSummary({
+                trace_id: "33333333-3333-4333-8333-333333333333",
+                status: "failed",
+                run_id: "run-b",
+                request_id: "request-b",
+                total_latency_ms: 1610,
+                scores_count: 0,
+                output_preview: "tool failed with password=[redacted]",
+                metadata: {
+                  mode: "streaming_first",
+                  transcript_locator: {
+                    turn_index: 2,
+                    turn_id: "session-a:turn:2",
+                    current_message_preview: "unrelated account lookup",
+                    transcript_excerpt: "user: unrelated account lookup",
+                  },
+                },
+              }),
+            ];
+      const transcriptQuery = (url.searchParams.get("transcript_query") || "").toLowerCase();
+      const requestId = url.searchParams.get("request_id") || "";
+      const turnIndex = url.searchParams.get("turn_index") || "";
+      const filtered = traces.filter((trace) => {
+        const haystack = JSON.stringify(trace).toLowerCase();
+        if (transcriptQuery && !haystack.includes(transcriptQuery)) return false;
+        if (requestId && trace.request_id !== requestId) return false;
+        if (
+          turnIndex &&
+          String((trace.metadata.transcript_locator as { turn_index?: unknown }).turn_index || "") !== turnIndex
+        ) {
+          return false;
+        }
+        return true;
+      });
+      await route.fulfill(
+        jsonResponse({
+          traces: filtered,
+          total: filtered.length,
+          limit: 100,
+          offset: 0,
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/traces/66666666-6666-4666-8666-666666666666")
+    ) {
+      if (url.searchParams.get("trace_family") !== "langgraph_proxy") {
+        await route.fulfill(jsonResponse({ detail: "wrong trace family" }, 404));
+        return;
+      }
+      await route.fulfill(
+        jsonResponse({
+          trace: traceSummary({
+            trace_id: "66666666-6666-4666-8666-666666666666",
+            trace_family: "langgraph_proxy",
+            workflow_kind: "langgraph_agent_run",
+            session_id: "thread-a",
+            run_id: "lg-run-a",
+            request_id: "lg-request-a",
+            model_id: null,
+            provider: "langgraph",
+            output_preview: "upstream_status=200 streaming=true",
+            metadata: { upstream_route: "/threads/thread-a/runs/stream" },
+            scores_count: 0,
+          }),
+          spans: [
+            {
+              span_id: "77777777-7777-4777-8777-777777777777",
+              trace_id: "66666666-6666-4666-8666-666666666666",
+              parent_span_id: null,
+              span_kind: "gateway_proxy",
+              name: "upstream_request",
+              status: "succeeded",
+              sequence_no: 1,
+              started_at: nowIso(),
+              ended_at: nowIso(),
+              duration_ms: 320,
+              input_preview: "POST /threads/thread-a/runs/stream",
+              output_preview: "streaming response",
+              attributes: { thread_id: "thread-a", run_id: "lg-run-a" },
+              error_type: null,
+              error_message: null,
+              created_at: nowIso(),
+            },
+          ],
+          events: [
+            {
+              event_id: "88888888-8888-4888-8888-888888888888",
+              trace_id: "66666666-6666-4666-8666-666666666666",
+              span_id: null,
+              event_type: "proxy_request_finished",
+              sequence_no: 2,
+              occurred_at: nowIso(),
+              payload: { data: { upstream_status: 200, streaming: true } },
+              payload_size_bytes: 70,
+              redacted: true,
+              created_at: nowIso(),
+            },
+          ],
+          scores: [],
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/traces/55555555-5555-4555-8555-555555555555")
+    ) {
+      if (url.searchParams.get("trace_family") !== "rag") {
+        await route.fulfill(jsonResponse({ detail: "wrong trace family" }, 404));
+        return;
+      }
+      await route.fulfill(
+        jsonResponse({
+          trace: traceSummary({
+            trace_id: "55555555-5555-4555-8555-555555555555",
+            trace_family: "rag",
+            workflow_kind: "rag_retrieval",
+            run_id: "rag-run-a",
+            request_id: "rag-request-a",
+            model_id: null,
+            provider: "knowledge-service",
+            output_preview: "2 retrieved documents",
+            metadata: { retrieval: { dataset_ids: ["support-kb"], document_count: 2 } },
+            scores_count: 0,
+          }),
+          spans: [
+            {
+              span_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              trace_id: "55555555-5555-4555-8555-555555555555",
+              parent_span_id: null,
+              span_kind: "retriever",
+              name: "rag_retrieval",
+              status: "succeeded",
+              sequence_no: 2,
+              started_at: nowIso(),
+              ended_at: nowIso(),
+              duration_ms: 64,
+              input_preview: "refund policy",
+              output_preview: "2 retrieved documents",
+              attributes: {
+                "openinference.span.kind": "RETRIEVER",
+                "gen_ai.retrieval.query.text": "refund policy",
+                "retrieval.document_count": 2,
+              },
+              error_type: null,
+              error_message: null,
+              created_at: nowIso(),
+            },
+          ],
+          events: [
+            {
+              event_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+              trace_id: "55555555-5555-4555-8555-555555555555",
+              span_id: null,
+              event_type: "rag_retrieval_completed",
+              sequence_no: 2,
+              occurred_at: nowIso(),
+              payload: { data: { dataset_ids: ["support-kb"], document_count: 2 } },
+              payload_size_bytes: 72,
+              redacted: true,
+              created_at: nowIso(),
+            },
+          ],
+          scores: [],
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/traces/11111111-1111-4111-8111-111111111111")
+    ) {
+      await route.fulfill(
+        jsonResponse({
+          trace: traceSummary({ scores_count: scores.length }),
+          spans: [
+            {
+              span_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              trace_id: "11111111-1111-4111-8111-111111111111",
+              parent_span_id: null,
+              span_kind: "lifecycle",
+              name: "assistant_run",
+              status: "succeeded",
+              sequence_no: 0,
+              started_at: nowIso(),
+              ended_at: nowIso(),
+              duration_ms: 980,
+              input_preview: "hello Authorization: Bearer [redacted]",
+              output_preview: "safe assistant answer",
+              attributes: { mode: "streaming_first" },
+              error_type: null,
+              error_message: null,
+              created_at: nowIso(),
+            },
+            {
+              span_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              trace_id: "11111111-1111-4111-8111-111111111111",
+              parent_span_id: null,
+              span_kind: "model_invocation",
+              name: "streaming_first_generation",
+              status: "succeeded",
+              sequence_no: 2,
+              started_at: nowIso(),
+              ended_at: nowIso(),
+              duration_ms: 740,
+              input_preview: "hello",
+              output_preview: "safe assistant answer",
+              attributes: { usage: { input_tokens: 10, output_tokens: 20 } },
+              error_type: null,
+              error_message: null,
+              created_at: nowIso(),
+            },
+          ],
+          events: [
+            {
+              event_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+              trace_id: "11111111-1111-4111-8111-111111111111",
+              span_id: null,
+              event_type: "run_started",
+              sequence_no: 1,
+              occurred_at: nowIso(),
+              payload: { data: { run_id: "run-a", request_id: "request-a" } },
+              payload_size_bytes: 82,
+              redacted: true,
+              created_at: nowIso(),
+            },
+            {
+              event_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+              trace_id: "11111111-1111-4111-8111-111111111111",
+              span_id: null,
+              event_type: "run_finished",
+              sequence_no: 9,
+              occurred_at: nowIso(),
+              payload: { data: { status: "succeeded" } },
+              payload_size_bytes: 42,
+              redacted: true,
+              created_at: nowIso(),
+            },
+          ],
+          scores,
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/traces/11111111-1111-4111-8111-111111111111/export")
+    ) {
+      await route.fulfill(
+        jsonResponse({
+          trace_id: "11111111-1111-4111-8111-111111111111",
+          format: url.searchParams.get("format") || "openinference",
+          payload: {
+            trace_id: "11111111-1111-4111-8111-111111111111",
+            root: { "openinference.span.kind": "AGENT" },
+          },
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
+      url.pathname.endsWith("/api/v1/eval/traces/11111111-1111-4111-8111-111111111111/scores")
+    ) {
+      const payload = request.postDataJSON();
+      expect(payload.tenant_id).toBeUndefined();
+      const score = {
+        score_id: "44444444-4444-4444-8444-444444444444",
+        trace_id: "11111111-1111-4111-8111-111111111111",
+        span_id: null,
+        score_name: payload.score_name,
+        score_type: payload.score_type,
+        numeric_value: payload.numeric_value,
+        boolean_value: payload.boolean_value,
+        categorical_value: payload.categorical_value,
+        text_value: payload.text_value,
+        label: payload.label,
+        explanation: payload.explanation,
+        scorer_type: "human",
+        evaluator_version: null,
+        created_by: "eval-user",
+        metadata: payload.metadata || {},
+        created_at: nowIso(),
+      };
+      scores = [score, ...scores];
+      await route.fulfill(jsonResponse(score, 201));
+      return;
+    }
+
+    if (request.method() === "POST" && url.pathname.endsWith("/api/v1/eval/datasets")) {
+      const payload = request.postDataJSON();
+      await route.fulfill(
+        jsonResponse(
+          {
+            dataset_id: datasetId,
+            tenant_id: "tenant-a",
+            name: payload.name,
+            description: payload.description || "",
+            version: payload.version || "v1",
+            schema: payload.schema || {},
+            metadata: payload.metadata || {},
+            created_by: "eval-user",
+            created_at: nowIso(),
+            updated_at: nowIso(),
+          },
+          201
+        )
+      );
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
+      url.pathname.endsWith(`/api/v1/eval/datasets/${datasetId}/examples:from-trace`)
+    ) {
+      const payload = request.postDataJSON();
+      expect(payload.trace_family).toBe("assistant");
+      await route.fulfill(
+        jsonResponse(
+          {
+            example_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            dataset_id: datasetId,
+            tenant_id: "tenant-a",
+            split: payload.split || "regression",
+            input: { input_preview: "hello" },
+            expected_output: { output_preview: "safe assistant answer" },
+            metadata: payload.metadata || {},
+            source_trace_id: payload.source_trace_id,
+            source_span_id: payload.source_span_id || null,
+            created_by: "eval-user",
+            created_at: nowIso(),
+          },
+          201
+        )
+      );
+      return;
+    }
+
+    if (request.method() === "POST" && url.pathname.endsWith("/api/v1/eval/evaluators")) {
+      const payload = request.postDataJSON();
+      await route.fulfill(
+        jsonResponse(
+          {
+            evaluator_id: evaluatorId,
+            tenant_id: "tenant-a",
+            name: payload.name,
+            evaluator_type: payload.evaluator_type || "human",
+            rubric: payload.rubric || "",
+            version: payload.version || "v1",
+            sampling_config: payload.sampling_config || {},
+            filter_config: payload.filter_config || {},
+            metadata: payload.metadata || {},
+            created_by: "eval-user",
+            created_at: nowIso(),
+            updated_at: nowIso(),
+          },
+          201
+        )
+      );
+      return;
+    }
+
+    if (request.method() === "POST" && url.pathname.endsWith("/api/v1/eval/experiments")) {
+      const payload = request.postDataJSON();
+      await route.fulfill(
+        jsonResponse(
+          {
+            experiment_id: experimentId,
+            tenant_id: "tenant-a",
+            dataset_id: payload.dataset_id || null,
+            name: payload.name,
+            description: payload.description || "",
+            target_config: payload.target_config || {},
+            metadata: payload.metadata || {},
+            created_by: "eval-user",
+            created_at: nowIso(),
+            updated_at: nowIso(),
+            runs: [],
+          },
+          201
+        )
+      );
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
+      url.pathname.endsWith(`/api/v1/eval/evaluators/${evaluatorId}:run-async`)
+    ) {
+      await route.fulfill(
+        jsonResponse(
+          {
+            job_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            status: "queued",
+            run_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          },
+          202
+        )
+      );
+      return;
+    }
+
+    await route.fulfill(jsonResponse({ detail: "not found" }, 404));
+  });
+
+  return { observedTraceFamilies };
+}
+
+function watchRuntimeFailures(page: Page) {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const badResponses: string[] = [];
+
+  page.on("console", (message) => {
+    if (message.type() === "error" && !/favicon|NO_COLOR/i.test(message.text())) {
+      consoleErrors.push(message.text());
+    }
+  });
+  page.on("pageerror", (error) => {
+    pageErrors.push(String(error));
+  });
+  page.on("response", (response) => {
+    const url = response.url();
+    if (response.status() >= 400 && /\/api\/v1\//.test(url)) {
+      badResponses.push(`${response.status()} ${url}`);
+    }
+  });
+
+  return () => {
+    expect(pageErrors, `Page runtime errors:\n${pageErrors.join("\n")}`).toEqual([]);
+    expect(consoleErrors, `Console errors:\n${consoleErrors.join("\n")}`).toEqual([]);
+    expect([...new Set(badResponses)], `API responses >= 400:\n${badResponses.join("\n")}`).toEqual([]);
+  };
+}
+
+async function expectNoHorizontalOverflow(page: Page) {
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    return doc.scrollWidth - doc.clientWidth;
+  });
+  expect(overflow).toBeLessThanOrEqual(2);
+}
+
+test.describe("Eval trace console", () => {
+  test("blocks authenticated users without Eval permission", async ({ page }) => {
+    const assertNoRuntimeFailures = watchRuntimeFailures(page);
+    await installClientAuth(page, {
+      user_id: "viewer-user",
+      email: "viewer@example.com",
+      display_name: "Viewer User",
+      permissions: ["console:dashboard:view"],
+      effective_permissions: ["console:dashboard:view"],
+    });
+
+    await page.goto("/eval", { waitUntil: "domcontentloaded" });
+    await expect(page).toHaveURL(/\/403$/);
+    await expect(page.getByRole("heading", { name: "403" })).toBeVisible();
+
+    assertNoRuntimeFailures();
+  });
+
+  test("renders assistant traces, family tabs, focus path, and score submission", async ({
+    page,
+  }) => {
+    const assertNoRuntimeFailures = watchRuntimeFailures(page);
+    const harness = await installEvalHarness(page);
+    await fs.mkdir(".playwright", { recursive: true });
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/eval", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByRole("heading", { name: "Eval Console" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: /11111111/ })).toBeVisible();
+    await expect(page.getByText("Redacted trace preview")).toBeVisible();
+    await expect(page.getByText("Transcript locator")).toBeVisible();
+    await expect(page.getByLabel("hello refund transcript anchor", { exact: true })).toBeVisible();
+    await expect(page.getByText("run_started")).toBeVisible();
+    await expect(page.getByText("Grounded answer")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: ".playwright/eval-desktop.png", fullPage: true });
+
+    await page.getByLabel("Transcript, request, or message text").fill("refund transcript anchor");
+    await expect(page.getByRole("row", { name: /11111111/ })).toBeVisible();
+    await expect(page.getByRole("row", { name: /33333333/ })).toHaveCount(0);
+    await page.getByLabel("Turn").fill("4");
+    await expect(page.getByRole("row", { name: /11111111/ })).toBeVisible();
+    await page.getByRole("button", { name: "Export OpenInference" }).click();
+    await expect(page.getByText("Trace export payload ready")).toBeVisible();
+
+    const firstTraceRow = page.getByRole("row", { name: /11111111/ }).first();
+    await firstTraceRow.focus();
+    await expect(firstTraceRow).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await page.getByLabel("Explanation").fill("Useful trace review");
+    await page.getByRole("button", { name: "Submit score" }).click();
+    await expect(page.getByText("Trace score submitted")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Datasets" }).click();
+    await page.getByRole("button", { name: "Create dataset" }).click();
+    await expect(page.getByText("Dataset created")).toBeVisible();
+    await page.getByRole("button", { name: "Add trace to dataset" }).click();
+    await expect(page.getByText("Trace added to dataset")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Evaluators" }).click();
+    await page.getByRole("button", { name: "Create evaluator" }).click();
+    await expect(page.getByText("Evaluator created")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Experiments" }).click();
+    await page.getByRole("button", { name: "Create experiment" }).click();
+    await expect(page.getByText("Experiment created")).toBeVisible();
+    await page.getByRole("button", { name: "Queue evaluator" }).click();
+    await expect(page.getByText("Evaluator run queued")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Trace Explorer" }).click();
+    await page.getByRole("tab", { name: "LangGraph Proxy" }).click();
+    await expect(page.getByRole("heading", { name: "LangGraph Proxy traces" })).toBeVisible();
+    await expect(page.getByRole("row", { name: /66666666/ })).toBeVisible();
+    await expect(
+      page
+        .getByRole("tabpanel", { name: "LangGraph Proxy" })
+        .getByText("proxy_request_finished", { exact: true })
+    ).toBeVisible();
+    expect(harness.observedTraceFamilies).toContain("langgraph_proxy");
+    await page.getByRole("tab", { name: "RAG" }).click();
+    await expect(page.getByRole("heading", { name: "RAG traces" })).toBeVisible();
+    await expect(page.getByRole("row", { name: /55555555/ })).toBeVisible();
+    await expect(
+      page
+        .getByRole("tabpanel", { name: "RAG" })
+        .getByText("rag_retrieval_completed", { exact: true })
+    ).toBeVisible();
+    expect(harness.observedTraceFamilies).toContain("rag");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("tab", { name: "Assistant" }).click();
+    await expect(page.getByRole("heading", { name: "Assistant traces" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Trace detail" })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: ".playwright/eval-mobile.png", fullPage: true });
+
+    assertNoRuntimeFailures();
+  });
+});

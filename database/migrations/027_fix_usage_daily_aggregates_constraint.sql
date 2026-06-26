@@ -17,9 +17,17 @@ DROP INDEX IF EXISTS idx_usage_daily_unique;
 -- Step 2: Add proper UNIQUE CONSTRAINT
 -- Note: The application code will use COALESCE to ensure no NULLs are inserted
 -- ============================================================================
-ALTER TABLE usage_daily_aggregates
-ADD CONSTRAINT uq_usage_daily_aggregates_dimensions
-UNIQUE (tenant_id, user_id, model, assistant_id, service_id, date);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_usage_daily_aggregates_dimensions'
+    ) THEN
+        ALTER TABLE usage_daily_aggregates
+        ADD CONSTRAINT uq_usage_daily_aggregates_dimensions
+        UNIQUE (tenant_id, user_id, model, assistant_id, service_id, date);
+    END IF;
+END $$;
 
 -- ============================================================================
 -- Step 3: Update existing NULL values to empty strings (if any)
@@ -55,9 +63,17 @@ ALTER COLUMN service_id SET DEFAULT '';
 -- ============================================================================
 DROP INDEX IF EXISTS idx_usage_hourly_unique;
 
-ALTER TABLE usage_hourly_aggregates
-ADD CONSTRAINT uq_usage_hourly_aggregates_dimensions
-UNIQUE (tenant_id, user_id, model, assistant_id, service_id, bucket_start);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_usage_hourly_aggregates_dimensions'
+    ) THEN
+        ALTER TABLE usage_hourly_aggregates
+        ADD CONSTRAINT uq_usage_hourly_aggregates_dimensions
+        UNIQUE (tenant_id, user_id, model, assistant_id, service_id, bucket_start);
+    END IF;
+END $$;
 
 UPDATE usage_hourly_aggregates
 SET

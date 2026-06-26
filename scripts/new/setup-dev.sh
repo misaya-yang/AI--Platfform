@@ -93,7 +93,24 @@ container_exists()  { docker ps -a --format '{{.Names}}' | grep -q "^$1$"; }
 ensure_container() {
     local name="$1"; shift
     local image="$1"; shift
-    # remaining args are docker run flags
+    # Remaining args are docker run flags, optionally followed by "--" and
+    # the container command. Docker requires the image before the command.
+    local run_args=()
+    local command_args=()
+    local after_separator=false
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--" ] && [ "$after_separator" = false ]; then
+            after_separator=true
+            shift
+            continue
+        fi
+        if [ "$after_separator" = true ]; then
+            command_args+=("$1")
+        else
+            run_args+=("$1")
+        fi
+        shift
+    done
 
     if container_running "$name"; then
         log_info "$name already running"
@@ -103,7 +120,11 @@ ensure_container() {
     if container_exists "$name"; then
         docker start "$name" >/dev/null
     else
-        docker run -d --name "$name" --restart unless-stopped "$@" "$image" >/dev/null
+        if [ "${#command_args[@]}" -gt 0 ]; then
+            docker run -d --name "$name" --restart unless-stopped "${run_args[@]}" "$image" "${command_args[@]}" >/dev/null
+        else
+            docker run -d --name "$name" --restart unless-stopped "${run_args[@]}" "$image" >/dev/null
+        fi
     fi
     log_success "$name started"
 }
@@ -151,9 +172,15 @@ init_db() {
 
     if [ -f "${PROJECT_ROOT}/database/schema.sql" ]; then
         log_info "Applying schema.sql..."
-        docker exec -i "$DEV_PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
-            < "${PROJECT_ROOT}/database/schema.sql" 2>&1 \
-            | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30
+        local schema_output
+        if ! schema_output="$(
+            docker exec -i "$DEV_PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
+                < "${PROJECT_ROOT}/database/schema.sql" 2>&1
+        )"; then
+            printf '%s\n' "$schema_output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
+            return 1
+        fi
+        printf '%s\n' "$schema_output" | grep -E "^(CREATE|INSERT|ALTER|NOTICE|ERROR)" | head -30 || true
     fi
 
     # Run migrations with tracking
@@ -203,6 +230,7 @@ case $ACTION in
         start_containers
         wait_all_healthy
         init_db
+        sync_workspace_packages
         show_status
         log_success "Dev environment reset complete"
         ;;
@@ -210,6 +238,7 @@ case $ACTION in
         start_containers
         wait_all_healthy
         init_db
+        sync_workspace_packages
         show_status
         log_success "Dev environment ready!"
         echo "Next steps:"

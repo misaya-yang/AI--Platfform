@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 from ai_gateway_core.proxy.sse_heartbeat import (
@@ -39,6 +40,7 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitHeaders,
 )
 from ...proxy.context_injector import ContextInjector, RequestContext
+from ...services.eval.langgraph_trace_capture import record_langgraph_proxy_trace
 from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
 
 router = APIRouter(prefix="/langgraph", tags=["LangGraph"])
@@ -725,25 +727,75 @@ async def passthrough(
 
     instance = await proxy.lb.select_instance()
     client = await proxy._get_client(instance)
+    started_at = time.time()
+    database = getattr(request.app.state, "database", None)
+    request_id = str(getattr(request.state, "request_id", "") or "")
+    traceparent = getattr(request.state, "traceparent", None) or request.headers.get(
+        "traceparent"
+    )
+
+    def _capture_proxy_trace(
+        *,
+        status: str,
+        upstream_status: int | None,
+        error_summary: str | None = None,
+    ) -> None:
+        if database is None:
+            return
+        record_langgraph_proxy_trace(
+            database,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            request_id=request_id,
+            method=method,
+            upstream_path=upstream_path,
+            started_at=started_at,
+            status=status,
+            upstream_status=upstream_status,
+            error_summary=error_summary,
+            traceparent=traceparent,
+            streaming=wants_stream,
+        )
 
     if wants_stream:
 
         async def gen():
-            async with client.stream(
-                method,
-                upstream_path,
-                params=params,
-                headers=headers,
-                content=body if body else None,
-            ) as resp:
-                if resp.status_code >= 400:
-                    err = await resp.aread()
-                    raise HTTPException(
-                        status_code=resp.status_code,
-                        detail=err.decode("utf-8", errors="ignore"),
-                    )
-                async for chunk in resp.aiter_raw():
-                    yield chunk
+            upstream_status: int | None = None
+            status = "succeeded"
+            error_summary: str | None = None
+            try:
+                async with client.stream(
+                    method,
+                    upstream_path,
+                    params=params,
+                    headers=headers,
+                    content=body if body else None,
+                ) as resp:
+                    upstream_status = resp.status_code
+                    if resp.status_code >= 400:
+                        status = "failed"
+                        err = await resp.aread()
+                        error_summary = err.decode("utf-8", errors="ignore")[:500]
+                        raise HTTPException(
+                            status_code=resp.status_code,
+                            detail=error_summary,
+                        )
+                    async for chunk in resp.aiter_raw():
+                        yield chunk
+            except HTTPException:
+                if upstream_status is None:
+                    status = "failed"
+                raise
+            except Exception as exc:
+                status = "failed"
+                error_summary = str(exc)
+                raise
+            finally:
+                _capture_proxy_trace(
+                    status=status,
+                    upstream_status=upstream_status,
+                    error_summary=error_summary,
+                )
 
         # Wrap the upstream byte stream with periodic ``: heartbeat``
         # SSE comments so an idle 30-60s stretch (long KB query, slow
@@ -762,6 +814,13 @@ async def passthrough(
         params=params,
         headers=headers,
         content=body if body else None,
+    )
+    status = "succeeded" if resp.status_code < 400 else "failed"
+    error_summary = None if status == "succeeded" else resp.text[:500]
+    _capture_proxy_trace(
+        status=status,
+        upstream_status=resp.status_code,
+        error_summary=error_summary,
     )
     content_type = resp.headers.get("content-type", "")
     if "application/json" in content_type:

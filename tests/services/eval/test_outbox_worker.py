@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from ai_gateway_core.eval.evaluator_executor import EvaluatorRunResult
+from ai_gateway_core.eval.outbox_worker import EvalOutboxWorker
+from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
+
+
+class FakeEvalRepository:
+    def __init__(self, *, jobs: list[dict[str, Any]] | None = None) -> None:
+        self.jobs = list(jobs or [])
+        self.succeeded: list[str] = []
+        self.failed: list[tuple[str, str]] = []
+
+    async def claim_outbox_jobs(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        if not self.jobs:
+            return []
+        batch = self.jobs[:]
+        self.jobs = []
+        return batch
+
+    async def mark_outbox_succeeded(self, job_id: str) -> None:
+        self.succeeded.append(job_id)
+
+    async def mark_outbox_failed(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        retry_after_seconds: int,  # noqa: ARG002
+        max_attempts: int,  # noqa: ARG002
+    ) -> None:
+        self.failed.append((job_id, error))
+
+
+class FakeEvaluatorExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run_job(self, *, tenant_id: str, job_payload: dict[str, Any]) -> EvaluatorRunResult:
+        self.calls.append({"tenant_id": tenant_id, "job_payload": job_payload})
+        return EvaluatorRunResult(run_id=str(job_payload.get("run_id")), status="succeeded")
+
+
+@pytest.mark.asyncio
+async def test_outbox_worker_executes_eval_job_and_marks_success() -> None:
+    repo = FakeEvalRepository(
+        jobs=[
+            {
+                "job_id": "job-1",
+                "tenant_id": "tenant-a",
+                "job_type": "eval.evaluator.run",
+                "payload": {"run_id": "run-1", "evaluator_id": "eval-1"},
+                "attempts": 1,
+            }
+        ]
+    )
+    executor = FakeEvaluatorExecutor()
+    worker = EvalOutboxWorker(repo, executor, poll_interval_s=0.01, batch_size=1)
+
+    await worker._handle_job(
+        {
+            "job_id": "job-1",
+            "tenant_id": "tenant-a",
+            "job_type": "eval.evaluator.run",
+            "payload": {"run_id": "run-1", "evaluator_id": "eval-1"},
+            "attempts": 1,
+        }
+    )
+
+    assert executor.calls
+    assert repo.succeeded == ["job-1"]
+
+
+@pytest.mark.asyncio
+async def test_outbox_worker_marks_failed_job_for_retry() -> None:
+    repo = FakeEvalRepository()
+
+    class FailingExecutor(FakeEvaluatorExecutor):
+        async def run_job(self, *, tenant_id: str, job_payload: dict[str, Any]) -> EvaluatorRunResult:  # noqa: ARG002
+            raise RuntimeError("judge unavailable")
+
+    worker = EvalOutboxWorker(repo, FailingExecutor(), poll_interval_s=0.01, batch_size=1)
+    await worker._handle_job(
+        {
+            "job_id": "job-2",
+            "tenant_id": "tenant-a",
+            "job_type": "eval.evaluator.run",
+            "payload": {"run_id": "run-2", "evaluator_id": "eval-1"},
+            "attempts": 2,
+        }
+    )
+
+    assert repo.failed == [("job-2", "judge unavailable")]
+
+
+class FakeTransaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class FakeOutboxConnection:
+    def __init__(self) -> None:
+        self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction()
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append((query, args))
+        return [
+            {
+                "job_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "tenant_id": "tenant-a",
+                "job_type": "eval.evaluator.run",
+                "payload": {"run_id": "run-a"},
+                "attempts": 1,
+            }
+        ]
+
+
+class FakePoolAcquire:
+    def __init__(self, conn: FakeOutboxConnection) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> FakeOutboxConnection:
+        return self.conn
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class FakePoolHolder:
+    enabled = True
+
+    def __init__(self, conn: FakeOutboxConnection) -> None:
+        self.conn = conn
+        self._pool = self
+
+    def acquire(self) -> FakePoolAcquire:
+        return FakePoolAcquire(self.conn)
+
+
+@pytest.mark.asyncio
+async def test_repository_claim_outbox_jobs_uses_limit_and_max_attempts_only() -> None:
+    conn = FakeOutboxConnection()
+    repo = AgentTraceRepository(FakePoolHolder(conn))
+
+    rows = await repo.claim_outbox_jobs(limit=3, max_attempts=7)
+
+    assert rows[0]["job_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert conn.fetch_calls
+    assert conn.fetch_calls[0][1] == (3, 7)

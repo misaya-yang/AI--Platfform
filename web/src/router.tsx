@@ -33,6 +33,7 @@ const DatasetCreatePage = lazy(() => import("@/pages/knowledge/DatasetCreate"));
 const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPage");
 const ExamsPage = lazyNamed(() => import("@/pages/exams"), "ExamsPage");
 const ExamDetailPage = lazyNamed(() => import("@/pages/exams/ExamDetailPage"), "ExamDetailPage");
+const EvalPage = lazyNamed(() => import("@/pages/eval"), "EvalPage");
 
 function RouteFallback() {
   return (
@@ -118,6 +119,14 @@ export function AppRouter() {
                 blockRedirectTo="/playground"
               >
                 <AssistantPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/eval"
+            element={
+              <ProtectedRoute requiredPermission="console:eval:view">
+                <EvalPage />
               </ProtectedRoute>
             }
           />

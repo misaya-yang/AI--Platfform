@@ -181,7 +181,9 @@ test.describe("Quiz workflow", () => {
     // --- Step 8: Navigate to /quiz/:shareCode page ---
     // Just verify the public page loads (renders intro screen)
     await page.goto(`/quiz/${share.share_code}`, { waitUntil: "domcontentloaded" });
-    await expect(page.getByText(publicQuiz.title)).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.getByRole("heading", { name: publicQuiz.title }).first(),
+    ).toBeVisible({ timeout: 10_000 });
 
     // --- Step 9: List quizzes ---
     const listRes = await request.get(
@@ -202,11 +204,12 @@ test.describe("Quiz workflow", () => {
       { headers },
     );
     expect(delRes.ok(), `Delete failed: ${delRes.status()}`).toBeTruthy();
+    const deletedQuizId = quizId;
     quizId = undefined; // prevent afterAll cleanup
 
     // Verify deletion
     const getAfterDel = await request.get(
-      `${apiUrl}/api/v1/assistant/quiz/${quizId ?? "nonexistent"}`,
+      `${apiUrl}/api/v1/assistant/quiz/${deletedQuizId}`,
       { headers },
     );
     expect(getAfterDel.status()).toBe(404);

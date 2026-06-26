@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { buildAuthHeaders, ensureAuthenticatedPage, getApiUrl } from "./support/helpers";
+import { buildAuthHeaders, ensureAuthenticatedPage, getApiUrl, readE2ETestUser } from "./support/helpers";
 
 const DATASET_PREFIX = "e2e-kb-test";
 
@@ -13,8 +13,10 @@ test.describe("Knowledge Base workflow", () => {
   let datasetId: string | undefined;
   let datasetName: string;
   let headers: Record<string, string>;
+  let testPassword: string;
 
   test.beforeAll(async ({ request }) => {
+    testPassword = (await readE2ETestUser()).password;
     headers = await buildAuthHeaders(request);
   });
 
@@ -22,18 +24,27 @@ test.describe("Knowledge Base workflow", () => {
     // Clean up: delete dataset if it was created
     if (datasetId) {
       const apiUrl = getApiUrl();
-      await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, { headers }).catch(() => {});
+      await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
+        headers,
+        data: { password: testPassword, reason: "E2E cleanup" },
+      }).catch(() => {});
     }
   });
 
-  test("full KB lifecycle: create, upload, verify, toggle, delete", async ({ page, request }) => {
+  test("full KB lifecycle: create, upload, verify, update, delete", async ({ page, request }) => {
     const apiUrl = getApiUrl();
     datasetName = uniqueName();
 
     // --- Step 1: Create dataset via API ---
     const createRes = await request.post(`${apiUrl}/api/v1/knowledge/datasets`, {
       headers,
-      data: { name: datasetName, description: "E2E test dataset" },
+      data: {
+        name: datasetName,
+        description: "E2E test dataset",
+        embedding_provider: "local",
+        embedding_model: "hash-384",
+        embedding_dimension: 384,
+      },
     });
     expect(createRes.ok(), `Create dataset failed: ${createRes.status()}`).toBeTruthy();
     const created = await createRes.json();
@@ -51,7 +62,7 @@ test.describe("Knowledge Base workflow", () => {
       headers,
       data: {
         title: "E2E Test Document",
-        text: "This is a test document created by the Playwright E2E suite. Bismillah.",
+        content: "This is a test document created by the Playwright E2E suite. Bismillah.",
       },
     });
     expect(docRes.ok(), `Create document failed: ${docRes.status()}`).toBeTruthy();
@@ -69,42 +80,25 @@ test.describe("Knowledge Base workflow", () => {
     // Verify document title or some content is shown
     await expect(page.getByText("E2E Test Document")).toBeVisible({ timeout: 15_000 });
 
-    // --- Step 6: Disable dataset via API ---
-    const disableRes = await request.patch(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}/status`, {
+    // --- Step 6: Update dataset metadata via API ---
+    const updatedDescription = "E2E test dataset updated";
+    const updateRes = await request.put(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
       headers,
-      data: { enabled: false },
+      data: { description: updatedDescription },
     });
-    if (!disableRes.ok()) {
-      // Try compat route
-      const disableCompat = await request.post(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}/enable`, {
-        headers,
-        data: { enabled: false },
-      });
-      expect(disableCompat.ok(), "Disable dataset failed on both routes").toBeTruthy();
-    }
+    expect(updateRes.ok(), `Update dataset failed: ${updateRes.status()}`).toBeTruthy();
 
-    // Verify disabled state
-    const getAfterDisable = await request.get(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, { headers });
-    expect(getAfterDisable.ok()).toBeTruthy();
-    const dsDisabled = await getAfterDisable.json();
-    const disabledData = dsDisabled.data ?? dsDisabled;
-    expect(disabledData.enabled).toBe(false);
-
-    // --- Step 7: Re-enable dataset via API ---
-    const enableRes = await request.patch(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}/status`, {
-      headers,
-      data: { enabled: true },
-    });
-    if (!enableRes.ok()) {
-      const enableCompat = await request.post(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}/enable`, {
-        headers,
-        data: { enabled: true },
-      });
-      expect(enableCompat.ok(), "Enable dataset failed on both routes").toBeTruthy();
-    }
+    const getAfterUpdate = await request.get(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, { headers });
+    expect(getAfterUpdate.ok()).toBeTruthy();
+    const dsUpdated = await getAfterUpdate.json();
+    const updatedData = dsUpdated.data ?? dsUpdated;
+    expect(updatedData.description).toBe(updatedDescription);
 
     // --- Step 8: Delete dataset via API ---
-    const deleteRes = await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, { headers });
+    const deleteRes = await request.delete(`${apiUrl}/api/v1/knowledge/datasets/${datasetId}`, {
+      headers,
+      data: { password: testPassword, reason: "E2E lifecycle complete" },
+    });
     expect(deleteRes.ok(), `Delete dataset failed: ${deleteRes.status()}`).toBeTruthy();
     datasetId = undefined; // prevent afterAll cleanup
 

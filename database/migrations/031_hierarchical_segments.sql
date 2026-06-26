@@ -70,6 +70,10 @@ CREATE INDEX IF NOT EXISTS idx_segments_level ON segments(dataset_id, level);
 CREATE INDEX IF NOT EXISTS idx_segments_parent ON segments(parent_segment_id) WHERE parent_segment_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_segments_document_level ON segments(document_id, level);
 
+-- Add detection_result column to documents for storing auto-detection results
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS detection_result JSONB;
+COMMENT ON COLUMN documents.detection_result IS 'Result of automatic document type detection';
+
 -- FIX: Add GIN index for detection_result if it will be queried
 CREATE INDEX IF NOT EXISTS idx_documents_detection_result ON documents USING GIN (detection_result) 
 WHERE detection_result IS NOT NULL;
@@ -112,10 +116,6 @@ CREATE TRIGGER trigger_document_summaries_updated_at
     BEFORE UPDATE ON document_summaries
     FOR EACH ROW
     EXECUTE FUNCTION update_document_summaries_timestamp();
-
--- Add detection_result column to documents for storing auto-detection results
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS detection_result JSONB;
-COMMENT ON COLUMN documents.detection_result IS 'Result of automatic document type detection';
 
 -- Migration complete
 
