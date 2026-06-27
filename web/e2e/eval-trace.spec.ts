@@ -111,6 +111,28 @@ async function installEvalHarness(page: Page) {
     const request = route.request();
     const url = new URL(request.url());
 
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/dashboard")) {
+      await route.fulfill(
+        jsonResponse({
+          metrics: {
+            total_traces: 4,
+            scored_traces: 1,
+            example_count: 10,
+            pass_rate: 0.9,
+            trajectory_pass_rate: 0.96,
+            critical_failures: 0,
+            judge_pending_count: 2,
+            latest_baseline: "assistant-baseline",
+            latest_candidate: "candidate",
+          },
+          run_health: { succeeded_runs: 1, failed_runs: 0 },
+          queue_health: { queued_jobs: 0, failed_jobs: 0 },
+          latest_gate_status: { status: "pass" },
+        })
+      );
+      return;
+    }
+
     if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/summary")) {
       await route.fulfill(
         jsonResponse({
@@ -137,6 +159,18 @@ async function installEvalHarness(page: Page) {
           datasets: [],
           total: 0,
           limit: Number(url.searchParams.get("limit") || 50),
+          offset: Number(url.searchParams.get("offset") || 0),
+        })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith(`/api/v1/eval/datasets/${datasetId}/examples`)) {
+      await route.fulfill(
+        jsonResponse({
+          examples: [],
+          total: 0,
+          limit: Number(url.searchParams.get("limit") || 200),
           offset: Number(url.searchParams.get("offset") || 0),
         })
       );
@@ -710,6 +744,8 @@ test.describe("Eval trace console", () => {
     await page.goto("/eval", { waitUntil: "domcontentloaded" });
 
     await expect(page.getByRole("heading", { name: "Eval Console" })).toBeVisible();
+    await expect(page.getByText("Golden cases")).toBeVisible();
+    await page.getByRole("tab", { name: "Traces" }).click();
     await expect(page.getByRole("cell", { name: /11111111/ })).toBeVisible();
     await expect(page.getByText("Redacted trace preview")).toBeVisible();
     await expect(page.getByText("Transcript locator")).toBeVisible();
@@ -736,7 +772,7 @@ test.describe("Eval trace console", () => {
     await page.getByRole("button", { name: "Submit score" }).click();
     await expect(page.getByText("Trace score submitted")).toBeVisible();
 
-    await page.getByRole("tab", { name: "Datasets" }).click();
+    await page.getByRole("tab", { name: "Golden Sets" }).click();
     await page.getByRole("button", { name: "Create dataset" }).click();
     await expect(page.getByText("Dataset created")).toBeVisible();
     await page.getByRole("button", { name: "Add trace to dataset" }).click();
@@ -752,7 +788,7 @@ test.describe("Eval trace console", () => {
     await page.getByRole("button", { name: "Queue evaluator" }).click();
     await expect(page.getByText("Evaluator run queued")).toBeVisible();
 
-    await page.getByRole("tab", { name: "Trace Explorer" }).click();
+    await page.getByRole("tab", { name: "Traces" }).click();
     await page.getByRole("tab", { name: "LangGraph Proxy" }).click();
     await expect(page.getByRole("heading", { name: "LangGraph Proxy traces" })).toBeVisible();
     await expect(page.getByRole("row", { name: /66666666/ })).toBeVisible();

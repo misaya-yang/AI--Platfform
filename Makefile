@@ -158,7 +158,7 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-eval-dev test-isolation snapshot-assistant-openapi
+.PHONY: verify-eval-dev eval-regression-gate test-isolation snapshot-assistant-openapi
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@uv run ruff check \
@@ -191,6 +191,12 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 		tests/services/eval/test_trace_capture_helpers.py
 	@corepack pnpm@10.33.0 -C web lint
 	@corepack pnpm@10.33.0 -C web type-check
+
+eval-regression-gate:       ## 运行离线 Assistant Eval golden regression gate
+	@uv run python scripts/eval_golden.py validate tests/fixtures/eval/golden/assistant_regression_v1.jsonl
+	@uv run python scripts/eval_golden.py gate tests/fixtures/eval/golden/assistant_regression_v1.jsonl \
+		--output reports/eval-regression/latest.json \
+		--markdown reports/eval-regression/latest.md
 
 # -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
 

@@ -48,6 +48,8 @@ def _trace_target(detail: dict[str, Any] | None) -> dict[str, Any] | None:
         "total_latency_ms": int(trace.get("total_latency_ms") or 0),
         "model_id": trace.get("model_id"),
         "metadata": trace.get("metadata") or {},
+        "spans": detail.get("spans") or [],
+        "events": detail.get("events") or [],
     }
 
 
@@ -68,6 +70,18 @@ def _apply_rule(rule: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str
         haystack = str(target.get("output_preview") or "")
         ok = needle.lower() in haystack.lower() if needle else True
         return ok, f"output {'contains' if ok else 'missing'} {needle!r}"
+    if rule_type == "expected_output_contains":
+        expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
+        needle = str(rule.get("value") or expected.get("contains") or expected.get("output_preview") or "")
+        haystack = str(target.get("output_preview") or "")
+        ok = needle.lower() in haystack.lower() if needle else True
+        return ok, f"expected output {'matched' if ok else 'missing'} {needle!r}"
+    if rule_type == "output_matches_expected":
+        expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
+        needle = str(expected.get("output_preview") or expected.get("contains") or "")
+        haystack = str(target.get("output_preview") or "")
+        ok = needle.lower() in haystack.lower() if needle else True
+        return ok, f"output {'matches' if ok else 'does not match'} expected preview"
     if rule_type == "output_not_empty":
         haystack = str(target.get("output_preview") or "").strip()
         ok = bool(haystack)
@@ -108,6 +122,70 @@ def _score_with_rules(
     }
 
 
+def _span_kinds(target: dict[str, Any]) -> list[str]:
+    spans = target.get("spans") if isinstance(target.get("spans"), list) else []
+    kinds: list[str] = []
+    for span in spans:
+        if isinstance(span, dict) and span.get("span_kind"):
+            kinds.append(str(span["span_kind"]))
+    return kinds
+
+
+def _event_types(target: dict[str, Any]) -> list[str]:
+    events = target.get("events") if isinstance(target.get("events"), list) else []
+    types: list[str] = []
+    for event in events:
+        if isinstance(event, dict) and event.get("event_type"):
+            types.append(str(event["event_type"]))
+    return types
+
+
+def _score_with_trajectory(
+    evaluator: dict[str, Any],
+    target: dict[str, Any],
+) -> dict[str, Any]:
+    filter_config = evaluator.get("filter_config") or {}
+    expected = target.get("expected_trajectory") if isinstance(target.get("expected_trajectory"), dict) else {}
+    config = {**expected, **filter_config}
+    required_spans = [str(item) for item in config.get("required_span_kinds", []) if isinstance(item, str)]
+    forbidden_spans = [str(item) for item in config.get("forbidden_span_kinds", []) if isinstance(item, str)]
+    required_events = [str(item) for item in config.get("required_events", []) if isinstance(item, str)]
+    actual_spans = _span_kinds(target)
+    actual_events = _event_types(target)
+    failed: list[str] = []
+    missing_spans = [span for span in required_spans if span not in actual_spans]
+    forbidden_present = [span for span in forbidden_spans if span in actual_spans]
+    missing_events = [event for event in required_events if event not in actual_events]
+    if missing_spans:
+        failed.append(f"missing span kinds: {', '.join(missing_spans)}")
+    if forbidden_present:
+        failed.append(f"forbidden span kinds present: {', '.join(forbidden_present)}")
+    if missing_events:
+        failed.append(f"missing events: {', '.join(missing_events)}")
+    checks = max(len(required_spans) + len(forbidden_spans) + len(required_events), 1)
+    score = max(0.0, 1.0 - (len(failed) / checks))
+    return {
+        "score_name": evaluator.get("name") or "trajectory",
+        "score_type": "numeric",
+        "numeric_value": round(score, 4),
+        "label": "pass" if not failed else "fail",
+        "explanation": "; ".join(failed) if failed else "trajectory matched expected spans/events",
+        "scorer_type": "rule",
+        "score_source": "rule",
+        "evaluator_id": evaluator.get("evaluator_id"),
+        "evaluator_name": evaluator.get("name"),
+        "evaluator_version": evaluator.get("version"),
+        "confidence": 1.0,
+        "target_type": "trace",
+        "target_id": target.get("trace_id"),
+        "metadata": {
+            "component": "trajectory",
+            "actual_span_kinds": actual_spans,
+            "actual_events": actual_events,
+        },
+    }
+
+
 def _parse_llm_score_response(text: str) -> dict[str, Any] | None:
     cleaned = text.strip()
     if not cleaned:
@@ -129,30 +207,28 @@ def _parse_llm_score_response(text: str) -> dict[str, Any] | None:
 
 
 def _heuristic_llm_score(evaluator: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
-    output = str(target.get("output_preview") or "")
-    score = 0.2
-    if output.strip():
-        score += 0.4
-    if len(output.strip()) >= 40:
-        score += 0.2
-    if str(target.get("status") or "") == "succeeded":
-        score += 0.2
-    score = min(1.0, score)
     return {
         "score_name": evaluator.get("name") or "quality",
         "score_type": "numeric",
-        "numeric_value": round(score, 4),
-        "label": "pass" if score >= 0.7 else "review",
-        "explanation": "Heuristic LLM-judge fallback used because no judge model response was available.",
+        "numeric_value": 0.0,
+        "label": "review",
+        "explanation": "LLM judge did not return a valid score; manual review is required.",
         "scorer_type": "llm",
         "score_source": "llm",
         "evaluator_id": evaluator.get("evaluator_id"),
         "evaluator_name": evaluator.get("name"),
         "evaluator_version": evaluator.get("version"),
-        "confidence": 0.35,
+        "confidence": 0.0,
         "target_type": "trace",
         "target_id": target.get("trace_id"),
     }
+
+
+def _score_number(payload: dict[str, Any]) -> float:
+    value = payload.get("numeric_value")
+    if isinstance(value, int | float):
+        return max(0.0, min(1.0, float(value)))
+    return 0.0
 
 
 class EvaluatorExecutor:
@@ -332,6 +408,9 @@ class EvaluatorExecutor:
             if not target:
                 continue
             target["expected_output"] = example.get("expected_output") or {}
+            metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
+            target["expected_trajectory"] = metadata.get("expected_trajectory") or {}
+            target["assertions"] = metadata.get("assertions") or []
             target["example_id"] = example.get("example_id")
             if target.get("example_id"):
                 target["target_type"] = "example"
@@ -347,6 +426,10 @@ class EvaluatorExecutor:
         evaluator_type = str(evaluator.get("evaluator_type") or "rule")
         if evaluator_type == "rule":
             payload = _score_with_rules(evaluator, target)
+        elif evaluator_type == "trajectory":
+            payload = _score_with_trajectory(evaluator, target)
+        elif evaluator_type == "composite":
+            payload = await self._score_with_composite(evaluator, target)
         else:
             payload = await self._score_with_llm(evaluator, target)
         if target.get("target_type"):
@@ -363,6 +446,7 @@ class EvaluatorExecutor:
         metadata = evaluator.get("metadata") or {}
         judge_model_id = str(metadata.get("judge_model_id") or "gpt-4o-mini")
         rubric = str(evaluator.get("rubric") or "Score helpfulness from 0 to 1.")
+        temperature = float(metadata.get("temperature") or 0)
         prompt = (
             "You are an evaluator. Return JSON only with keys: "
             "numeric_value (0-1), label, explanation, confidence (0-1).\n"
@@ -375,7 +459,12 @@ class EvaluatorExecutor:
                 response = await self.llm_complete(judge_model_id, prompt)
                 parsed = _parse_llm_score_response(response)
                 if parsed:
+                    if "numeric_value" not in parsed:
+                        raise ValueError("LLM judge response missing numeric_value")
                     numeric = float(parsed.get("numeric_value", 0))
+                    confidence = float(parsed.get("confidence", 0.6))
+                    if not 0 <= numeric <= 1 or not 0 <= confidence <= 1:
+                        raise ValueError("LLM judge score or confidence out of range")
                     return {
                         "score_name": evaluator.get("name") or "quality",
                         "score_type": "numeric",
@@ -387,11 +476,80 @@ class EvaluatorExecutor:
                         "evaluator_id": evaluator.get("evaluator_id"),
                         "evaluator_name": evaluator.get("name"),
                         "evaluator_version": evaluator.get("version"),
-                        "confidence": float(parsed.get("confidence") or 0.6),
+                        "confidence": confidence,
                         "target_type": "trace",
                         "target_id": target.get("trace_id"),
-                        "metadata": {"judge_model_id": judge_model_id},
+                        "metadata": {"judge_model_id": judge_model_id, "temperature": temperature},
                     }
             except Exception as exc:  # noqa: BLE001 - evaluator must degrade gracefully
-                logger.warning("LLM judge failed, using heuristic fallback: %s", exc)
+                logger.warning("LLM judge failed, marking review required: %s", exc)
         return _heuristic_llm_score(evaluator, target)
+
+    async def _score_with_composite(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+    ) -> dict[str, Any]:
+        filter_config = evaluator.get("filter_config") or {}
+        components = filter_config.get("components")
+        if not isinstance(components, list) or not components:
+            components = [
+                {"type": "rule", "weight": 0.5},
+                {"type": "trajectory", "weight": 0.5},
+            ]
+        total_weight = 0.0
+        weighted_score = 0.0
+        hard_failed = False
+        breakdown: list[dict[str, Any]] = []
+        for index, component in enumerate(components, start=1):
+            if not isinstance(component, dict):
+                continue
+            component_type = str(component.get("type") or "rule")
+            weight = float(component.get("weight") or 1.0)
+            component_evaluator = {
+                **evaluator,
+                "name": component.get("name") or f"{evaluator.get('name') or 'composite'}:{component_type}",
+                "evaluator_type": component_type,
+                "filter_config": component.get("config") or filter_config,
+            }
+            if component_type == "trajectory":
+                score_payload = _score_with_trajectory(component_evaluator, target)
+            elif component_type in {"llm", "llm_judge"}:
+                score_payload = await self._score_with_llm(component_evaluator, target)
+            else:
+                score_payload = _score_with_rules(component_evaluator, target)
+            score = _score_number(score_payload)
+            threshold = float(component.get("threshold") or 0.8)
+            if component.get("hard_blocker") and score < threshold:
+                hard_failed = True
+            total_weight += weight
+            weighted_score += score * weight
+            breakdown.append(
+                {
+                    "index": index,
+                    "type": component_type,
+                    "weight": weight,
+                    "score": score,
+                    "label": score_payload.get("label"),
+                    "hard_blocker": bool(component.get("hard_blocker")),
+                }
+            )
+        final_score = weighted_score / total_weight if total_weight else 0.0
+        if hard_failed:
+            final_score = min(final_score, 0.49)
+        return {
+            "score_name": evaluator.get("name") or "composite",
+            "score_type": "numeric",
+            "numeric_value": round(final_score, 4),
+            "label": "pass" if final_score >= float(filter_config.get("pass_threshold", 0.8)) else "fail",
+            "explanation": "Composite evaluator score from rule, trajectory, and judge components.",
+            "scorer_type": "system",
+            "score_source": "system",
+            "evaluator_id": evaluator.get("evaluator_id"),
+            "evaluator_name": evaluator.get("name"),
+            "evaluator_version": evaluator.get("version"),
+            "confidence": min(1.0, max((item["score"] for item in breakdown), default=0.0)),
+            "target_type": "trace",
+            "target_id": target.get("trace_id"),
+            "metadata": {"components": breakdown, "hard_failed": hard_failed},
+        }

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.permissions import Capability, build_permission_denied_detail
 from ...persistence.database import DatabaseStorage
+from ...services.eval.golden import apply_gate
 from ..eval_export import EXPORT_REDACTION_POLICY, export_trace
 from ..schemas.eval import (
     AgentTraceDetailResponse,
@@ -20,6 +21,7 @@ from ..schemas.eval import (
     AgentTraceScoreCreate,
     AgentTraceSummary,
     EvalAsyncJobResponse,
+    EvalDashboardResponse,
     EvalDataset,
     EvalDatasetCreate,
     EvalDatasetListResponse,
@@ -30,10 +32,19 @@ from ..schemas.eval import (
     EvalExample,
     EvalExampleFromTraceCreate,
     EvalExampleListResponse,
+    EvalExamplesExportResponse,
+    EvalExamplesImportRequest,
+    EvalExamplesImportResponse,
+    EvalExampleUpdate,
     EvalExperiment,
     EvalExperimentCreate,
     EvalExperimentListResponse,
     EvalExperimentRun,
+    EvalExperimentRunBatchResponse,
+    EvalExperimentRunComparisonResponse,
+    EvalExperimentRunCreate,
+    EvalGateDryRunRequest,
+    EvalGateDryRunResponse,
     EvalTraceExportResponse,
     EvalTraceMonitoringSummary,
     EvalTraceThreadResponse,
@@ -117,6 +128,20 @@ async def get_eval_summary(
         days=days,
     )
     return EvalTraceMonitoringSummary(**summary)
+
+
+@router.get("/dashboard", response_model=EvalDashboardResponse)
+async def get_eval_dashboard(
+    request: Request,
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalDashboardResponse:
+    _require_eval_trace_access(request, auth)
+    dashboard = await _get_trace_repository(request).get_dashboard(
+        tenant_id=auth.tenant_id,
+        days=days,
+    )
+    return EvalDashboardResponse(**dashboard)
 
 
 @router.get("/traces", response_model=AgentTraceListResponse)
@@ -360,6 +385,96 @@ async def list_eval_examples(
     )
 
 
+@router.patch("/datasets/{dataset_id}/examples/{example_id}", response_model=EvalExample)
+async def update_eval_example(
+    dataset_id: str,
+    example_id: str,
+    body: EvalExampleUpdate,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExample:
+    _require_eval_run_access(request, auth)
+    example = await _get_trace_repository(request).update_example(
+        tenant_id=auth.tenant_id,
+        dataset_id=dataset_id,
+        example_id=example_id,
+        payload=body.model_dump(exclude_unset=True),
+    )
+    if not example:
+        raise HTTPException(status_code=404, detail="Example not found")
+    return EvalExample(**example)
+
+
+@router.post(
+    "/datasets/{dataset_id}/examples:import",
+    response_model=EvalExamplesImportResponse,
+    status_code=201,
+)
+async def import_eval_examples(
+    dataset_id: str,
+    body: EvalExamplesImportRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExamplesImportResponse:
+    _require_eval_run_access(request, auth)
+    result = await _get_trace_repository(request).import_examples(
+        tenant_id=auth.tenant_id,
+        dataset_id=dataset_id,
+        created_by=auth.user_id,
+        examples=[example.model_dump() for example in body.examples],
+    )
+    return EvalExamplesImportResponse(
+        imported=result.get("imported", 0),
+        skipped=result.get("skipped", 0),
+        examples=[EvalExample(**example) for example in result.get("examples", [])],
+    )
+
+
+@router.get("/datasets/{dataset_id}/examples:export", response_model=EvalExamplesExportResponse)
+async def export_eval_examples(
+    dataset_id: str,
+    request: Request,
+    split: Annotated[str | None, Query()] = None,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExamplesExportResponse:
+    _require_eval_trace_access(request, auth)
+    repo = _get_trace_repository(request)
+    dataset = await repo.get_dataset(tenant_id=auth.tenant_id, dataset_id=dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    rows, _total = await repo.list_examples(
+        tenant_id=auth.tenant_id,
+        dataset_id=dataset_id,
+        split=split,
+        limit=500,
+        offset=0,
+    )
+    export_items = []
+    for row in rows:
+        metadata = row.get("metadata") or {}
+        export_items.append(
+            {
+                "case_id": metadata.get("case_id") or row.get("example_id"),
+                "split": row.get("split") or "regression",
+                "input": row.get("input") or {},
+                "expected_output": row.get("expected_output") or {},
+                "expected_trajectory": metadata.get("expected_trajectory") or {},
+                "assertions": metadata.get("assertions") or [],
+                "metadata": {
+                    key: value
+                    for key, value in metadata.items()
+                    if key not in {"case_id", "expected_trajectory", "assertions"}
+                },
+                "source_trace_id": row.get("source_trace_id"),
+                "source_span_id": row.get("source_span_id"),
+            }
+        )
+    return EvalExamplesExportResponse(
+        dataset=EvalDataset(**dataset),
+        examples=export_items,
+    )
+
+
 @router.post("/datasets", response_model=EvalDataset, status_code=201)
 async def create_eval_dataset(
     body: EvalDatasetCreate,
@@ -517,6 +632,58 @@ async def get_eval_experiment_run(
     return EvalExperimentRun(**run)
 
 
+@router.get("/experiment-runs:compare", response_model=EvalExperimentRunComparisonResponse)
+async def compare_eval_experiment_runs(
+    request: Request,
+    baseline_run_id: Annotated[str, Query()],
+    candidate_run_id: Annotated[str, Query()],
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExperimentRunComparisonResponse:
+    _require_eval_trace_access(request, auth)
+    comparison = await _get_trace_repository(request).compare_experiment_runs(
+        tenant_id=auth.tenant_id,
+        baseline_run_id=baseline_run_id,
+        candidate_run_id=candidate_run_id,
+    )
+    if not comparison:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    return EvalExperimentRunComparisonResponse(**comparison)
+
+
+@router.post("/experiments/{experiment_id}:run", response_model=EvalExperimentRunBatchResponse, status_code=202)
+async def run_eval_experiment(
+    experiment_id: str,
+    body: EvalExperimentRunCreate,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExperimentRunBatchResponse:
+    _require_eval_run_access(request, auth)
+    repo = _get_trace_repository(request)
+    experiment = await repo.get_experiment(tenant_id=auth.tenant_id, experiment_id=experiment_id)
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    jobs = []
+    for evaluator_id in body.evaluator_ids:
+        job = await repo.enqueue_evaluator_run(
+            tenant_id=auth.tenant_id,
+            evaluator_id=evaluator_id,
+            created_by=auth.user_id,
+            payload={
+                "experiment_id": experiment_id,
+                "dataset_id": body.dataset_id or experiment.get("dataset_id"),
+                "trace_id": body.target_snapshot.get("trace_id"),
+                "target_snapshot": {
+                    **body.target_snapshot,
+                    "candidate_label": body.candidate_label,
+                    "baseline_label": body.baseline_label,
+                },
+                "metadata": body.metadata,
+            },
+        )
+        jobs.append(EvalAsyncJobResponse(**job))
+    return EvalExperimentRunBatchResponse(jobs=jobs)
+
+
 @router.post("/evaluators/{evaluator_id}:run-async", response_model=EvalAsyncJobResponse, status_code=202)
 async def run_eval_evaluator_async(
     evaluator_id: str,
@@ -532,3 +699,32 @@ async def run_eval_evaluator_async(
         payload=body.model_dump(),
     )
     return EvalAsyncJobResponse(**job)
+
+
+@router.post("/gates:dry-run", response_model=EvalGateDryRunResponse)
+async def dry_run_eval_gate(
+    body: EvalGateDryRunRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalGateDryRunResponse:
+    _require_eval_run_access(request, auth)
+    metrics = dict(body.result_payload.get("metrics") or body.result_payload)
+    baseline_metrics = None
+    if body.baseline_run_id and body.candidate_run_id:
+        comparison = await _get_trace_repository(request).compare_experiment_runs(
+            tenant_id=auth.tenant_id,
+            baseline_run_id=body.baseline_run_id,
+            candidate_run_id=body.candidate_run_id,
+        )
+        if not comparison:
+            raise HTTPException(status_code=404, detail="Experiment run not found")
+        metrics = comparison.get("candidate_summary") or metrics
+        baseline_metrics = comparison.get("baseline_summary")
+    gate = apply_gate(metrics, thresholds=body.thresholds, baseline_metrics=baseline_metrics)
+    return EvalGateDryRunResponse(
+        status=gate["status"],
+        thresholds=gate["thresholds"],
+        metrics=gate["metrics"],
+        failures=gate["failures"],
+        report={"source": "api-dry-run", "baseline_run_id": body.baseline_run_id},
+    )

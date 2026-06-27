@@ -6,6 +6,8 @@ export type SpanStatus = "running" | "succeeded" | "failed" | "cancelled" | "ski
 export type ScoreType = "numeric" | "categorical" | "boolean" | "text";
 export type ScorerType = "human" | "llm" | "rule" | "system";
 export type ScoreTargetType = "trace" | "span" | "thread" | "dataset_run" | "example";
+export type EvalReviewStatus = "pending" | "approved" | "rejected" | "needs_fix";
+export type EvalGateStatus = "pass" | "fail" | "warning";
 
 export interface AgentTraceSummary {
   trace_id: string;
@@ -184,11 +186,48 @@ export interface EvalExample {
   created_at?: string | null;
 }
 
+export interface EvalExampleImportItem {
+  case_id: string;
+  split?: string;
+  input?: Record<string, unknown>;
+  expected_output?: Record<string, unknown>;
+  expected_trajectory?: Record<string, unknown>;
+  assertions?: Array<Record<string, unknown>>;
+  metadata?: Record<string, unknown>;
+  source_trace_id?: string | null;
+  source_span_id?: string | null;
+}
+
+export interface EvalExampleUpdate {
+  split?: string;
+  input?: Record<string, unknown>;
+  expected_output?: Record<string, unknown>;
+  expected_trajectory?: Record<string, unknown>;
+  assertions?: Array<Record<string, unknown>>;
+  tags?: string[];
+  difficulty?: string;
+  owner?: string;
+  review_status?: EvalReviewStatus;
+  metadata?: Record<string, unknown>;
+}
+
+export interface EvalExamplesImportResponse {
+  imported: number;
+  skipped: number;
+  examples: EvalExample[];
+}
+
+export interface EvalExamplesExportResponse {
+  dataset: EvalDataset;
+  schema_version: string;
+  examples: EvalExampleImportItem[];
+}
+
 export interface EvalEvaluator {
   evaluator_id: string;
   tenant_id: string;
   name: string;
-  evaluator_type: "human" | "rule" | "llm" | "composite";
+  evaluator_type: "human" | "rule" | "trajectory" | "llm" | "llm_judge" | "composite";
   rubric: string;
   version: string;
   sampling_config: Record<string, unknown>;
@@ -262,6 +301,13 @@ export interface EvalTraceMonitoringSummary {
   window_days: number;
 }
 
+export interface EvalDashboardResponse {
+  metrics: Record<string, unknown>;
+  run_health: Record<string, unknown>;
+  queue_health: Record<string, unknown>;
+  latest_gate_status: Record<string, unknown>;
+}
+
 export interface EvalExperimentRun {
   run_id: string;
   experiment_id?: string | null;
@@ -278,6 +324,28 @@ export interface EvalExperimentRun {
   finished_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+export interface EvalExperimentRunBatchResponse {
+  jobs: EvalAsyncJobResponse[];
+}
+
+export interface EvalExperimentRunComparisonResponse {
+  baseline_run_id: string;
+  candidate_run_id: string;
+  baseline_summary: Record<string, unknown>;
+  candidate_summary: Record<string, unknown>;
+  deltas: Record<string, unknown>;
+  regression_summary: Record<string, unknown>;
+  case_diffs: Array<Record<string, unknown>>;
+}
+
+export interface EvalGateDryRunResponse {
+  status: EvalGateStatus;
+  thresholds: Record<string, number>;
+  metrics: Record<string, unknown>;
+  failures: string[];
+  report: Record<string, unknown>;
 }
 
 export interface AgentTraceScoreCreate {
@@ -309,6 +377,13 @@ function compactParams(params: Record<string, unknown>) {
 
 export async function getEvalSummary(days = 7): Promise<EvalTraceMonitoringSummary> {
   const response = await api.get<EvalTraceMonitoringSummary>("/api/v1/eval/summary", {
+    params: { days },
+  });
+  return response.data;
+}
+
+export async function getEvalDashboard(days = 7): Promise<EvalDashboardResponse> {
+  const response = await api.get<EvalDashboardResponse>("/api/v1/eval/dashboard", {
     params: { days },
   });
   return response.data;
@@ -415,6 +490,40 @@ export async function createEvalExampleFromTrace(
   return response.data;
 }
 
+export async function updateEvalExample(
+  datasetId: string,
+  exampleId: string,
+  payload: EvalExampleUpdate
+): Promise<EvalExample> {
+  const response = await api.patch<EvalExample>(
+    `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples/${encodeURIComponent(exampleId)}`,
+    payload
+  );
+  return response.data;
+}
+
+export async function importEvalExamples(
+  datasetId: string,
+  examples: EvalExampleImportItem[]
+): Promise<EvalExamplesImportResponse> {
+  const response = await api.post<EvalExamplesImportResponse>(
+    `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples:import`,
+    { examples, mode: "append" }
+  );
+  return response.data;
+}
+
+export async function exportEvalExamples(
+  datasetId: string,
+  params: { split?: string } = {}
+): Promise<EvalExamplesExportResponse> {
+  const response = await api.get<EvalExamplesExportResponse>(
+    `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples:export`,
+    { params: compactParams(params) }
+  );
+  return response.data;
+}
+
 export async function listEvalEvaluators(params: { limit?: number; offset?: number } = {}): Promise<EvalEvaluatorListResponse> {
   const response = await api.get<EvalEvaluatorListResponse>("/api/v1/eval/evaluators", {
     params: compactParams({ limit: 50, offset: 0, ...params }),
@@ -465,6 +574,45 @@ export async function createEvalExperiment(payload: {
   metadata?: Record<string, unknown>;
 }): Promise<EvalExperiment> {
   const response = await api.post<EvalExperiment>("/api/v1/eval/experiments", payload);
+  return response.data;
+}
+
+export async function runEvalExperiment(
+  experimentId: string,
+  payload: {
+    dataset_id?: string | null;
+    evaluator_ids: string[];
+    target_snapshot?: Record<string, unknown>;
+    candidate_label?: string;
+    baseline_label?: string | null;
+    metadata?: Record<string, unknown>;
+  }
+): Promise<EvalExperimentRunBatchResponse> {
+  const response = await api.post<EvalExperimentRunBatchResponse>(
+    `/api/v1/eval/experiments/${encodeURIComponent(experimentId)}:run`,
+    payload
+  );
+  return response.data;
+}
+
+export async function compareEvalExperimentRuns(
+  baselineRunId: string,
+  candidateRunId: string
+): Promise<EvalExperimentRunComparisonResponse> {
+  const response = await api.get<EvalExperimentRunComparisonResponse>(
+    "/api/v1/eval/experiment-runs:compare",
+    { params: { baseline_run_id: baselineRunId, candidate_run_id: candidateRunId } }
+  );
+  return response.data;
+}
+
+export async function dryRunEvalGate(payload: {
+  baseline_run_id?: string | null;
+  candidate_run_id?: string | null;
+  result_payload?: Record<string, unknown>;
+  thresholds?: Record<string, number>;
+}): Promise<EvalGateDryRunResponse> {
+  const response = await api.post<EvalGateDryRunResponse>("/api/v1/eval/gates:dry-run", payload);
   return response.data;
 }
 

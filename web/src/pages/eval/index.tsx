@@ -1,6 +1,17 @@
-import { Alert, App as AntApp, Button, Descriptions, Input, Select, Space, Tabs, Tag } from "antd";
+import { Alert, App as AntApp, Button, Descriptions, Input, Progress, Select, Space, Tabs, Tag } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Beaker, Database, Download, Play, SearchCheck, Sparkles } from "lucide-react";
+import {
+  Activity,
+  Beaker,
+  CheckCircle2,
+  Database,
+  Download,
+  GitCompare,
+  Play,
+  SearchCheck,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -11,19 +22,31 @@ import {
   createEvalExampleFromTrace,
   createEvalExperiment,
   createAgentTraceScore,
+  compareEvalExperimentRuns,
+  dryRunEvalGate,
   exportAgentTrace,
+  exportEvalExamples,
   getAgentTraceDetail,
+  getEvalDashboard,
   getEvalExperimentRun,
   getEvalSummary,
+  importEvalExamples,
   listAgentTraces,
   listEvalDatasets,
   listEvalEvaluators,
+  listEvalExamples,
   listEvalExperiments,
+  runEvalExperiment,
   runEvalEvaluatorAsync,
+  updateEvalExample,
   type EvalDataset,
   type EvalEvaluator,
   type EvalExperiment,
   type EvalExperimentRun,
+  type EvalExperimentRunComparisonResponse,
+  type EvalGateDryRunResponse,
+  type EvalExamplesExportResponse,
+  type EvalReviewStatus,
   type EvalTraceExportResponse,
   type AgentTraceScoreCreate,
   type AgentTraceSummary,
@@ -118,6 +141,21 @@ function buildServerFilters(
   };
 }
 
+function asNumber(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function pct(value: unknown) {
+  return `${Math.round(asNumber(value) * 100)}%`;
+}
+
+type ExampleActionOptions = {
+  split?: string;
+  reviewStatus?: EvalReviewStatus;
+  metadata?: Record<string, unknown>;
+  expectedOutput?: Record<string, unknown>;
+};
+
 export function EvalPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -170,6 +208,9 @@ export function EvalPage() {
     targetConfigText: JSON.stringify({ trace_family: "assistant", model_id: "current" }, null, 2),
   });
   const [exportPreview, setExportPreview] = useState<EvalTraceExportResponse | null>(null);
+  const [examplesExport, setExamplesExport] = useState<EvalExamplesExportResponse | null>(null);
+  const [runComparison, setRunComparison] = useState<EvalExperimentRunComparisonResponse | null>(null);
+  const [gateResult, setGateResult] = useState<EvalGateDryRunResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
   const [latestRun, setLatestRun] = useState<EvalExperimentRun | null>(null);
   const serverFilters = useMemo(
@@ -184,6 +225,12 @@ export function EvalPage() {
   const summaryQuery = useQuery({
     queryKey: ["eval", "summary"],
     queryFn: () => getEvalSummary(7),
+    staleTime: 30_000,
+  });
+
+  const dashboardQuery = useQuery({
+    queryKey: ["eval", "dashboard"],
+    queryFn: () => getEvalDashboard(7),
     staleTime: 30_000,
   });
 
@@ -252,6 +299,13 @@ export function EvalPage() {
     return createdExperiment;
   }, [createdExperiment, experiments, selectedExperimentId]);
 
+  const examplesQuery = useQuery({
+    queryKey: ["eval", "examples", activeDataset?.dataset_id],
+    queryFn: () => listEvalExamples(activeDataset?.dataset_id || ""),
+    enabled: Boolean(activeDataset?.dataset_id),
+    staleTime: 20_000,
+  });
+
   const detailQuery = useQuery({
     queryKey: ["eval", "trace-detail", activeTraceFamily, selectedTraceId],
     queryFn: () => getAgentTraceDetail(selectedTraceId || "", activeTraceFamily),
@@ -311,20 +365,41 @@ export function EvalPage() {
   });
 
   const exampleMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (options?: ExampleActionOptions) => {
       if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
       if (!selectedTraceId) throw new Error(t("eval.workbench.selectTrace"));
       return createEvalExampleFromTrace(activeDataset.dataset_id, {
         source_trace_id: selectedTraceId,
         trace_family: activeTraceFamily,
-        split: exampleDraft.split.trim() || "regression",
-        expected_output: parseJsonObjectDraft(exampleDraft.expectedOutputText, {}),
-        metadata: { source: "eval_console", trace_family: activeTraceFamily },
+        split: options?.split || exampleDraft.split.trim() || "regression",
+        expected_output: options?.expectedOutput || parseJsonObjectDraft(exampleDraft.expectedOutputText, {}),
+        metadata: {
+          source: "eval_console",
+          trace_family: activeTraceFamily,
+          review_status: options?.reviewStatus || "approved",
+          ...options?.metadata,
+        },
       });
     },
-    onSuccess: () => message.success(t("eval.workbench.exampleCreated")),
+    onSuccess: async () => {
+      message.success(t("eval.workbench.exampleCreated"));
+      await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+    },
     onError: (error) => message.error(toError(error).message),
   });
+
+  const promoteSelectedTraceToGolden = () =>
+    exampleMutation.mutate({ reviewStatus: "approved", metadata: { tags: ["golden"] } });
+
+  const addSelectedTraceToReview = () =>
+    exampleMutation.mutate({ reviewStatus: "pending", metadata: { tags: ["review"] } });
+
+  const createSelectedFailureCase = () =>
+    exampleMutation.mutate({
+      reviewStatus: "needs_fix",
+      split: "regression",
+      metadata: { tags: ["failure"], critical: true },
+    });
 
   const evaluatorMutation = useMutation({
     mutationFn: () =>
@@ -393,6 +468,112 @@ export function EvalPage() {
     onError: (error) => message.error(toError(error).message),
   });
 
+  const experimentBatchMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeExperiment) throw new Error(t("eval.workbench.createExperimentFirst", "Create an experiment first"));
+      if (!activeEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
+      return runEvalExperiment(activeExperiment.experiment_id, {
+        dataset_id: activeDataset?.dataset_id || null,
+        evaluator_ids: [activeEvaluator.evaluator_id],
+        candidate_label: "candidate",
+        baseline_label: "baseline",
+        target_snapshot: {
+          trace_family: activeTraceFamily,
+          dataset_id: activeDataset?.dataset_id || null,
+          trace_id: selectedTraceId || null,
+        },
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
+      });
+    },
+    onSuccess: (batch) => {
+      const firstRunId = batch.jobs[0]?.run_id;
+      if (firstRunId) setQueuedRunId(firstRunId);
+      message.success(t("eval.workbench.evaluatorQueued"));
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const examplesExportMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
+      return exportEvalExamples(activeDataset.dataset_id);
+    },
+    onSuccess: (result) => {
+      setExamplesExport(result);
+      message.success(t("eval.workbench.exportReady"));
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const examplesImportMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
+      return importEvalExamples(activeDataset.dataset_id, [
+        {
+          case_id: `console.${Date.now()}`,
+          split: exampleDraft.split.trim() || "regression",
+          input: { source: "eval_console_seed", trace_id: selectedTraceId || null },
+          expected_output: parseJsonObjectDraft(exampleDraft.expectedOutputText, {}),
+          expected_trajectory: { required_span_kinds: ["lifecycle", "model_invocation"] },
+          assertions: [{ type: "output_not_empty" }],
+          metadata: { review_status: "pending", tags: ["console-import"] },
+        },
+      ]);
+    },
+    onSuccess: async () => {
+      message.success(t("eval.workbench.exampleCreated"));
+      await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const reviewMutation = useMutation({
+    mutationFn: async (payload: { exampleId: string; status: "approved" | "rejected" | "needs_fix" }) => {
+      if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
+      return updateEvalExample(activeDataset.dataset_id, payload.exampleId, {
+        review_status: payload.status,
+        metadata: { reviewed_from: "eval_console" },
+      });
+    },
+    onSuccess: async () => {
+      message.success(t("eval.score.submitted"));
+      await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const comparableRuns = activeExperiment?.runs || [];
+  const canCompareRuns = comparableRuns.length >= 2;
+  const latestScoreSummary = latestRun?.score_summary || {};
+
+  const compareMutation = useMutation({
+    mutationFn: async () => {
+      const candidate = comparableRuns[0]?.run_id;
+      const baseline = comparableRuns[1]?.run_id;
+      if (!baseline || !candidate) {
+        throw new Error(t("eval.workbench.needTwoRuns", "Need two runs to compare"));
+      }
+      return compareEvalExperimentRuns(baseline, candidate);
+    },
+    onSuccess: (result) => setRunComparison(result),
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const gateMutation = useMutation({
+    mutationFn: () =>
+      dryRunEvalGate({
+        result_payload: {
+          metrics: {
+            overall_score: asNumber(latestScoreSummary.overall_score ?? latestScoreSummary.average_score),
+            trajectory_pass_rate: asNumber(latestScoreSummary.trajectory_pass_rate),
+            critical_pass_rate: asNumber(latestScoreSummary.critical_pass_rate),
+          },
+        },
+      }),
+    onSuccess: (result) => setGateResult(result),
+    onError: (error) => message.error(toError(error).message),
+  });
+
   useEffect(() => {
     if (!queuedRunId) return;
     let cancelled = false;
@@ -453,6 +634,57 @@ export function EvalPage() {
     setExportPreview(null);
   };
 
+  const dashboardMetrics = dashboardQuery.data?.metrics || {};
+  const overviewTab = (
+    <div className="eval-platform-grid">
+      {[
+        { key: "captured", label: t("eval.summary.totalTraces"), value: summaryQuery.data?.total_traces ?? "—" },
+        { key: "scored", label: t("eval.summary.scoredTraces"), value: summaryQuery.data?.scored_traces ?? "—" },
+        { key: "golden", label: t("eval.workbench.goldenCases", "Golden cases"), value: dashboardMetrics.example_count ?? "—" },
+        { key: "pass", label: t("eval.workbench.passRate", "Pass rate"), value: pct(dashboardMetrics.pass_rate) },
+        { key: "trajectory", label: t("eval.workbench.trajectoryPass", "Trajectory pass"), value: pct(dashboardMetrics.trajectory_pass_rate) },
+        { key: "critical", label: t("eval.workbench.criticalFailures", "Critical failures"), value: dashboardMetrics.critical_failures ?? 0 },
+        { key: "outbox", label: t("eval.workbench.outboxFailures", "Outbox failures"), value: dashboardQuery.data?.queue_health?.failed_jobs ?? 0 },
+        { key: "judge", label: t("eval.workbench.judgePending", "Judge pending"), value: dashboardMetrics.judge_pending_count ?? 0 },
+      ].map((card) => (
+        <article key={card.key} className="eval-summary-card">
+          <span className="eval-summary-label">{card.label}</span>
+          <strong className="eval-summary-value">{card.value}</strong>
+        </article>
+      ))}
+      <section className="eval-panel eval-workbench-panel eval-platform-wide">
+        <div className="eval-panel-heading">
+          <div>
+            <h2>{t("eval.workbench.platformHealth", "Platform health")}</h2>
+            <p>{t("eval.workbench.platformHealthDescription", "Latest run, queue, and offline gate readiness")}</p>
+          </div>
+          <ShieldCheck size={22} />
+        </div>
+        <div className="eval-overview-bars">
+          <div>
+            <span>{t("eval.workbench.passRate", "Pass rate")}</span>
+            <Progress percent={Math.round(asNumber(dashboardMetrics.pass_rate) * 100)} size="small" />
+          </div>
+          <div>
+            <span>{t("eval.workbench.trajectoryPass", "Trajectory pass")}</span>
+            <Progress percent={Math.round(asNumber(dashboardMetrics.trajectory_pass_rate) * 100)} size="small" />
+          </div>
+        </div>
+        <Descriptions
+          className="eval-workbench-descriptions"
+          size="small"
+          bordered
+          column={1}
+          items={[
+            { key: "baseline", label: t("eval.workbench.latestBaseline", "Latest baseline"), children: String(dashboardMetrics.latest_baseline || "-") },
+            { key: "candidate", label: t("eval.workbench.latestCandidate", "Latest candidate"), children: String(dashboardMetrics.latest_candidate || "-") },
+            { key: "gate", label: t("eval.workbench.latestGate", "Latest gate"), children: String(dashboardQuery.data?.latest_gate_status?.status || "not_run") },
+          ]}
+        />
+      </section>
+    </div>
+  );
+
   const traceFamilyPanel = (
     <>
       {familyCoverageMessage ? (
@@ -460,7 +692,7 @@ export function EvalPage() {
           className="eval-family-coverage-note"
           type={hasCapturedFamilyTraces ? "success" : "warning"}
           showIcon
-          message={familyCoverageMessage}
+          title={familyCoverageMessage}
         />
       ) : null}
       <div className="eval-workbench-actions">
@@ -475,11 +707,27 @@ export function EvalPage() {
           </Button>
           <Button
             icon={<Database size={15} />}
-            onClick={() => exampleMutation.mutate()}
+            onClick={promoteSelectedTraceToGolden}
             loading={exampleMutation.isPending}
             disabled={!selectedTraceId || !activeDataset}
           >
-            {t("eval.workbench.addTraceToDataset")}
+            {t("eval.workbench.promoteToGolden", "Promote to Golden")}
+          </Button>
+          <Button
+            icon={<CheckCircle2 size={15} />}
+            onClick={addSelectedTraceToReview}
+            loading={exampleMutation.isPending}
+            disabled={!selectedTraceId || !activeDataset}
+          >
+            {t("eval.workbench.addToReview", "Add to Review")}
+          </Button>
+          <Button
+            icon={<ShieldCheck size={15} />}
+            onClick={createSelectedFailureCase}
+            loading={exampleMutation.isPending}
+            disabled={!selectedTraceId || !activeDataset}
+          >
+            {t("eval.workbench.createFailureCase", "Create Failure Case")}
           </Button>
           {exportPreview ? <Tag color="blue">{t("eval.workbench.exportFormat", { format: exportPreview.format })}</Tag> : null}
         </Space>
@@ -543,10 +791,10 @@ export function EvalPage() {
     />
   );
 
-  const datasetsTab = (
+  const goldenSetsTab = (
     <WorkbenchPanel
-      title={t("eval.workbench.datasets")}
-      description={t("eval.workbench.datasetsDescription")}
+      title={t("eval.workbench.goldenSets", "Golden Sets")}
+      description={t("eval.workbench.goldenSetsDescription", "Versioned regression cases backed by repo JSONL and DB review state.")}
       icon={<Database size={22} />}
     >
       <div className="eval-workbench-form-grid">
@@ -609,11 +857,27 @@ export function EvalPage() {
         </Button>
         <Button
           icon={<SearchCheck size={15} />}
-          onClick={() => exampleMutation.mutate()}
+          onClick={promoteSelectedTraceToGolden}
           loading={exampleMutation.isPending}
           disabled={!activeDataset || !selectedTraceId}
         >
           {t("eval.workbench.addTraceToDataset")}
+        </Button>
+        <Button
+          icon={<Download size={15} />}
+          onClick={() => examplesExportMutation.mutate()}
+          loading={examplesExportMutation.isPending}
+          disabled={!activeDataset}
+        >
+          {t("eval.workbench.exportJsonl", "Export JSONL")}
+        </Button>
+        <Button
+          icon={<Database size={15} />}
+          onClick={() => examplesImportMutation.mutate()}
+          loading={examplesImportMutation.isPending}
+          disabled={!activeDataset}
+        >
+          {t("eval.workbench.importSeed", "Import seed case")}
         </Button>
       </Space>
       <Descriptions
@@ -626,6 +890,8 @@ export function EvalPage() {
           { key: "version", label: t("eval.workbench.version"), children: activeDataset?.version || "-" },
           { key: "source", label: t("eval.workbench.selectedTrace"), children: selectedTraceId || "-" },
           { key: "listed", label: t("eval.workbench.listedDatasets", "Listed datasets"), children: String(datasetsQuery.data?.total ?? 0) },
+          { key: "cases", label: t("eval.workbench.goldenCases", "Golden cases"), children: String(examplesQuery.data?.total ?? 0) },
+          { key: "exported", label: t("eval.workbench.exportedCases", "Exported cases"), children: String(examplesExport?.examples.length ?? 0) },
         ]}
       />
     </WorkbenchPanel>
@@ -685,6 +951,22 @@ export function EvalPage() {
         >
           {t("eval.workbench.queueEvaluator")}
         </Button>
+        <Button
+          icon={<Beaker size={15} />}
+          onClick={() => experimentBatchMutation.mutate()}
+          loading={experimentBatchMutation.isPending}
+          disabled={!activeEvaluator || !activeExperiment}
+        >
+          {t("eval.workbench.runExperiment", "Run experiment")}
+        </Button>
+        <Button
+          icon={<GitCompare size={15} />}
+          onClick={() => compareMutation.mutate()}
+          loading={compareMutation.isPending}
+          disabled={!canCompareRuns}
+        >
+          {t("eval.workbench.compareRuns", "Compare runs")}
+        </Button>
       </Space>
       <Descriptions
         className="eval-workbench-descriptions"
@@ -697,6 +979,7 @@ export function EvalPage() {
           { key: "target", label: t("eval.workbench.target"), children: `${activeTraceFamily}:${serverFilters.model_id || "current"}` },
           { key: "listed", label: t("eval.workbench.listedExperiments", "Listed experiments"), children: String(experimentsQuery.data?.total ?? 0) },
           { key: "run", label: t("eval.workbench.latestRun", "Latest run"), children: latestRun?.status || "-" },
+          { key: "comparison", label: t("eval.workbench.comparison", "Comparison delta"), children: String(runComparison?.deltas?.overall_score ?? "-") },
         ]}
       />
     </WorkbenchPanel>
@@ -732,7 +1015,9 @@ export function EvalPage() {
           options={[
             { label: "Human", value: "human" },
             { label: "Rule", value: "rule" },
+            { label: "Trajectory", value: "trajectory" },
             { label: "LLM", value: "llm" },
+            { label: "LLM Judge", value: "llm_judge" },
             { label: "Composite", value: "composite" },
           ]}
           onChange={(value: EvalEvaluator["evaluator_type"]) =>
@@ -798,6 +1083,82 @@ export function EvalPage() {
     </WorkbenchPanel>
   );
 
+  const pendingExamples = (examplesQuery.data?.examples || []).filter(
+    (example) => example.metadata?.review_status === "pending"
+      || example.metadata?.review_status === "needs_fix"
+  );
+
+  const reviewQueueTab = (
+    <WorkbenchPanel
+      title={t("eval.workbench.reviewQueue", "Review Queue")}
+      description={t("eval.workbench.reviewQueueDescription", "Approve golden candidates and judge disagreements before they affect regression gates.")}
+      icon={<CheckCircle2 size={22} />}
+    >
+      <Space size={10} wrap>
+        <Button
+          icon={<CheckCircle2 size={15} />}
+          onClick={addSelectedTraceToReview}
+          loading={exampleMutation.isPending}
+          disabled={!activeDataset || !selectedTraceId}
+        >
+          {t("eval.workbench.addToReview", "Add to Review")}
+        </Button>
+      </Space>
+      <div className="eval-review-list">
+        {pendingExamples.length > 0 ? pendingExamples.slice(0, 8).map((example) => (
+          <article className="eval-review-row" key={example.example_id}>
+            <div>
+              <strong>{String(example.metadata?.case_id || example.example_id)}</strong>
+              <span>{String(example.metadata?.review_status || "pending")} · {example.split}</span>
+            </div>
+            <Space size={8}>
+              <Button size="small" onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "approved" })}>
+                {t("common.approve", "Approve")}
+              </Button>
+              <Button size="small" onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "needs_fix" })}>
+                {t("common.review", "Needs fix")}
+              </Button>
+            </Space>
+          </article>
+        )) : (
+          <Alert type="info" showIcon title={t("eval.workbench.reviewEmpty", "No pending review cases for the active dataset")} />
+        )}
+      </div>
+    </WorkbenchPanel>
+  );
+
+  const gatesTab = (
+    <WorkbenchPanel
+      title={t("eval.workbench.gates", "Gates")}
+      description={t("eval.workbench.gatesDescription", "Dry-run the offline regression thresholds before they enter CI.")}
+      icon={<ShieldCheck size={22} />}
+    >
+      <Space size={10} wrap>
+        <Button
+          type="primary"
+          icon={<ShieldCheck size={15} />}
+          onClick={() => gateMutation.mutate()}
+          loading={gateMutation.isPending}
+        >
+          {t("eval.workbench.dryRunGate", "Dry-run gate")}
+        </Button>
+      </Space>
+      <Descriptions
+        className="eval-workbench-descriptions"
+        size="small"
+        bordered
+        column={1}
+        items={[
+          { key: "status", label: t("eval.workbench.gateStatus", "Gate status"), children: gateResult?.status || "not_run" },
+          { key: "overall", label: t("eval.workbench.overallScore", "Overall score"), children: String(gateResult?.metrics?.overall_score ?? "-") },
+          { key: "trajectory", label: t("eval.workbench.trajectoryPass", "Trajectory pass"), children: String(gateResult?.metrics?.trajectory_pass_rate ?? "-") },
+          { key: "critical", label: t("eval.workbench.criticalPass", "Critical pass"), children: String(gateResult?.metrics?.critical_pass_rate ?? "-") },
+          { key: "failures", label: t("eval.workbench.failures", "Failures"), children: gateResult?.failures.join(", ") || "-" },
+        ]}
+      />
+    </WorkbenchPanel>
+  );
+
   return (
     <main className="eval-console" data-testid="eval-console">
       <div className="eval-page-heading">
@@ -815,72 +1176,29 @@ export function EvalPage() {
         </div>
       </div>
 
-      <section className="eval-summary-grid" aria-label={t("eval.summary.ariaLabel")}>
-        {[
-          {
-            key: "total",
-            label: t("eval.summary.totalTraces"),
-            value: summaryQuery.data?.total_traces ?? "—",
-          },
-          {
-            key: "failed",
-            label: t("eval.summary.failedTraces"),
-            value: summaryQuery.data?.failed_traces ?? "—",
-          },
-          {
-            key: "scored",
-            label: t("eval.summary.scoredTraces"),
-            value: summaryQuery.data?.scored_traces ?? "—",
-          },
-          {
-            key: "latency",
-            label: t("eval.summary.avgLatency"),
-            value:
-              summaryQuery.data?.avg_latency_ms != null
-                ? `${summaryQuery.data.avg_latency_ms}ms`
-                : "—",
-          },
-          {
-            key: "assistant",
-            label: t("eval.summary.assistantTraces"),
-            value: summaryQuery.data?.assistant_traces ?? "—",
-          },
-          {
-            key: "langgraph",
-            label: t("eval.summary.langgraphTraces"),
-            value: summaryQuery.data?.langgraph_traces ?? "—",
-          },
-          {
-            key: "rag",
-            label: t("eval.summary.ragTraces"),
-            value: summaryQuery.data?.rag_traces ?? "—",
-          },
-          {
-            key: "window",
-            label: t("eval.summary.windowDays"),
-            value: summaryQuery.data?.window_days ?? 7,
-          },
-        ].map((card) => (
-          <article key={card.key} className="eval-summary-card">
-            <span className="eval-summary-label">{card.label}</span>
-            <strong className="eval-summary-value">{card.value}</strong>
-          </article>
-        ))}
-      </section>
-
       <Tabs
         className="eval-tabs"
-        defaultActiveKey="trace_explorer"
+        defaultActiveKey="overview"
         items={[
           {
-            key: "trace_explorer",
-            label: t("eval.workbench.traceExplorer"),
+            key: "overview",
+            label: t("eval.workbench.overview", "Overview"),
+            children: overviewTab,
+          },
+          {
+            key: "traces",
+            label: t("eval.workbench.traces", "Traces"),
             children: traceExplorerTab,
           },
           {
-            key: "datasets",
-            label: t("eval.workbench.datasets"),
-            children: datasetsTab,
+            key: "golden_sets",
+            label: t("eval.workbench.goldenSets", "Golden Sets"),
+            children: goldenSetsTab,
+          },
+          {
+            key: "evaluators",
+            label: t("eval.workbench.evaluators"),
+            children: evaluatorsTab,
           },
           {
             key: "experiments",
@@ -888,9 +1206,14 @@ export function EvalPage() {
             children: experimentsTab,
           },
           {
-            key: "evaluators",
-            label: t("eval.workbench.evaluators"),
-            children: evaluatorsTab,
+            key: "review_queue",
+            label: t("eval.workbench.reviewQueue", "Review Queue"),
+            children: reviewQueueTab,
+          },
+          {
+            key: "gates",
+            label: t("eval.workbench.gates", "Gates"),
+            children: gatesTab,
           },
         ]}
       />
@@ -922,11 +1245,25 @@ export function EvalPage() {
           color: hsl(var(--muted-foreground));
           font-size: 13px;
         }
-        .eval-summary-grid {
+        .eval-platform-grid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
           gap: 10px;
-          margin-bottom: 16px;
+        }
+        .eval-platform-wide {
+          grid-column: 1 / -1;
+        }
+        .eval-overview-bars {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .eval-overview-bars span {
+          display: block;
+          margin-bottom: 4px;
+          color: hsl(var(--muted-foreground));
+          font-size: 12px;
         }
         .eval-summary-card {
           display: flex;
@@ -1064,6 +1401,30 @@ export function EvalPage() {
         }
         .eval-workbench-wide {
           grid-column: 1 / -1;
+        }
+        .eval-review-list {
+          display: grid;
+          gap: 8px;
+          margin-top: 12px;
+        }
+        .eval-review-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 10px 12px;
+          border: 1px solid hsl(var(--border));
+          border-radius: 8px;
+          background: hsl(var(--card));
+        }
+        .eval-review-row div {
+          display: grid;
+          gap: 2px;
+          min-width: 0;
+        }
+        .eval-review-row span {
+          color: hsl(var(--muted-foreground));
+          font-size: 12px;
         }
         .eval-workbench-textarea textarea {
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;

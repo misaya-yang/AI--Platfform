@@ -10,10 +10,12 @@ TraceStatus = Literal["running", "succeeded", "failed", "cancelled", "timeout"]
 SpanStatus = Literal["running", "succeeded", "failed", "cancelled", "skipped"]
 ScoreType = Literal["numeric", "categorical", "boolean", "text"]
 ScorerType = Literal["human", "llm", "rule", "system"]
-EvaluatorType = Literal["human", "rule", "llm", "composite"]
+EvaluatorType = Literal["human", "rule", "trajectory", "llm", "llm_judge", "composite"]
 TraceExportFormat = Literal["openinference", "otel", "langsmith-jsonl"]
 EvalRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 ScoreTargetType = Literal["trace", "span", "thread", "dataset_run", "example"]
+EvalReviewStatus = Literal["pending", "approved", "rejected", "needs_fix"]
+EvalGateStatus = Literal["pass", "fail", "warning"]
 
 
 class AgentTraceSummary(BaseModel):
@@ -235,6 +237,31 @@ class EvalExampleFromTraceCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvalExampleImportItem(BaseModel):
+    case_id: str = Field(..., min_length=1, max_length=160)
+    split: str = Field(default="regression", max_length=32)
+    input: dict[str, Any] = Field(default_factory=dict)
+    expected_output: dict[str, Any] = Field(default_factory=dict)
+    expected_trajectory: dict[str, Any] = Field(default_factory=dict)
+    assertions: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source_trace_id: str | None = None
+    source_span_id: str | None = None
+
+
+class EvalExampleUpdate(BaseModel):
+    split: str | None = Field(default=None, max_length=32)
+    input: dict[str, Any] | None = None
+    expected_output: dict[str, Any] | None = None
+    expected_trajectory: dict[str, Any] | None = None
+    assertions: list[dict[str, Any]] | None = None
+    tags: list[str] | None = None
+    difficulty: str | None = Field(default=None, max_length=32)
+    owner: str | None = Field(default=None, max_length=128)
+    review_status: EvalReviewStatus | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvalExample(BaseModel):
     example_id: str
     dataset_id: str
@@ -247,6 +274,23 @@ class EvalExample(BaseModel):
     source_span_id: str | None = None
     created_by: str
     created_at: datetime | None = None
+
+
+class EvalExamplesImportRequest(BaseModel):
+    examples: list[EvalExampleImportItem] = Field(default_factory=list, max_length=500)
+    mode: Literal["append"] = "append"
+
+
+class EvalExamplesImportResponse(BaseModel):
+    imported: int
+    skipped: int = 0
+    examples: list[EvalExample] = Field(default_factory=list)
+
+
+class EvalExamplesExportResponse(BaseModel):
+    dataset: EvalDataset
+    schema_version: str = "eval-golden-v1"
+    examples: list[EvalExampleImportItem] = Field(default_factory=list)
 
 
 class EvalEvaluatorCreate(BaseModel):
@@ -328,6 +372,44 @@ class EvalAsyncJobResponse(BaseModel):
     run_id: str | None = None
 
 
+class EvalExperimentRunCreate(BaseModel):
+    dataset_id: str | None = None
+    evaluator_ids: list[str] = Field(default_factory=list, min_length=1, max_length=10)
+    target_snapshot: dict[str, Any] = Field(default_factory=dict)
+    candidate_label: str = Field(default="candidate", max_length=96)
+    baseline_label: str | None = Field(default=None, max_length=96)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvalExperimentRunBatchResponse(BaseModel):
+    jobs: list[EvalAsyncJobResponse] = Field(default_factory=list)
+
+
+class EvalExperimentRunComparisonResponse(BaseModel):
+    baseline_run_id: str
+    candidate_run_id: str
+    baseline_summary: dict[str, Any] = Field(default_factory=dict)
+    candidate_summary: dict[str, Any] = Field(default_factory=dict)
+    deltas: dict[str, Any] = Field(default_factory=dict)
+    regression_summary: dict[str, Any] = Field(default_factory=dict)
+    case_diffs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvalGateDryRunRequest(BaseModel):
+    baseline_run_id: str | None = None
+    candidate_run_id: str | None = None
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    thresholds: dict[str, float] = Field(default_factory=dict)
+
+
+class EvalGateDryRunResponse(BaseModel):
+    status: EvalGateStatus
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    failures: list[str] = Field(default_factory=list)
+    report: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvalDatasetListResponse(BaseModel):
     datasets: list[EvalDataset]
     total: int
@@ -369,3 +451,10 @@ class EvalTraceMonitoringSummary(BaseModel):
     total_cost_cents: int = 0
     scored_traces: int = 0
     window_days: int = 7
+
+
+class EvalDashboardResponse(BaseModel):
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    run_health: dict[str, Any] = Field(default_factory=dict)
+    queue_health: dict[str, Any] = Field(default_factory=dict)
+    latest_gate_status: dict[str, Any] = Field(default_factory=dict)

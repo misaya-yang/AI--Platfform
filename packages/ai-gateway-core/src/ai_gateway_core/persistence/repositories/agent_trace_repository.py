@@ -6,6 +6,32 @@ from typing import Any
 
 from .base import BaseRepository
 
+EXAMPLE_METADATA_PATCH_KEYS = (
+    "expected_trajectory",
+    "assertions",
+    "tags",
+    "difficulty",
+    "owner",
+    "review_status",
+)
+
+
+def _example_metadata_patch(payload: dict[str, Any]) -> dict[str, Any]:
+    patch = dict(payload.get("metadata") or {})
+    for key in EXAMPLE_METADATA_PATCH_KEYS:
+        if payload.get(key) is not None:
+            patch[key] = payload[key]
+    return patch
+
+
+def _import_example_metadata(example: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": example.get("case_id"),
+        "expected_trajectory": example.get("expected_trajectory") or {},
+        "assertions": example.get("assertions") or [],
+        **(example.get("metadata") or {}),
+    }
+
 
 class AgentTraceRepository(BaseRepository):
     """Tenant-scoped persistence helper for Agent Trace Eval APIs."""
@@ -609,6 +635,97 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def create_example(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        created_by: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            """
+            INSERT INTO eval_examples (
+                dataset_id, tenant_id, split, input, expected_output, metadata,
+                source_trace_id, source_span_id, created_by
+            ) VALUES (
+                $1::uuid, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb,
+                $7::uuid, $8::uuid, $9
+            )
+            RETURNING *
+            """,
+            dataset_id,
+            tenant_id,
+            payload.get("split") or "regression",
+            self._json_dumps(payload.get("input") or {}),
+            self._json_dumps(payload.get("expected_output") or {}),
+            self._json_dumps(payload.get("metadata") or {}),
+            payload.get("source_trace_id"),
+            payload.get("source_span_id"),
+            created_by,
+        )
+        return self._decode_eval_row(row) if row else None
+
+    async def update_example(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        example_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        metadata_patch = _example_metadata_patch(payload)
+        row = await self.fetchrow(
+            """
+            UPDATE eval_examples
+            SET split = COALESCE($4, split),
+                input = COALESCE($5::jsonb, input),
+                expected_output = COALESCE($6::jsonb, expected_output),
+                metadata = COALESCE(metadata, '{}'::jsonb) || $7::jsonb
+            WHERE tenant_id = $1
+              AND dataset_id = $2::uuid
+              AND example_id = $3::uuid
+            RETURNING *
+            """,
+            tenant_id,
+            dataset_id,
+            example_id,
+            payload.get("split"),
+            self._json_dumps(payload["input"]) if payload.get("input") is not None else None,
+            self._json_dumps(payload["expected_output"])
+            if payload.get("expected_output") is not None
+            else None,
+            self._json_dumps(metadata_patch),
+        )
+        return self._decode_eval_row(row) if row else None
+
+    async def import_examples(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+        created_by: str,
+        examples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        imported: list[dict[str, Any]] = []
+        for example in examples:
+            created = await self.create_example(
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+                created_by=created_by,
+                payload={
+                    "split": example.get("split") or "regression",
+                    "input": example.get("input") or {},
+                    "expected_output": example.get("expected_output") or {},
+                    "metadata": _import_example_metadata(example),
+                    "source_trace_id": example.get("source_trace_id"),
+                    "source_span_id": example.get("source_span_id"),
+                },
+            )
+            if created:
+                imported.append(created)
+        return {"imported": len(imported), "skipped": 0, "examples": imported}
+
     async def create_evaluator(
         self,
         *,
@@ -892,6 +1009,100 @@ class AgentTraceRepository(BaseRepository):
             run_id,
         )
         return self._decode_eval_row(row) if row else None
+
+    async def compare_experiment_runs(
+        self,
+        *,
+        tenant_id: str,
+        baseline_run_id: str,
+        candidate_run_id: str,
+    ) -> dict[str, Any] | None:
+        baseline = await self.get_experiment_run(tenant_id=tenant_id, run_id=baseline_run_id)
+        candidate = await self.get_experiment_run(tenant_id=tenant_id, run_id=candidate_run_id)
+        if not baseline or not candidate:
+            return None
+        baseline_summary = baseline.get("score_summary") or {}
+        candidate_summary = candidate.get("score_summary") or {}
+        numeric_keys = {
+            key
+            for key in set(baseline_summary) | set(candidate_summary)
+            if isinstance(baseline_summary.get(key), int | float)
+            or isinstance(candidate_summary.get(key), int | float)
+        }
+        deltas = {
+            key: round(float(candidate_summary.get(key) or 0) - float(baseline_summary.get(key) or 0), 4)
+            for key in sorted(numeric_keys)
+        }
+        regression_summary = {
+            "baseline_status": baseline.get("status"),
+            "candidate_status": candidate.get("status"),
+            "regressed_metrics": [key for key, value in deltas.items() if value < 0],
+        }
+        return {
+            "baseline_run_id": baseline_run_id,
+            "candidate_run_id": candidate_run_id,
+            "baseline_summary": baseline_summary,
+            "candidate_summary": candidate_summary,
+            "deltas": deltas,
+            "regression_summary": regression_summary,
+            "case_diffs": [],
+        }
+
+    async def get_dashboard(
+        self,
+        *,
+        tenant_id: str,
+        days: int = 7,
+    ) -> dict[str, Any]:
+        summary = await self.get_summary(tenant_id=tenant_id, days=days)
+        counts = await self.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM eval_datasets WHERE tenant_id = $1)::int AS dataset_count,
+                (SELECT COUNT(*) FROM eval_examples WHERE tenant_id = $1)::int AS example_count,
+                (SELECT COUNT(*) FROM eval_evaluators WHERE tenant_id = $1)::int AS evaluator_count,
+                (SELECT COUNT(*) FROM eval_experiments WHERE tenant_id = $1)::int AS experiment_count,
+                (SELECT COUNT(*) FROM eval_experiment_runs WHERE tenant_id = $1)::int AS run_count,
+                (SELECT COUNT(*) FROM eval_examples
+                 WHERE tenant_id = $1 AND metadata->>'review_status' = 'pending')::int AS judge_pending_count
+            """,
+            tenant_id,
+        )
+        run_health = await self.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'queued')::int AS queued_runs,
+                COUNT(*) FILTER (WHERE status = 'running')::int AS running_runs,
+                COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded_runs,
+                COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_runs
+            FROM eval_experiment_runs
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        queue_health = await self.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'queued')::int AS queued_jobs,
+                COUNT(*) FILTER (WHERE status = 'running')::int AS running_jobs,
+                COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_jobs
+            FROM agent_trace_outbox
+            WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+        metrics = {**summary, **dict(counts or {})}
+        metrics.setdefault("latest_baseline", None)
+        metrics.setdefault("latest_candidate", None)
+        metrics.setdefault("pass_rate", 0)
+        metrics.setdefault("trajectory_pass_rate", 0)
+        metrics.setdefault("critical_failures", 0)
+        return {
+            "metrics": metrics,
+            "run_health": dict(run_health or {}),
+            "queue_health": dict(queue_health or {}),
+            "latest_gate_status": {"status": "not_run", "source": "offline"},
+        }
 
     async def get_evaluator(
         self,

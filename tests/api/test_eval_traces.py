@@ -19,16 +19,24 @@ from src.api.schemas.eval import (
     EvalEvaluatorCreate,
     EvalEvaluatorRunRequest,
     EvalExampleFromTraceCreate,
+    EvalExamplesImportRequest,
+    EvalExampleUpdate,
     EvalExperimentCreate,
+    EvalExperimentRunCreate,
+    EvalGateDryRunRequest,
 )
 from src.api.v1 import eval as eval_routes
 from src.api.v1.eval import (
+    compare_eval_experiment_runs,
     create_eval_dataset,
     create_eval_evaluator,
     create_eval_example_from_trace,
     create_eval_experiment,
     create_eval_trace_score,
+    dry_run_eval_gate,
+    export_eval_examples,
     export_eval_trace,
+    get_eval_dashboard,
     get_eval_dataset,
     get_eval_evaluator,
     get_eval_experiment,
@@ -36,12 +44,15 @@ from src.api.v1.eval import (
     get_eval_summary,
     get_eval_trace_detail,
     get_eval_trace_thread,
+    import_eval_examples,
     list_eval_datasets,
     list_eval_evaluators,
     list_eval_examples,
     list_eval_experiments,
     list_eval_traces,
     run_eval_evaluator_async,
+    run_eval_experiment,
+    update_eval_example,
 )
 from src.config.settings import Settings
 from src.core.auth.permissions import Capability
@@ -207,6 +218,29 @@ class FakeTraceRepository:
             "updated_at": datetime.now(timezone.utc),
             "runs": [],
         }
+        self.baseline_run = {
+            "run_id": "12121212-1212-4212-8212-121212121212",
+            "experiment_id": self.experiment["experiment_id"],
+            "tenant_id": "tenant-a",
+            "evaluator_id": self.evaluator["evaluator_id"],
+            "dataset_id": self.dataset["dataset_id"],
+            "status": "succeeded",
+            "target_snapshot": {"candidate_label": "baseline"},
+            "score_summary": {"overall_score": 0.9, "trajectory_pass_rate": 1.0, "critical_pass_rate": 1.0},
+            "metrics": {"targets": 10},
+            "error_message": None,
+            "created_by": "user-a",
+            "started_at": datetime.now(timezone.utc),
+            "finished_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        self.candidate_run = {
+            **self.baseline_run,
+            "run_id": "34343434-3434-4434-8434-343434343434",
+            "target_snapshot": {"candidate_label": "candidate"},
+            "score_summary": {"overall_score": 0.88, "trajectory_pass_rate": 0.96, "critical_pass_rate": 1.0},
+        }
 
     async def list_traces(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list", kwargs))
@@ -244,6 +278,45 @@ class FakeTraceRepository:
     async def create_example_from_trace(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("example", kwargs))
         return self.example
+
+    async def update_example(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.calls.append(("update_example", kwargs))
+        payload = kwargs["payload"]
+        metadata = {
+            **self.example["metadata"],
+            **payload.get("metadata", {}),
+        }
+        for key in ("expected_trajectory", "assertions", "tags", "difficulty", "owner", "review_status"):
+            if payload.get(key) is not None:
+                metadata[key] = payload[key]
+        self.example = {
+            **self.example,
+            "split": payload.get("split") or self.example["split"],
+            "input": payload.get("input") or self.example["input"],
+            "expected_output": payload.get("expected_output") or self.example["expected_output"],
+            "metadata": metadata,
+        }
+        return self.example
+
+    async def import_examples(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("import_examples", kwargs))
+        examples = []
+        for item in kwargs["examples"]:
+            examples.append(
+                {
+                    **self.example,
+                    "example_id": f"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb{len(examples)}",
+                    "input": item.get("input") or {},
+                    "expected_output": item.get("expected_output") or {},
+                    "metadata": {
+                        "case_id": item.get("case_id"),
+                        "expected_trajectory": item.get("expected_trajectory") or {},
+                        "assertions": item.get("assertions") or [],
+                        **(item.get("metadata") or {}),
+                    },
+                }
+            )
+        return {"imported": len(examples), "skipped": 0, "examples": examples}
 
     async def create_evaluator(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("evaluator", kwargs))
@@ -302,8 +375,29 @@ class FakeTraceRepository:
             "window_days": kwargs.get("days", 7),
         }
 
+    async def get_dashboard(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("dashboard", kwargs))
+        return {
+            "metrics": {
+                "total_traces": 12,
+                "scored_traces": 3,
+                "example_count": 10,
+                "pass_rate": 0.9,
+                "trajectory_pass_rate": 0.96,
+                "critical_failures": 0,
+                "judge_pending_count": 2,
+            },
+            "run_health": {"succeeded_runs": 2, "failed_runs": 0},
+            "queue_health": {"queued_jobs": 0, "failed_jobs": 1},
+            "latest_gate_status": {"status": "pass"},
+        }
+
     async def get_experiment_run(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("get_experiment_run", kwargs))
+        if kwargs.get("run_id") == self.baseline_run["run_id"]:
+            return self.baseline_run
+        if kwargs.get("run_id") == self.candidate_run["run_id"]:
+            return self.candidate_run
         return {
             "run_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
             "experiment_id": self.experiment["experiment_id"],
@@ -320,6 +414,18 @@ class FakeTraceRepository:
             "finished_at": datetime.now(timezone.utc),
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
+        }
+
+    async def compare_experiment_runs(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.calls.append(("compare_runs", kwargs))
+        return {
+            "baseline_run_id": kwargs["baseline_run_id"],
+            "candidate_run_id": kwargs["candidate_run_id"],
+            "baseline_summary": self.baseline_run["score_summary"],
+            "candidate_summary": self.candidate_run["score_summary"],
+            "deltas": {"overall_score": -0.02, "trajectory_pass_rate": -0.04},
+            "regression_summary": {"regressed_metrics": ["overall_score", "trajectory_pass_rate"]},
+            "case_diffs": [],
         }
 
 
@@ -780,10 +886,121 @@ async def test_eval_run_endpoint_requires_eval_run_permission(monkeypatch) -> No
     assert detail["required_capability"] == Capability.GATEWAY_EVAL_RUN.value
 
 
+@pytest.mark.asyncio
+async def test_eval_dashboard_returns_platform_health(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await get_eval_dashboard(
+        request=_request(),
+        days=14,
+        auth=_auth(user_id="admin", tenant_id="tenant-a", roles=["admin"]),
+    )
+
+    assert result.metrics["example_count"] == 10
+    assert result.queue_health["failed_jobs"] == 1
+    assert result.latest_gate_status["status"] == "pass"
+    assert repo.calls[-1] == ("dashboard", {"tenant_id": "tenant-a", "days": 14})
+
+
+@pytest.mark.asyncio
+async def test_eval_example_review_import_and_export(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+
+    updated = await update_eval_example(
+        dataset_id=repo.dataset["dataset_id"],
+        example_id=repo.example["example_id"],
+        body=EvalExampleUpdate(
+            expected_trajectory={"required_span_kinds": ["model_invocation"]},
+            assertions=[{"type": "output_contains", "value": "hi"}],
+            review_status="approved",
+            tags=["golden"],
+        ),
+        request=_request(),
+        auth=auth,
+    )
+    assert updated.metadata["review_status"] == "approved"
+    assert updated.metadata["expected_trajectory"]["required_span_kinds"] == ["model_invocation"]
+
+    imported = await import_eval_examples(
+        dataset_id=repo.dataset["dataset_id"],
+        body=EvalExamplesImportRequest(
+            examples=[
+                {
+                    "case_id": "assistant.case.one",
+                    "input": {"input_preview": "hello"},
+                    "expected_output": {"contains": "hi"},
+                    "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+                    "assertions": [{"type": "output_contains", "value": "hi"}],
+                    "metadata": {"review_status": "approved"},
+                }
+            ]
+        ),
+        request=_request(),
+        auth=auth,
+    )
+    assert imported.imported == 1
+    assert imported.examples[0].metadata["case_id"] == "assistant.case.one"
+
+    exported = await export_eval_examples(
+        dataset_id=repo.dataset["dataset_id"],
+        request=_request(),
+        auth=_auth(),
+    )
+    assert exported.dataset.dataset_id == repo.dataset["dataset_id"]
+    assert exported.examples[0].case_id in {"assistant.case.one", repo.example["example_id"]}
+
+
+@pytest.mark.asyncio
+async def test_eval_experiment_batch_compare_and_gate(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+
+    batch = await run_eval_experiment(
+        experiment_id=repo.experiment["experiment_id"],
+        body=EvalExperimentRunCreate(
+            dataset_id=repo.dataset["dataset_id"],
+            evaluator_ids=[repo.evaluator["evaluator_id"]],
+            target_snapshot={"trace_family": "assistant", "candidate_label": "candidate"},
+        ),
+        request=_request(),
+        auth=auth,
+    )
+    assert batch.jobs[0].status == "queued"
+
+    comparison = await compare_eval_experiment_runs(
+        request=_request(),
+        baseline_run_id=repo.baseline_run["run_id"],
+        candidate_run_id=repo.candidate_run["run_id"],
+        auth=_auth(),
+    )
+    assert comparison.deltas["overall_score"] == -0.02
+    assert "overall_score" in comparison.regression_summary["regressed_metrics"]
+
+    gate = await dry_run_eval_gate(
+        body=EvalGateDryRunRequest(
+            result_payload={
+                "metrics": {
+                    "overall_score": 0.88,
+                    "trajectory_pass_rate": 0.96,
+                    "critical_pass_rate": 1.0,
+                }
+            }
+        ),
+        request=_request(),
+        auth=auth,
+    )
+    assert gate.status == "pass"
+
+
 def test_eval_openapi_paths_are_registered() -> None:
     paths = create_app().openapi()["paths"]
 
     assert "/api/v1/eval/summary" in paths
+    assert "/api/v1/eval/dashboard" in paths
     assert "/api/v1/eval/traces" in paths
     assert "/api/v1/eval/traces/{trace_id}" in paths
     assert "/api/v1/eval/traces/{trace_id}/scores" in paths
@@ -791,11 +1008,18 @@ def test_eval_openapi_paths_are_registered() -> None:
     assert "/api/v1/eval/threads/{thread_id}" in paths
     assert "/api/v1/eval/traces/{trace_id}/export" in paths
     assert "/api/v1/eval/datasets" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/examples" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/examples/{example_id}" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/examples:import" in paths
+    assert "/api/v1/eval/datasets/{dataset_id}/examples:export" in paths
     assert "/api/v1/eval/datasets/{dataset_id}/examples:from-trace" in paths
     assert "/api/v1/eval/evaluators" in paths
     assert "/api/v1/eval/evaluators/{evaluator_id}:run-async" in paths
     assert "/api/v1/eval/experiments" in paths
+    assert "/api/v1/eval/experiments/{experiment_id}:run" in paths
     assert "/api/v1/eval/experiment-runs/{run_id}" in paths
+    assert "/api/v1/eval/experiment-runs:compare" in paths
+    assert "/api/v1/eval/gates:dry-run" in paths
 
 
 def test_eval_openapi_and_web_types_expose_shared_trace_contract() -> None:
@@ -831,6 +1055,12 @@ def test_eval_openapi_and_web_types_expose_shared_trace_contract() -> None:
         "confidence?: number | null",
         "redaction_policy: Record<string, unknown>",
         "runs: EvalExperimentRun[]",
+        "EvalDashboardResponse",
+        "updateEvalExample",
+        "importEvalExamples",
+        "exportEvalExamples",
+        "compareEvalExperimentRuns",
+        "dryRunEvalGate",
     ):
         assert token in web_types
 

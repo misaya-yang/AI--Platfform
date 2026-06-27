@@ -31,7 +31,9 @@ class FakeEvalRepository:
                 "total_latency_ms": 900,
                 "model_id": "test-model",
                 "metadata": {},
-            }
+            },
+            "spans": [],
+            "events": [],
         }
 
     async def update_experiment_run(self, **kwargs: Any) -> None:
@@ -54,7 +56,9 @@ class FakeEvalRepository:
                     "total_latency_ms": 5000,
                     "model_id": "test-model",
                     "metadata": {},
-                }
+                },
+                "spans": [],
+                "events": [],
             }
         return self.trace_detail
 
@@ -189,6 +193,98 @@ async def test_llm_evaluator_uses_injected_complete_and_writes_scores() -> None:
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     assert score_calls[0][1]["trace_family"] == "rag"
     assert score_calls[0][1]["payload"]["scorer_type"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_trajectory_evaluator_scores_required_spans() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "trajectory"
+    repo.evaluator["evaluator_type"] = "trajectory"
+    repo.evaluator["filter_config"] = {"required_span_kinds": ["lifecycle", "model_invocation"]}
+    repo.trace_detail["spans"] = [
+        {"span_kind": "lifecycle", "event_type": None},
+        {"span_kind": "model_invocation", "event_type": None},
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-trajectory",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "pass"
+    assert score_calls[0][1]["payload"]["metadata"]["component"] == "trajectory"
+
+
+@pytest.mark.asyncio
+async def test_llm_judge_invalid_response_marks_review_not_pass() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "llm_judge"
+
+    async def _complete(_model_id: str, _prompt: str) -> str:
+        return '{"label": "pass"}'
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-llm-review",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    payload = score_calls[0][1]["payload"]
+    assert payload["label"] == "review"
+    assert payload["numeric_value"] == 0.0
+    assert payload["confidence"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_composite_evaluator_writes_component_breakdown() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "composite-quality"
+    repo.evaluator["evaluator_type"] = "composite"
+    repo.evaluator["filter_config"] = {
+        "components": [
+            {
+                "type": "rule",
+                "weight": 0.5,
+                "config": {"rules": [{"type": "status_eq", "value": "succeeded"}]},
+            },
+            {
+                "type": "trajectory",
+                "weight": 0.5,
+                "config": {"required_span_kinds": ["lifecycle"]},
+            },
+        ]
+    }
+    repo.trace_detail["spans"] = [{"span_kind": "lifecycle"}]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-composite",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    payload = score_calls[0][1]["payload"]
+    assert payload["label"] == "pass"
+    assert len(payload["metadata"]["components"]) == 2
 
 
 @pytest.mark.asyncio
