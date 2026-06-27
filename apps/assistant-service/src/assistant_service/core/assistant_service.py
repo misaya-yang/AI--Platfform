@@ -1338,7 +1338,7 @@ Please use this web search context to inform your response when relevant."""
             traceparent=config.traceparent,
             otel_trace_id=config.otel_trace_id,
         )
-        self.trace_writer.start_trace(trace_ctx)
+        # Later writes carry the history-aware transcript locator; avoid a second root upsert.
 
         if persist_messages and self.session_manager:
             try:

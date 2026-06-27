@@ -5,6 +5,7 @@ export type TraceStatus = "running" | "succeeded" | "failed" | "cancelled" | "ti
 export type SpanStatus = "running" | "succeeded" | "failed" | "cancelled" | "skipped";
 export type ScoreType = "numeric" | "categorical" | "boolean" | "text";
 export type ScorerType = "human" | "llm" | "rule" | "system";
+export type ScoreTargetType = "trace" | "span" | "thread" | "dataset_run" | "example";
 
 export interface AgentTraceSummary {
   trace_id: string;
@@ -12,6 +13,7 @@ export interface AgentTraceSummary {
   workflow_kind: string;
   tenant_id: string;
   user_id: string;
+  thread_id?: string | null;
   session_id?: string | null;
   run_id?: string | null;
   request_id?: string | null;
@@ -30,6 +32,9 @@ export interface AgentTraceSummary {
   output_preview: string;
   redaction_state: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  privacy: Record<string, unknown>;
+  source_adapter?: string | null;
   scores_count: number;
   created_at?: string | null;
   updated_at?: string | null;
@@ -81,6 +86,12 @@ export interface AgentTraceScore {
   explanation?: string | null;
   scorer_type: ScorerType;
   evaluator_version?: string | null;
+  target_type: ScoreTargetType;
+  target_id?: string | null;
+  evaluator_id?: string | null;
+  evaluator_name?: string | null;
+  score_source: string;
+  confidence?: number | null;
   created_by: string;
   metadata: Record<string, unknown>;
   created_at?: string | null;
@@ -110,6 +121,16 @@ export interface ListAgentTracesParams {
   request_id?: string;
   transcript_query?: string;
   turn_index?: number;
+  span_kind?: string;
+  score_name?: string;
+  score_label?: string;
+  min_score?: number;
+  max_score?: number;
+  min_latency_ms?: number;
+  max_latency_ms?: number;
+  dataset_id?: string;
+  started_after?: string;
+  started_before?: string;
   limit?: number;
   offset?: number;
 }
@@ -124,6 +145,7 @@ export interface EvalTraceThreadResponse {
 export interface EvalTraceExportResponse {
   trace_id: string;
   format: "openinference" | "otel" | "langsmith-jsonl";
+  redaction_policy: Record<string, unknown>;
   payload: Record<string, unknown> | Array<Record<string, unknown>>;
 }
 
@@ -188,7 +210,7 @@ export interface EvalExperiment {
   created_by: string;
   created_at?: string | null;
   updated_at?: string | null;
-  runs: Array<Record<string, unknown>>;
+  runs: EvalExperimentRun[];
 }
 
 export interface EvalAsyncJobResponse {
@@ -270,6 +292,12 @@ export interface AgentTraceScoreCreate {
   explanation?: string | null;
   scorer_type?: ScorerType;
   evaluator_version?: string | null;
+  target_type?: ScoreTargetType;
+  target_id?: string | null;
+  evaluator_id?: string | null;
+  evaluator_name?: string | null;
+  score_source?: string;
+  confidence?: number | null;
   metadata?: Record<string, unknown>;
 }
 

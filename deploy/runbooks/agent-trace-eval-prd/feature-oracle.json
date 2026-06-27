@@ -46,7 +46,7 @@
       "description": "AI assistant non-streaming and streaming chat requests persist a redacted application trace with run lifecycle, model, tool, RAG/context, usage, timing, status, and error evidence without adding user-visible agent latency.",
       "steps": [
         "Run a controlled assistant chat path that emits run_started and a terminal run_finished or run_error event.",
-        "Verify a trace record is persisted with session_id, run_id, tenant_id, user_id, request_id, source_kind assistant, and terminal status.",
+        "Verify a trace record is persisted with session_id/thread_id, run_id, tenant_id, user_id, request_id, trace_family assistant, and terminal status. Treat source_kind as a historical alias only.",
         "Verify child spans or events capture model call, tool call, context/RAG, usage, latency, and error fields while redacting credentials and bounding large content.",
         "Verify a slow or failing trace writer does not delay first stream event, final non-stream response, or assistant run status updates."
       ],

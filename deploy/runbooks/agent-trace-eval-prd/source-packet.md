@@ -71,14 +71,14 @@ Design implication: implement a vendor-neutral internal data model with source-s
 
 First-wave tables should be additive and tenant-scoped. Suggested names are descriptive; implementation can adjust after baseline review if the contract is preserved.
 
-- `agent_traces`: root trace record with `trace_id`, `source_kind`, `workflow_kind`, `tenant_id`, `user_id`, `session_id`, `run_id`, `request_id`, `otel_trace_id`, `traceparent`, `model_id`, `provider`, `status`, timing, token usage, cost, redacted input/output preview, metadata, retention fields, and timestamps.
+- `agent_traces`: root trace record with `trace_id`, `trace_family` (historical docs may call this `source_kind`), `workflow_kind`, `tenant_id`, `user_id`, `session_id`, `thread_id`, `run_id`, `request_id`, `otel_trace_id`, `traceparent`, `model_id`, `provider`, `status`, timing, token usage, cost, redacted input/output preview, metadata, metrics, privacy, retention fields, and timestamps.
 - `agent_trace_spans`: nested steps with `span_id`, `trace_id`, `parent_span_id`, `span_kind`, `name`, `status`, `started_at`, `ended_at`, duration, redacted input/output preview, attributes, and error fields.
 - `agent_trace_events`: ordered lifecycle events with `event_id`, `trace_id`, optional `span_id`, `event_type`, sequence, timestamp, redacted payload, and size metadata.
 - `agent_trace_scores`: human or evaluator feedback with `score_id`, `trace_id`, optional `span_id`, `score_name`, numeric/categorical/boolean/text value, label, explanation, scorer type, evaluator version, created_by, and timestamps.
 
-Source taxonomy:
+Trace taxonomy:
 
-- `source_kind`: `assistant`, `langgraph_proxy`, `rag`.
+- `trace_family`: `assistant`, `langgraph_proxy`, `rag`. `source_kind` is a historical planning alias only.
 - `workflow_kind`: `ai_assistant_chat`, `langgraph_agent_run`, `rag_retrieval_chain`, `rag_greeting_chain`.
 - `span_kind`: `lifecycle`, `model_call`, `tool_call`, `retrieval`, `rerank`, `context_build`, `memory`, `subagent`, `gateway_proxy`, `score`, `error`.
 
@@ -213,7 +213,7 @@ ATE-01 through ATE-04 define narrower commands in their phase contracts.
 
 ## LangGraph Proxy Trace Expansion Contract
 
-- Use existing ATE-01 tables with `source_kind=langgraph_proxy` and `workflow_kind=langgraph_agent_run`.
+- Use existing ATE-01 tables with `trace_family=langgraph_proxy` and `workflow_kind=langgraph_agent_run`.
 - Capture tenant/user/request ids, upstream route, HTTP method, upstream status, LangGraph thread/run ids when available, traceparent, otel trace id, latency, terminal status, and bounded error summary.
 - Model spans/events around transparent proxy receive, upstream request, streaming lifecycle, terminal event, retry/backoff if added later, timeout, cancellation, and error.
 - Never persist upstream auth headers, cookies, API keys, raw tool arguments, or unbounded request/response bodies.
@@ -222,7 +222,7 @@ ATE-01 through ATE-04 define narrower commands in their phase contracts.
 
 ## RAG Trace Expansion Contract
 
-- Use existing ATE-01 tables with `source_kind=rag` and `workflow_kind=rag_retrieval_chain` or `workflow_kind=rag_greeting_chain`.
+- Use existing ATE-01 tables with `trace_family=rag` and `workflow_kind=rag_retrieval_chain` or `workflow_kind=rag_greeting_chain`.
 - Retrieval spans should cover query classification, dataset selection, vector/keyword/hybrid search, rerank, citation selection, context assembly, model generation, grounding check, and errors.
 - Retrieval metadata should include dataset ids, collection ids, top-k, score threshold, retrieval mode, rerank mode, returned document ids, scores, citation ids, token usage, and latency.
 - Greeting-chain spans should cover greeting/conversational classification, retrieval skip decision, prompt path, model response, and safety checks.

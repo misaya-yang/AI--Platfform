@@ -1,4 +1,4 @@
-import { App as AntApp, Button, Descriptions, Input, Select, Space, Tabs, Tag } from "antd";
+import { Alert, App as AntApp, Button, Descriptions, Input, Select, Space, Tabs, Tag } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Beaker, Database, Download, Play, SearchCheck, Sparkles } from "lucide-react";
 import type { ReactNode } from "react";
@@ -89,6 +89,16 @@ function WorkbenchPanel({
   );
 }
 
+function parseJsonObjectDraft(text: string, fallback: Record<string, unknown>): Record<string, unknown> {
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  const parsed: unknown = JSON.parse(trimmed);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("JSON config must be an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 function buildServerFilters(
   filters: AssistantTraceFilters,
   traceFamily: TraceFamily
@@ -122,6 +132,43 @@ export function EvalPage() {
   const [createdDataset, setCreatedDataset] = useState<EvalDataset | null>(null);
   const [createdEvaluator, setCreatedEvaluator] = useState<EvalEvaluator | null>(null);
   const [createdExperiment, setCreatedExperiment] = useState<EvalExperiment | null>(null);
+  const [selectedDatasetId, setSelectedDatasetId] = useState<string | undefined>();
+  const [selectedEvaluatorId, setSelectedEvaluatorId] = useState<string | undefined>();
+  const [selectedExperimentId, setSelectedExperimentId] = useState<string | undefined>();
+  const [datasetDraft, setDatasetDraft] = useState({
+    name: "assistant-regression",
+    description: "Assistant trace regression dataset",
+    version: "v1",
+    schemaText: JSON.stringify(
+      { input: "bounded trace preview", expected_output: "bounded output preview" },
+      null,
+      2
+    ),
+  });
+  const [exampleDraft, setExampleDraft] = useState({
+    split: "regression",
+    expectedOutputText: JSON.stringify({ output_preview: "expected bounded answer" }, null, 2),
+  });
+  const [evaluatorDraft, setEvaluatorDraft] = useState<{
+    name: string;
+    evaluator_type: EvalEvaluator["evaluator_type"];
+    rubric: string;
+    version: string;
+    samplingConfigText: string;
+    filterConfigText: string;
+  }>({
+    name: "quality",
+    evaluator_type: "human",
+    rubric: "Score helpfulness, grounding, and safety from bounded trace previews.",
+    version: "v1",
+    samplingConfigText: "{}",
+    filterConfigText: "{}",
+  });
+  const [experimentDraft, setExperimentDraft] = useState({
+    name: "assistant-baseline",
+    description: "",
+    targetConfigText: JSON.stringify({ trace_family: "assistant", model_id: "current" }, null, 2),
+  });
   const [exportPreview, setExportPreview] = useState<EvalTraceExportResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
   const [latestRun, setLatestRun] = useState<EvalExperimentRun | null>(null);
@@ -180,6 +227,30 @@ export function EvalPage() {
     queryFn: () => listEvalExperiments(),
     staleTime: 30_000,
   });
+  const datasets = useMemo(() => datasetsQuery.data?.datasets || [], [datasetsQuery.data?.datasets]);
+  const evaluators = useMemo(() => evaluatorsQuery.data?.evaluators || [], [evaluatorsQuery.data?.evaluators]);
+  const experiments = useMemo(() => experimentsQuery.data?.experiments || [], [experimentsQuery.data?.experiments]);
+  const activeDataset = useMemo(() => {
+    if (selectedDatasetId) {
+      return datasets.find((dataset) => dataset.dataset_id === selectedDatasetId)
+        || (createdDataset?.dataset_id === selectedDatasetId ? createdDataset : null);
+    }
+    return createdDataset;
+  }, [createdDataset, datasets, selectedDatasetId]);
+  const activeEvaluator = useMemo(() => {
+    if (selectedEvaluatorId) {
+      return evaluators.find((evaluator) => evaluator.evaluator_id === selectedEvaluatorId)
+        || (createdEvaluator?.evaluator_id === selectedEvaluatorId ? createdEvaluator : null);
+    }
+    return createdEvaluator;
+  }, [createdEvaluator, evaluators, selectedEvaluatorId]);
+  const activeExperiment = useMemo(() => {
+    if (selectedExperimentId) {
+      return experiments.find((experiment) => experiment.experiment_id === selectedExperimentId)
+        || (createdExperiment?.experiment_id === selectedExperimentId ? createdExperiment : null);
+    }
+    return createdExperiment;
+  }, [createdExperiment, experiments, selectedExperimentId]);
 
   const detailQuery = useQuery({
     queryKey: ["eval", "trace-detail", activeTraceFamily, selectedTraceId],
@@ -221,14 +292,18 @@ export function EvalPage() {
   const datasetMutation = useMutation({
     mutationFn: () =>
       createEvalDataset({
-        name: "assistant-regression",
-        description: "Assistant trace regression dataset",
-        version: "v1",
-        schema: { input: "bounded trace preview", expected_output: "bounded output preview" },
-        metadata: { source: "eval_console" },
+        name: datasetDraft.name.trim() || "assistant-regression",
+        description: datasetDraft.description.trim(),
+        version: datasetDraft.version.trim() || "v1",
+        schema: parseJsonObjectDraft(datasetDraft.schemaText, {
+          input: "bounded trace preview",
+          expected_output: "bounded output preview",
+        }),
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
       }),
     onSuccess: async (dataset) => {
       setCreatedDataset(dataset);
+      setSelectedDatasetId(dataset.dataset_id);
       message.success(t("eval.workbench.datasetCreated"));
       await queryClient.invalidateQueries({ queryKey: ["eval", "datasets"] });
     },
@@ -237,13 +312,14 @@ export function EvalPage() {
 
   const exampleMutation = useMutation({
     mutationFn: async () => {
-      if (!createdDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
+      if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
       if (!selectedTraceId) throw new Error(t("eval.workbench.selectTrace"));
-      return createEvalExampleFromTrace(createdDataset.dataset_id, {
+      return createEvalExampleFromTrace(activeDataset.dataset_id, {
         source_trace_id: selectedTraceId,
         trace_family: activeTraceFamily,
-        split: "regression",
-        metadata: { source: "eval_console" },
+        split: exampleDraft.split.trim() || "regression",
+        expected_output: parseJsonObjectDraft(exampleDraft.expectedOutputText, {}),
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
       });
     },
     onSuccess: () => message.success(t("eval.workbench.exampleCreated")),
@@ -253,14 +329,17 @@ export function EvalPage() {
   const evaluatorMutation = useMutation({
     mutationFn: () =>
       createEvalEvaluator({
-        name: "quality",
-        evaluator_type: "human",
-        rubric: "Score helpfulness, grounding, and safety from bounded trace previews.",
-        version: "v1",
-        metadata: { source: "eval_console" },
+        name: evaluatorDraft.name.trim() || "quality",
+        evaluator_type: evaluatorDraft.evaluator_type,
+        rubric: evaluatorDraft.rubric.trim(),
+        version: evaluatorDraft.version.trim() || "v1",
+        sampling_config: parseJsonObjectDraft(evaluatorDraft.samplingConfigText, {}),
+        filter_config: parseJsonObjectDraft(evaluatorDraft.filterConfigText, {}),
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
       }),
     onSuccess: async (evaluator) => {
       setCreatedEvaluator(evaluator);
+      setSelectedEvaluatorId(evaluator.evaluator_id);
       message.success(t("eval.workbench.evaluatorCreated"));
       await queryClient.invalidateQueries({ queryKey: ["eval", "evaluators"] });
     },
@@ -270,13 +349,19 @@ export function EvalPage() {
   const experimentMutation = useMutation({
     mutationFn: () =>
       createEvalExperiment({
-        name: "assistant-baseline",
-        dataset_id: createdDataset?.dataset_id || null,
-        target_config: { trace_family: activeTraceFamily, model_id: serverFilters.model_id || "current" },
-        metadata: { source: "eval_console" },
+        name: experimentDraft.name.trim() || "assistant-baseline",
+        description: experimentDraft.description.trim(),
+        dataset_id: activeDataset?.dataset_id || null,
+        target_config: {
+          ...parseJsonObjectDraft(experimentDraft.targetConfigText, {}),
+          trace_family: activeTraceFamily,
+          model_id: serverFilters.model_id || "current",
+        },
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
       }),
     onSuccess: async (experiment) => {
       setCreatedExperiment(experiment);
+      setSelectedExperimentId(experiment.experiment_id);
       message.success(t("eval.workbench.experimentCreated"));
       await queryClient.invalidateQueries({ queryKey: ["eval", "experiments"] });
     },
@@ -285,12 +370,20 @@ export function EvalPage() {
 
   const evaluatorRunMutation = useMutation({
     mutationFn: async () => {
-      if (!createdEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
-      return runEvalEvaluatorAsync(createdEvaluator.evaluator_id, {
-        experiment_id: createdExperiment?.experiment_id || null,
-        dataset_id: createdDataset?.dataset_id || null,
+      if (!activeEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
+      return runEvalEvaluatorAsync(activeEvaluator.evaluator_id, {
+        experiment_id: activeExperiment?.experiment_id || null,
+        dataset_id: activeDataset?.dataset_id || null,
         trace_id: selectedTraceId || null,
-        metadata: { source: "eval_console" },
+        target_snapshot: {
+          trace_family: activeTraceFamily,
+          trace_id: selectedTraceId || null,
+          dataset_id: activeDataset?.dataset_id || null,
+          experiment_id: activeExperiment?.experiment_id || null,
+          evaluator_id: activeEvaluator.evaluator_id,
+          target_config: activeExperiment?.target_config || {},
+        },
+        metadata: { source: "eval_console", trace_family: activeTraceFamily },
       });
     },
     onSuccess: (job) => {
@@ -321,24 +414,35 @@ export function EvalPage() {
     };
   }, [queuedRunId]);
 
-  const traceListTitle =
-    activeTraceFamily === "rag"
-      ? t("eval.list.ragTitle")
-      : activeTraceFamily === "langgraph_proxy"
-        ? t("eval.list.langgraphTitle")
-        : t("eval.list.title");
-  const traceListEmpty =
-    activeTraceFamily === "rag"
-      ? t("eval.list.ragEmpty")
-      : activeTraceFamily === "langgraph_proxy"
-        ? t("eval.list.langgraphEmpty")
-        : t("eval.list.empty");
-  const traceListAria =
-    activeTraceFamily === "rag"
-      ? t("eval.list.ragAriaLabel")
-      : activeTraceFamily === "langgraph_proxy"
-        ? t("eval.list.langgraphAriaLabel")
-        : t("eval.list.ariaLabel");
+  const traceListCopy = useMemo(() => {
+    if (activeTraceFamily === "rag") {
+      return {
+        title: t("eval.list.ragTitle"),
+        empty: t("eval.list.ragEmpty"),
+        aria: t("eval.list.ragAriaLabel"),
+      };
+    }
+    if (activeTraceFamily === "langgraph_proxy") {
+      return {
+        title: t("eval.list.langgraphTitle"),
+        empty: t("eval.list.langgraphEmpty"),
+        aria: t("eval.list.langgraphAriaLabel"),
+      };
+    }
+    return {
+      title: t("eval.list.title"),
+      empty: t("eval.list.empty"),
+      aria: t("eval.list.ariaLabel"),
+    };
+  }, [activeTraceFamily, t]);
+  const hasCapturedFamilyTraces = (tracesQuery.data?.total || 0) > 0;
+  const familyCoverageMessage = useMemo(() => {
+    if (activeTraceFamily === "assistant") return null;
+    if (hasCapturedFamilyTraces) {
+      return t("eval.workbench.familyCovered", "Trace family wired with captured backend data");
+    }
+    return t("eval.workbench.familyPartial", "Trace family wired but not fully covered");
+  }, [activeTraceFamily, hasCapturedFamilyTraces, t]);
 
   const handleTraceFamilyChange = (key: string) => {
     const nextFamily = key as TraceFamily;
@@ -351,6 +455,14 @@ export function EvalPage() {
 
   const traceFamilyPanel = (
     <>
+      {familyCoverageMessage ? (
+        <Alert
+          className="eval-family-coverage-note"
+          type={hasCapturedFamilyTraces ? "success" : "warning"}
+          showIcon
+          message={familyCoverageMessage}
+        />
+      ) : null}
       <div className="eval-workbench-actions">
         <Space size={8} wrap>
           <Button
@@ -365,7 +477,7 @@ export function EvalPage() {
             icon={<Database size={15} />}
             onClick={() => exampleMutation.mutate()}
             loading={exampleMutation.isPending}
-            disabled={!selectedTraceId || !createdDataset}
+            disabled={!selectedTraceId || !activeDataset}
           >
             {t("eval.workbench.addTraceToDataset")}
           </Button>
@@ -378,9 +490,9 @@ export function EvalPage() {
           total={tracesQuery.data?.total || 0}
           filters={filters}
           setFilters={setFilters}
-          title={traceListTitle}
-          ariaLabel={traceListAria}
-          emptyText={traceListEmpty}
+          title={traceListCopy.title}
+          ariaLabel={traceListCopy.aria}
+          emptyText={traceListCopy.empty}
           selectedTraceId={selectedTraceId}
           loading={tracesQuery.isLoading || tracesQuery.isFetching}
           error={tracesQuery.error ? toError(tracesQuery.error) : null}
@@ -437,6 +549,55 @@ export function EvalPage() {
       description={t("eval.workbench.datasetsDescription")}
       icon={<Database size={22} />}
     >
+      <div className="eval-workbench-form-grid">
+        <Select
+          className="eval-workbench-wide"
+          allowClear
+          aria-label={t("eval.workbench.selectDataset", "Select dataset")}
+          placeholder={t("eval.workbench.selectDataset", "Select dataset")}
+          value={selectedDatasetId}
+          options={datasets.map((dataset) => ({
+            label: `${dataset.name} (${dataset.version})`,
+            value: dataset.dataset_id,
+          }))}
+          onChange={(value) => setSelectedDatasetId(value)}
+        />
+        <Input
+          aria-label={t("eval.workbench.datasetName", "Dataset name")}
+          value={datasetDraft.name}
+          onChange={(event) => setDatasetDraft((draft) => ({ ...draft, name: event.target.value }))}
+        />
+        <Input
+          aria-label={t("eval.workbench.version")}
+          value={datasetDraft.version}
+          onChange={(event) => setDatasetDraft((draft) => ({ ...draft, version: event.target.value }))}
+        />
+        <Input
+          className="eval-workbench-wide"
+          aria-label={t("eval.workbench.datasetDescription", "Dataset description")}
+          value={datasetDraft.description}
+          onChange={(event) => setDatasetDraft((draft) => ({ ...draft, description: event.target.value }))}
+        />
+        <Input
+          aria-label={t("eval.workbench.exampleSplit", "Example split")}
+          value={exampleDraft.split}
+          onChange={(event) => setExampleDraft((draft) => ({ ...draft, split: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea eval-workbench-wide"
+          aria-label={t("eval.workbench.datasetSchema", "Dataset schema JSON")}
+          value={datasetDraft.schemaText}
+          autoSize={{ minRows: 3, maxRows: 6 }}
+          onChange={(event) => setDatasetDraft((draft) => ({ ...draft, schemaText: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea eval-workbench-wide"
+          aria-label={t("eval.workbench.expectedOutput", "Expected output JSON")}
+          value={exampleDraft.expectedOutputText}
+          autoSize={{ minRows: 2, maxRows: 5 }}
+          onChange={(event) => setExampleDraft((draft) => ({ ...draft, expectedOutputText: event.target.value }))}
+        />
+      </div>
       <Space size={10} wrap>
         <Button
           type="primary"
@@ -450,7 +611,7 @@ export function EvalPage() {
           icon={<SearchCheck size={15} />}
           onClick={() => exampleMutation.mutate()}
           loading={exampleMutation.isPending}
-          disabled={!createdDataset || !selectedTraceId}
+          disabled={!activeDataset || !selectedTraceId}
         >
           {t("eval.workbench.addTraceToDataset")}
         </Button>
@@ -461,8 +622,8 @@ export function EvalPage() {
         bordered
         column={1}
         items={[
-          { key: "dataset", label: t("eval.workbench.currentDataset"), children: createdDataset?.name || "-" },
-          { key: "version", label: t("eval.workbench.version"), children: createdDataset?.version || "-" },
+          { key: "dataset", label: t("eval.workbench.currentDataset"), children: activeDataset?.name || "-" },
+          { key: "version", label: t("eval.workbench.version"), children: activeDataset?.version || "-" },
           { key: "source", label: t("eval.workbench.selectedTrace"), children: selectedTraceId || "-" },
           { key: "listed", label: t("eval.workbench.listedDatasets", "Listed datasets"), children: String(datasetsQuery.data?.total ?? 0) },
         ]}
@@ -476,6 +637,37 @@ export function EvalPage() {
       description={t("eval.workbench.experimentsDescription")}
       icon={<Beaker size={22} />}
     >
+      <div className="eval-workbench-form-grid">
+        <Select
+          className="eval-workbench-wide"
+          allowClear
+          aria-label={t("eval.workbench.selectExperiment", "Select experiment")}
+          placeholder={t("eval.workbench.selectExperiment", "Select experiment")}
+          value={selectedExperimentId}
+          options={experiments.map((experiment) => ({
+            label: experiment.name,
+            value: experiment.experiment_id,
+          }))}
+          onChange={(value) => setSelectedExperimentId(value)}
+        />
+        <Input
+          aria-label={t("eval.workbench.experimentName", "Experiment name")}
+          value={experimentDraft.name}
+          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, name: event.target.value }))}
+        />
+        <Input
+          aria-label={t("eval.workbench.experimentDescription", "Experiment description")}
+          value={experimentDraft.description}
+          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, description: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea eval-workbench-wide"
+          aria-label={t("eval.workbench.targetConfig", "Target config JSON")}
+          value={experimentDraft.targetConfigText}
+          autoSize={{ minRows: 3, maxRows: 6 }}
+          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, targetConfigText: event.target.value }))}
+        />
+      </div>
       <Space size={10} wrap>
         <Button
           type="primary"
@@ -489,7 +681,7 @@ export function EvalPage() {
           icon={<Play size={15} />}
           onClick={() => evaluatorRunMutation.mutate()}
           loading={evaluatorRunMutation.isPending}
-          disabled={!createdEvaluator}
+          disabled={!activeEvaluator}
         >
           {t("eval.workbench.queueEvaluator")}
         </Button>
@@ -500,9 +692,9 @@ export function EvalPage() {
         bordered
         column={1}
         items={[
-          { key: "experiment", label: t("eval.workbench.currentExperiment"), children: createdExperiment?.name || "-" },
-          { key: "dataset", label: t("eval.workbench.currentDataset"), children: createdDataset?.name || "-" },
-          { key: "target", label: t("eval.workbench.target"), children: serverFilters.model_id || "current" },
+          { key: "experiment", label: t("eval.workbench.currentExperiment"), children: activeExperiment?.name || "-" },
+          { key: "dataset", label: t("eval.workbench.currentDataset"), children: activeDataset?.name || "-" },
+          { key: "target", label: t("eval.workbench.target"), children: `${activeTraceFamily}:${serverFilters.model_id || "current"}` },
           { key: "listed", label: t("eval.workbench.listedExperiments", "Listed experiments"), children: String(experimentsQuery.data?.total ?? 0) },
           { key: "run", label: t("eval.workbench.latestRun", "Latest run"), children: latestRun?.status || "-" },
         ]}
@@ -517,11 +709,60 @@ export function EvalPage() {
       icon={<Sparkles size={22} />}
     >
       <div className="eval-evaluator-config-grid">
-        <Input value="quality" readOnly aria-label={t("eval.workbench.evaluatorName")} />
         <Select
-          value="human"
+          className="eval-workbench-wide"
+          allowClear
+          aria-label={t("eval.workbench.selectEvaluator", "Select evaluator")}
+          placeholder={t("eval.workbench.selectEvaluator", "Select evaluator")}
+          value={selectedEvaluatorId}
+          options={evaluators.map((evaluator) => ({
+            label: `${evaluator.name} (${evaluator.version})`,
+            value: evaluator.evaluator_id,
+          }))}
+          onChange={(value) => setSelectedEvaluatorId(value)}
+        />
+        <Input
+          value={evaluatorDraft.name}
+          aria-label={t("eval.workbench.evaluatorName")}
+          onChange={(event) => setEvaluatorDraft((draft) => ({ ...draft, name: event.target.value }))}
+        />
+        <Select
+          value={evaluatorDraft.evaluator_type}
           aria-label={t("eval.workbench.evaluatorType")}
-          options={[{ label: "Human", value: "human" }]}
+          options={[
+            { label: "Human", value: "human" },
+            { label: "Rule", value: "rule" },
+            { label: "LLM", value: "llm" },
+            { label: "Composite", value: "composite" },
+          ]}
+          onChange={(value: EvalEvaluator["evaluator_type"]) =>
+            setEvaluatorDraft((draft) => ({ ...draft, evaluator_type: value }))}
+        />
+        <Input
+          value={evaluatorDraft.version}
+          aria-label={t("eval.workbench.version")}
+          onChange={(event) => setEvaluatorDraft((draft) => ({ ...draft, version: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea eval-workbench-wide"
+          aria-label={t("eval.workbench.rubric", "Rubric")}
+          value={evaluatorDraft.rubric}
+          autoSize={{ minRows: 3, maxRows: 6 }}
+          onChange={(event) => setEvaluatorDraft((draft) => ({ ...draft, rubric: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea"
+          aria-label={t("eval.workbench.samplingConfig", "Sampling config JSON")}
+          value={evaluatorDraft.samplingConfigText}
+          autoSize={{ minRows: 2, maxRows: 5 }}
+          onChange={(event) => setEvaluatorDraft((draft) => ({ ...draft, samplingConfigText: event.target.value }))}
+        />
+        <Input.TextArea
+          className="eval-workbench-textarea"
+          aria-label={t("eval.workbench.filterConfig", "Filter config JSON")}
+          value={evaluatorDraft.filterConfigText}
+          autoSize={{ minRows: 2, maxRows: 5 }}
+          onChange={(event) => setEvaluatorDraft((draft) => ({ ...draft, filterConfigText: event.target.value }))}
         />
       </div>
       <Space size={10} wrap>
@@ -537,7 +778,7 @@ export function EvalPage() {
           icon={<Play size={15} />}
           onClick={() => evaluatorRunMutation.mutate()}
           loading={evaluatorRunMutation.isPending}
-          disabled={!createdEvaluator}
+          disabled={!activeEvaluator}
         >
           {t("eval.workbench.queueEvaluator")}
         </Button>
@@ -548,8 +789,8 @@ export function EvalPage() {
         bordered
         column={1}
         items={[
-          { key: "evaluator", label: t("eval.workbench.currentEvaluator"), children: createdEvaluator?.name || "-" },
-          { key: "version", label: t("eval.workbench.version"), children: createdEvaluator?.version || "-" },
+          { key: "evaluator", label: t("eval.workbench.currentEvaluator"), children: activeEvaluator?.name || "-" },
+          { key: "version", label: t("eval.workbench.version"), children: activeEvaluator?.version || "-" },
           { key: "selected", label: t("eval.workbench.selectedTrace"), children: selectedTraceId || "-" },
           { key: "listed", label: t("eval.workbench.listedEvaluators", "Listed evaluators"), children: String(evaluatorsQuery.data?.total ?? 0) },
         ]}
@@ -776,6 +1017,9 @@ export function EvalPage() {
           margin-bottom: 10px;
           min-width: 0;
         }
+        .eval-family-coverage-note {
+          margin-bottom: 10px;
+        }
         .eval-assistant-grid {
           display: grid;
           grid-template-columns: minmax(360px, 0.95fr) minmax(460px, 1.22fr) minmax(292px, 0.62fr);
@@ -811,11 +1055,20 @@ export function EvalPage() {
         .eval-workbench-descriptions .ant-descriptions-item-content {
           word-break: break-all;
         }
+        .eval-workbench-form-grid,
         .eval-evaluator-config-grid {
           display: grid;
-          grid-template-columns: minmax(220px, 320px) minmax(160px, 220px);
+          grid-template-columns: repeat(2, minmax(0, 280px));
           gap: 10px;
-          max-width: 560px;
+          max-width: 760px;
+        }
+        .eval-workbench-wide {
+          grid-column: 1 / -1;
+        }
+        .eval-workbench-textarea textarea {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+          font-size: 12px;
+          line-height: 1.45;
         }
         .eval-panel {
           display: flex;
@@ -1198,6 +1451,7 @@ export function EvalPage() {
           .eval-filter-grid,
           .eval-metric-grid,
           .eval-preview-grid,
+          .eval-workbench-form-grid,
           .eval-evaluator-config-grid,
           .eval-score-form-grid {
             grid-template-columns: minmax(0, 1fr);

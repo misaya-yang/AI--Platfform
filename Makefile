@@ -156,9 +156,43 @@ dev-compose:                ## 源码挂载启动应用服务 (首次 quickstart
 dev-compose-logs:           ## 查看源码挂载开发服务日志
 	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" logs -f gateway assistant-service knowledge-service frontend
 
-# -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
+# -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: test-isolation snapshot-assistant-openapi
+.PHONY: verify-eval-dev test-isolation snapshot-assistant-openapi
+
+verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
+	@uv run ruff check \
+		src/api/v1/eval.py \
+		src/api/schemas/eval.py \
+		src/api/eval_export.py \
+		packages/ai-gateway-core/src/ai_gateway_core/eval \
+		packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py \
+		apps/assistant-service/src/assistant_service/core/assistant_service.py \
+		apps/assistant-service/src/assistant_service/core/trace_writer.py \
+		apps/assistant-service/src/assistant_service/core/trace_payloads.py \
+		tests/api/test_eval_traces.py \
+		tests/api/test_eval_api_trace_tree.py \
+		tests/services/eval \
+		tests/services/assistant/test_agent_trace_capture.py
+	@uv run pytest -q --no-cov \
+		tests/api/test_eval_traces.py \
+		tests/api/test_eval_api_trace_tree.py \
+		tests/services/eval/test_eval_permissions.py
+	@uv run pytest -q --no-cov \
+		tests/services/eval/test_evaluator_executor.py \
+		tests/services/eval/test_outbox_worker.py \
+		tests/services/eval/test_trace_retention_scheduler.py \
+		tests/services/eval/test_search_indexes.py \
+		tests/services/eval/test_drive_shipped_entrypoints.py
+	@uv run --package assistant-service pytest -q --no-cov \
+		tests/services/assistant/test_agent_trace_capture.py
+	@uv run --package assistant-service pytest -q --no-cov \
+		tests/services/eval/test_ingest_roundtrip.py \
+		tests/services/eval/test_trace_capture_helpers.py
+	@corepack pnpm@10.33.0 -C web lint
+	@corepack pnpm@10.33.0 -C web type-check
+
+# -- Assistant Service Isolation Gate (Phase 0 safety net) -------------------
 
 test-isolation:             ## 运行 Assistant Service 隔离契约测试 (Phase 0 + Phase 4 gates)
 	@uv run pytest -q --no-cov \

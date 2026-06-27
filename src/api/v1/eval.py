@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.permissions import Capability, build_permission_denied_detail
 from ...persistence.database import DatabaseStorage
-from ..eval_export import export_trace
+from ..eval_export import EXPORT_REDACTION_POLICY, export_trace
 from ..schemas.eval import (
     AgentTraceDetailResponse,
     AgentTraceIngestRequest,
@@ -293,6 +293,7 @@ async def export_eval_trace(
     return EvalTraceExportResponse(
         trace_id=trace_id,
         format=format,
+        redaction_policy=EXPORT_REDACTION_POLICY,
         payload=export_trace(detail, format),
     )
 

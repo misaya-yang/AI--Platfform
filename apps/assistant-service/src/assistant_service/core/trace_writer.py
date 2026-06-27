@@ -353,6 +353,14 @@ class AssistantTraceWriter:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    def telemetry_snapshot(self) -> dict[str, int]:
+        return {
+            "pending_writes": self.pending_count,
+            "dropped_writes": self.dropped_writes,
+            "failed_writes": self.failed_writes,
+            "timed_out_writes": self.timed_out_writes,
+        }
+
     def start_trace(self, ctx: AssistantTraceContext) -> bool:
         return self._submit(self._start_trace(ctx))
 
@@ -619,8 +627,7 @@ class AssistantTraceWriter:
         metadata = {
             "mode": ctx.mode,
             "trace_writer": "assistant-service",
-            "dropped_writes": self.dropped_writes,
-            "timed_out_writes": self.timed_out_writes,
+            **self.telemetry_snapshot(),
             "pricing_status": pricing_status,
         }
         if ctx.transcript_locator:

@@ -22,6 +22,7 @@ class AgentTraceSummary(BaseModel):
     workflow_kind: str
     tenant_id: str
     user_id: str
+    thread_id: str | None = None
     session_id: str | None = None
     run_id: str | None = None
     request_id: str | None = None
@@ -40,6 +41,9 @@ class AgentTraceSummary(BaseModel):
     output_preview: str = ""
     redaction_state: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    privacy: dict[str, Any] = Field(default_factory=dict)
+    source_adapter: str | None = None
     scores_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -186,6 +190,7 @@ class AgentTraceIngestResponse(BaseModel):
 class EvalTraceExportResponse(BaseModel):
     trace_id: str
     format: TraceExportFormat
+    redaction_policy: dict[str, Any] = Field(default_factory=dict)
     payload: dict[str, Any] | list[dict[str, Any]]
 
 

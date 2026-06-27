@@ -1130,7 +1130,7 @@ class AgentTraceRepository(BaseRepository):
         for key in ("trace_id",):
             if decoded.get(key) is not None:
                 decoded[key] = str(decoded[key])
-        for key in ("redaction_state", "metadata"):
+        for key in ("redaction_state", "metadata", "metrics", "privacy"):
             decoded[key] = self._decode_json(decoded.get(key), default={})
         decoded["scores_count"] = int(decoded.get("scores_count") or 0)
         return decoded

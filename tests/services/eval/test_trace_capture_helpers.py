@@ -48,6 +48,47 @@ def test_build_langgraph_trace_payload_extracts_thread_and_run_ids() -> None:
     assert payload["events"][0]["event_type"] == "proxy_request_accepted"
 
 
+@pytest.mark.parametrize(
+    ("upstream_path", "thread_id", "run_id", "assistant_id", "streaming"),
+    [
+        ("/assistants/assistant-1/runs/stream", None, None, "assistant-1", True),
+        ("/threads/thread-1/runs/stream", "thread-1", None, None, True),
+        ("/threads/thread-1/runs/run-1/stream", "thread-1", "run-1", None, True),
+        ("/threads/thread-1/runs/run-1/wait", "thread-1", "run-1", None, False),
+        ("/threads/thread-1/runs/run-1/cancel", "thread-1", "run-1", None, False),
+    ],
+)
+def test_langgraph_trace_payload_route_matrix(
+    upstream_path: str,
+    thread_id: str | None,
+    run_id: str | None,
+    assistant_id: str | None,
+    streaming: bool,
+) -> None:
+    started = time.time()
+    payload = build_langgraph_trace_payload(
+        request_id=f"req-{upstream_path}",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        method="POST",
+        upstream_path=upstream_path,
+        started_at=started,
+        ended_at=started + 0.05,
+        status="succeeded",
+        upstream_status=200,
+        error_summary=None,
+        traceparent=None,
+        streaming=streaming,
+    )
+
+    assert payload["trace_family"] == "langgraph_proxy"
+    assert payload["thread_id"] == thread_id
+    assert payload["session_id"] == thread_id
+    assert payload["run_id"] == run_id
+    assert payload["metadata"]["assistant_id"] == assistant_id
+    assert payload["metrics"]["streaming"] is streaming
+
+
 def test_build_rag_trace_payload_parses_query_and_document_count() -> None:
     started = time.time()
     payload = build_rag_trace_payload(

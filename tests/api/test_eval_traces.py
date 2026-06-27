@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -84,6 +86,7 @@ def _trace_row(**overrides: Any) -> dict[str, Any]:
         "workflow_kind": "ai_assistant_chat",
         "tenant_id": "tenant-a",
         "user_id": "user-a",
+        "thread_id": "session-a",
         "session_id": "session-a",
         "run_id": "run-a",
         "request_id": "request-a",
@@ -102,6 +105,9 @@ def _trace_row(**overrides: Any) -> dict[str, Any]:
         "output_preview": "hi",
         "redaction_state": {"input": "preview"},
         "metadata": {"redacted": True},
+        "metrics": {"total_latency_ms": 980},
+        "privacy": {"payloads": "bounded_redacted_preview"},
+        "source_adapter": "assistant-service",
         "scores_count": 0,
         "created_at": now,
         "updated_at": now,
@@ -560,8 +566,76 @@ async def test_eval_trace_export_returns_semantic_payload(monkeypatch):
     )
 
     assert result.format == "otel"
+    assert result.redaction_policy
     assert isinstance(result.payload, dict)
     assert result.payload["trace"]["attributes"]["gen_ai.request.model"] == "qwen3.6-plus"
+    assert result.payload["trace"]["attributes"]["gen_ai.usage.total_tokens"] == 30
+
+
+@pytest.mark.asyncio
+async def test_eval_trace_export_defensively_redacts_sensitive_payload(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.detail = {
+        "trace": _trace_row(
+            input_preview="hello Authorization: Bearer raw-trace-token",
+            output_preview="safe",
+            metadata={
+                "headers": {
+                    "Authorization": "Bearer raw-header-token",
+                    "Cookie": "sid=raw-cookie",
+                },
+                "callback_url": "https://user:raw-password@example.test/path",
+            },
+        ),
+        "spans": [
+            {
+                "span_id": "33333333-3333-4333-8333-333333333333",
+                "trace_id": "11111111-1111-4111-8111-111111111111",
+                "parent_span_id": None,
+                "span_kind": "tool_execution",
+                "name": "tool",
+                "status": "succeeded",
+                "started_at": datetime.now(timezone.utc),
+                "ended_at": datetime.now(timezone.utc),
+                "duration_ms": 10,
+                "attributes": {
+                    "api_key": "raw-api-key",
+                    "note": "access_token=raw-access-token",
+                },
+            }
+        ],
+        "events": [
+            {
+                "event_type": "tool_call",
+                "occurred_at": datetime.now(timezone.utc),
+                "payload": {
+                    "headers": {"Authorization": "Bearer raw-event-token"},
+                    "cookie": "raw-event-cookie",
+                    "body": "password=raw-password",
+                },
+            }
+        ],
+        "scores": [],
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await export_eval_trace(
+        trace_id="11111111-1111-4111-8111-111111111111",
+        request=_request(),
+        format="otel",
+        auth=_auth(user_id="user-a", tenant_id="tenant-a"),
+    )
+
+    serialized = json.dumps(result.payload, default=str)
+    assert "raw-trace-token" not in serialized
+    assert "raw-header-token" not in serialized
+    assert "raw-event-token" not in serialized
+    assert "raw-cookie" not in serialized
+    assert "raw-event-cookie" not in serialized
+    assert "raw-api-key" not in serialized
+    assert "raw-access-token" not in serialized
+    assert "raw-password" not in serialized
+    assert "[redacted]" in serialized
 
 
 @pytest.mark.asyncio
@@ -722,6 +796,43 @@ def test_eval_openapi_paths_are_registered() -> None:
     assert "/api/v1/eval/evaluators/{evaluator_id}:run-async" in paths
     assert "/api/v1/eval/experiments" in paths
     assert "/api/v1/eval/experiment-runs/{run_id}" in paths
+
+
+def test_eval_openapi_and_web_types_expose_shared_trace_contract() -> None:
+    schemas = create_app().openapi()["components"]["schemas"]
+
+    assert {
+        "thread_id",
+        "metrics",
+        "privacy",
+        "source_adapter",
+    }.issubset(schemas["AgentTraceSummary"]["properties"])
+    assert {
+        "target_type",
+        "target_id",
+        "evaluator_id",
+        "evaluator_name",
+        "score_source",
+        "confidence",
+    }.issubset(schemas["AgentTraceScore"]["properties"])
+    assert "redaction_policy" in schemas["EvalTraceExportResponse"]["properties"]
+
+    web_types = Path("web/src/api/eval.ts").read_text(encoding="utf-8")
+    for token in (
+        "thread_id?: string | null",
+        "metrics: Record<string, unknown>",
+        "privacy: Record<string, unknown>",
+        "source_adapter?: string | null",
+        "target_type: ScoreTargetType",
+        "target_id?: string | null",
+        "evaluator_id?: string | null",
+        "evaluator_name?: string | null",
+        "score_source: string",
+        "confidence?: number | null",
+        "redaction_policy: Record<string, unknown>",
+        "runs: EvalExperimentRun[]",
+    ):
+        assert token in web_types
 
 
 class CapturingTraceRepository(AgentTraceRepository):

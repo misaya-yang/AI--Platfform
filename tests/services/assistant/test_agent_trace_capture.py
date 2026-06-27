@@ -213,6 +213,8 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
     assert "ON CONFLICT (trace_id, sequence_no)" in queries
     assert "run_started" in db.serialized_calls()
     assert "run_finished" in db.serialized_calls()
+    assert "failed_writes" in db.serialized_calls()
+    assert writer.telemetry_snapshot()["pending_writes"] == 0
 
 
 @pytest.mark.asyncio
