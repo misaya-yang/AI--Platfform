@@ -29,6 +29,8 @@ def handle_langgraph_proxy_error(
     not_found_detail: str = "resource not found",
 ) -> None:
     """Map LangGraph proxy exceptions to HTTP errors."""
+    if isinstance(exc, HTTPException):
+        raise exc
     if isinstance(exc, (ForbiddenError, AssistantAccessDeniedError)):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if isinstance(exc, QuotaExceededError):

@@ -16,8 +16,11 @@ from ...core.auth.service_access import (
     ServiceAccessPolicy,
     evaluate_service_access,
     normalize_service_scope,
-    service_access_policy_from_metadata,
     service_scope_matches,
+)
+from ...core.auth.service_access_resolver import (
+    clear_service_access_constraint_cache,
+    load_service_access_constraints,
 )
 from ...core.auth.user_resolver import UserContext
 from ...services.llm.model_failover import (
@@ -28,6 +31,7 @@ from ...services.llm.model_failover import (
 from ...services.registry.service_registry import ServiceRegistry
 from ..deps import AuthContext, get_auth_context, get_registry, get_user_context
 from ._assistant_status import get_assistant_health
+from ._route_trace import current_trace_id
 
 router = APIRouter()
 
@@ -96,9 +100,6 @@ _DEFAULT_LANGGRAPH_FAILOVER_PROVIDER_PRIORITY = (
 _DEFAULT_LANGGRAPH_FAILOVER_MAX_CANDIDATES = 2
 
 
-from ._route_trace import current_trace_id
-
-
 def _current_trace_id(request: Request) -> str:
     return current_trace_id(request)
 
@@ -108,6 +109,7 @@ def _invalidate_proxy_config_cache(request: Request, service_id: str | None = No
     invalidate = getattr(loader, "invalidate", None)
     if callable(invalidate):
         invalidate(service_id)
+    clear_service_access_constraint_cache()
 
 
 def _require_capability(request: Request, auth: AuthContext, capability: Capability) -> None:
@@ -175,37 +177,7 @@ async def _load_access_constraints(
     request: Request,
     user: UserContext,
 ) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy]:
-    allowed_sources: list[tuple[str, list[str]]] = []
-    user_policy = ServiceAccessPolicy()
-
-    db = getattr(request.app.state, "database", None)
-    if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
-        return allowed_sources, user_policy
-
-    api_key_info = getattr(request.state, "api_key_info", None)
-    if api_key_info:
-        api_allowed = normalize_service_scope(api_key_info.get("allowed_services"))
-        if api_allowed:
-            allowed_sources.append(("api_key", api_allowed))
-
-    if user.tenant_id:
-        try:
-            tenant = await db.get_tenant(user.tenant_id)
-            if tenant:
-                tenant_allowed = normalize_service_scope(tenant.get("allowed_services"))
-                if tenant_allowed:
-                    allowed_sources.append(("tenant", tenant_allowed))
-        except Exception:
-            pass
-
-    try:
-        user_record = await db.get_user(user.user_id)
-        if user_record:
-            user_policy = service_access_policy_from_metadata(user_record.get("metadata"))
-    except Exception:
-        pass
-
-    return allowed_sources, user_policy
+    return await load_service_access_constraints(request, user)
 
 
 def _normalize_langgraph_connector_config(definition: dict) -> None:

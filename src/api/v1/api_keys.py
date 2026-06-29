@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from ...core.auth.service_access_resolver import clear_service_access_constraint_cache
 from ...core.auth.user_resolver import UserContext
 from ...persistence.database import DatabaseStorage
 from ...services.auth.api_key_service import APIKeyService
@@ -104,6 +105,7 @@ async def create_api_key(
         expires_at=req.expires_at,
     )
 
+    clear_service_access_constraint_cache()
     return result
 
 
@@ -169,6 +171,7 @@ async def revoke_api_key(
     if not success:
         raise HTTPException(status_code=404, detail="API Key not found")
 
+    clear_service_access_constraint_cache()
     return {"message": "API Key revoked", "key_id": key_id}
 
 
@@ -189,4 +192,5 @@ async def delete_api_key(
     if not success:
         raise HTTPException(status_code=404, detail="API Key not found")
 
+    clear_service_access_constraint_cache()
     return {"message": "API Key deleted", "key_id": key_id}

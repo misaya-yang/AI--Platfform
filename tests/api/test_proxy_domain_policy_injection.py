@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from src.api.v1.proxy import _inject_gateway_domain_policy_metadata
+from src.proxy.langgraph_run_body import inject_domain_policy_metadata_bytes
 from src.proxy.config_loader import ProxyServiceConfig
 
 
@@ -22,7 +22,7 @@ def test_injects_domain_policy_for_langgraph_run_payload() -> None:
         "utf-8"
     )
 
-    updated_body = _inject_gateway_domain_policy_metadata(
+    updated_body = inject_domain_policy_metadata_bytes(
         body=body,
         method="POST",
         path="threads/t1/runs/stream",
@@ -39,7 +39,7 @@ def test_does_not_inject_for_non_run_path() -> None:
         "utf-8"
     )
 
-    updated_body = _inject_gateway_domain_policy_metadata(
+    updated_body = inject_domain_policy_metadata_bytes(
         body=body,
         method="POST",
         path="assistants/search",
@@ -55,7 +55,7 @@ def test_does_not_inject_when_service_policy_is_none() -> None:
         "utf-8"
     )
 
-    updated_body = _inject_gateway_domain_policy_metadata(
+    updated_body = inject_domain_policy_metadata_bytes(
         body=body,
         method="POST",
         path="runs/wait",
@@ -74,7 +74,7 @@ def test_preserves_existing_gateway_domain_policy() -> None:
         }
     ).encode("utf-8")
 
-    updated_body = _inject_gateway_domain_policy_metadata(
+    updated_body = inject_domain_policy_metadata_bytes(
         body=body,
         method="POST",
         path="runs/wait",
@@ -91,7 +91,7 @@ def test_injects_for_root_runs_path_without_leading_slash() -> None:
         "utf-8"
     )
 
-    updated_body = _inject_gateway_domain_policy_metadata(
+    updated_body = inject_domain_policy_metadata_bytes(
         body=body,
         method="POST",
         path="runs/wait",

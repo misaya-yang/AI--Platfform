@@ -154,6 +154,33 @@ async def test_prepare_and_finalize_injects_gateway_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_run_payload_without_http_request_scrubs_gateway_model() -> None:
+    from src.adapters.langgraph_proxy import LangGraphProxy
+
+    proxy = LangGraphProxy.__new__(LangGraphProxy)
+    payload = {
+        "assistant_id": "assistant-1",
+        "input": {"messages": [{"role": "user", "content": "hi"}]},
+        "config": {
+            "configurable": {
+                "gateway_model": {"_api_key": "browser-secret"},
+                "api_key": "leak",
+            }
+        },
+    }
+    prepared = await proxy._prepare_run_payload(
+        payload=payload,
+        path="threads/thread-9/runs/wait",
+        user=_user(),
+        http_request=None,
+    )
+    configurable = prepared["config"]["configurable"]
+    assert "gateway_model" not in configurable
+    assert "api_key" not in configurable
+    assert configurable["user_id"] == "gateway-user"
+
+
+@pytest.mark.asyncio
 async def test_passthrough_preparer_reencodes_prepared_body() -> None:
     body = json.dumps(
         {

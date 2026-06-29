@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from ...core.auth.permissions import (
     Capability,
 )
+from ...core.auth.service_access_resolver import clear_service_access_constraint_cache
 from ...core.gateway.capacity import CapacityResolver
 from ...core.gateway.rate_policy import RatePolicyResolver
 from ...services.metrics.audit_event_writer import record_config_change
@@ -444,6 +445,7 @@ async def create_api_key(
         )
         _runtime_config["auth"]["api_keys"].append(api_key)
 
+    clear_service_access_constraint_cache()
     await record_config_change(
         request=request,
         auth=auth,

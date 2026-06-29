@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, validator
 
+from ...core.auth.service_access_resolver import clear_service_access_constraint_cache
 from ...core.auth.password import (
     ALLOWED_EMAIL_DOMAIN,
     DEFAULT_PASSWORD,
@@ -409,6 +410,8 @@ async def update_user(
 
     if update_data:
         await db.update_user(user_id, update_data)
+        if service_policy_updated:
+            clear_service_access_constraint_cache()
 
         # Update roles if changed
         if body.roles is not None:
@@ -464,6 +467,7 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
 
     await db.delete_user(user_id)
+    clear_service_access_constraint_cache()
     return {"status": "success", "message": f"User {user_id} deleted"}
 
 

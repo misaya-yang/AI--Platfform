@@ -480,7 +480,13 @@ class TransparentProxy:
             cached = self._availability.get(config.service_id)
         if cached:
             age = time.time() - float(cached.get("last_health_check_at") or 0.0)
-            if age > self.availability_cache_ttl:
+            is_unavailable = cached.get("availability_status") == "unavailable"
+            stale_ttl = self.availability_cache_ttl
+            if is_unavailable:
+                stale_ttl = min(stale_ttl, 5.0)
+            if age > stale_ttl:
+                if is_unavailable:
+                    return await self._refresh_service_availability(config)
                 await self._schedule_availability_refresh(config)
             return cached
         return await self._refresh_service_availability(config)
@@ -745,12 +751,7 @@ class TransparentProxy:
                 is_streaming=False,
             )
 
-        # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
-        if request.method in ("POST", "PUT", "PATCH") and not request.langgraph_body_prepared:
-            if config.assistant_id:
-                body = self._inject_assistant_id(body, request.path, config.assistant_id)
-            body = self._ensure_stream_defaults(body, request.path)
         t_body_done = time.perf_counter()
         capacity_headers = capacity_lease.headers if capacity_lease is not None else {}
 

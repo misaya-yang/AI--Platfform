@@ -34,15 +34,16 @@ from ...adapters.langgraph_proxy import (
     ThreadNotFoundError,
 )
 from ...core.auth.user_resolver import UserContext
-from ...core.gateway.multi_dimension_rate_limiter import (
-    MultiDimensionRateLimiter,
-    RateLimitContext,
-    RateLimitHeaders,
-)
+from ...core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
 from ...proxy.context_injector import ContextInjector, RequestContext
-from ...proxy.langgraph_run_body import prepare_langgraph_run_body_for_passthrough
+from ...proxy.langgraph_run_body import (
+    decode_json_body,
+    is_langgraph_run_path,
+    prepare_langgraph_run_body_for_passthrough,
+)
+from ._langgraph_route_utils import check_langgraph_rate_limit, handle_langgraph_proxy_error
 from ...services.eval.langgraph_trace_capture import record_langgraph_proxy_trace
-from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
+from ..deps import AuthContext, get_auth_context, get_rate_limiter, get_user_context, require_langgraph_proxy
 
 router = APIRouter(prefix="/langgraph", tags=["LangGraph"])
 
@@ -139,50 +140,8 @@ class StoreItem(BaseModel):
     value: dict[str, Any]
 
 
-# ============ 异常处理 ============
-
-
-def handle_proxy_error(e: Exception):
-    """处理代理层异常"""
-    if isinstance(e, (ForbiddenError, AssistantAccessDeniedError)):
-        raise HTTPException(status_code=403, detail=str(e))
-    elif isinstance(e, QuotaExceededError):
-        raise HTTPException(status_code=429, detail=str(e))
-    elif isinstance(e, (ThreadNotFoundError, AssistantNotFoundError)):
-        raise HTTPException(status_code=404, detail=str(e))
-    elif isinstance(e, NoHealthyInstanceError):
-        raise HTTPException(status_code=503, detail=str(e))
-    else:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============ 限流检查 ============
-
-
-async def check_rate_limit(
-    user: UserContext,
-    rate_limiter: MultiDimensionRateLimiter,
-    assistant_id: str | None = None,
-    operation: str | None = None,
-) -> dict[str, str]:
-    """检查限流"""
-    if not rate_limiter:
-        return {}
-
-    context = RateLimitContext.from_user_context(
-        user=user,
-        assistant_id=assistant_id,
-        operation=operation,
-    )
-
-    result = await rate_limiter.check(context)
-    if not result.allowed:
-        raise HTTPException(
-            status_code=429,
-            detail=RateLimitHeaders.build_exceeded_response(result),
-            headers=RateLimitHeaders.build(result),
-        )
-    return RateLimitHeaders.build(result)
+def handle_proxy_error(e: Exception) -> None:
+    handle_langgraph_proxy_error(e)
 
 
 # ============ Assistants API ============
@@ -245,7 +204,7 @@ async def create_thread(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """创建 Thread"""
-    await check_rate_limit(user, rate_limiter, operation="thread_create")
+    await check_langgraph_rate_limit(user, rate_limiter, operation="thread_create")
 
     try:
         return await proxy.create_thread(
@@ -380,10 +339,11 @@ async def create_run(
     request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
+    _auth: AuthContext = Depends(get_auth_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """创建 Run"""
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -417,7 +377,7 @@ async def create_run_wait(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """创建 Run 并等待完成"""
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -448,7 +408,7 @@ async def stream_run(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """流式执行 Run"""
-    rate_limit_headers = await check_rate_limit(
+    rate_limit_headers = await check_langgraph_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -471,6 +431,8 @@ async def stream_run(
                     "event": chunk.get("event", "message"),
                     "data": json.dumps(chunk.get("data", {})),
                 }
+        except HTTPException:
+            raise
         except Exception as e:
             yield {
                 "event": "error",
@@ -546,7 +508,7 @@ async def stream_stateless_run(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """无 Thread 的流式 Run（一次性对话）"""
-    rate_limit_headers = await check_rate_limit(
+    rate_limit_headers = await check_langgraph_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -569,6 +531,8 @@ async def stream_stateless_run(
                     "event": chunk.get("event", "message"),
                     "data": json.dumps(chunk.get("data", {})),
                 }
+        except HTTPException:
+            raise
         except Exception as e:
             yield {
                 "event": "error",
@@ -591,7 +555,7 @@ async def create_stateless_run(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """无状态 Run（一次性对话）"""
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         assistant_id=data.assistant_id,
@@ -622,7 +586,7 @@ async def store_put_item(
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """写入记忆"""
-    await check_rate_limit(user, rate_limiter, operation="store_write")
+    await check_langgraph_rate_limit(user, rate_limiter, operation="store_write")
 
     try:
         await proxy.store_put(user, data.namespace, data.key, data.value)
@@ -697,6 +661,8 @@ async def passthrough(
     request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+    rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """
     LangGraph CLI / LangSmith Deployment API is evolving quickly.
@@ -705,6 +671,25 @@ async def passthrough(
     """
     upstream_path = "/" + full_path.lstrip("/")
     method = request.method.upper()
+    body = (
+        await request.body()
+        if method in {"POST", "PUT", "PATCH"}
+        else None
+    )
+
+    if is_langgraph_run_path(method, full_path):
+        parsed = decode_json_body(body)
+        assistant_id = (
+            str(parsed.get("assistant_id") or "").strip() or None
+            if isinstance(parsed, dict)
+            else None
+        )
+        await check_langgraph_rate_limit(
+            user,
+            rate_limiter,
+            assistant_id=assistant_id,
+            operation="run_create",
+        )
 
     # Ownership checks for thread/assistant scoped paths.
     # Authorization failures must abort; only non-authorization errors
@@ -729,13 +714,13 @@ async def passthrough(
     params = list(request.query_params.multi_items())
     headers = _build_langgraph_passthrough_headers(request, user, proxy)
 
-    body = await request.body()
     body = await prepare_langgraph_run_body_for_passthrough(
         body,
         method=method,
         path=full_path,
         request=request,
         user=user,
+        auth=auth,
     )
     wants_stream = (
         "text/event-stream" in (headers.get("accept", "") or "")

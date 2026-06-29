@@ -27,8 +27,11 @@ import httpx
 from fastapi import Request
 
 from ..proxy.langgraph_run_body import (
+    build_minimal_langgraph_prep_request,
     merge_gateway_domain_policy_metadata,
     prepare_and_finalize_langgraph_run_payload,
+    prepare_langgraph_run_payload,
+    synthetic_langgraph_service_config,
 )
 from ..services.metrics import get_metrics_recorder, get_usage_recorder
 from ..services.metrics.realtime_metrics import get_realtime_metrics
@@ -783,14 +786,22 @@ class LangGraphProxy:
         assistant_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if http_request is None:
-            run_config = self._build_run_config(user, payload.get("config"))
-            payload["config"] = run_config
-            effective_metadata = self._inject_gateway_domain_policy_metadata(
-                metadata=payload.get("metadata"),
+            logger.warning(
+                "LangGraph run prep without http_request; applying sync scrub and configurable injection only"
+            )
+            minimal_request = build_minimal_langgraph_prep_request()
+            assistant_id = str(payload.get("assistant_id") or "").strip() or None
+            service_config = synthetic_langgraph_service_config(assistant_id=assistant_id)
+            prepare_langgraph_run_payload(
+                payload,
+                method="POST",
+                path=path,
+                request=minimal_request,
+                user=user,
+                auth=user,
+                service_config=service_config,
                 assistant_payload=assistant_payload,
             )
-            if effective_metadata:
-                payload["metadata"] = effective_metadata
             return payload
 
         return await prepare_and_finalize_langgraph_run_payload(

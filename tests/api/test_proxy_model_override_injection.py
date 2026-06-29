@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from src.api.v1.proxy import (
-    _inject_langgraph_model_override_config,
-    _safe_model_override_debug,
-)
+from src.api.v1.proxy import _safe_model_override_debug
 from src.proxy.config_loader import ProxyServiceConfig
-from src.proxy.langgraph_run_body import clear_runtime_model_override_cache
+from src.proxy.langgraph_run_body import (
+    clear_runtime_model_override_cache,
+    inject_langgraph_model_override_bytes,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -124,7 +124,7 @@ async def test_proxy_run_injects_gateway_resolved_gateway_model() -> None:
         }
     ).encode("utf-8")
 
-    updated = await _inject_langgraph_model_override_config(
+    updated = await inject_langgraph_model_override_bytes(
         request=_request(),
         body=body,
         method="POST",
@@ -165,7 +165,7 @@ async def test_proxy_run_injects_gateway_model_when_config_is_absent() -> None:
         }
     ).encode("utf-8")
 
-    updated = await _inject_langgraph_model_override_config(
+    updated = await inject_langgraph_model_override_bytes(
         request=_request(),
         body=body,
         method="POST",
@@ -197,7 +197,7 @@ async def test_proxy_injects_primary_and_fallback_candidates_without_browser_key
         }
     ).encode("utf-8")
 
-    updated = await _inject_langgraph_model_override_config(
+    updated = await inject_langgraph_model_override_bytes(
         request=_request(),
         body=body,
         method="POST",
@@ -246,7 +246,7 @@ async def test_proxy_run_scrubs_browser_gateway_model_when_override_disabled() -
         }
     ).encode("utf-8")
 
-    updated = await _inject_langgraph_model_override_config(
+    updated = await inject_langgraph_model_override_bytes(
         request=_request(),
         body=body,
         method="POST",

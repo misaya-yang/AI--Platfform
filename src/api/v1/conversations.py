@@ -24,22 +24,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from ...adapters.langgraph_proxy import (
-    AssistantAccessDeniedError,
-    AssistantNotFoundError,
-    ForbiddenError,
-    LangGraphProxy,
-    NoHealthyInstanceError,
-    QuotaExceededError,
-    ThreadNotFoundError,
-)
+from ...adapters.langgraph_proxy import LangGraphProxy
 from ...core.auth.user_resolver import UserContext
-from ...core.gateway.multi_dimension_rate_limiter import (
-    MultiDimensionRateLimiter,
-    RateLimitContext,
-    RateLimitHeaders,
-)
-from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
+from ...core.gateway.multi_dimension_rate_limiter import MultiDimensionRateLimiter
+from ..deps import AuthContext, get_auth_context, get_rate_limiter, get_user_context, require_langgraph_proxy
+from ._langgraph_route_utils import check_langgraph_rate_limit, handle_langgraph_proxy_error
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
@@ -114,53 +103,20 @@ class StreamMessageCreate(BaseModel):
     )
 
 
-# ============ 异常处理 ============
+def handle_proxy_error(e: Exception) -> None:
+    handle_langgraph_proxy_error(e, not_found_detail="Conversation not found")
 
 
-def handle_proxy_error(e: Exception):
-    """处理代理层异常"""
-    if isinstance(e, (ForbiddenError, AssistantAccessDeniedError)):
-        raise HTTPException(status_code=403, detail=str(e))
-    elif isinstance(e, QuotaExceededError):
-        raise HTTPException(status_code=429, detail=str(e))
-    elif isinstance(e, ThreadNotFoundError):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    elif isinstance(e, AssistantNotFoundError):
-        raise HTTPException(status_code=404, detail=str(e))
-    elif isinstance(e, NoHealthyInstanceError):
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-    else:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============ 限流检查 ============
-
-
-async def check_rate_limit(
+async def _on_rate_limit_denied(
     user: UserContext,
-    rate_limiter: MultiDimensionRateLimiter,
-    operation: str | None = None,
-    service_id: str | None = None,
-):
-    """检查限流"""
-    if not rate_limiter:
-        return
-
-    context = RateLimitContext.from_user_context(user, operation=operation)
-    result = await rate_limiter.check(context)
-
-    if not result.allowed:
-        await _record_security_event(
-            event_type="rate_limited",
-            tenant_id=user.tenant_id,
-            user_id=user.user_id,
-            service_id=service_id or "assistant",
-        )
-        raise HTTPException(
-            status_code=429,
-            detail=RateLimitHeaders.build_exceeded_response(result),
-            headers=RateLimitHeaders.build(result),
-        )
+    service_id: str | None,
+) -> None:
+    await _record_security_event(
+        event_type="rate_limited",
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        service_id=service_id or "assistant",
+    )
 
 
 # ============ 辅助函数 ============
@@ -217,11 +173,12 @@ async def create_conversation(
 
     创建一个新的对话会话，返回对话 ID 用于后续消息交互。
     """
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         operation="thread_create",
         service_id=data.assistant_id,
+        on_denied=lambda: _on_rate_limit_denied(user, data.assistant_id),
     )
 
     try:
@@ -316,6 +273,7 @@ async def send_message(
     request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
+    _auth: AuthContext = Depends(get_auth_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
 ):
     """
@@ -323,11 +281,12 @@ async def send_message(
 
     向对话发送消息并等待 AI 回复。适用于简单交互场景。
     """
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         operation="run_create",
         service_id="assistant",
+        on_denied=lambda: _on_rate_limit_denied(user, "assistant"),
     )
 
     try:
@@ -416,11 +375,12 @@ async def stream_message(
 
     向对话发送消息并获取流式回复。适用于需要实时显示 AI 回复的场景。
     """
-    await check_rate_limit(
+    await check_langgraph_rate_limit(
         user,
         rate_limiter,
         operation="run_create",
         service_id="assistant",
+        on_denied=lambda: _on_rate_limit_denied(user, "assistant"),
     )
 
     # 获取对话关联的 assistant_id
@@ -471,6 +431,8 @@ async def stream_message(
                 "data": json.dumps({"status": "completed"}),
             }
 
+        except HTTPException:
+            raise
         except Exception as e:
             yield {
                 "event": "error",

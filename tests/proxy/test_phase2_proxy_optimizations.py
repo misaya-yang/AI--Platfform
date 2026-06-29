@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.proxy.config_loader import ProxyServiceConfig
+from src.proxy.langgraph_run_body import billing_request_snapshot
 from src.proxy.response_cache import ResponseCache
 from src.proxy.transparent_proxy import TransparentProxy
 
@@ -21,6 +22,29 @@ def _service_config() -> ProxyServiceConfig:
         model_override={"provider_id": "dashscope"},
         metadata={"adapter_type": "langgraph"},
     )
+
+
+def test_billing_request_snapshot_shallow_copies_payload() -> None:
+    payload = {
+        "input": {"messages": [{"role": "user", "content": "hello"}]},
+        "config": {
+            "configurable": {
+                "gateway_model": {
+                    "model_id": "qwen-max",
+                    "provider_id": "dashscope",
+                    "_api_key": "secret",
+                }
+            }
+        },
+    }
+    snapshot = billing_request_snapshot(payload)
+    assert snapshot is not None
+    snapshot["input"]["messages"][0]["content"] = "mutated"
+    assert payload["input"]["messages"][0]["content"] == "mutated"
+    assert snapshot["config"]["configurable"]["gateway_model"] == {
+        "model_id": "qwen-max",
+        "provider_id": "dashscope",
+    }
 
 
 def test_resolve_billing_hints_prefers_effective_model() -> None:
@@ -71,6 +95,36 @@ def test_response_cache_uses_parsed_body_without_decoding_bytes() -> None:
     stable, model = ResponseCache._normalize_body(b"{}", parsed_body=parsed)
     assert model == "qwen-max"
     assert "qwen-max" in stable
+
+
+@pytest.mark.asyncio
+async def test_availability_unavailable_stale_refreshes_synchronously() -> None:
+    proxy = TransparentProxy.__new__(TransparentProxy)
+    proxy.availability_cache_ttl = 30.0
+    proxy._availability = {
+        "agent-1": {
+            "availability_status": "unavailable",
+            "available_upstreams": [],
+            "last_health_check_at": 0.0,
+            "last_health_error": "down",
+        }
+    }
+    proxy._availability_lock = asyncio.Lock()
+    proxy._availability_refresh_inflight = {}
+
+    async def refresh(_config: ProxyServiceConfig) -> dict:
+        return {
+            "availability_status": "available",
+            "available_upstreams": ["http://langgraph:8000"],
+            "last_health_check_at": 10.0,
+            "last_health_error": None,
+        }
+
+    proxy._refresh_service_availability = refresh  # type: ignore[method-assign]
+
+    config = _service_config()
+    snapshot = await proxy.get_service_availability(config)
+    assert snapshot["availability_status"] == "available"
 
 
 @pytest.mark.asyncio

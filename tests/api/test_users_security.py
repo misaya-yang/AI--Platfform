@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+import src.api.v1.users as users_module
 from src.api.deps import AuthContext
 from src.api.v1.users import UserUpdate, update_user
 
@@ -64,6 +65,28 @@ async def test_non_admin_cannot_modify_user_service_access_policy():
 
     assert exc.value.status_code == 403
     assert db.updated is False
+
+
+@pytest.mark.asyncio
+async def test_service_access_update_clears_constraint_cache(monkeypatch):
+    db = _DB()
+    clear_calls = 0
+
+    def fake_clear_cache() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+
+    monkeypatch.setattr(users_module, "clear_service_access_constraint_cache", fake_clear_cache)
+
+    await update_user(
+        user_id="target-user",
+        body=UserUpdate(service_access_mode="allowlist", allowed_services=["agent"]),
+        request=_request(db),
+        auth=AuthContext(user_id="admin", roles=["admin"], is_authenticated=True),
+    )
+
+    assert db.updated is True
+    assert clear_calls == 1
 
 
 @pytest.mark.asyncio

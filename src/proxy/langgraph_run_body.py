@@ -156,13 +156,9 @@ def extract_langgraph_thread_id(path: str) -> str | None:
 
 
 def _current_trace_id(request: Request) -> str:
-    request_id = getattr(request.state, "request_id", "")
-    if isinstance(request_id, str) and request_id:
-        return request_id
-    trace_id = getattr(request.state, "trace_id", "")
-    if isinstance(trace_id, str):
-        return trace_id
-    return ""
+    from ..api.v1._route_trace import current_trace_id
+
+    return current_trace_id(request)
 
 
 def _stream_mode_wants_messages(stream_mode: Any) -> bool:
@@ -527,6 +523,8 @@ async def prepare_and_finalize_langgraph_run_payload(
     tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """Single canonical LangGraph run preparation for all gateway entry points."""
+    from .langgraph_governance import apply_langgraph_run_governance
+
     resolved_assistant_id = str(
         assistant_id or payload.get("assistant_id") or ""
     ).strip() or None
@@ -549,10 +547,13 @@ async def prepare_and_finalize_langgraph_run_payload(
         service_config=service_config,
         assistant_payload=assistant_payload,
     )
-    await finalize_langgraph_run_payload(
+    await apply_langgraph_run_governance(
         request=request,
+        user=user,
         payload=payload,
+        path=path,
         service_config=service_config,
+        auth=auth,
         tenant_id=effective_tenant,
     )
     return payload
@@ -580,6 +581,8 @@ async def prepare_langgraph_run_body_for_passthrough(
         request,
         assistant_id=str(payload.get("assistant_id") or "").strip() or None,
     )
+    from .langgraph_governance import apply_langgraph_run_governance
+
     _, sync_changed = prepare_langgraph_run_payload(
         payload,
         method=method,
@@ -590,13 +593,16 @@ async def prepare_langgraph_run_body_for_passthrough(
         service_config=service_config,
         assistant_payload=assistant_payload,
     )
-    async_changed = await finalize_langgraph_run_payload(
+    _, _, governance_changed = await apply_langgraph_run_governance(
         request=request,
+        user=user,
         payload=payload,
+        path=path,
         service_config=service_config,
+        auth=auth,
         tenant_id=str(getattr(user, "tenant_id", "") or "default"),
     )
-    if sync_changed or async_changed:
+    if sync_changed or governance_changed:
         return encode_json_body(payload)
     return body
 
@@ -854,16 +860,128 @@ def billing_request_snapshot(payload: dict[str, Any] | None) -> dict[str, Any] |
     """Redacted request snapshot for capacity/billing hints (no gateway_model secrets)."""
     if payload is None:
         return None
-    snapshot = copy.deepcopy(payload)
-    run_config = snapshot.get("config")
+    snapshot = dict(payload)
+    run_config = payload.get("config")
     if isinstance(run_config, dict):
+        updated_config = dict(run_config)
         configurable = run_config.get("configurable")
         if isinstance(configurable, dict):
+            updated_configurable = dict(configurable)
             redacted_hints = redact_gateway_model_for_billing(configurable.get("gateway_model"))
-            configurable.pop("gateway_model", None)
+            updated_configurable.pop("gateway_model", None)
             if redacted_hints:
-                configurable["gateway_model"] = redacted_hints
+                updated_configurable["gateway_model"] = redacted_hints
+            updated_config["configurable"] = updated_configurable
+        snapshot["config"] = updated_config
     return snapshot
+
+
+def build_minimal_langgraph_prep_request() -> SimpleNamespace:
+    """Request-like object for sync LangGraph prep when no FastAPI request is available."""
+    return build_control_plane_request(
+        provider_service=None,
+        model_service=None,
+    )
+
+
+def synthetic_langgraph_service_config(
+    *,
+    assistant_id: str | None = None,
+) -> ProxyServiceConfig:
+    effective_assistant_id = str(assistant_id or "").strip() or None
+    return ProxyServiceConfig(
+        service_id="langgraph",
+        service_name="langgraph",
+        upstream_url="",
+        assistant_id=effective_assistant_id,
+        metadata={"adapter_type": "langgraph"},
+    )
+
+
+def inject_domain_policy_metadata_bytes(
+    *,
+    body: bytes | None,
+    method: str,
+    path: str,
+    service_config: ProxyServiceConfig | None,
+) -> bytes | None:
+    """Inject service-level domain policy into a LangGraph run body."""
+    if not should_prepare_langgraph_run_body(method, path, service_config):
+        return body
+    payload = decode_json_body(body)
+    if not isinstance(payload, dict) or service_config is None:
+        return body
+    if not apply_domain_policy_metadata(payload, service_config=service_config):
+        return body
+    return encode_json_body(payload)
+
+
+def inject_langgraph_gateway_configurable_bytes(
+    *,
+    body: bytes | None,
+    method: str,
+    path: str,
+    request: Request,
+    user: Any,
+    auth: Any,
+    service_config: ProxyServiceConfig | None = None,
+) -> bytes | None:
+    """Apply synchronous LangGraph gateway configurable injection to a run body."""
+    if not body or not is_langgraph_run_path(method, path):
+        return body
+
+    payload = decode_json_body(body)
+    if not isinstance(payload, dict):
+        return body
+
+    resolved_config = service_config or synthetic_langgraph_service_config()
+    _, changed = prepare_langgraph_run_payload(
+        payload,
+        method=method,
+        path=path,
+        request=request,
+        user=user,
+        auth=auth,
+        service_config=resolved_config,
+    )
+    return encode_json_body(payload) if changed else body
+
+
+async def inject_langgraph_model_override_bytes(
+    *,
+    body: bytes | None,
+    method: str,
+    path: str,
+    request: Request,
+    service_config: ProxyServiceConfig | None,
+    tenant_id: str,
+) -> bytes | None:
+    """Scrub caller gateway_model and inject server-side runtime override into a run body."""
+    if not body or not is_langgraph_run_path(method, path):
+        return body
+
+    payload = decode_json_body(body)
+    if not isinstance(payload, dict):
+        return body
+
+    scrub_changed = scrub_caller_gateway_model(payload)
+    if (
+        not service_config
+        or not should_prepare_langgraph_run_body(method, path, service_config)
+    ):
+        return encode_json_body(payload) if scrub_changed else body
+
+    before = json.dumps(payload, sort_keys=True)
+    await apply_langgraph_model_override(
+        request=request,
+        payload=payload,
+        service_config=service_config,
+        tenant_id=tenant_id,
+    )
+    after = json.dumps(payload, sort_keys=True)
+    if scrub_changed or before != after:
+        return encode_json_body(payload)
+    return body
 
 
 def clear_runtime_model_override_cache() -> None:

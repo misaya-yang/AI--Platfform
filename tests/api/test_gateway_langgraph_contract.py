@@ -9,13 +9,13 @@ import pytest
 from fastapi import HTTPException
 
 from src.api.deps import AuthContext
-from src.api.v1.proxy import (
-    _inject_langgraph_gateway_configurable,
-    _inject_langgraph_model_override_config,
-)
 from src.proxy.config_loader import ProxyServiceConfig
 from src.proxy.context_injector import ContextInjector, RequestContext
-from src.proxy.langgraph_run_body import clear_runtime_model_override_cache
+from src.proxy.langgraph_run_body import (
+    clear_runtime_model_override_cache,
+    inject_langgraph_gateway_configurable_bytes,
+    inject_langgraph_model_override_bytes,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +126,7 @@ def test_gateway_configurable_overwrites_identity_and_scrubs_browser_secrets() -
         }
     ).encode("utf-8")
 
-    updated = _inject_langgraph_gateway_configurable(
+    updated = inject_langgraph_gateway_configurable_bytes(
         request=_request(),
         body=body,
         method="POST",
@@ -163,7 +163,7 @@ async def test_stream_and_wait_paths_receive_same_gateway_model_override() -> No
     results: list[dict[str, Any]] = []
 
     for path in ("threads/thread-1/runs/stream", "threads/thread-1/runs/wait"):
-        gateway_body = _inject_langgraph_gateway_configurable(
+        gateway_body = inject_langgraph_gateway_configurable_bytes(
             request=_request(),
             body=body,
             method="POST",
@@ -171,7 +171,7 @@ async def test_stream_and_wait_paths_receive_same_gateway_model_override() -> No
             user=_user(),
             auth=_auth(),
         )
-        updated = await _inject_langgraph_model_override_config(
+        updated = await inject_langgraph_model_override_bytes(
             request=_request(),
             body=gateway_body,
             method="POST",
@@ -203,7 +203,7 @@ async def test_disabled_override_does_not_restore_browser_gateway_model() -> Non
         }
     ).encode("utf-8")
 
-    gateway_body = _inject_langgraph_gateway_configurable(
+    gateway_body = inject_langgraph_gateway_configurable_bytes(
         request=_request(),
         body=body,
         method="POST",
@@ -211,7 +211,7 @@ async def test_disabled_override_does_not_restore_browser_gateway_model() -> Non
         user=_user(),
         auth=_auth(),
     )
-    updated = await _inject_langgraph_model_override_config(
+    updated = await inject_langgraph_model_override_bytes(
         request=_request(),
         body=gateway_body,
         method="POST",
@@ -230,7 +230,7 @@ async def test_missing_provider_key_fails_before_upstream_call() -> None:
     body = json.dumps({"input": {}, "config": {"configurable": {}}}).encode("utf-8")
 
     with pytest.raises(HTTPException) as exc_info:
-        await _inject_langgraph_model_override_config(
+        await inject_langgraph_model_override_bytes(
             request=_request(provider_has_key=False),
             body=body,
             method="POST",

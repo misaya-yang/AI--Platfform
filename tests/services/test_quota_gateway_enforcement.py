@@ -7,6 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 import src.api.v1.proxy as proxy_module
+import src.proxy.langgraph_governance as governance_module
 from src.api.deps import AuthContext
 from src.core.auth.user_resolver import UserContext
 from src.services.billing.quota_service import (
@@ -112,10 +113,10 @@ async def test_hard_block_returns_403_before_upstream(monkeypatch) -> None:
         )
     )
     events = []
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
     monkeypatch.setattr(
-        proxy_module,
-        "_record_security_event",
+        governance_module,
+        "record_security_event",
         lambda **kwargs: _append_event(events, **kwargs),
     )
 
@@ -150,8 +151,8 @@ async def test_rate_limit_returns_429_with_retry_after(monkeypatch) -> None:
             retry_after_seconds=17,
         )
     )
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
-    monkeypatch.setattr(proxy_module, "_record_security_event", _ignore_event)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "record_security_event", _ignore_event)
 
     with pytest.raises(HTTPException) as exc:
         await _apply(request=_request())
@@ -172,8 +173,8 @@ async def test_allow_but_alert_proceeds_and_alerts_once_per_window(monkeypatch) 
             overage_strategy=OverageStrategy.ALLOW_BUT_ALERT,
         )
     )
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
-    monkeypatch.setattr(proxy_module, "_record_security_event", _ignore_event)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "record_security_event", _ignore_event)
     request = _request()
 
     await _apply(request=request)
@@ -194,8 +195,8 @@ async def test_downgrade_model_only_mutates_model_fields(monkeypatch) -> None:
             downgraded_model="safe-model",
         )
     )
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
-    monkeypatch.setattr(proxy_module, "_record_security_event", _ignore_event)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "record_security_event", _ignore_event)
 
     body, model = await _apply(
         request=_request(),
@@ -231,8 +232,8 @@ async def test_downgrade_model_mutates_deferred_parsed_payload(monkeypatch) -> N
             downgraded_model="safe-model",
         )
     )
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
-    monkeypatch.setattr(proxy_module, "_record_security_event", _ignore_event)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "record_security_event", _ignore_event)
     payload = {
         "model": "expensive-model",
         "input": {"model": "expensive-model", "text": "hello"},
@@ -264,10 +265,10 @@ async def test_downgrade_model_mutates_deferred_parsed_payload(monkeypatch) -> N
 async def test_quota_check_failure_policy_is_explicit(monkeypatch) -> None:
     service = _FakeQuotaService(error=RuntimeError("quota store down"))
     events = []
-    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(governance_module, "get_quota_service", lambda: service)
     monkeypatch.setattr(
-        proxy_module,
-        "_record_security_event",
+        governance_module,
+        "record_security_event",
         lambda **kwargs: _append_event(events, **kwargs),
     )
 
