@@ -1,5 +1,6 @@
-import { Alert, Descriptions, Empty, Space, Spin, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Descriptions, Empty, Space, Spin, Tag, Timeline, Typography, message } from "antd";
 import type { ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
@@ -10,7 +11,20 @@ import type {
   TraceStatus,
 } from "@/api/eval";
 
+import {
+  compactJson,
+  datasetIdFromDetail,
+  formatDate,
+  formatDuration,
+  locatorText,
+  ragQueryFromDetail,
+  retrievalContextsFromDetail,
+  retrievalDocumentCountFromDetail,
+  traceLocator,
+} from "./tracePresentation";
+
 const { Paragraph, Text } = Typography;
+const VISIBLE_SPAN_LIMIT = 80;
 
 interface AssistantTraceDetailProps {
   detail?: AgentTraceDetailResponse;
@@ -18,48 +32,11 @@ interface AssistantTraceDetailProps {
   error?: Error | null;
 }
 
-function formatDate(value: string | null | undefined, locale: string) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString(locale);
-}
-
-function formatDuration(ms: number) {
-  if (!ms) return "0ms";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
-  return `${ms}ms`;
-}
-
 function statusColor(status: TraceStatus | AgentTraceSpan["status"]) {
   if (status === "succeeded") return "green";
   if (status === "failed" || status === "timeout") return "red";
   if (status === "cancelled" || status === "skipped") return "orange";
   return "blue";
-}
-
-function compactJson(value: unknown): string {
-  if (value === undefined || value === null) return "{}";
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function metadataObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function traceLocator(trace: AgentTraceSummary): Record<string, unknown> {
-  return metadataObject(trace.metadata?.transcript_locator);
-}
-
-function locatorText(locator: Record<string, unknown>, key: string): string {
-  const value = locator[key];
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (typeof value === "string" && value.trim()) return value;
-  return "-";
 }
 
 function PreviewBlock({ label, value, emptyText }: { label: string; value?: string; emptyText: string }) {
@@ -70,6 +47,26 @@ function PreviewBlock({ label, value, emptyText }: { label: string; value?: stri
         {value || emptyText}
       </Paragraph>
     </div>
+  );
+}
+
+function JsonBlock({ value, defaultOpen = false }: { value: unknown; defaultOpen?: boolean }) {
+  const { t } = useTranslation();
+  const json = useMemo(() => compactJson(value), [value]);
+  const copy = async () => {
+    await navigator.clipboard.writeText(json);
+    message.success(t("eval.detail.copied"));
+  };
+  return (
+    <details className="eval-json-details" open={defaultOpen}>
+      <summary>
+        <span>{t("eval.detail.jsonDetails")}</span>
+        <Button size="small" type="text" onClick={copy}>
+          {t("eval.detail.copyJson")}
+        </Button>
+      </summary>
+      <pre className="eval-json-block">{json}</pre>
+    </details>
   );
 }
 
@@ -88,6 +85,49 @@ function RedactionBanner({ state }: { state: Record<string, unknown> }) {
           : t("eval.detail.redactedDescription")
       }
     />
+  );
+}
+
+function RetrievalContextPanel({ detail }: { detail: AgentTraceDetailResponse }) {
+  const { t } = useTranslation();
+  const contexts = retrievalContextsFromDetail(detail);
+  const query = ragQueryFromDetail(detail);
+  const datasetId = datasetIdFromDetail(detail);
+  if (detail.trace.trace_family !== "rag") return null;
+  return (
+    <div className="eval-ragas-retrieval-panel" aria-label={t("eval.ragas.retrievedContexts")}>
+      <div className="eval-section-title eval-section-title-compact">
+        <h3>{t("eval.ragas.retrievalSection")}</h3>
+        <span>{t("eval.ragas.contextCount", { count: contexts.length })}</span>
+      </div>
+      <Descriptions
+        className="eval-descriptions"
+        size="small"
+        column={1}
+        bordered
+        items={[
+          { key: "query", label: t("eval.ragas.fields.query"), children: query || t("eval.detail.noPreview") },
+          { key: "dataset", label: t("eval.ragas.fields.dataset"), children: datasetId || "-" },
+          {
+            key: "documents",
+            label: t("eval.ragas.fields.documents"),
+            children: String(retrievalDocumentCountFromDetail(detail)),
+          },
+        ]}
+      />
+      <div className="eval-ragas-context-list eval-ragas-context-list-compact">
+        {contexts.length > 0 ? (
+          contexts.map((context, index) => (
+            <article className="eval-ragas-context-card" key={`${index}-${context.slice(0, 24)}`}>
+              <div className="eval-ragas-context-index">{index + 1}</div>
+              <p>{context}</p>
+            </article>
+          ))
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("eval.ragas.noContexts")} />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -209,9 +249,7 @@ function SpanTimelineItem({ span, depth = 0 }: { span: AgentTraceSpan; depth?: n
         <PreviewBlock label={t("eval.detail.inputPreview")} value={span.input_preview} emptyText={t("eval.detail.noPreview")} />
         <PreviewBlock label={t("eval.detail.outputPreview")} value={span.output_preview} emptyText={t("eval.detail.noPreview")} />
       </div>
-      {Object.keys(span.attributes || {}).length > 0 ? (
-        <pre className="eval-json-block">{compactJson(span.attributes)}</pre>
-      ) : null}
+      {Object.keys(span.attributes || {}).length > 0 ? <JsonBlock value={span.attributes} /> : null}
     </div>
   );
 }
@@ -235,13 +273,14 @@ function EventTimelineItem({ event }: { event: AgentTraceEvent }) {
           {event.redacted ? t("eval.detail.redacted") : t("eval.detail.raw")}
         </Tag>
       </Space>
-      <pre className="eval-json-block">{compactJson(event.payload)}</pre>
+      <JsonBlock value={event.payload} />
     </div>
   );
 }
 
 export function AssistantTraceDetail({ detail, loading, error }: AssistantTraceDetailProps) {
   const { t, i18n } = useTranslation();
+  const [showAllSpans, setShowAllSpans] = useState(false);
 
   if (loading) {
     return (
@@ -273,7 +312,9 @@ export function AssistantTraceDetail({ detail, loading, error }: AssistantTraceD
   }
 
   const { trace, spans, events } = detail;
-  const spanTree = buildSpanTree(spans);
+  const visibleSpans = showAllSpans ? spans : spans.slice(0, VISIBLE_SPAN_LIMIT);
+  const spanTree = buildSpanTree(visibleSpans);
+  const hiddenSpanCount = Math.max(spans.length - visibleSpans.length, 0);
   const timelineItems: { key: string; dot?: ReactNode; content: ReactNode; color?: string }[] =
     spanTree.length > 0
       ? spanTree.map((node) => ({
@@ -347,13 +388,24 @@ export function AssistantTraceDetail({ detail, loading, error }: AssistantTraceD
         <PreviewBlock label={t("eval.detail.outputPreview")} value={trace.output_preview} emptyText={t("eval.detail.noPreview")} />
       </div>
 
+      <RetrievalContextPanel detail={detail} />
+
       <div className="eval-section-title">
         <h3>{t("eval.detail.executionTimeline")}</h3>
-        <span>
-          {spans.length > 0
-            ? t("eval.detail.spanCount", { count: spans.length })
-            : t("eval.detail.eventFallbackCount", { count: events.length })}
-        </span>
+        <Space size={8} wrap>
+          <span>
+            {spans.length > 0
+              ? t("eval.detail.spanCount", { count: spans.length })
+              : t("eval.detail.eventFallbackCount", { count: events.length })}
+          </span>
+          {hiddenSpanCount > 0 || showAllSpans ? (
+            <Button size="small" onClick={() => setShowAllSpans((value) => !value)}>
+              {showAllSpans
+                ? t("eval.detail.showLessSpans")
+                : `${t("eval.detail.showAllSpans")} (${hiddenSpanCount})`}
+            </Button>
+          ) : null}
+        </Space>
       </div>
       <Timeline className="eval-timeline" mode="start" items={timelineItems} />
 

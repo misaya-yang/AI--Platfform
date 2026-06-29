@@ -57,6 +57,7 @@ class AgentTraceRepository(BaseRepository):
         min_latency_ms: int | None = None,
         max_latency_ms: int | None = None,
         dataset_id: str | None = None,
+        metadata_dataset_id: str | None = None,
         started_after: Any | None = None,
         started_before: Any | None = None,
         limit: int = 50,
@@ -196,6 +197,9 @@ class AgentTraceRepository(BaseRepository):
                 )
                 """
             )
+        if metadata_dataset_id:
+            params.append(metadata_dataset_id)
+            filters.append(f"t.metadata->>'dataset_id' = ${len(params)}")
 
         where_clause = " AND ".join(filters)
         count_row = await self.fetchrow(
@@ -705,6 +709,29 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def list_dataset_example_case_ids(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+    ) -> set[str]:
+        rows = await self.fetch(
+            """
+            SELECT DISTINCT metadata->>'case_id' AS case_id
+            FROM eval_examples
+            WHERE tenant_id = $1
+              AND dataset_id = $2::uuid
+              AND COALESCE(metadata->>'case_id', '') <> ''
+            """,
+            tenant_id,
+            dataset_id,
+        )
+        return {
+            str(row["case_id"])
+            for row in rows
+            if row.get("case_id")
+        }
+
     async def import_examples(
         self,
         *,
@@ -712,9 +739,23 @@ class AgentTraceRepository(BaseRepository):
         dataset_id: str,
         created_by: str,
         examples: list[dict[str, Any]],
+        mode: str = "skip_duplicates",
     ) -> dict[str, Any]:
+        existing_case_ids: set[str] = set()
+        if mode == "skip_duplicates":
+            existing_case_ids = await self.list_dataset_example_case_ids(
+                tenant_id=tenant_id,
+                dataset_id=dataset_id,
+            )
+        seen_in_request: set[str] = set()
         imported: list[dict[str, Any]] = []
+        skipped = 0
         for example in examples:
+            case_id = str(example.get("case_id") or "").strip()
+            if mode == "skip_duplicates" and case_id:
+                if case_id in existing_case_ids or case_id in seen_in_request:
+                    skipped += 1
+                    continue
             created = await self.create_example(
                 tenant_id=tenant_id,
                 dataset_id=dataset_id,
@@ -730,7 +771,10 @@ class AgentTraceRepository(BaseRepository):
             )
             if created:
                 imported.append(created)
-        return {"imported": len(imported), "skipped": 0, "examples": imported}
+                if case_id:
+                    existing_case_ids.add(case_id)
+                    seen_in_request.add(case_id)
+        return {"imported": len(imported), "skipped": skipped, "examples": imported}
 
     async def create_evaluator(
         self,
@@ -827,7 +871,6 @@ class AgentTraceRepository(BaseRepository):
               AND evaluator_id = $2::uuid
               AND status IN ('queued', 'running', 'succeeded')
               AND target_snapshot->>'trace_id' = $3
-              AND target_snapshot->>'source' = 'online_sampling'
             LIMIT 1
             """,
             tenant_id,
@@ -1412,6 +1455,113 @@ class AgentTraceRepository(BaseRepository):
         summary["scored_traces"] = int((scored_row or {}).get("scored_traces") or 0)
         summary["window_days"] = max(1, days)
         return summary
+
+    async def get_kb_ragas_summary(
+        self,
+        *,
+        tenant_id: str,
+        days: int = 7,
+        dataset_id: str | None = None,
+    ) -> dict[str, Any]:
+        params: list[Any] = [tenant_id, max(1, days)]
+        trace_filters = [
+            "t.tenant_id = $1",
+            "t.trace_family = 'rag'",
+            "t.created_at >= NOW() - make_interval(days => $2::int)",
+        ]
+        if dataset_id:
+            params.append(dataset_id)
+            trace_filters.append(f"t.metadata->>'dataset_id' = ${len(params)}")
+        trace_where = " AND ".join(trace_filters)
+
+        trace_row = await self.fetchrow(
+            f"""
+            SELECT
+                COUNT(DISTINCT t.trace_id)::int AS rag_traces,
+                COUNT(DISTINCT CASE
+                    WHEN s.score_source = 'kb_ragas' AND COALESCE(s.label, '') <> 'review'
+                    THEN t.trace_id
+                END)::int AS ragas_scored_traces
+            FROM agent_traces t
+            LEFT JOIN agent_trace_scores s
+                ON s.trace_id = t.trace_id
+               AND s.score_source = 'kb_ragas'
+               AND COALESCE(s.label, '') <> 'review'
+            WHERE {trace_where}
+            """,
+            *params,
+        )
+
+        metric_rows = await self.fetch(
+            f"""
+            SELECT
+                s.score_name AS metric,
+                COALESCE(AVG(s.numeric_value), 0)::float AS average_score,
+                COUNT(*)::int AS scored_count,
+                COUNT(*) FILTER (WHERE s.label = 'pass')::int AS pass_count,
+                COUNT(*) FILTER (WHERE s.label = 'fail')::int AS fail_count,
+                COUNT(*) FILTER (WHERE s.label = 'review')::int AS review_count
+            FROM agent_trace_scores s
+            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
+            WHERE {trace_where}
+              AND s.score_source = 'kb_ragas'
+            GROUP BY s.score_name
+            ORDER BY s.score_name
+            """,
+            *params,
+        )
+
+        judge_row = await self.fetchrow(
+            f"""
+            SELECT s.metadata->>'judge_model' AS judge_model
+            FROM agent_trace_scores s
+            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
+            WHERE {trace_where}
+              AND s.score_source = 'kb_ragas'
+              AND COALESCE(s.metadata->>'judge_model', '') <> ''
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            """,
+            *params,
+        )
+
+        return {
+            "window_days": max(1, days),
+            "dataset_id": dataset_id,
+            "rag_traces": int((trace_row or {}).get("rag_traces") or 0),
+            "ragas_scored_traces": int((trace_row or {}).get("ragas_scored_traces") or 0),
+            "metrics": [dict(row) for row in metric_rows],
+            "latest_judge_model": (judge_row or {}).get("judge_model"),
+        }
+
+    async def trace_has_kb_ragas_score(
+        self,
+        *,
+        tenant_id: str,
+        trace_id: str,
+        evaluator_id: str | None = None,
+    ) -> bool:
+        params: list[Any] = [tenant_id, trace_id]
+        filters = [
+            "s.trace_id = $2::uuid",
+            "t.tenant_id = $1",
+            "s.score_source = 'kb_ragas'",
+            "COALESCE(s.label, '') <> 'review'",
+        ]
+        if evaluator_id:
+            params.append(evaluator_id)
+            filters.append(f"s.evaluator_id = ${len(params)}::uuid")
+        row = await self.fetchrow(
+            f"""
+            SELECT 1
+            FROM agent_trace_scores s
+            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
+            WHERE {' AND '.join(filters)}
+            LIMIT 1
+            """,
+            *params,
+        )
+        return row is not None
 
     async def purge_expired_traces(
         self,

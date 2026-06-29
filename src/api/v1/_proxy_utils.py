@@ -16,7 +16,7 @@ from typing import Final
 from ai_gateway_core.auth.gateway_secret import GatewaySecret
 from ai_gateway_core.proxy import ServiceProxy, ServiceProxyConfig
 from fastapi import HTTPException, Request
-from starlette.responses import Response
+from starlette.responses import Response, StreamingResponse
 
 from ...core.auth.user_resolver import UserContext
 from ...services.eval.rag_trace_capture import is_retrieve_path, record_rag_retrieval_trace
@@ -109,6 +109,27 @@ def _record_rag_proxy_trace(
     )
 
 
+async def _materialize_proxy_response(response: Response) -> tuple[Response, bytes]:
+    """Buffer streaming proxy responses so retrieve trace capture can parse JSON bodies."""
+    body = getattr(response, "body", b"") or b""
+    if body:
+        return response, body
+    if isinstance(response, StreamingResponse):
+        chunks: list[bytes] = []
+        async for chunk in response.body_iterator:
+            if chunk:
+                chunks.append(chunk)
+        buffered = b"".join(chunks)
+        materialized = Response(
+            content=buffered,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+        return materialized, buffered
+    return response, body
+
+
 async def proxy_to_kb_service(
     request: Request,
     user: UserContext,
@@ -156,7 +177,7 @@ async def proxy_to_kb_service(
         )
         raise
 
-    response_body = getattr(response, "body", b"") or b""
+    response, response_body = await _materialize_proxy_response(response)
     _record_rag_proxy_trace(
         request,
         user,

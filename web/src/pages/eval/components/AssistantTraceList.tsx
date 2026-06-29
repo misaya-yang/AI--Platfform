@@ -6,6 +6,8 @@ import { useTranslation } from "react-i18next";
 
 import type { AgentTraceSummary, TraceStatus } from "@/api/eval";
 
+import { formatDate, formatDuration, traceThreadId, traceTurn } from "./tracePresentation";
+
 const { RangePicker } = DatePicker;
 
 export type ScoreStatusFilter = "all" | "scored" | "unscored";
@@ -19,6 +21,12 @@ export interface AssistantTraceFilters {
   request_id?: string;
   transcript_query?: string;
   turn_index?: number;
+  span_kind?: string;
+  score_name?: string;
+  min_score?: number;
+  max_score?: number;
+  min_latency_ms?: number;
+  max_latency_ms?: number;
   score_status?: ScoreStatusFilter;
   start_date?: string;
   end_date?: string;
@@ -39,35 +47,11 @@ interface AssistantTraceListProps {
   onRefresh: () => void;
 }
 
-function formatDuration(ms: number) {
-  if (!ms) return "0ms";
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
-  return `${ms}ms`;
-}
-
-function formatDate(value: string | null | undefined, locale: string) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString(locale);
-}
-
 function statusColor(status: TraceStatus) {
   if (status === "succeeded") return "success";
   if (status === "failed" || status === "timeout") return "error";
   if (status === "cancelled") return "warning";
   return "processing";
-}
-
-function traceLocator(trace: AgentTraceSummary): Record<string, unknown> {
-  const locator = trace.metadata?.transcript_locator;
-  return locator && typeof locator === "object" && !Array.isArray(locator)
-    ? (locator as Record<string, unknown>)
-    : {};
-}
-
-function traceTurn(trace: AgentTraceSummary): string | null {
-  const turn = traceLocator(trace).turn_index;
-  if (typeof turn === "number" || typeof turn === "string") return String(turn);
-  return null;
 }
 
 export function AssistantTraceList({
@@ -99,7 +83,7 @@ export function AssistantTraceList({
       title: t("eval.list.columns.trace"),
       dataIndex: "trace_id",
       key: "trace",
-      width: 250,
+      width: 260,
       fixed: "left",
       render: (traceId, item) => {
         const turn = traceTurn(item);
@@ -127,6 +111,22 @@ export function AssistantTraceList({
           {item.scores_count > 0 ? <Tag className="eval-status-tag">{t("eval.score.scored")}</Tag> : null}
         </Space>
       ),
+    },
+    {
+      title: t("eval.list.columns.thread"),
+      key: "thread",
+      width: 150,
+      render: (_, item) => (
+        <span className="eval-trace-subline eval-trace-thread-cell">
+          {traceThreadId(item) || "-"}
+        </span>
+      ),
+    },
+    {
+      title: t("eval.list.columns.turn"),
+      key: "turn",
+      width: 86,
+      render: (_, item) => traceTurn(item) || "-",
     },
     {
       title: t("eval.list.columns.model"),
@@ -158,6 +158,17 @@ export function AssistantTraceList({
       key: "tokens",
       width: 110,
       render: (tokens: number) => <span className="eval-trace-metric">{tokens.toLocaleString()}</span>,
+    },
+    {
+      title: t("eval.list.columns.scores"),
+      dataIndex: "scores_count",
+      key: "scores",
+      width: 92,
+      render: (count: number) => (
+        <Tag className="eval-status-tag" color={count > 0 ? "blue" : undefined}>
+          {count.toLocaleString()}
+        </Tag>
+      ),
     },
     {
       title: t("eval.list.columns.user"),
@@ -201,95 +212,157 @@ export function AssistantTraceList({
         </Space>
       </div>
 
-      <div className="eval-filter-grid" aria-label="Trace filters">
-        <Input
-          className="eval-transcript-filter"
-          aria-label={t("eval.filters.transcript")}
-          prefix={<Search size={14} />}
-          placeholder={t("eval.filters.transcript")}
-          value={filters.transcript_query}
-          onChange={(event) => updateFilter("transcript_query", event.target.value)}
-          allowClear
-        />
-        <Select
-          aria-label={t("eval.filters.status")}
-          value={filters.status || "all"}
-          onChange={(value) => updateFilter("status", value as TraceStatus | "all")}
-          options={[
-            { label: t("eval.filters.allStatuses"), value: "all" },
-            { label: t("eval.status.succeeded"), value: "succeeded" },
-            { label: t("eval.status.running"), value: "running" },
-            { label: t("eval.status.failed"), value: "failed" },
-            { label: t("eval.status.cancelled"), value: "cancelled" },
-            { label: t("eval.status.timeout"), value: "timeout" },
-          ]}
-        />
-        <Input
-          aria-label={t("eval.filters.model")}
-          prefix={<Search size={14} />}
-          placeholder={t("eval.filters.model")}
-          value={filters.model_id}
-          onChange={(event) => updateFilter("model_id", event.target.value)}
-          allowClear
-        />
-        <Input
-          aria-label={t("eval.filters.user")}
-          placeholder={t("eval.filters.user")}
-          value={filters.user_id}
-          onChange={(event) => updateFilter("user_id", event.target.value)}
-          allowClear
-        />
-        <Input
-          aria-label={t("eval.filters.session")}
-          placeholder={t("eval.filters.session")}
-          value={filters.session_id}
-          onChange={(event) => updateFilter("session_id", event.target.value)}
-          allowClear
-        />
-        <Input
-          aria-label={t("eval.filters.run")}
-          placeholder={t("eval.filters.run")}
-          value={filters.run_id}
-          onChange={(event) => updateFilter("run_id", event.target.value)}
-          allowClear
-        />
-        <Input
-          aria-label={t("eval.filters.request")}
-          placeholder={t("eval.filters.request")}
-          value={filters.request_id}
-          onChange={(event) => updateFilter("request_id", event.target.value)}
-          allowClear
-        />
-        <InputNumber
-          aria-label={t("eval.filters.turn")}
-          placeholder={t("eval.filters.turn")}
-          min={1}
-          precision={0}
-          value={filters.turn_index}
-          onChange={(value) =>
-            updateFilter("turn_index", typeof value === "number" ? value : undefined)
-          }
-          style={{ width: "100%" }}
-        />
-        <Select
-          aria-label={t("eval.filters.scoreStatus")}
-          value={filters.score_status || "all"}
-          onChange={(value) => updateFilter("score_status", value as ScoreStatusFilter)}
-          options={[
-            { label: t("eval.filters.allScoreStates"), value: "all" },
-            { label: t("eval.score.scored"), value: "scored" },
-            { label: t("eval.score.unscored"), value: "unscored" },
-          ]}
-        />
-        <RangePicker
-          aria-label={t("eval.filters.dateRange")}
-          className="eval-date-range"
-          placeholder={[t("eval.filters.startDate"), t("eval.filters.endDate")]}
-          onChange={(_dates, dateStrings) => {
-            updateFilter("start_date", dateStrings[0] || undefined);
-            updateFilter("end_date", dateStrings[1] || undefined);
-          }}
-        />
+      <div className="eval-filter-stack" aria-label="Trace filters">
+        <div className="eval-primary-filter-row">
+          <Input
+            className="eval-transcript-filter"
+            aria-label={t("eval.filters.transcript")}
+            prefix={<Search size={14} />}
+            placeholder={t("eval.filters.transcript")}
+            value={filters.transcript_query}
+            onChange={(event) => updateFilter("transcript_query", event.target.value)}
+            allowClear
+          />
+          <Select
+            aria-label={t("eval.filters.status")}
+            value={filters.status || "all"}
+            onChange={(value) => updateFilter("status", value as TraceStatus | "all")}
+            options={[
+              { label: t("eval.filters.allStatuses"), value: "all" },
+              { label: t("eval.status.succeeded"), value: "succeeded" },
+              { label: t("eval.status.running"), value: "running" },
+              { label: t("eval.status.failed"), value: "failed" },
+              { label: t("eval.status.cancelled"), value: "cancelled" },
+              { label: t("eval.status.timeout"), value: "timeout" },
+            ]}
+          />
+          <Input
+            aria-label={t("eval.filters.model")}
+            prefix={<Search size={14} />}
+            placeholder={t("eval.filters.model")}
+            value={filters.model_id}
+            onChange={(event) => updateFilter("model_id", event.target.value)}
+            allowClear
+          />
+        </div>
+        <details className="eval-advanced-filters">
+          <summary>
+            <Filter size={14} />
+            <span>{t("eval.filters.advanced")}</span>
+          </summary>
+          <div className="eval-filter-grid">
+            <Input
+              aria-label={t("eval.filters.user")}
+              placeholder={t("eval.filters.user")}
+              value={filters.user_id}
+              onChange={(event) => updateFilter("user_id", event.target.value)}
+              allowClear
+            />
+            <Input
+              aria-label={t("eval.filters.session")}
+              placeholder={t("eval.filters.session")}
+              value={filters.session_id}
+              onChange={(event) => updateFilter("session_id", event.target.value)}
+              allowClear
+            />
+            <Input
+              aria-label={t("eval.filters.run")}
+              placeholder={t("eval.filters.run")}
+              value={filters.run_id}
+              onChange={(event) => updateFilter("run_id", event.target.value)}
+              allowClear
+            />
+            <Input
+              aria-label={t("eval.filters.request")}
+              placeholder={t("eval.filters.request")}
+              value={filters.request_id}
+              onChange={(event) => updateFilter("request_id", event.target.value)}
+              allowClear
+            />
+            <InputNumber
+              aria-label={t("eval.filters.turn")}
+              placeholder={t("eval.filters.turn")}
+              min={1}
+              precision={0}
+              value={filters.turn_index}
+              onChange={(value) =>
+                updateFilter("turn_index", typeof value === "number" ? value : undefined)
+              }
+              style={{ width: "100%" }}
+            />
+            <Input
+              aria-label={t("eval.filters.spanKind")}
+              placeholder={t("eval.filters.spanKind")}
+              value={filters.span_kind}
+              onChange={(event) => updateFilter("span_kind", event.target.value)}
+              allowClear
+            />
+            <Input
+              aria-label={t("eval.filters.scoreName")}
+              placeholder={t("eval.filters.scoreName")}
+              value={filters.score_name}
+              onChange={(event) => updateFilter("score_name", event.target.value)}
+              allowClear
+            />
+            <InputNumber
+              aria-label={t("eval.filters.minScore")}
+              placeholder={t("eval.filters.minScore")}
+              min={0}
+              max={1}
+              step={0.05}
+              value={filters.min_score}
+              onChange={(value) => updateFilter("min_score", typeof value === "number" ? value : undefined)}
+              style={{ width: "100%" }}
+            />
+            <InputNumber
+              aria-label={t("eval.filters.maxScore")}
+              placeholder={t("eval.filters.maxScore")}
+              min={0}
+              max={1}
+              step={0.05}
+              value={filters.max_score}
+              onChange={(value) => updateFilter("max_score", typeof value === "number" ? value : undefined)}
+              style={{ width: "100%" }}
+            />
+            <InputNumber
+              aria-label={t("eval.filters.minLatency")}
+              placeholder={t("eval.filters.minLatency")}
+              min={0}
+              precision={0}
+              value={filters.min_latency_ms}
+              onChange={(value) => updateFilter("min_latency_ms", typeof value === "number" ? value : undefined)}
+              style={{ width: "100%" }}
+            />
+            <InputNumber
+              aria-label={t("eval.filters.maxLatency")}
+              placeholder={t("eval.filters.maxLatency")}
+              min={0}
+              precision={0}
+              value={filters.max_latency_ms}
+              onChange={(value) => updateFilter("max_latency_ms", typeof value === "number" ? value : undefined)}
+              style={{ width: "100%" }}
+            />
+            <Select
+              aria-label={t("eval.filters.scoreStatus")}
+              value={filters.score_status || "all"}
+              onChange={(value) => updateFilter("score_status", value as ScoreStatusFilter)}
+              options={[
+                { label: t("eval.filters.allScoreStates"), value: "all" },
+                { label: t("eval.score.scored"), value: "scored" },
+                { label: t("eval.score.unscored"), value: "unscored" },
+              ]}
+            />
+            <RangePicker
+              aria-label={t("eval.filters.dateRange")}
+              className="eval-date-range"
+              placeholder={[t("eval.filters.startDate"), t("eval.filters.endDate")]}
+              onChange={(_dates, dateStrings) => {
+                updateFilter("start_date", dateStrings[0] || undefined);
+                updateFilter("end_date", dateStrings[1] || undefined);
+              }}
+            />
+          </div>
+        </details>
       </div>
 
       {error ? (
@@ -309,7 +382,7 @@ export function AssistantTraceList({
           rowKey="trace_id"
           size="small"
           pagination={false}
-          scroll={{ x: 1080, y: 420 }}
+          scroll={{ x: 1320, y: 420 }}
           locale={{
             emptyText: (
               <Empty

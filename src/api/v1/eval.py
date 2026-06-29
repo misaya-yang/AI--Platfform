@@ -11,6 +11,11 @@ from ...api.deps import AuthContext, get_auth_context, require_gateway_capabilit
 from ...core.auth.permissions import Capability, build_permission_denied_detail
 from ...persistence.database import DatabaseStorage
 from ...services.eval.golden import apply_gate
+from ...services.eval.kb_ragas_service import (
+    batch_score_kb_ragas_traces,
+    get_kb_ragas_knowledge_summary,
+    score_retrieval_with_kb_ragas,
+)
 from ..eval_export import EXPORT_REDACTION_POLICY, export_trace
 from ..schemas.eval import (
     AgentTraceDetailResponse,
@@ -45,6 +50,13 @@ from ..schemas.eval import (
     EvalExperimentRunCreate,
     EvalGateDryRunRequest,
     EvalGateDryRunResponse,
+    KbRagasBatchScoreRequest,
+    KbRagasBatchScoreResponse,
+    KbRagasKnowledgeSummaryResponse,
+    KbRagasMetricSummary,
+    KbRagasScoreRetrievalRequest,
+    KbRagasScoreRetrievalResponse,
+    KbRagasScoreRetrievalResult,
     EvalTraceExportResponse,
     EvalTraceMonitoringSummary,
     EvalTraceThreadResponse,
@@ -166,6 +178,7 @@ async def list_eval_traces(
     min_latency_ms: Annotated[int | None, Query(ge=0)] = None,
     max_latency_ms: Annotated[int | None, Query(ge=0)] = None,
     dataset_id: Annotated[str | None, Query()] = None,
+    metadata_dataset_id: Annotated[str | None, Query()] = None,
     started_after: Annotated[str | None, Query()] = None,
     started_before: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -195,6 +208,7 @@ async def list_eval_traces(
         min_latency_ms=min_latency_ms,
         max_latency_ms=max_latency_ms,
         dataset_id=dataset_id,
+        metadata_dataset_id=metadata_dataset_id,
         started_after=started_after,
         started_before=started_before,
         limit=limit,
@@ -422,6 +436,7 @@ async def import_eval_examples(
         dataset_id=dataset_id,
         created_by=auth.user_id,
         examples=[example.model_dump() for example in body.examples],
+        mode=body.mode,
     )
     return EvalExamplesImportResponse(
         imported=result.get("imported", 0),
@@ -699,6 +714,86 @@ async def run_eval_evaluator_async(
         payload=body.model_dump(),
     )
     return EvalAsyncJobResponse(**job)
+
+
+@router.get("/knowledge/summary", response_model=KbRagasKnowledgeSummaryResponse)
+async def get_kb_ragas_summary_endpoint(
+    request: Request,
+    days: Annotated[int, Query(ge=1, le=90)] = 7,
+    dataset_id: Annotated[str | None, Query()] = None,
+    auth: AuthContext = Depends(get_auth_context),
+) -> KbRagasKnowledgeSummaryResponse:
+    _require_eval_trace_access(request, auth)
+    summary = await get_kb_ragas_knowledge_summary(
+        _get_trace_repository(request),
+        tenant_id=auth.tenant_id,
+        days=days,
+        dataset_id=dataset_id,
+    )
+    summary_payload = dict(summary)
+    metric_items = summary_payload.pop("metrics", [])
+    return KbRagasKnowledgeSummaryResponse(
+        **summary_payload,
+        metrics=[KbRagasMetricSummary(**item) for item in metric_items or []],
+    )
+
+
+@router.post(
+    "/knowledge/{dataset_id}/batch-score",
+    response_model=KbRagasBatchScoreResponse,
+    status_code=202,
+)
+async def batch_score_kb_ragas_dataset(
+    dataset_id: str,
+    body: KbRagasBatchScoreRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> KbRagasBatchScoreResponse:
+    _require_eval_run_access(request, auth)
+    try:
+        result = await batch_score_kb_ragas_traces(
+            _get_trace_repository(request),
+            tenant_id=auth.tenant_id,
+            dataset_id=dataset_id,
+            evaluator_id=body.evaluator_id,
+            created_by=auth.user_id or "eval-api",
+            limit=body.limit,
+            only_unscored=body.only_unscored,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return KbRagasBatchScoreResponse(
+        queued=result["queued"],
+        skipped=result["skipped"],
+        jobs=[EvalAsyncJobResponse(**job) for job in result["jobs"]],
+    )
+
+
+@router.post("/knowledge/score-retrieval", response_model=KbRagasScoreRetrievalResponse)
+async def score_kb_ragas_retrieval(
+    body: KbRagasScoreRetrievalRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> KbRagasScoreRetrievalResponse:
+    _require_eval_run_access(request, auth)
+    try:
+        payload = await score_retrieval_with_kb_ragas(
+            query=body.query,
+            contexts=body.contexts,
+            metrics=body.metrics,
+            ground_truth=body.ground_truth,
+            llm_config=body.llm_config,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return KbRagasScoreRetrievalResponse(
+        judge_model=str(payload.get("judge_model") or ""),
+        results=[
+            KbRagasScoreRetrievalResult(**item)
+            for item in payload.get("results") or []
+            if isinstance(item, dict)
+        ],
+    )
 
 
 @router.post("/gates:dry-run", response_model=EvalGateDryRunResponse)

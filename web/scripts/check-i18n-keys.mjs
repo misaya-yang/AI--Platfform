@@ -29,13 +29,15 @@ async function readJson(filePath) {
 
 async function main() {
   const baseDir = path.resolve("src/i18n/locales");
-  const [en, zh] = await Promise.all([
+  const [en, zh, evalEn, evalZh] = await Promise.all([
     readJson(path.join(baseDir, "en-US.json")),
     readJson(path.join(baseDir, "zh-CN.json")),
+    readJson(path.join(baseDir, "eval-en-US.json")),
+    readJson(path.join(baseDir, "eval-zh-CN.json")),
   ]);
 
-  const enKeys = flatten(en);
-  const zhKeys = flatten(zh);
+  const enKeys = flatten({ ...en, eval: evalEn });
+  const zhKeys = flatten({ ...zh, eval: evalZh });
 
   const missingInZh = difference(enKeys, zhKeys);
   const missingInEn = difference(zhKeys, enKeys);
@@ -62,4 +64,3 @@ main().catch((error) => {
   console.error("Failed to check i18n keys:", error);
   process.exit(1);
 });
-

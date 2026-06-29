@@ -534,6 +534,145 @@ async def test_span_evaluator_uses_rules_config_when_present() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ragas_evaluator_writes_multiple_metric_scores() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "kb-ragas"
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.evaluator["filter_config"] = {
+        "metrics": ["context_relevancy", "context_precision"],
+        "required_span_kinds": ["retriever"],
+        "pass_threshold": 0.7,
+        "ground_truth": "Refunds within 30 days.",
+    }
+    repo.trace_detail = {
+        "trace": {
+            "trace_id": "trace-rag-1",
+            "trace_family": "rag",
+            "input_preview": "refund policy",
+            "output_preview": "2 docs",
+            "status": "succeeded",
+            "total_latency_ms": 120,
+            "metadata": {"gen_ai.retrieval.query.text": "refund policy", "dataset_id": "ds-1"},
+        },
+        "spans": [
+            {
+                "span_id": "span-life",
+                "span_kind": "lifecycle",
+                "name": "retrieve",
+                "status": "succeeded",
+            },
+            {
+                "span_id": "span-ret",
+                "span_kind": "retriever",
+                "name": "kb_retrieve",
+                "status": "succeeded",
+                "attributes": {
+                    "retrieval": {
+                        "documents": [{"content_eval": "Refunds are allowed within 30 days."}],
+                    }
+                },
+            },
+        ],
+        "events": [],
+    }
+
+    async def _kb_ragas_evaluate(**kwargs: Any) -> list[dict[str, Any]]:
+        assert kwargs["query"] == "refund policy"
+        assert kwargs["contexts"] == ["Refunds are allowed within 30 days."]
+        assert kwargs["ground_truth"] == "Refunds within 30 days."
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.9,
+                "explanation": "Highly relevant.",
+                "label": "pass",
+                "judge_model": "qwen-test",
+            },
+            {
+                "metric": "context_precision",
+                "score": 0.8,
+                "explanation": "Useful for the answer.",
+                "label": "pass",
+                "judge_model": "qwen-test",
+            },
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-rag-1",
+            "target_snapshot": {"trace_family": "rag"},
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 2
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    metrics = {call[1]["payload"]["score_name"] for call in score_calls}
+    assert metrics == {"context_relevancy", "context_precision"}
+    assert score_calls[0][1]["payload"]["score_source"] == "kb_ragas"
+
+
+@pytest.mark.asyncio
+async def test_ragas_evaluator_applies_pass_threshold_over_service_label() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.evaluator["filter_config"] = {"pass_threshold": 0.9}
+    repo.trace_detail["trace"]["trace_family"] = "rag"
+    repo.trace_detail["spans"] = [
+        {
+            "span_kind": "retriever",
+            "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
+        }
+    ]
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.8,
+                "explanation": "Borderline.",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-threshold", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_ragas_evaluator_requires_configured_client() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.trace_detail["trace"]["trace_family"] = "rag"
+    repo.trace_detail["spans"] = [
+        {
+            "span_kind": "retriever",
+            "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
+        }
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-missing", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "review"
+    assert "not configured" in score_calls[0][1]["payload"]["explanation"]
+
+
+@pytest.mark.asyncio
 async def test_evaluator_run_transitions_queued_running_succeeded() -> None:
     repo = FakeEvalRepository()
     executor = EvaluatorExecutor(repo)

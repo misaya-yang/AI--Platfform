@@ -1,4 +1,4 @@
-import { Alert, App as AntApp, Button, Descriptions, Input, Progress, Select, Space, Tabs, Tag } from "antd";
+import { Alert, App as AntApp, Button, Descriptions, Input, Progress, Select, Space, Tabs } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -15,6 +15,7 @@ import {
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 
 import {
   createEvalDataset,
@@ -56,11 +57,13 @@ import {
 } from "@/api/eval";
 
 import {
-  AssistantTraceList,
   type AssistantTraceFilters,
 } from "./components/AssistantTraceList";
-import { AssistantTraceDetail } from "./components/AssistantTraceDetail";
-import { TraceScorePanel } from "./components/TraceScorePanel";
+import { GoldenJsonlImport } from "./components/GoldenJsonlImport";
+import { KbRagasPanel } from "./components/KbRagasPanel";
+import { TraceExplorerShell } from "./components/TraceExplorerShell";
+
+import "./styles.css";
 
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value || "Unknown error"));
@@ -125,6 +128,7 @@ function parseJsonObjectDraft(text: string, fallback: Record<string, unknown>): 
 function evaluatorPresetForType(
   evaluatorType: EvalEvaluator["evaluator_type"],
   traceFamily: TraceFamily,
+  translate: (key: string, fallback?: string) => string,
 ): {
   rubric: string;
   filterConfigText: string;
@@ -221,6 +225,32 @@ function evaluatorPresetForType(
       samplingConfigText: defaultSampling,
     };
   }
+  if (evaluatorType === "ragas") {
+    return {
+      rubric: translate("eval.ragas.evaluatorRubric"),
+      filterConfigText: JSON.stringify(
+        {
+          metrics: ["context_relevancy"],
+          required_span_kinds: ["retriever"],
+          pass_threshold: 0.7,
+        },
+        null,
+        2,
+      ),
+      samplingConfigText: JSON.stringify(
+        {
+          online: {
+            enabled: traceFamily === "rag",
+            rate: 0.05,
+            trace_families: ["rag"],
+            only_failed: false,
+          },
+        },
+        null,
+        2,
+      ),
+    };
+  }
   return {
     rubric: "Score helpfulness, grounding, and safety from bounded trace previews.",
     filterConfigText: "{}",
@@ -230,10 +260,13 @@ function evaluatorPresetForType(
 
 function buildServerFilters(
   filters: AssistantTraceFilters,
-  traceFamily: TraceFamily
+  traceFamily: TraceFamily,
+  kbDatasetId?: string
 ): ListAgentTracesParams {
+  const datasetFilter = kbDatasetId?.trim() || undefined;
   return {
     trace_family: traceFamily,
+    metadata_dataset_id: traceFamily === "rag" && datasetFilter ? datasetFilter : undefined,
     status: filters.status && filters.status !== "all" ? (filters.status as TraceStatus) : undefined,
     model_id: filters.model_id?.trim() || undefined,
     user_id: filters.user_id?.trim() || undefined,
@@ -242,6 +275,12 @@ function buildServerFilters(
     request_id: filters.request_id?.trim() || undefined,
     transcript_query: filters.transcript_query?.trim() || undefined,
     turn_index: filters.turn_index,
+    span_kind: filters.span_kind?.trim() || undefined,
+    score_name: filters.score_name?.trim() || undefined,
+    min_score: filters.min_score,
+    max_score: filters.max_score,
+    min_latency_ms: filters.min_latency_ms,
+    max_latency_ms: filters.max_latency_ms,
     limit: 100,
     offset: 0,
   };
@@ -319,14 +358,24 @@ export function EvalPage() {
   const [gateResult, setGateResult] = useState<EvalGateDryRunResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
   const [latestRun, setLatestRun] = useState<EvalExperimentRun | null>(null);
+  const [searchParams] = useSearchParams();
+  const kbDatasetFilter = searchParams.get("dataset_id") || "";
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState("overview");
   const serverFilters = useMemo(
-    () => buildServerFilters(filters, activeTraceFamily),
-    [activeTraceFamily, filters]
+    () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter),
+    [activeTraceFamily, filters, kbDatasetFilter]
   );
   const traceFamilyEnabled =
     activeTraceFamily === "assistant"
     || activeTraceFamily === "langgraph_proxy"
     || activeTraceFamily === "rag";
+
+  useEffect(() => {
+    if (activeWorkbenchTab === "kb_ragas" && activeTraceFamily !== "rag") {
+      setActiveTraceFamily("rag");
+      setFilters({ status: "all", score_status: "all" });
+    }
+  }, [activeTraceFamily, activeWorkbenchTab]);
 
   const summaryQuery = useQuery({
     queryKey: ["eval", "summary"],
@@ -382,6 +431,24 @@ export function EvalPage() {
   });
   const datasets = useMemo(() => datasetsQuery.data?.datasets || [], [datasetsQuery.data?.datasets]);
   const evaluators = useMemo(() => evaluatorsQuery.data?.evaluators || [], [evaluatorsQuery.data?.evaluators]);
+  const ragasEvaluators = useMemo(() => {
+    const listed = evaluators.filter((evaluator) => evaluator.evaluator_type === "ragas");
+    if (
+      createdEvaluator?.evaluator_type === "ragas"
+      && !listed.some((evaluator) => evaluator.evaluator_id === createdEvaluator.evaluator_id)
+    ) {
+      return [createdEvaluator, ...listed];
+    }
+    return listed;
+  }, [createdEvaluator, evaluators]);
+  const evaluatorTypeOptions = useMemo(
+    () =>
+      (["human", "rule", "trajectory", "span", "llm", "llm_judge", "composite", "ragas"] as const).map((value) => ({
+        label: t(`eval.workbench.evaluatorTypes.${value}`),
+        value,
+      })),
+    [t],
+  );
   const experiments = useMemo(() => experimentsQuery.data?.experiments || [], [experimentsQuery.data?.experiments]);
   const activeDataset = useMemo(() => {
     if (selectedDatasetId) {
@@ -397,6 +464,12 @@ export function EvalPage() {
     }
     return createdEvaluator;
   }, [createdEvaluator, evaluators, selectedEvaluatorId]);
+  const activeRagasEvaluator = useMemo(() => {
+    if (selectedEvaluatorId) {
+      return ragasEvaluators.find((evaluator) => evaluator.evaluator_id === selectedEvaluatorId) || null;
+    }
+    return createdEvaluator?.evaluator_type === "ragas" ? createdEvaluator : null;
+  }, [createdEvaluator, ragasEvaluators, selectedEvaluatorId]);
   const activeExperiment = useMemo(() => {
     if (selectedExperimentId) {
       return experiments.find((experiment) => experiment.experiment_id === selectedExperimentId)
@@ -507,6 +580,28 @@ export function EvalPage() {
       metadata: { tags: ["failure"], critical: true },
     });
 
+  const createRagasEvaluatorMutation = useMutation({
+    mutationFn: () => {
+      const preset = evaluatorPresetForType("ragas", "rag", (key, fallback) => t(key, fallback));
+      return createEvalEvaluator({
+        name: "kb-ragas",
+        evaluator_type: "ragas",
+        rubric: preset.rubric,
+        version: "v1",
+        sampling_config: parseJsonObjectDraft(preset.samplingConfigText, {}),
+        filter_config: parseJsonObjectDraft(preset.filterConfigText, {}),
+        metadata: { source: "eval_console", trace_family: "rag" },
+      });
+    },
+    onSuccess: async (evaluator) => {
+      setCreatedEvaluator(evaluator);
+      setSelectedEvaluatorId(evaluator.evaluator_id);
+      message.success(t("eval.ragas.evaluatorCreated"));
+      await queryClient.invalidateQueries({ queryKey: ["eval", "evaluators"] });
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
   const evaluatorMutation = useMutation({
     mutationFn: () => {
       const metadata: Record<string, unknown> = {
@@ -573,6 +668,28 @@ export function EvalPage() {
           target_config: activeExperiment?.target_config || {},
         },
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
+      });
+    },
+    onSuccess: (job) => {
+      if (job.run_id) setQueuedRunId(job.run_id);
+      message.success(t("eval.workbench.evaluatorQueued"));
+    },
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const ragasEvaluatorRunMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeRagasEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
+      return runEvalEvaluatorAsync(activeRagasEvaluator.evaluator_id, {
+        experiment_id: null,
+        dataset_id: null,
+        trace_id: selectedTraceId || null,
+        target_snapshot: {
+          trace_family: "rag",
+          trace_id: selectedTraceId || null,
+          evaluator_id: activeRagasEvaluator.evaluator_id,
+        },
+        metadata: { source: "eval_console", trace_family: "rag", evaluator_type: "ragas" },
       });
     },
     onSuccess: (job) => {
@@ -748,10 +865,22 @@ export function EvalPage() {
     setExportPreview(null);
   };
 
+  const handleWorkbenchTabChange = (key: string) => {
+    const previousTab = activeWorkbenchTab;
+    setActiveWorkbenchTab(key);
+    if (key === "kb_ragas" && activeTraceFamily !== "rag") {
+      handleTraceFamilyChange("rag");
+    }
+    if (key === "traces" && previousTab === "kb_ragas") {
+      handleTraceFamilyChange("assistant");
+    }
+  };
+
   const dashboardMetrics = dashboardQuery.data?.metrics || {};
   const overviewTab = (
     <div className="eval-platform-grid">
       {[
+        { key: "rag", label: t("eval.summary.ragTraces"), value: summaryQuery.data?.rag_traces ?? "—" },
         { key: "captured", label: t("eval.summary.totalTraces"), value: summaryQuery.data?.total_traces ?? "—" },
         { key: "scored", label: t("eval.summary.scoredTraces"), value: summaryQuery.data?.scored_traces ?? "—" },
         { key: "golden", label: t("eval.workbench.goldenCases", "Golden cases"), value: dashboardMetrics.example_count ?? "—" },
@@ -799,109 +928,39 @@ export function EvalPage() {
     </div>
   );
 
-  const traceFamilyPanel = (
-    <>
-      {familyCoverageMessage ? (
-        <Alert
-          className="eval-family-coverage-note"
-          type={hasCapturedFamilyTraces ? "success" : "warning"}
-          showIcon
-          title={familyCoverageMessage}
-        />
-      ) : null}
-      <div className="eval-workbench-actions">
-        <Space size={8} wrap>
-          <Button
-            icon={<Download size={15} />}
-            onClick={() => exportMutation.mutate()}
-            loading={exportMutation.isPending}
-            disabled={!selectedTraceId}
-          >
-            {t("eval.workbench.exportOpenInference")}
-          </Button>
-          <Button
-            icon={<Database size={15} />}
-            onClick={promoteSelectedTraceToGolden}
-            loading={exampleMutation.isPending}
-            disabled={!selectedTraceId || !activeDataset}
-          >
-            {t("eval.workbench.promoteToGolden", "Promote to Golden")}
-          </Button>
-          <Button
-            icon={<CheckCircle2 size={15} />}
-            onClick={addSelectedTraceToReview}
-            loading={exampleMutation.isPending}
-            disabled={!selectedTraceId || !activeDataset}
-          >
-            {t("eval.workbench.addToReview", "Add to Review")}
-          </Button>
-          <Button
-            icon={<ShieldCheck size={15} />}
-            onClick={createSelectedFailureCase}
-            loading={exampleMutation.isPending}
-            disabled={!selectedTraceId || !activeDataset}
-          >
-            {t("eval.workbench.createFailureCase", "Create Failure Case")}
-          </Button>
-          {exportPreview ? <Tag color="blue">{t("eval.workbench.exportFormat", { format: exportPreview.format })}</Tag> : null}
-        </Space>
-      </div>
-      <div className="eval-assistant-grid">
-        <AssistantTraceList
-          traces={visibleTraces}
-          total={tracesQuery.data?.total || 0}
-          filters={filters}
-          setFilters={setFilters}
-          title={traceListCopy.title}
-          ariaLabel={traceListCopy.aria}
-          emptyText={traceListCopy.empty}
-          selectedTraceId={selectedTraceId}
-          loading={tracesQuery.isLoading || tracesQuery.isFetching}
-          error={tracesQuery.error ? toError(tracesQuery.error) : null}
-          onSelect={setSelectedTraceId}
-          onRefresh={() => tracesQuery.refetch()}
-        />
-        <AssistantTraceDetail
-          detail={detailQuery.data}
-          loading={detailQuery.isLoading || detailQuery.isFetching}
-          error={detailQuery.error ? toError(detailQuery.error) : null}
-        />
-        <TraceScorePanel
-          traceId={selectedTraceId}
-          scores={detailQuery.data?.scores || []}
-          loading={detailQuery.isLoading || detailQuery.isFetching}
-          submitting={scoreMutation.isPending}
-          error={scoreError}
-          onSubmit={async (payload) => {
-            await scoreMutation.mutateAsync(payload);
-          }}
-        />
-      </div>
-    </>
-  );
-
   const traceExplorerTab = (
-    <Tabs
-      className="eval-family-tabs"
-      activeKey={activeTraceFamily}
-      onChange={handleTraceFamilyChange}
-      items={[
-        {
-          key: "assistant",
-          label: t("eval.tabs.assistant"),
-          children: traceFamilyPanel,
-        },
-        {
-          key: "langgraph_proxy",
-          label: t("eval.tabs.langgraphProxy"),
-          children: traceFamilyPanel,
-        },
-        {
-          key: "rag",
-          label: t("eval.tabs.rag"),
-          children: traceFamilyPanel,
-        },
-      ]}
+    <TraceExplorerShell
+      activeTraceFamily={activeTraceFamily}
+      onTraceFamilyChange={handleTraceFamilyChange}
+      familyCoverageMessage={familyCoverageMessage}
+      hasCapturedFamilyTraces={hasCapturedFamilyTraces}
+      traces={visibleTraces}
+      traceTotal={tracesQuery.data?.total || 0}
+      filters={filters}
+      setFilters={setFilters}
+      traceListCopy={traceListCopy}
+      selectedTraceId={selectedTraceId}
+      onSelectTrace={setSelectedTraceId}
+      onRefresh={() => tracesQuery.refetch()}
+      tracesLoading={tracesQuery.isLoading || tracesQuery.isFetching}
+      tracesError={tracesQuery.error ? toError(tracesQuery.error) : null}
+      detail={detailQuery.data}
+      detailLoading={detailQuery.isLoading || detailQuery.isFetching}
+      detailError={detailQuery.error ? toError(detailQuery.error) : null}
+      scoreError={scoreError}
+      scoreSubmitting={scoreMutation.isPending}
+      onScoreSubmit={async (payload) => {
+        await scoreMutation.mutateAsync(payload);
+      }}
+      exportPreview={exportPreview}
+      exportLoading={exportMutation.isPending}
+      onExport={() => exportMutation.mutate()}
+      activeDatasetName={activeDataset?.name || null}
+      datasetActionLoading={exampleMutation.isPending}
+      onPromoteToGolden={promoteSelectedTraceToGolden}
+      onAddToReview={addSelectedTraceToReview}
+      onCreateFailureCase={createSelectedFailureCase}
+      dashboard={dashboardQuery.data}
     />
   );
 
@@ -1007,6 +1066,13 @@ export function EvalPage() {
           { key: "cases", label: t("eval.workbench.goldenCases", "Golden cases"), children: String(examplesQuery.data?.total ?? 0) },
           { key: "exported", label: t("eval.workbench.exportedCases", "Exported cases"), children: String(examplesExport?.examples.length ?? 0) },
         ]}
+      />
+      <GoldenJsonlImport
+        datasetId={activeDataset?.dataset_id ?? null}
+        onImported={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+          await queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] });
+        }}
       />
     </WorkbenchPanel>
   );
@@ -1126,17 +1192,9 @@ export function EvalPage() {
         <Select
           value={evaluatorDraft.evaluator_type}
           aria-label={t("eval.workbench.evaluatorType")}
-          options={[
-            { label: "Human", value: "human" },
-            { label: "Rule", value: "rule" },
-            { label: "Trajectory", value: "trajectory" },
-            { label: "Span", value: "span" },
-            { label: "LLM", value: "llm" },
-            { label: "LLM Judge", value: "llm_judge" },
-            { label: "Composite", value: "composite" },
-          ]}
+          options={evaluatorTypeOptions}
           onChange={(value: EvalEvaluator["evaluator_type"]) => {
-            const preset = evaluatorPresetForType(value, activeTraceFamily);
+            const preset = evaluatorPresetForType(value, activeTraceFamily, (key, fallback) => t(key, fallback));
             setEvaluatorDraft((draft) => ({
               ...draft,
               evaluator_type: value,
@@ -1250,6 +1308,24 @@ export function EvalPage() {
     </WorkbenchPanel>
   );
 
+  const kbRagasTab = (
+    <KbRagasPanel
+      traces={visibleTraces}
+      traceTotal={tracesQuery.data?.total || 0}
+      selectedTraceId={selectedTraceId}
+      detail={detailQuery.data}
+      detailLoading={detailQuery.isLoading || detailQuery.isFetching}
+      ragasEvaluators={ragasEvaluators}
+      selectedEvaluatorId={activeRagasEvaluator?.evaluator_id}
+      onSelectEvaluator={setSelectedEvaluatorId}
+      onQueueEvaluator={() => ragasEvaluatorRunMutation.mutate()}
+      queueLoading={ragasEvaluatorRunMutation.isPending}
+      onCreateRagasEvaluator={() => createRagasEvaluatorMutation.mutate()}
+      createLoading={createRagasEvaluatorMutation.isPending}
+      initialDatasetId={kbDatasetFilter}
+    />
+  );
+
   const gatesTab = (
     <WorkbenchPanel
       title={t("eval.workbench.gates", "Gates")}
@@ -1301,7 +1377,8 @@ export function EvalPage() {
 
       <Tabs
         className="eval-tabs"
-        defaultActiveKey="overview"
+        activeKey={activeWorkbenchTab}
+        onChange={handleWorkbenchTabChange}
         items={[
           {
             key: "overview",
@@ -1337,6 +1414,11 @@ export function EvalPage() {
             key: "gates",
             label: t("eval.workbench.gates", "Gates"),
             children: gatesTab,
+          },
+          {
+            key: "kb_ragas",
+            label: t("eval.ragas.tab"),
+            children: kbRagasTab,
           },
         ]}
       />

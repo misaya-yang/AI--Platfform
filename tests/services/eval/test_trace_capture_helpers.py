@@ -9,9 +9,11 @@ import pytest
 from src.services.eval.langgraph_trace_capture import build_langgraph_trace_payload
 from src.services.eval.rag_trace_capture import (
     build_rag_trace_payload,
+    build_retrieval_documents,
     is_retrieve_path,
     parse_retrieve_document_count,
     parse_retrieve_request_body,
+    parse_retrieve_response,
     record_rag_retrieval_trace,
 )
 from src.services.eval.trace_capture import schedule_gateway_trace_ingest
@@ -141,6 +143,18 @@ def test_parse_retrieve_helpers() -> None:
     assert parse_retrieve_document_count(b'{"results":[{"id":1},{"id":2}]}') == 2
 
 
+def test_parse_retrieve_response_and_build_retrieval_documents() -> None:
+    body = b'{"results":[{"text":"Refund within 30 days","score":0.9},{"content":"Support email"}]}'
+    results, metadata = parse_retrieve_response(body)
+    documents = build_retrieval_documents(results)
+
+    assert len(results) == 2
+    assert isinstance(metadata, dict)
+    assert len(documents) == 2
+    assert documents[0]["content_eval"] == "Refund within 30 days"
+    assert "content_preview" in documents[0]
+
+
 class _IngestRepository:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -207,8 +221,39 @@ def test_record_rag_retrieval_trace_schedules_payload(monkeypatch) -> None:
         path="dataset-1/retrieve",
         body=b'{"query":"hello"}',
         response_status=200,
-        response_body=b'{"results":[{}]}',
+        response_body=b'{"results":[{"text":"hello chunk"}]}',
         started_at=time.time(),
     )
     assert len(scheduled) == 1
+    assert scheduled[0]["enqueue"] is True
     assert scheduled[0]["trace"]["trace_family"] == "rag"
+    assert scheduled[0]["trace"]["metadata"]["dataset_id"] == "dataset-1"
+    retriever_span = next(
+        span for span in scheduled[0]["trace"]["spans"] if span["span_kind"] == "retriever"
+    )
+    assert retriever_span["attributes"]["retrieval"]["documents"]
+
+
+def test_record_rag_retrieval_trace_extracts_dataset_from_full_knowledge_path(monkeypatch) -> None:
+    scheduled: list[dict[str, Any]] = []
+
+    def _capture(_database: Any, **kwargs: Any) -> None:
+        scheduled.append(kwargs)
+
+    monkeypatch.setattr(
+        "src.services.eval.rag_trace_capture.schedule_gateway_trace_ingest",
+        _capture,
+    )
+    record_rag_retrieval_trace(
+        SimpleNamespace(enabled=True),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        request_id="req-5",
+        path="/api/v1/knowledge/dataset-1/retrieve",
+        body=b'{"query":"hello"}',
+        response_status=200,
+        response_body=b'{"results":[{"text":"hello chunk"}]}',
+        started_at=time.time(),
+    )
+
+    assert scheduled[0]["trace"]["metadata"]["dataset_id"] == "dataset-1"

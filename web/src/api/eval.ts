@@ -131,10 +131,47 @@ export interface ListAgentTracesParams {
   min_latency_ms?: number;
   max_latency_ms?: number;
   dataset_id?: string;
+  metadata_dataset_id?: string;
   started_after?: string;
   started_before?: string;
   limit?: number;
   offset?: number;
+}
+
+export interface KbRagasMetricSummary {
+  metric: string;
+  average_score: number;
+  scored_count: number;
+  pass_count: number;
+  fail_count: number;
+  review_count: number;
+}
+
+export interface KbRagasKnowledgeSummary {
+  window_days: number;
+  dataset_id?: string | null;
+  rag_traces: number;
+  ragas_scored_traces: number;
+  metrics: KbRagasMetricSummary[];
+  latest_judge_model?: string | null;
+}
+
+export interface KbRagasScoreRetrievalResult {
+  metric: string;
+  score: number;
+  explanation: string;
+  label: string;
+}
+
+export interface KbRagasScoreRetrievalResponse {
+  results: KbRagasScoreRetrievalResult[];
+  judge_model: string;
+}
+
+export interface KbRagasBatchScoreResponse {
+  queued: number;
+  skipped: number;
+  jobs: EvalAsyncJobResponse[];
 }
 
 export interface EvalTraceThreadResponse {
@@ -211,6 +248,8 @@ export interface EvalExampleUpdate {
   metadata?: Record<string, unknown>;
 }
 
+export type EvalExamplesImportMode = "skip_duplicates" | "append";
+
 export interface EvalExamplesImportResponse {
   imported: number;
   skipped: number;
@@ -227,7 +266,7 @@ export interface EvalEvaluator {
   evaluator_id: string;
   tenant_id: string;
   name: string;
-  evaluator_type: "human" | "rule" | "trajectory" | "span" | "llm" | "llm_judge" | "composite";
+  evaluator_type: "human" | "rule" | "trajectory" | "span" | "llm" | "llm_judge" | "composite" | "ragas";
   rubric: string;
   version: string;
   sampling_config: Record<string, unknown>;
@@ -504,11 +543,12 @@ export async function updateEvalExample(
 
 export async function importEvalExamples(
   datasetId: string,
-  examples: EvalExampleImportItem[]
+  examples: EvalExampleImportItem[],
+  options: { mode?: EvalExamplesImportMode } = {}
 ): Promise<EvalExamplesImportResponse> {
   const response = await api.post<EvalExamplesImportResponse>(
     `/api/v1/eval/datasets/${encodeURIComponent(datasetId)}/examples:import`,
-    { examples, mode: "append" }
+    { examples, mode: options.mode ?? "skip_duplicates" }
   );
   return response.data;
 }
@@ -628,6 +668,46 @@ export async function runEvalEvaluatorAsync(
 ): Promise<EvalAsyncJobResponse> {
   const response = await api.post<EvalAsyncJobResponse>(
     `/api/v1/eval/evaluators/${encodeURIComponent(evaluatorId)}:run-async`,
+    payload
+  );
+  return response.data;
+}
+
+export async function getKbRagasKnowledgeSummary(params: {
+  days?: number;
+  dataset_id?: string;
+} = {}): Promise<KbRagasKnowledgeSummary> {
+  const response = await api.get<KbRagasKnowledgeSummary>("/api/v1/eval/knowledge/summary", {
+    params: compactParams(params),
+  });
+  return response.data;
+}
+
+export async function batchScoreKbRagasDataset(
+  datasetId: string,
+  payload: {
+    evaluator_id: string;
+    limit?: number;
+    only_unscored?: boolean;
+  }
+): Promise<KbRagasBatchScoreResponse> {
+  const response = await api.post<KbRagasBatchScoreResponse>(
+    `/api/v1/eval/knowledge/${encodeURIComponent(datasetId)}/batch-score`,
+    payload
+  );
+  return response.data;
+}
+
+export async function scoreKbRagasRetrieval(payload: {
+  query: string;
+  contexts: string[];
+  metrics?: string[];
+  ground_truth?: string | null;
+  dataset_id?: string | null;
+  llm_config?: Record<string, unknown>;
+}): Promise<KbRagasScoreRetrievalResponse> {
+  const response = await api.post<KbRagasScoreRetrievalResponse>(
+    "/api/v1/eval/knowledge/score-retrieval",
     payload
   );
   return response.data;

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 
 import { installClientAuth } from "./support/helpers";
@@ -103,6 +105,7 @@ async function installEvalHarness(page: Page) {
     },
   ];
   const datasetId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const importedCaseIds = new Set<string>();
   const evaluatorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const experimentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const observedTraceFamilies: string[] = [];
@@ -149,6 +152,51 @@ async function installEvalHarness(page: Page) {
           scored_traces: 1,
           window_days: Number(url.searchParams.get("days") || 7),
         })
+      );
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/knowledge/summary")) {
+      await route.fulfill(
+        jsonResponse({
+          window_days: Number(url.searchParams.get("days") || 7),
+          dataset_id: url.searchParams.get("dataset_id"),
+          rag_traces: 1,
+          ragas_scored_traces: 0,
+          metrics: [
+            {
+              metric: "context_relevancy",
+              average_score: 0.0,
+              scored_count: 0,
+              pass_count: 0,
+              fail_count: 0,
+              review_count: 0,
+            },
+          ],
+          latest_judge_model: null,
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
+      url.pathname.endsWith("/api/v1/eval/knowledge/support-kb/batch-score")
+    ) {
+      const payload = request.postDataJSON();
+      expect(payload.evaluator_id).toBe(evaluatorId);
+      expect(payload.only_unscored).toBe(true);
+      await route.fulfill(
+        jsonResponse(
+          {
+            dataset_id: "support-kb",
+            evaluator_id: evaluatorId,
+            matched: 1,
+            queued: 1,
+            skipped: 0,
+          },
+          202
+        )
       );
       return;
     }
@@ -201,6 +249,39 @@ async function installEvalHarness(page: Page) {
       return;
     }
 
+    if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/threads/session-a")) {
+      await route.fulfill(
+        jsonResponse({
+          thread_id: "session-a",
+          traces: [
+            traceSummary(),
+            traceSummary({
+              trace_id: "33333333-3333-4333-8333-333333333333",
+              status: "failed",
+              run_id: "run-b",
+              request_id: "request-b",
+              total_latency_ms: 1610,
+              scores_count: 0,
+              output_preview: "tool failed with password=[redacted]",
+              metadata: {
+                mode: "streaming_first",
+                transcript_locator: {
+                  turn_index: 2,
+                  turn_id: "session-a:turn:2",
+                  current_message_preview: "unrelated account lookup",
+                  transcript_excerpt: "user: unrelated account lookup",
+                  transcript_fingerprint: "def456locator",
+                },
+              },
+            }),
+          ],
+          total: 2,
+          metrics: { turn_count: 2, failed_traces: 1, total_latency_ms: 2590 },
+        })
+      );
+      return;
+    }
+
     if (
       request.method() === "GET" &&
       url.pathname.endsWith("/api/v1/eval/experiment-runs/ffffffff-ffff-4fff-8fff-ffffffffffff")
@@ -242,7 +323,12 @@ async function installEvalHarness(page: Page) {
                 model_id: null,
                 provider: "knowledge-service",
                 output_preview: "2 retrieved documents",
-                metadata: { retrieval: { dataset_ids: ["support-kb"], document_count: 2 } },
+                metadata: {
+              dataset_id: "support-kb",
+              "gen_ai.retrieval.query.text": "refund policy",
+              retrieval: { dataset_ids: ["support-kb"], document_count: 2 },
+            },
+            input_preview: "refund policy",
                 scores_count: 0,
               }),
             ]
@@ -391,7 +477,12 @@ async function installEvalHarness(page: Page) {
             model_id: null,
             provider: "knowledge-service",
             output_preview: "2 retrieved documents",
-            metadata: { retrieval: { dataset_ids: ["support-kb"], document_count: 2 } },
+            metadata: {
+              dataset_id: "support-kb",
+              "gen_ai.retrieval.query.text": "refund policy",
+              retrieval: { dataset_ids: ["support-kb"], document_count: 2 },
+            },
+            input_preview: "refund policy",
             scores_count: 0,
           }),
           spans: [
@@ -412,6 +503,12 @@ async function installEvalHarness(page: Page) {
                 "openinference.span.kind": "RETRIEVER",
                 "gen_ai.retrieval.query.text": "refund policy",
                 "retrieval.document_count": 2,
+                retrieval: {
+                  documents: [
+                    { content_eval: "Refunds are allowed within 30 days." },
+                    { content_eval: "Contact support for exceptions." },
+                  ],
+                },
               },
               error_type: null,
               error_message: null,
@@ -585,6 +682,55 @@ async function installEvalHarness(page: Page) {
 
     if (
       request.method() === "POST" &&
+      url.pathname.endsWith(`/api/v1/eval/datasets/${datasetId}/examples:import`)
+    ) {
+      const payload = request.postDataJSON() as {
+        examples?: unknown[];
+        mode?: "skip_duplicates" | "append";
+      };
+      const examples = Array.isArray(payload.examples) ? payload.examples : [];
+      const mode = payload.mode ?? "skip_duplicates";
+      let imported = 0;
+      let skipped = 0;
+      const createdExamples: Record<string, unknown>[] = [];
+      for (const example of examples) {
+        const row = example as Record<string, unknown>;
+        const caseId = typeof row.case_id === "string" ? row.case_id.trim() : "";
+        if (mode === "skip_duplicates" && caseId && importedCaseIds.has(caseId)) {
+          skipped += 1;
+          continue;
+        }
+        imported += 1;
+        if (caseId) importedCaseIds.add(caseId);
+        createdExamples.push({
+          example_id: `import-${importedCaseIds.size}`,
+          dataset_id: datasetId,
+          tenant_id: "tenant-a",
+          split: row.split || "regression",
+          input: row.input || {},
+          expected_output: row.expected_output || {},
+          metadata: row.metadata || { case_id: row.case_id },
+          source_trace_id: row.source_trace_id || null,
+          source_span_id: row.source_span_id || null,
+          created_by: "eval-user",
+          created_at: nowIso(),
+        });
+      }
+      await route.fulfill(
+        jsonResponse(
+          {
+            imported,
+            skipped,
+            examples: createdExamples,
+          },
+          201
+        )
+      );
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
       url.pathname.endsWith(`/api/v1/eval/datasets/${datasetId}/examples:from-trace`)
     ) {
       const payload = request.postDataJSON();
@@ -747,20 +893,18 @@ test.describe("Eval trace console", () => {
     await expect(page.getByText("Golden cases")).toBeVisible();
     await page.getByRole("tab", { name: "Traces" }).click();
     await expect(page.getByRole("cell", { name: /11111111/ })).toBeVisible();
-    await expect(page.getByText("Redacted trace preview")).toBeVisible();
-    await expect(page.getByText("Transcript locator")).toBeVisible();
-    await expect(page.getByLabel("hello refund transcript anchor", { exact: true })).toBeVisible();
-    await expect(page.getByText("run_started")).toBeVisible();
-    await expect(page.getByText("Grounded answer")).toBeVisible();
+    await expect(page.getByText("Active selection")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open Run Detail" })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: ".playwright/eval-desktop.png", fullPage: true });
 
     await page.getByLabel("Transcript, request, or message text").fill("refund transcript anchor");
     await expect(page.getByRole("row", { name: /11111111/ })).toBeVisible();
     await expect(page.getByRole("row", { name: /33333333/ })).toHaveCount(0);
+    await page.getByText("Advanced filters").click();
     await page.getByLabel("Turn").fill("4");
     await expect(page.getByRole("row", { name: /11111111/ })).toBeVisible();
-    await page.getByRole("button", { name: "Export OpenInference" }).click();
+    await page.getByRole("button", { name: "Export OpenInference" }).first().click();
     await expect(page.getByText("Trace export payload ready")).toBeVisible();
 
     const firstTraceRow = page.getByRole("row", { name: /11111111/ }).first();
@@ -768,15 +912,43 @@ test.describe("Eval trace console", () => {
     await expect(firstTraceRow).toBeFocused();
     await page.keyboard.press("Enter");
 
+    await page.getByRole("button", { name: "Open Run Detail" }).click();
+    await expect(page.getByText("Redacted trace preview")).toBeVisible();
+    await expect(page.getByText("Transcript locator")).toBeVisible();
+    await expect(page.getByLabel("hello refund transcript anchor", { exact: true })).toBeVisible();
+    await expect(page.getByText("run_started")).toBeVisible();
+    await expect(page.getByText("Grounded answer")).toBeVisible();
+    await page.getByRole("button", { name: "Add score" }).click();
     await page.getByLabel("Explanation").fill("Useful trace review");
     await page.getByRole("button", { name: "Submit score" }).click();
     await expect(page.getByText("Trace score submitted")).toBeVisible();
+
+    await page.getByText("Thread View").click();
+    await expect(page.getByRole("heading", { name: "Thread View" })).toBeVisible();
+    await expect(page.locator(".eval-thread-view").getByText("hello refund transcript anchor").first()).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: ".playwright/eval-thread.png", fullPage: true });
 
     await page.getByRole("tab", { name: "Golden Sets" }).click();
     await page.getByRole("button", { name: "Create dataset" }).click();
     await expect(page.getByText("Dataset created")).toBeVisible();
     await page.getByRole("button", { name: "Add trace to dataset" }).click();
     await expect(page.getByText("Trace added to dataset")).toBeVisible();
+
+    const goldenFixture = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../tests/fixtures/eval/golden/assistant_regression_v1.jsonl"
+    );
+    await page.locator('[data-testid="golden-jsonl-import"] input[type="file"]').setInputFiles(goldenFixture);
+    await expect(page.getByText("10 case(s) passed validation")).toBeVisible();
+    await page.getByTestId("golden-jsonl-import-submit").click();
+    await expect(
+      page.getByTestId("golden-jsonl-import").getByText("Imported 10 case(s) across 1 batch(es). Skipped 0.")
+    ).toBeVisible();
+    await page.getByTestId("golden-jsonl-import-submit").click();
+    await expect(
+      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 10.")
+    ).toBeVisible();
 
     await page.getByRole("tab", { name: "Evaluators" }).click();
     await page.getByRole("button", { name: "Create evaluator" }).click();
@@ -789,31 +961,61 @@ test.describe("Eval trace console", () => {
     await expect(page.getByText("Evaluator run queued")).toBeVisible();
 
     await page.getByRole("tab", { name: "Traces" }).click();
-    await page.getByRole("tab", { name: "LangGraph Proxy" }).click();
+    await page.locator(".ant-segmented-item").filter({ hasText: "LangGraph Proxy" }).click();
     await expect(page.getByRole("heading", { name: "LangGraph Proxy traces" })).toBeVisible();
     await expect(page.getByRole("row", { name: /66666666/ })).toBeVisible();
+    await page.getByRole("row", { name: /66666666/ }).click();
+    await page.getByRole("button", { name: "Open Run Detail" }).click();
     await expect(
-      page
-        .getByRole("tabpanel", { name: "LangGraph Proxy" })
-        .getByText("proxy_request_finished", { exact: true })
+      page.getByText("proxy_request_finished", { exact: true })
     ).toBeVisible();
     expect(harness.observedTraceFamilies).toContain("langgraph_proxy");
-    await page.getByRole("tab", { name: "RAG" }).click();
+    await page.locator(".ant-segmented-item").filter({ hasText: "RAG" }).click();
     await expect(page.getByRole("heading", { name: "RAG traces" })).toBeVisible();
     await expect(page.getByRole("row", { name: /55555555/ })).toBeVisible();
+    await page.getByRole("row", { name: /55555555/ }).click();
+    await page.getByRole("button", { name: "Open Run Detail" }).click();
     await expect(
-      page
-        .getByRole("tabpanel", { name: "RAG" })
-        .getByText("rag_retrieval_completed", { exact: true })
+      page.getByText("rag_retrieval_completed", { exact: true })
     ).toBeVisible();
     expect(harness.observedTraceFamilies).toContain("rag");
 
+    await page.getByRole("tab", { name: "KB RAGAS" }).click();
+    await expect(page.getByTestId("kb-ragas-panel")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Knowledge-base RAGAS" })).toBeVisible();
+    await expect(page.getByTestId("kb-ragas-panel").getByText("refund policy")).toBeVisible();
+    await page.getByRole("button", { name: "Create KB RAGAS evaluator" }).click();
+    await expect(page.getByText("KB RAGAS evaluator created")).toBeVisible();
+    await page.getByRole("button", { name: "Score selected trace" }).click();
+    await expect(page.getByText("Evaluator run queued")).toBeVisible();
+    await page.getByRole("button", { name: "Batch score dataset traces" }).click();
+    await expect(page.getByText("Queued 1 trace(s), skipped 0")).toBeVisible();
+
+    await page.evaluate(() => {
+      localStorage.setItem(
+        "agent-gateway-storage",
+        JSON.stringify({
+          state: { themeMode: "dark", resolvedTheme: "dark", darkMode: true },
+          version: 3,
+        })
+      );
+      localStorage.setItem("i18nextLng", "zh-CN");
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "评测控制台" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "知识库 RAGAS" })).toBeVisible();
+    await expect(page.getByText("Trace 持久化为异步路径")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.screenshot({ path: ".playwright/eval-dark-zh.png", fullPage: true });
+
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("tab", { name: "Assistant" }).click();
-    await expect(page.getByRole("heading", { name: "Assistant traces" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Trace detail" })).toBeVisible();
+    await page.getByRole("tab", { name: "Trace" }).click();
+    await page.locator(".ant-segmented-item").filter({ hasText: "Assistant" }).click();
+    await expect(page.getByRole("heading", { name: "Assistant Trace" })).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: ".playwright/eval-mobile.png", fullPage: true });
+    await page.getByRole("button", { name: "打开 Run Detail" }).click();
+    await expect(page.getByRole("heading", { name: "Trace 详情" })).toBeVisible();
 
     assertNoRuntimeFailures();
   });

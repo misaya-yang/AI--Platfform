@@ -516,8 +516,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # --- API routes ---
     # Try full 51-endpoint router first; fall back to placeholder if imports fail
     try:
+        from .api.routes.eval import router as kb_eval_router
         from .api.routes.knowledge import router as full_knowledge_router
+
         app.include_router(full_knowledge_router, prefix="/api/v1")
+        app.include_router(kb_eval_router, prefix="/api/v1")
         logger.info("knowledge_routes_loaded", mode="full", endpoints=51)
     except Exception as e:
         logger.warning("knowledge_routes_fallback", error=str(e), mode="placeholder")

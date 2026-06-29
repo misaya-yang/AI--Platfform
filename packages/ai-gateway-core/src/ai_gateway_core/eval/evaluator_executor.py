@@ -7,12 +7,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.eval.kb_ragas_sample import kb_ragas_sample_from_target
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
 
 logger = get_logger(__name__)
 
 LlmCompleteFn = Callable[..., Awaitable[str]]
+KbRagasEvaluateFn = Callable[..., Awaitable[list[dict[str, Any]]]]
 
 
 @dataclass(frozen=True)
@@ -396,10 +398,12 @@ class EvaluatorExecutor:
         repository: AgentTraceRepository,
         *,
         llm_complete: LlmCompleteFn | None = None,
+        kb_ragas_evaluate: KbRagasEvaluateFn | None = None,
         created_by: str = "eval-worker",
     ) -> None:
         self.repository = repository
         self.llm_complete = llm_complete
+        self.kb_ragas_evaluate = kb_ragas_evaluate
         self.created_by = created_by
 
     async def run_job(
@@ -684,6 +688,8 @@ class EvaluatorExecutor:
         evaluator_type = str(evaluator.get("evaluator_type") or "rule")
         if evaluator_type == "span":
             return await self._score_span_targets(evaluator, target, llm_context=llm_context)
+        if evaluator_type == "ragas":
+            return await self._score_with_kb_ragas(evaluator, target)
         payload = await self._build_score_payload(evaluator, target, llm_context=llm_context)
         return [payload]
 
@@ -745,6 +751,159 @@ class EvaluatorExecutor:
         if family == "rag":
             return _DEFAULT_RAG_RUBRIC
         return "Score helpfulness, grounding, and safety from 0 to 1 using bounded previews."
+
+    def _resolve_ground_truth(self, evaluator: dict[str, Any], target: dict[str, Any]) -> str | None:
+        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+        if filter_config.get("ground_truth"):
+            return str(filter_config["ground_truth"]).strip() or None
+        expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
+        for key in ("output_preview", "contains", "answer"):
+            value = expected.get(key)
+            if value:
+                return str(value).strip() or None
+        return None
+
+    def _heuristic_kb_ragas_score(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        explanation: str,
+        metric: str = "context_relevancy",
+    ) -> dict[str, Any]:
+        return {
+            "score_name": metric,
+            "score_type": "numeric",
+            "numeric_value": 0.0,
+            "label": "review",
+            "explanation": explanation[:2000],
+            "scorer_type": "llm",
+            "score_source": "kb_ragas",
+            "evaluator_id": evaluator.get("evaluator_id"),
+            "evaluator_name": evaluator.get("name"),
+            "evaluator_version": evaluator.get("version"),
+            "confidence": 0.0,
+            "target_type": "trace",
+            "target_id": target.get("trace_id"),
+            "metadata": {"metric": metric, "component": "kb_ragas"},
+        }
+
+    async def _score_with_kb_ragas(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+        metadata = evaluator.get("metadata") if isinstance(evaluator.get("metadata"), dict) else {}
+        ground_truth = self._resolve_ground_truth(evaluator, target)
+        sample = kb_ragas_sample_from_target(target, ground_truth=ground_truth)
+        if not sample:
+            return [
+                self._heuristic_kb_ragas_score(
+                    evaluator,
+                    target,
+                    explanation="KB RAGAS sample could not be built from rag trace retrieval spans.",
+                )
+            ]
+
+        required_span_kinds = filter_config.get("required_span_kinds")
+        if isinstance(required_span_kinds, list) and required_span_kinds:
+            actual = set(_span_kinds(target))
+            missing = [kind for kind in required_span_kinds if str(kind) not in actual]
+            if missing:
+                return [
+                    self._heuristic_kb_ragas_score(
+                        evaluator,
+                        target,
+                        explanation=f"Missing required span kinds for KB RAGAS: {', '.join(missing)}",
+                    )
+                ]
+
+        metrics = filter_config.get("metrics") or metadata.get("metrics") or ["context_relevancy"]
+        if not isinstance(metrics, list):
+            metrics = ["context_relevancy"]
+        llm_config = filter_config.get("llm_config") or metadata.get("llm_config")
+        if llm_config is not None and not isinstance(llm_config, dict):
+            llm_config = None
+
+        if self.kb_ragas_evaluate is None:
+            return [
+                self._heuristic_kb_ragas_score(
+                    evaluator,
+                    target,
+                    explanation="KB RAGAS client is not configured; manual review is required.",
+                )
+            ]
+
+        try:
+            raw_results = await self.kb_ragas_evaluate(
+                query=sample.question,
+                contexts=sample.contexts,
+                metrics=[str(item) for item in metrics if isinstance(item, str)],
+                ground_truth=sample.ground_truth,
+                llm_config=llm_config,
+            )
+        except Exception as exc:  # noqa: BLE001 - evaluator must degrade gracefully
+            logger.warning("KB RAGAS evaluation failed: %s", exc)
+            return [
+                self._heuristic_kb_ragas_score(
+                    evaluator,
+                    target,
+                    explanation=f"KB RAGAS evaluation failed: {exc}",
+                )
+            ]
+
+        if not raw_results:
+            return [
+                self._heuristic_kb_ragas_score(
+                    evaluator,
+                    target,
+                    explanation="KB RAGAS evaluation returned no metric results.",
+                )
+            ]
+
+        pass_threshold = float(filter_config.get("pass_threshold", 0.7))
+        payloads: list[dict[str, Any]] = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            metric = str(item.get("metric") or "context_relevancy")
+            score = max(0.0, min(1.0, float(item.get("score") or 0.0)))
+            service_label = str(item.get("label") or "")
+            if service_label == "review":
+                label = "review"
+            else:
+                label = "pass" if score >= pass_threshold else "fail"
+            payloads.append(
+                {
+                    "score_name": metric,
+                    "score_type": "numeric",
+                    "numeric_value": round(score, 4),
+                    "label": label,
+                    "explanation": str(item.get("explanation") or "")[:2000],
+                    "scorer_type": "llm",
+                    "score_source": "kb_ragas",
+                    "evaluator_id": evaluator.get("evaluator_id"),
+                    "evaluator_name": evaluator.get("name"),
+                    "evaluator_version": evaluator.get("version"),
+                    "confidence": 0.7 if label != "review" else 0.0,
+                    "target_type": target.get("target_type") or "trace",
+                    "target_id": target.get("target_id") or target.get("trace_id"),
+                    "metadata": {
+                        "metric": metric,
+                        "component": "kb_ragas",
+                        "judge_model": item.get("judge_model"),
+                        "dataset_id": sample.dataset_id,
+                    },
+                }
+            )
+        return payloads or [
+            self._heuristic_kb_ragas_score(
+                evaluator,
+                target,
+                explanation="KB RAGAS evaluation returned invalid metric payloads.",
+            )
+        ]
 
     async def _score_with_llm(
         self,

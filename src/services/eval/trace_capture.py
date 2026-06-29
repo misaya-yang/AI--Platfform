@@ -57,12 +57,13 @@ def schedule_gateway_trace_ingest(
     created_by: str,
     trace: dict[str, Any],
     retention_days: int = 90,
+    enqueue: bool = False,
 ) -> None:
     if not getattr(database, "enabled", False):
         return
     trace = dict(trace)
     trace["retention_expires_at"] = retention_expires_at(retention_days=retention_days).isoformat()
-    payload = {"trace": trace, "enqueue": False}
+    payload = {"trace": trace, "enqueue": enqueue}
 
     async def _ingest() -> None:
         try:
@@ -71,7 +72,7 @@ def schedule_gateway_trace_ingest(
                 tenant_id=tenant_id,
                 created_by=created_by,
                 payload=payload,
-                enqueue=False,
+                enqueue=enqueue,
             )
         except Exception:
             logger.exception("Gateway trace ingest failed for trace_family=%s", trace.get("trace_family"))

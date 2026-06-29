@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -22,6 +24,11 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+KNOWLEDGE_SERVICE_SRC = REPO_ROOT / "apps" / "knowledge-service" / "src"
+if KNOWLEDGE_SERVICE_SRC.exists() and str(KNOWLEDGE_SERVICE_SRC) not in sys.path:
+    sys.path.insert(0, str(KNOWLEDGE_SERVICE_SRC))
 
 # ============ 测试常量 ============
 

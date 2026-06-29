@@ -73,6 +73,7 @@ import {
   type ChunkPreviewItem,
   type ProcessingMode,
 } from "@/api/knowledge";
+import { scoreKbRagasRetrieval, type KbRagasScoreRetrievalResult } from "@/api/eval";
 import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
 
 import { Button } from "@/components/ui/button";
@@ -274,6 +275,9 @@ export function KnowledgeDatasetDetailPage() {
   const [mmr, setMmr] = useState(false);
   const [hitLoading, setHitLoading] = useState(false);
   const [hitResults, setHitResults] = useState<RetrieveHit[]>([]);
+  const [ragasLoading, setRagasLoading] = useState(false);
+  const [ragasResults, setRagasResults] = useState<KbRagasScoreRetrievalResult[]>([]);
+  const [ragasJudgeModel, setRagasJudgeModel] = useState<string | null>(null);
   const [hitMeta, setHitMeta] = useState<Record<string, unknown>>({});
 
   // QA Testing
@@ -1039,11 +1043,38 @@ export function KnowledgeDatasetDetailPage() {
     setDeletePassword("");
   };
 
+  async function runRagasScore() {
+    if (!datasetId || !query.trim() || hitResults.length === 0) return;
+    setRagasLoading(true);
+    setRagasResults([]);
+    setRagasJudgeModel(null);
+    try {
+      const contexts = hitResults
+        .map((hit) => hit.text?.trim())
+        .filter((text): text is string => Boolean(text));
+      const response = await scoreKbRagasRetrieval({
+        query: query.trim(),
+        contexts,
+        dataset_id: datasetId,
+        metrics: ["context_relevancy"],
+      });
+      setRagasResults(response.results || []);
+      setRagasJudgeModel(response.judge_model || null);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      setHitMeta((prev) => ({ ...prev, ragas_error: message }));
+    } finally {
+      setRagasLoading(false);
+    }
+  }
+
   async function runHitTest() {
     if (!datasetId || !query.trim()) return;
     setHitLoading(true);
     setHitResults([]);
     setHitMeta({});
+    setRagasResults([]);
+    setRagasJudgeModel(null);
     try {
       const res = await hitTest(datasetId, {
         query,
@@ -1775,17 +1806,81 @@ export function KnowledgeDatasetDetailPage() {
                   </div>
 
                   {/* 测试按钮 - 阿里云风格 */}
-                  <Button
-                    onClick={runHitTest}
-                    disabled={hitLoading || !query.trim()}
-                    className="w-full h-10 bg-primary/10 hover:bg-primary/20 text-primary font-medium border-0"
-                  >
-                    {hitLoading ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.testing")}</>
-                    ) : (
-                      <><Target className="h-4 w-4 mr-2" /> {t("knowledge.detail.test")}</>
-                    )}
-                  </Button>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <Button
+                      onClick={runHitTest}
+                      disabled={hitLoading || !query.trim()}
+                      className="h-10 bg-primary/10 hover:bg-primary/20 text-primary font-medium border-0"
+                    >
+                      {hitLoading ? (
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.testing")}</>
+                      ) : (
+                        <><Target className="h-4 w-4 mr-2" /> {t("knowledge.detail.test")}</>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={runRagasScore}
+                      disabled={ragasLoading || hitLoading || !query.trim() || hitResults.length === 0}
+                      className="h-10 border-primary/30 text-primary hover:bg-primary/5"
+                    >
+                      {ragasLoading ? (
+                        <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> {t("knowledge.detail.ragasScoring")}</>
+                      ) : (
+                        <><BarChart3 className="h-4 w-4 mr-2" /> {t("knowledge.detail.ragasScore")}</>
+                      )}
+                    </Button>
+                  </div>
+
+                  {ragasResults.length > 0 && (
+                    <div className="p-4 rounded-lg border border-border bg-card/80 space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h4 className="text-xs font-semibold text-foreground/80">{t("knowledge.detail.ragasResults")}</h4>
+                        {ragasJudgeModel ? (
+                          <Badge variant="outline" className="font-mono text-[10px]">{ragasJudgeModel}</Badge>
+                        ) : null}
+                      </div>
+                      <div className="grid gap-2">
+                        {ragasResults.map((result) => (
+                          <div
+                            key={result.metric}
+                            className="flex items-start justify-between gap-3 rounded-md border border-border/70 bg-muted/30 px-3 py-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-xs font-semibold text-foreground">
+                                {t(`eval.ragas.metrics.${result.metric}`, result.metric)}
+                              </p>
+                              <p className="text-[11px] text-muted-foreground mt-1 line-clamp-3">{result.explanation}</p>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-sm font-bold text-foreground tabular-nums">
+                                {Math.round(result.score * 100)}%
+                              </p>
+                              <Badge
+                                className={
+                                  result.label === "pass"
+                                    ? "bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300"
+                                    : result.label === "fail"
+                                      ? "bg-red-100 dark:bg-red-950/40 text-red-700 dark:text-red-300"
+                                      : "bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
+                                }
+                              >
+                                {t(`eval.ragas.labels.${result.label}`, result.label)}
+                              </Badge>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="w-full text-xs"
+                        onClick={() => nav(`/eval?dataset_id=${encodeURIComponent(datasetId || "")}`)}
+                      >
+                        {t("knowledge.detail.openEvalConsole")}
+                      </Button>
+                    </div>
+                  )}
 
                   {Object.keys(hitMeta).length > 0 && (
                     <div className="p-4 bg-linear-to-r from-muted/70 to-primary/5 rounded-lg border border-border">
@@ -1850,6 +1945,11 @@ export function KnowledgeDatasetDetailPage() {
                       {typeof hitMeta.error === 'string' && hitMeta.error && (
                         <div className="mt-2 p-2 bg-red-500/10 dark:bg-red-500/15 text-red-600 dark:text-red-400 rounded text-xs">
                           {t("knowledge.detail.error", { msg: hitMeta.error })}
+                        </div>
+                      )}
+                      {typeof hitMeta.ragas_error === 'string' && hitMeta.ragas_error && (
+                        <div className="mt-2 p-2 bg-red-500/10 dark:bg-red-500/15 text-red-600 dark:text-red-400 rounded text-xs">
+                          {t("knowledge.detail.ragasError", { msg: hitMeta.ragas_error })}
                         </div>
                       )}
                     </div>

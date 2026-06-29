@@ -10,7 +10,7 @@ TraceStatus = Literal["running", "succeeded", "failed", "cancelled", "timeout"]
 SpanStatus = Literal["running", "succeeded", "failed", "cancelled", "skipped"]
 ScoreType = Literal["numeric", "categorical", "boolean", "text"]
 ScorerType = Literal["human", "llm", "rule", "system"]
-EvaluatorType = Literal["human", "rule", "trajectory", "span", "llm", "llm_judge", "composite"]
+EvaluatorType = Literal["human", "rule", "trajectory", "span", "llm", "llm_judge", "composite", "ragas"]
 TraceExportFormat = Literal["openinference", "otel", "langsmith-jsonl"]
 EvalRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 ScoreTargetType = Literal["trace", "span", "thread", "dataset_run", "example"]
@@ -278,7 +278,7 @@ class EvalExample(BaseModel):
 
 class EvalExamplesImportRequest(BaseModel):
     examples: list[EvalExampleImportItem] = Field(default_factory=list, max_length=500)
-    mode: Literal["append"] = "append"
+    mode: Literal["skip_duplicates", "append"] = "skip_duplicates"
 
 
 class EvalExamplesImportResponse(BaseModel):
@@ -458,3 +458,54 @@ class EvalDashboardResponse(BaseModel):
     run_health: dict[str, Any] = Field(default_factory=dict)
     queue_health: dict[str, Any] = Field(default_factory=dict)
     latest_gate_status: dict[str, Any] = Field(default_factory=dict)
+
+
+class KbRagasMetricSummary(BaseModel):
+    metric: str
+    average_score: float = 0.0
+    scored_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    review_count: int = 0
+
+
+class KbRagasKnowledgeSummaryResponse(BaseModel):
+    window_days: int = 7
+    dataset_id: str | None = None
+    rag_traces: int = 0
+    ragas_scored_traces: int = 0
+    metrics: list[KbRagasMetricSummary] = Field(default_factory=list)
+    latest_judge_model: str | None = None
+
+
+class KbRagasBatchScoreRequest(BaseModel):
+    evaluator_id: str
+    limit: int = Field(default=50, ge=1, le=200)
+    only_unscored: bool = True
+
+
+class KbRagasBatchScoreResponse(BaseModel):
+    queued: int = 0
+    skipped: int = 0
+    jobs: list[EvalAsyncJobResponse] = Field(default_factory=list)
+
+
+class KbRagasScoreRetrievalRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4000)
+    contexts: list[str] = Field(..., min_length=1, max_length=32)
+    metrics: list[str] | None = None
+    ground_truth: str | None = Field(default=None, max_length=8000)
+    dataset_id: str | None = None
+    llm_config: dict[str, Any] | None = None
+
+
+class KbRagasScoreRetrievalResult(BaseModel):
+    metric: str
+    score: float
+    explanation: str
+    label: str
+
+
+class KbRagasScoreRetrievalResponse(BaseModel):
+    results: list[KbRagasScoreRetrievalResult] = Field(default_factory=list)
+    judge_model: str = ""

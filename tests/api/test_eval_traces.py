@@ -24,6 +24,8 @@ from src.api.schemas.eval import (
     EvalExperimentCreate,
     EvalExperimentRunCreate,
     EvalGateDryRunRequest,
+    KbRagasBatchScoreRequest,
+    KbRagasScoreRetrievalRequest,
 )
 from src.api.v1 import eval as eval_routes
 from src.api.v1.eval import (
@@ -44,14 +46,17 @@ from src.api.v1.eval import (
     get_eval_summary,
     get_eval_trace_detail,
     get_eval_trace_thread,
+    get_kb_ragas_summary_endpoint,
     import_eval_examples,
     list_eval_datasets,
     list_eval_evaluators,
     list_eval_examples,
     list_eval_experiments,
     list_eval_traces,
+    batch_score_kb_ragas_dataset,
     run_eval_evaluator_async,
     run_eval_experiment,
+    score_kb_ragas_retrieval,
     update_eval_example,
 )
 from src.config.settings import Settings
@@ -191,6 +196,7 @@ class FakeTraceRepository:
             "created_by": "user-a",
             "created_at": datetime.now(timezone.utc),
         }
+        self.imported_case_ids: set[str] = set()
         self.evaluator = {
             "evaluator_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
             "tenant_id": "tenant-a",
@@ -298,10 +304,30 @@ class FakeTraceRepository:
         }
         return self.example
 
+    async def list_dataset_example_case_ids(self, **kwargs: Any) -> set[str]:
+        self.calls.append(("list_dataset_example_case_ids", kwargs))
+        return set(self.imported_case_ids)
+
     async def import_examples(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("import_examples", kwargs))
+        mode = kwargs.get("mode", "skip_duplicates")
+        existing_case_ids = (
+            await self.list_dataset_example_case_ids(
+                tenant_id=kwargs["tenant_id"],
+                dataset_id=kwargs["dataset_id"],
+            )
+            if mode == "skip_duplicates"
+            else set()
+        )
+        seen_in_request: set[str] = set()
         examples = []
+        skipped = 0
         for item in kwargs["examples"]:
+            case_id = str(item.get("case_id") or "").strip()
+            if mode == "skip_duplicates" and case_id:
+                if case_id in existing_case_ids or case_id in seen_in_request:
+                    skipped += 1
+                    continue
             examples.append(
                 {
                     **self.example,
@@ -316,7 +342,11 @@ class FakeTraceRepository:
                     },
                 }
             )
-        return {"imported": len(examples), "skipped": 0, "examples": examples}
+            if case_id:
+                existing_case_ids.add(case_id)
+                seen_in_request.add(case_id)
+                self.imported_case_ids.add(case_id)
+        return {"imported": len(examples), "skipped": skipped, "examples": examples}
 
     async def create_evaluator(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("evaluator", kwargs))
@@ -357,6 +387,34 @@ class FakeTraceRepository:
     async def get_evaluator(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("get_evaluator", kwargs))
         return self.evaluator
+
+    async def get_kb_ragas_summary(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("kb_ragas_summary", kwargs))
+        return {
+            "window_days": kwargs.get("days", 7),
+            "dataset_id": kwargs.get("dataset_id"),
+            "rag_traces": 2,
+            "ragas_scored_traces": 1,
+            "metrics": [
+                {
+                    "metric": "context_relevancy",
+                    "average_score": 0.86,
+                    "scored_count": 1,
+                    "pass_count": 1,
+                    "fail_count": 0,
+                    "review_count": 0,
+                }
+            ],
+            "latest_judge_model": "qwen-test",
+        }
+
+    async def trace_has_kb_ragas_score(self, **kwargs: Any) -> bool:
+        self.calls.append(("trace_has_kb_ragas_score", kwargs))
+        return False
+
+    async def has_active_evaluator_run_for_trace(self, **kwargs: Any) -> bool:
+        self.calls.append(("has_active_evaluator_run_for_trace", kwargs))
+        return False
 
     async def get_summary(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("summary", kwargs))
@@ -490,6 +548,102 @@ async def test_get_eval_summary_scopes_tenant_and_user(monkeypatch):
     assert kwargs["tenant_id"] == "tenant-a"
     assert kwargs["user_id"] == "user-a"
     assert kwargs["days"] == 14
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_summary_endpoint_scopes_tenant_and_dataset(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await get_kb_ragas_summary_endpoint(
+        request=_request(),
+        days=14,
+        dataset_id="dataset-a",
+        auth=_auth(user_id="user-a", tenant_id="tenant-a"),
+    )
+
+    assert result.window_days == 14
+    assert result.dataset_id == "dataset-a"
+    assert result.rag_traces == 2
+    assert result.ragas_scored_traces == 1
+    assert result.metrics[0].metric == "context_relevancy"
+    call_name, kwargs = repo.calls[-1]
+    assert call_name == "kb_ragas_summary"
+    assert kwargs["tenant_id"] == "tenant-a"
+    assert kwargs["dataset_id"] == "dataset-a"
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_batch_score_endpoint_queues_rag_traces(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.evaluator = {
+        **repo.evaluator,
+        "name": "kb-ragas",
+        "evaluator_type": "ragas",
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await batch_score_kb_ragas_dataset(
+        dataset_id="dataset-a",
+        body=KbRagasBatchScoreRequest(
+            evaluator_id=repo.evaluator["evaluator_id"],
+            limit=10,
+            only_unscored=True,
+        ),
+        request=_request(),
+        auth=_auth(
+            user_id="user-a",
+            tenant_id="tenant-a",
+            permissions=["console:eval:view", "console:eval:run"],
+        ),
+    )
+
+    assert result.queued == 1
+    assert result.skipped == 0
+    assert result.jobs[0].status == "queued"
+    list_call = next(call for call in repo.calls if call[0] == "list")
+    assert list_call[1]["trace_family"] == "rag"
+    assert list_call[1]["metadata_dataset_id"] == "dataset-a"
+    enqueue_call = next(call for call in repo.calls if call[0] == "evaluator_run")
+    assert enqueue_call[1]["payload"]["metadata"]["kb_ragas_batch"] is True
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_score_retrieval_endpoint_maps_service_payload(monkeypatch) -> None:
+    async def _score_retrieval_with_kb_ragas(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["query"] == "refund policy"
+        assert kwargs["contexts"] == ["Refunds are allowed within 30 days."]
+        return {
+            "judge_model": "qwen-test",
+            "results": [
+                {
+                    "metric": "context_relevancy",
+                    "score": 0.91,
+                    "explanation": "Relevant.",
+                    "label": "pass",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(eval_routes, "score_retrieval_with_kb_ragas", _score_retrieval_with_kb_ragas)
+
+    result = await score_kb_ragas_retrieval(
+        body=KbRagasScoreRetrievalRequest(
+            query="refund policy",
+            contexts=["Refunds are allowed within 30 days."],
+            metrics=["context_relevancy"],
+        ),
+        request=_request(),
+        auth=_auth(
+            user_id="user-a",
+            tenant_id="tenant-a",
+            permissions=["console:eval:view", "console:eval:run"],
+        ),
+    )
+
+    assert result.judge_model == "qwen-test"
+    assert result.results[0].metric == "context_relevancy"
+    assert result.results[0].score == 0.91
 
 
 @pytest.mark.asyncio
@@ -951,6 +1105,59 @@ async def test_eval_example_review_import_and_export(monkeypatch) -> None:
     )
     assert exported.dataset.dataset_id == repo.dataset["dataset_id"]
     assert exported.examples[0].case_id in {"assistant.case.one", repo.example["example_id"]}
+
+
+@pytest.mark.asyncio
+async def test_eval_example_import_skips_duplicate_case_ids(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+    body = EvalExamplesImportRequest(
+        examples=[
+            {
+                "case_id": "assistant.case.one",
+                "input": {"input_preview": "hello"},
+                "expected_output": {"contains": "hi"},
+                "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+                "assertions": [{"type": "output_contains", "value": "hi"}],
+                "metadata": {"review_status": "approved"},
+            },
+            {
+                "case_id": "assistant.case.one",
+                "input": {"input_preview": "duplicate"},
+                "expected_output": {"contains": "dup"},
+                "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+                "assertions": [{"type": "output_contains", "value": "dup"}],
+                "metadata": {"review_status": "approved"},
+            },
+            {
+                "case_id": "assistant.case.two",
+                "input": {"input_preview": "second"},
+                "expected_output": {"contains": "two"},
+                "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+                "assertions": [{"type": "output_contains", "value": "two"}],
+                "metadata": {"review_status": "approved"},
+            },
+        ]
+    )
+
+    first = await import_eval_examples(
+        dataset_id=repo.dataset["dataset_id"],
+        body=body,
+        request=_request(),
+        auth=auth,
+    )
+    assert first.imported == 2
+    assert first.skipped == 1
+
+    second = await import_eval_examples(
+        dataset_id=repo.dataset["dataset_id"],
+        body=body,
+        request=_request(),
+        auth=auth,
+    )
+    assert second.imported == 0
+    assert second.skipped == 3
 
 
 @pytest.mark.asyncio

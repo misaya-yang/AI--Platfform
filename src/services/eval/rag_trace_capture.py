@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -15,19 +16,103 @@ from .trace_capture import (
     trace_id_for_request,
 )
 
+_DEFAULT_EVAL_CONTEXT_MAX_CHARS = 1500
+_DEFAULT_EVAL_CONTEXT_MAX_CHUNKS = 8
+_DEFAULT_UI_PREVIEW_MAX_CHARS = 360
+
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def eval_context_max_chars() -> int:
+    return _read_int_env("KB_TRACE_EVAL_CONTEXT_MAX_CHARS", _DEFAULT_EVAL_CONTEXT_MAX_CHARS)
+
+
+def eval_context_max_chunks() -> int:
+    return _read_int_env("KB_TRACE_EVAL_MAX_CHUNKS", _DEFAULT_EVAL_CONTEXT_MAX_CHUNKS)
+
 
 def _parse_dataset_id(path: str) -> str | None:
     parts = [part for part in path.strip("/").split("/") if part]
     if not parts:
         return None
-    if parts[0] == "knowledge" and len(parts) >= 2:
-        return parts[1]
-    return parts[0]
+    if "knowledge" in parts:
+        index = parts.index("knowledge")
+        if len(parts) > index + 1:
+            return parts[index + 1]
+    if parts[-1] == "retrieve" and len(parts) >= 2:
+        return parts[-2]
+    if len(parts) == 1 and parts[0] != "retrieve":
+        return parts[0]
+    return None
 
 
 def is_retrieve_path(path: str) -> bool:
     normalized = path.strip("/")
     return normalized.endswith("/retrieve") or normalized.endswith("retrieve")
+
+
+def _bounded_eval_text(value: Any, *, limit: int | None = None) -> str:
+    return redact_preview(value, limit=limit or eval_context_max_chars())
+
+
+def _bounded_ui_preview(value: Any) -> str:
+    return redact_preview(value, limit=_DEFAULT_UI_PREVIEW_MAX_CHARS)
+
+
+def build_retrieval_documents(
+    results: list[dict[str, Any]],
+    *,
+    max_chunks: int | None = None,
+    eval_max_chars: int | None = None,
+) -> list[dict[str, Any]]:
+    chunk_limit = max_chunks or eval_context_max_chunks()
+    char_limit = eval_max_chars or eval_context_max_chars()
+    documents: list[dict[str, Any]] = []
+    for index, result in enumerate(results[:chunk_limit], start=1):
+        if not isinstance(result, dict):
+            continue
+        text = str(result.get("text") or result.get("content") or "").strip()
+        if not text:
+            continue
+        documents.append(
+            {
+                "rank": index,
+                "segment_id": result.get("segment_id"),
+                "document_id": result.get("document_id"),
+                "score": result.get("score"),
+                "content_eval": _bounded_eval_text(text, limit=char_limit),
+                "content_preview": _bounded_ui_preview(text),
+            }
+        )
+    return documents
+
+
+def parse_retrieve_response(response_body: bytes) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not response_body:
+        return [], {}
+    try:
+        payload = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return [], {}
+    if not isinstance(payload, dict):
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)], {}
+        return [], {}
+
+    results = payload.get("results")
+    if not isinstance(results, list):
+        chunks = payload.get("chunks")
+        results = chunks if isinstance(chunks, list) else []
+    metadata = payload.get("metadata")
+    return [item for item in results if isinstance(item, dict)], metadata if isinstance(metadata, dict) else {}
 
 
 def build_rag_trace_payload(
@@ -44,6 +129,8 @@ def build_rag_trace_payload(
     document_count: int,
     error_summary: str | None,
     traceparent: str | None,
+    retrieval_documents: list[dict[str, Any]] | None = None,
+    retrieval_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trace_id = trace_id_for_request(
         request_id=request_id or str(uuid.uuid4()),
@@ -59,6 +146,36 @@ def build_rag_trace_payload(
         parts = traceparent.split("-")
         if len(parts) >= 2 and parts[1]:
             otel_trace_id = parts[1]
+
+    documents = list(retrieval_documents or [])
+    effective_document_count = document_count or len(documents)
+    retrieval_meta = dict(retrieval_metadata or {})
+    retrieval_mode = retrieval_meta.get("mode")
+
+    retriever_attributes: dict[str, Any] = {
+        "openinference.span.kind": "RETRIEVER",
+        "retrieval.dataset_ids": [dataset_id] if dataset_id else [],
+        "retrieval.document_count": effective_document_count,
+        "retrieval": {
+            "documents": documents,
+            "mode": retrieval_mode,
+            "pipeline_stages": retrieval_meta.get("pipeline_stages"),
+        },
+    }
+
+    trace_metadata: dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "gen_ai.retrieval.query.text": redact_preview(query),
+        "retrieval.dataset_ids": [dataset_id] if dataset_id else [],
+        "error_summary": redact_preview(error_summary) if error_summary else None,
+        "retrieval": {
+            "mode": retrieval_mode,
+            "pipeline_stages": retrieval_meta.get("pipeline_stages"),
+            "fusion_method": retrieval_meta.get("fusion_method"),
+            "rerank": retrieval_meta.get("rerank"),
+        },
+    }
+
     return {
         "trace_id": trace_id,
         "trace_family": "rag",
@@ -72,20 +189,15 @@ def build_rag_trace_payload(
         "started_at": started_dt.isoformat(),
         "ended_at": ended_dt.isoformat(),
         "input_preview": redact_preview(query),
-        "output_preview": redact_preview(f"{document_count} retrieved documents"),
+        "output_preview": redact_preview(f"{effective_document_count} retrieved documents"),
         "metrics": {
             "total_latency_ms": duration_ms,
-            "retrieval.document_count": document_count,
+            "retrieval.document_count": effective_document_count,
             "upstream_status": upstream_status,
         },
-        "privacy": {"payloads": "bounded_redacted_preview"},
-        "redaction_state": {"chunks": "not_persisted"},
-        "metadata": {
-            "dataset_id": dataset_id,
-            "gen_ai.retrieval.query.text": redact_preview(query),
-            "retrieval.dataset_ids": [dataset_id] if dataset_id else [],
-            "error_summary": redact_preview(error_summary) if error_summary else None,
-        },
+        "privacy": {"payloads": "bounded_redacted_preview", "eval_contexts": "bounded_eval_only"},
+        "redaction_state": {"chunks": "bounded_eval_context"},
+        "metadata": trace_metadata,
         "source_adapter": "gateway.knowledge_proxy",
         "spans": [
             {
@@ -110,12 +222,8 @@ def build_rag_trace_payload(
                 "ended_at": ended_dt.isoformat(),
                 "duration_ms": duration_ms,
                 "input_preview": redact_preview(query),
-                "output_preview": redact_preview(f"{document_count} documents"),
-                "attributes": {
-                    "openinference.span.kind": "RETRIEVER",
-                    "retrieval.dataset_ids": [dataset_id] if dataset_id else [],
-                    "retrieval.document_count": document_count,
-                },
+                "output_preview": redact_preview(f"{effective_document_count} documents"),
+                "attributes": retriever_attributes,
                 "error_message": redact_preview(error_summary) if error_summary else None,
             },
         ],
@@ -129,7 +237,7 @@ def build_rag_trace_payload(
                 "event_type": "rag_retrieval_completed" if status == "succeeded" else "rag_retrieval_failed",
                 "sequence_no": 2,
                 "payload": {
-                    "document_count": document_count,
+                    "document_count": effective_document_count,
                     "duration_ms": duration_ms,
                     "error": redact_preview(error_summary) if error_summary else None,
                 },
@@ -151,22 +259,8 @@ def parse_retrieve_request_body(body: bytes) -> str:
 
 
 def parse_retrieve_document_count(response_body: bytes) -> int:
-    if not response_body:
-        return 0
-    try:
-        payload = json.loads(response_body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return 0
-    if isinstance(payload, dict):
-        results = payload.get("results")
-        if isinstance(results, list):
-            return len(results)
-        chunks = payload.get("chunks")
-        if isinstance(chunks, list):
-            return len(chunks)
-    if isinstance(payload, list):
-        return len(payload)
-    return 0
+    results, _metadata = parse_retrieve_response(response_body)
+    return len(results)
 
 
 def record_rag_retrieval_trace(
@@ -185,6 +279,8 @@ def record_rag_retrieval_trace(
 ) -> None:
     status = "succeeded" if 200 <= response_status < 400 else "failed"
     error_summary = None if status == "succeeded" else f"upstream_status={response_status}"
+    results, retrieval_metadata = parse_retrieve_response(response_body)
+    documents = build_retrieval_documents(results)
     payload = build_rag_trace_payload(
         request_id=request_id,
         tenant_id=tenant_id,
@@ -195,9 +291,11 @@ def record_rag_retrieval_trace(
         ended_at=time.time(),
         status=status,
         upstream_status=response_status,
-        document_count=parse_retrieve_document_count(response_body),
+        document_count=len(documents),
         error_summary=error_summary,
         traceparent=traceparent,
+        retrieval_documents=documents,
+        retrieval_metadata=retrieval_metadata,
     )
     schedule_gateway_trace_ingest(
         database,
@@ -205,4 +303,5 @@ def record_rag_retrieval_trace(
         created_by=user_id,
         trace=payload,
         retention_days=retention_days,
+        enqueue=True,
     )
