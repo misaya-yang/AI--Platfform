@@ -680,6 +680,39 @@ class AssistantTraceWriter:
                 phase="generation_storage",
                 occurred_at=ended_at,
             )
+        await self._enqueue_trace_ingested(ctx, status=status)
+
+    async def _enqueue_trace_ingested(self, ctx: AssistantTraceContext, *, status: str) -> None:
+        if not self.database or not hasattr(self.database, "execute"):
+            return
+        payload = _json_dumps(
+            {
+                "trace_id": ctx.trace_id,
+                "trace_family": "assistant",
+                "status": status,
+                "source_adapter": "assistant-service",
+            }
+        )
+        try:
+            await self.database.execute(
+                """
+                INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+                SELECT $1, 'trace.ingested', $2::jsonb
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM agent_trace_outbox
+                    WHERE tenant_id = $1
+                      AND job_type = 'trace.ingested'
+                      AND status IN ('queued', 'running')
+                      AND payload->>'trace_id' = $3
+                )
+                """,
+                ctx.tenant_id,
+                payload,
+                ctx.trace_id,
+            )
+        except Exception:
+            logger.debug("trace.ingested enqueue skipped for trace_id=%s", ctx.trace_id, exc_info=True)
 
     async def _upsert_trace_root(self, ctx: AssistantTraceContext) -> None:
         redaction_state = {

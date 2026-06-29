@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from ai_gateway_core.eval.evaluator_executor import EvaluatorExecutor
+from ai_gateway_core.eval.evaluator_executor import (
+    EvaluatorExecutor,
+    LlmCompleteContext,
+    _parse_llm_score_response,
+    build_trajectory_summary,
+)
 
 
 class FakeEvalRepository:
@@ -223,6 +228,29 @@ async def test_trajectory_evaluator_scores_required_spans() -> None:
 
 
 @pytest.mark.asyncio
+async def test_trajectory_evaluator_reports_missing_span_once() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "trajectory"
+    repo.evaluator["evaluator_type"] = "trajectory"
+    repo.evaluator["filter_config"] = {"required_span_kinds": ["retriever"]}
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-missing-span",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    explanation = score_calls[0][1]["payload"]["explanation"]
+    assert explanation == "missing span kinds: retriever"
+
+
+@pytest.mark.asyncio
 async def test_llm_judge_invalid_response_marks_review_not_pass() -> None:
     repo = FakeEvalRepository()
     repo.evaluator["evaluator_type"] = "llm_judge"
@@ -285,6 +313,224 @@ async def test_composite_evaluator_writes_component_breakdown() -> None:
     payload = score_calls[0][1]["payload"]
     assert payload["label"] == "pass"
     assert len(payload["metadata"]["components"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_llm_prompt_includes_trajectory_summary() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "llm"
+    repo.trace_detail["spans"] = [
+        {
+            "span_kind": "tool_execution",
+            "name": "search_kb",
+            "status": "succeeded",
+            "input_preview": "query refund",
+            "output_preview": "3 docs",
+        }
+    ]
+    captured: dict[str, str] = {}
+
+    async def _complete(model_id: str, prompt: str) -> str:
+        captured["prompt"] = prompt
+        return '{"numeric_value": 0.9, "label": "pass", "explanation": "ok", "confidence": 0.8}'
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-traj", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert "Trajectory summary:" in captured["prompt"]
+    assert "tool_execution/search_kb" in captured["prompt"]
+
+
+def test_build_trajectory_summary_includes_metrics() -> None:
+    summary = build_trajectory_summary(
+        {
+            "workflow_kind": "rag_retrieval_chain",
+            "metrics": {"retrieval.document_count": 3},
+            "spans": [{"span_kind": "lifecycle", "name": "rag", "status": "succeeded"}],
+            "events": [],
+        }
+    )
+    assert "retrieval.document_count=3" in summary
+    assert "workflow_kind=rag_retrieval_chain" in summary
+
+
+@pytest.mark.asyncio
+async def test_rag_retrieval_document_count_rule() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {
+        "rules": [{"type": "retrieval_document_count_gte", "value": 2}],
+    }
+    repo.trace_detail["trace"]["metrics"] = {"retrieval.document_count": 3}
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-rag", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.status == "succeeded"
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_no_error_spans_rule_fails_when_error_span_present() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {"rules": [{"type": "no_error_spans"}]}
+    repo.trace_detail["spans"] = [{"span_kind": "error", "name": "tool", "status": "failed"}]
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-err", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_span_evaluator_writes_per_span_scores() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["name"] = "span-quality"
+    repo.evaluator["evaluator_type"] = "span"
+    repo.evaluator["filter_config"] = {
+        "mode": "rule",
+        "span_kinds": ["tool_execution", "model_invocation"],
+        "rules": [{"type": "output_not_empty"}],
+    }
+    repo.trace_detail["spans"] = [
+        {
+            "span_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "span_kind": "tool_execution",
+            "name": "search_kb",
+            "status": "succeeded",
+            "output_preview": "3 docs",
+        },
+        {
+            "span_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "span_kind": "model_invocation",
+            "name": "answer",
+            "status": "succeeded",
+            "output_preview": "final answer",
+        },
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-span",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 2
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["target_type"] == "span"
+    assert score_calls[0][1]["payload"]["span_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def test_parse_llm_score_response_extracts_embedded_nested_json() -> None:
+    parsed = _parse_llm_score_response(
+        'Here is the score:\n{"numeric_value": 0.82, "label": "pass", '
+        '"explanation": "nested {detail}", "confidence": 0.7}'
+    )
+    assert parsed is not None
+    assert parsed["numeric_value"] == 0.82
+    assert parsed["confidence"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_llm_complete_internal_type_error_is_not_retried_with_context() -> None:
+    repo = FakeEvalRepository()
+    calls = 0
+
+    async def _complete(_model_id: str, _prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        raise TypeError("internal callback failure")
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+
+    with pytest.raises(TypeError, match="internal callback failure"):
+        await executor._invoke_llm_complete(
+            "judge-model",
+            "prompt",
+            LlmCompleteContext(tenant_id="tenant-a"),
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_output_contains_empty_value_fails() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {"rules": [{"type": "output_contains", "value": ""}]}
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-empty-needle", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_unknown_rule_type_is_skipped_for_compatibility() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {"rules": [{"type": "not_a_real_rule"}]}
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-unknown", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "pass"
+    assert score_calls[0][1]["payload"]["numeric_value"] == 1.0
+    assert "skipped" in score_calls[0][1]["payload"]["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_span_evaluator_uses_rules_config_when_present() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "span"
+    repo.evaluator["filter_config"] = {
+        "mode": "rule",
+        "span_kinds": ["tool_execution"],
+        "rules_config": {"rules": [{"type": "output_not_empty"}]},
+    }
+    repo.trace_detail["spans"] = [
+        {
+            "span_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "span_kind": "tool_execution",
+            "name": "search",
+            "status": "succeeded",
+            "output_preview": "",
+        }
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-span-rules", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
 
 
 @pytest.mark.asyncio

@@ -446,12 +446,18 @@ class AgentTraceRepository(BaseRepository):
         for event in trace.get("events") or []:
             await self._upsert_ingested_event(trace_id, event)
         if enqueue:
-            job = await self.create_outbox_job(
+            job = await self.create_trace_ingested_outbox_job(
                 tenant_id=tenant_id,
-                job_type="trace.ingested",
-                payload={"trace_id": trace_id, "source_adapter": trace.get("source_adapter") or "api"},
+                trace_id=trace_id,
+                trace_family=str(trace.get("trace_family") or "assistant"),
+                status=str(trace.get("status") or "succeeded"),
+                source_adapter=str(trace.get("source_adapter") or "api"),
             )
-            return {"trace_id": trace_id, "status": "stored", "job_id": job.get("job_id")}
+            return {
+                "trace_id": trace_id,
+                "status": "stored",
+                "job_id": job.get("job_id") if job else None,
+            }
         return {"trace_id": trace_id, "status": "stored", "job_id": None}
 
     async def _upsert_ingested_span(self, trace_id: str, span: dict[str, Any]) -> None:
@@ -806,6 +812,99 @@ class AgentTraceRepository(BaseRepository):
         decoded["runs"] = [self._decode_eval_row(run) for run in runs]
         return decoded
 
+    async def has_active_evaluator_run_for_trace(
+        self,
+        *,
+        tenant_id: str,
+        evaluator_id: str,
+        trace_id: str,
+    ) -> bool:
+        row = await self.fetchrow(
+            """
+            SELECT 1
+            FROM eval_experiment_runs
+            WHERE tenant_id = $1
+              AND evaluator_id = $2::uuid
+              AND status IN ('queued', 'running', 'succeeded')
+              AND target_snapshot->>'trace_id' = $3
+              AND target_snapshot->>'source' = 'online_sampling'
+            LIMIT 1
+            """,
+            tenant_id,
+            evaluator_id,
+            trace_id,
+        )
+        return row is not None
+
+    async def count_pending_online_eval_runs(self, *, tenant_id: str) -> int:
+        row = await self.fetchrow(
+            """
+            SELECT COUNT(*)::int AS pending
+            FROM eval_experiment_runs
+            WHERE tenant_id = $1
+              AND status IN ('queued', 'running')
+              AND target_snapshot->>'source' = 'online_sampling'
+            """,
+            tenant_id,
+        )
+        return int((row or {}).get("pending") or 0)
+
+    async def has_pending_trace_ingested_job(
+        self,
+        *,
+        tenant_id: str,
+        trace_id: str,
+    ) -> bool:
+        row = await self.fetchrow(
+            """
+            SELECT 1
+            FROM agent_trace_outbox
+            WHERE tenant_id = $1
+              AND job_type = 'trace.ingested'
+              AND status IN ('queued', 'running')
+              AND payload->>'trace_id' = $2
+            LIMIT 1
+            """,
+            tenant_id,
+            trace_id,
+        )
+        return row is not None
+
+    async def create_trace_ingested_outbox_job(
+        self,
+        *,
+        tenant_id: str,
+        trace_id: str,
+        trace_family: str,
+        status: str,
+        source_adapter: str,
+    ) -> dict[str, Any] | None:
+        payload = {
+            "trace_id": trace_id,
+            "trace_family": trace_family,
+            "status": status,
+            "source_adapter": source_adapter,
+        }
+        row = await self.fetchrow(
+            """
+            INSERT INTO agent_trace_outbox (tenant_id, job_type, payload)
+            SELECT $1, 'trace.ingested', $2::jsonb
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM agent_trace_outbox
+                WHERE tenant_id = $1
+                  AND job_type = 'trace.ingested'
+                  AND status IN ('queued', 'running')
+                  AND payload->>'trace_id' = $3
+            )
+            RETURNING *
+            """,
+            tenant_id,
+            self._json_dumps(payload),
+            trace_id,
+        )
+        return self._decode_eval_row(row) if row else None
+
     async def enqueue_evaluator_run(
         self,
         *,
@@ -814,6 +913,15 @@ class AgentTraceRepository(BaseRepository):
         created_by: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        target_snapshot = dict(payload.get("target_snapshot") or {})
+        trace_id = payload.get("trace_id")
+        if trace_id and "trace_id" not in target_snapshot:
+            target_snapshot["trace_id"] = trace_id
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict) and metadata:
+            target_snapshot.setdefault("metadata", metadata)
+        if not target_snapshot and trace_id:
+            target_snapshot = {"trace_id": trace_id, "metadata": metadata or {}}
         run = await self.fetchrow(
             """
             INSERT INTO eval_experiment_runs (
@@ -829,10 +937,7 @@ class AgentTraceRepository(BaseRepository):
             tenant_id,
             evaluator_id,
             payload.get("dataset_id"),
-            self._json_dumps(
-                payload.get("target_snapshot")
-                or {"trace_id": payload.get("trace_id"), "metadata": payload.get("metadata") or {}}
-            ),
+            self._json_dumps(target_snapshot),
             self._json_dumps({}),
             created_by,
         )

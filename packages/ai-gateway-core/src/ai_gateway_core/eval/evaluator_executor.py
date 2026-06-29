@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -11,7 +12,20 @@ from ai_gateway_core.persistence.repositories.agent_trace_repository import Agen
 
 logger = get_logger(__name__)
 
-LlmCompleteFn = Callable[[str, str], Awaitable[str]]
+LlmCompleteFn = Callable[..., Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class LlmCompleteContext:
+    tenant_id: str
+    trace_family: str = "assistant"
+    trace_id: str | None = None
+
+
+_DEFAULT_RAG_RUBRIC = (
+    "Score RAG retrieval quality from 0 to 1. Penalize empty retrieval, failed spans, "
+    "and answers that are not grounded in the bounded previews. Reward concise, faithful answers."
+)
 
 
 @dataclass
@@ -40,17 +54,87 @@ def _trace_target(detail: dict[str, Any] | None) -> dict[str, Any] | None:
     if not detail:
         return None
     trace = detail.get("trace") or {}
+    metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+    metrics = trace.get("metrics") if isinstance(trace.get("metrics"), dict) else {}
     return {
         "trace_id": trace.get("trace_id"),
+        "trace_family": trace.get("trace_family"),
+        "workflow_kind": trace.get("workflow_kind"),
         "input_preview": trace.get("input_preview") or "",
         "output_preview": trace.get("output_preview") or "",
         "status": trace.get("status"),
         "total_latency_ms": int(trace.get("total_latency_ms") or 0),
         "model_id": trace.get("model_id"),
-        "metadata": trace.get("metadata") or {},
+        "metadata": metadata,
+        "metrics": metrics,
         "spans": detail.get("spans") or [],
         "events": detail.get("events") or [],
     }
+
+
+def _target_metrics(target: dict[str, Any]) -> dict[str, Any]:
+    metrics = target.get("metrics") if isinstance(target.get("metrics"), dict) else {}
+    metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+    merged = dict(metrics)
+    for key in ("retrieval.document_count", "retrieval_document_count"):
+        if key in metadata and key not in merged:
+            merged[key] = metadata[key]
+    return merged
+
+
+def _preview_excerpt(value: Any, *, limit: int = 120) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...[truncated]"
+
+
+def build_trajectory_summary(
+    target: dict[str, Any],
+    *,
+    max_spans: int = 12,
+    max_events: int = 8,
+) -> str:
+    spans = target.get("spans") if isinstance(target.get("spans"), list) else []
+    events = target.get("events") if isinstance(target.get("events"), list) else []
+    lines: list[str] = []
+    for span in spans[:max_spans]:
+        if not isinstance(span, dict):
+            continue
+        lines.append(
+            "span "
+            f"{span.get('span_kind') or 'unknown'}/"
+            f"{span.get('name') or 'unnamed'} "
+            f"status={span.get('status') or 'unknown'} "
+            f"in={_preview_excerpt(span.get('input_preview'))!r} "
+            f"out={_preview_excerpt(span.get('output_preview'))!r} "
+            f"err={_preview_excerpt(span.get('error_message'), limit=80) or '-'}"
+        )
+    for event in events[:max_events]:
+        if not isinstance(event, dict):
+            continue
+        lines.append(
+            f"event {event.get('event_type') or 'unknown'} "
+            f"seq={event.get('sequence_no')} "
+            f"payload={_preview_excerpt(event.get('payload'), limit=80)}"
+        )
+    metrics = _target_metrics(target)
+    if metrics:
+        metric_bits = ", ".join(f"{key}={value}" for key, value in sorted(metrics.items())[:8])
+        lines.append(f"metrics {metric_bits}")
+    workflow = str(target.get("workflow_kind") or "").strip()
+    if workflow:
+        lines.append(f"workflow_kind={workflow}")
+    return "\n".join(lines) if lines else "No trajectory steps recorded."
+
+
+def _failed_span_count(target: dict[str, Any]) -> int:
+    spans = target.get("spans") if isinstance(target.get("spans"), list) else []
+    return sum(
+        1
+        for span in spans
+        if isinstance(span, dict) and str(span.get("status") or "").lower() in {"failed", "error"}
+    )
 
 
 def _apply_rule(rule: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str]:
@@ -66,27 +150,65 @@ def _apply_rule(rule: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str
         ok = actual < limit
         return ok, f"latency {actual}ms {'<' if ok else '>='} {limit}ms"
     if rule_type == "output_contains":
-        needle = str(rule.get("value") or "")
+        needle = str(rule.get("value") or "").strip()
+        if not needle:
+            return False, "output_contains rule value is empty"
         haystack = str(target.get("output_preview") or "")
-        ok = needle.lower() in haystack.lower() if needle else True
+        ok = needle.lower() in haystack.lower()
         return ok, f"output {'contains' if ok else 'missing'} {needle!r}"
     if rule_type == "expected_output_contains":
         expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
-        needle = str(rule.get("value") or expected.get("contains") or expected.get("output_preview") or "")
+        needle = str(rule.get("value") or expected.get("contains") or expected.get("output_preview") or "").strip()
+        if not needle:
+            return False, "expected_output_contains rule value is empty"
         haystack = str(target.get("output_preview") or "")
-        ok = needle.lower() in haystack.lower() if needle else True
+        ok = needle.lower() in haystack.lower()
         return ok, f"expected output {'matched' if ok else 'missing'} {needle!r}"
     if rule_type == "output_matches_expected":
         expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
-        needle = str(expected.get("output_preview") or expected.get("contains") or "")
+        needle = str(expected.get("output_preview") or expected.get("contains") or "").strip()
+        if not needle:
+            return False, "output_matches_expected has no expected preview"
         haystack = str(target.get("output_preview") or "")
-        ok = needle.lower() in haystack.lower() if needle else True
+        ok = needle.lower() in haystack.lower()
         return ok, f"output {'matches' if ok else 'does not match'} expected preview"
     if rule_type == "output_not_empty":
         haystack = str(target.get("output_preview") or "").strip()
         ok = bool(haystack)
         return ok, "output preview is non-empty" if ok else "output preview is empty"
+    if rule_type == "retrieval_document_count_gte":
+        metrics = _target_metrics(target)
+        limit = int(rule.get("value") or 1)
+        actual = int(metrics.get("retrieval.document_count") or metrics.get("retrieval_document_count") or 0)
+        ok = actual >= limit
+        return ok, f"retrieval documents {actual} {'>=' if ok else '<'} {limit}"
+    if rule_type == "no_error_spans":
+        failed = _failed_span_count(target)
+        ok = failed == 0
+        return ok, "no failed spans" if ok else f"{failed} failed span(s) present"
+    if rule_type == "required_span_kinds":
+        required = [str(item) for item in rule.get("value") or [] if isinstance(item, str)]
+        actual = set(_span_kinds(target))
+        missing = [kind for kind in required if kind not in actual]
+        ok = not missing
+        return ok, "required span kinds present" if ok else f"missing span kinds: {', '.join(missing)}"
     return True, f"unknown rule type {rule_type!r} skipped"
+
+
+def _rules_from_filter_config(filter_config: dict[str, Any]) -> dict[str, Any]:
+    rules = filter_config.get("rules")
+    if not isinstance(rules, list) or not rules:
+        rules_config = filter_config.get("rules_config")
+        if isinstance(rules_config, dict):
+            nested_rules = rules_config.get("rules")
+            if isinstance(nested_rules, list) and nested_rules:
+                rules = nested_rules
+    extracted: dict[str, Any] = {}
+    if isinstance(rules, list) and rules:
+        extracted["rules"] = rules
+    if "pass_threshold" in filter_config:
+        extracted["pass_threshold"] = filter_config["pass_threshold"]
+    return extracted
 
 
 def _score_with_rules(
@@ -186,24 +308,59 @@ def _score_with_trajectory(
     }
 
 
+def _extract_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if escaped:
+            escaped = False
+            continue
+        if in_string:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
 def _parse_llm_score_response(text: str) -> dict[str, Any] | None:
     cleaned = text.strip()
     if not cleaned:
         return None
-    try:
-        payload = json.loads(cleaned)
+    candidates = [cleaned]
+    embedded = _extract_json_object(cleaned)
+    if embedded and embedded != cleaned:
+        candidates.append(embedded)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
         if isinstance(payload, dict):
             return payload
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{[^{}]*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        return None
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
-    return payload if isinstance(payload, dict) else None
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, flags=re.DOTALL)
+    if fenced:
+        try:
+            payload = json.loads(fenced.group(1))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
 
 
 def _heuristic_llm_score(evaluator: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
@@ -321,22 +478,32 @@ class EvaluatorExecutor:
         scores: list[float] = []
         written = 0
         for target in targets:
-            score_payload = await self._score_target(evaluator, target)
+            llm_context = LlmCompleteContext(
+                tenant_id=tenant_id,
+                trace_family=trace_family,
+                trace_id=str(target.get("trace_id") or "") or None,
+            )
+            score_payloads = await self._score_target_payloads(
+                evaluator,
+                target,
+                llm_context=llm_context,
+            )
             trace_id = str(target.get("trace_id") or "")
             if not trace_id:
                 continue
-            created = await self.repository.create_eval_score(
-                tenant_id=tenant_id,
-                trace_id=trace_id,
-                created_by=self.created_by,
-                payload=score_payload,
-                trace_family=trace_family,
-            )
-            if created:
-                written += 1
-                numeric = created.get("numeric_value")
-                if isinstance(numeric, int | float):
-                    scores.append(float(numeric))
+            for score_payload in score_payloads:
+                created = await self.repository.create_eval_score(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    created_by=self.created_by,
+                    payload=score_payload,
+                    trace_family=trace_family,
+                )
+                if created:
+                    written += 1
+                    numeric = created.get("numeric_value")
+                    if isinstance(numeric, int | float):
+                        scores.append(float(numeric))
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
         summary = {
@@ -418,10 +585,114 @@ class EvaluatorExecutor:
             targets.append(target)
         return targets
 
-    async def _score_target(
+    def _selected_spans(self, target: dict[str, Any], filter_config: dict[str, Any]) -> list[dict[str, Any]]:
+        spans = target.get("spans") if isinstance(target.get("spans"), list) else []
+        span_kinds = filter_config.get("span_kinds")
+        allowed_kinds = (
+            {str(item) for item in span_kinds if isinstance(item, str)}
+            if isinstance(span_kinds, list) and span_kinds
+            else {"tool_execution", "retriever", "model_invocation", "document_fetch", "gateway_proxy"}
+        )
+        selected: list[dict[str, Any]] = []
+        for span in spans:
+            if not isinstance(span, dict):
+                continue
+            kind = str(span.get("span_kind") or "")
+            if kind in allowed_kinds:
+                selected.append(span)
+        return selected
+
+    def _span_target(self, parent_target: dict[str, Any], span: dict[str, Any]) -> dict[str, Any]:
+        span_id = str(span.get("span_id") or "")
+        return {
+            "trace_id": parent_target.get("trace_id"),
+            "trace_family": parent_target.get("trace_family"),
+            "workflow_kind": parent_target.get("workflow_kind"),
+            "input_preview": span.get("input_preview") or parent_target.get("input_preview") or "",
+            "output_preview": span.get("output_preview") or "",
+            "status": span.get("status") or parent_target.get("status"),
+            "total_latency_ms": int(span.get("duration_ms") or parent_target.get("total_latency_ms") or 0),
+            "model_id": parent_target.get("model_id"),
+            "metadata": {
+                **(parent_target.get("metadata") if isinstance(parent_target.get("metadata"), dict) else {}),
+                "span_kind": span.get("span_kind"),
+                "span_name": span.get("name"),
+            },
+            "metrics": parent_target.get("metrics") if isinstance(parent_target.get("metrics"), dict) else {},
+            "spans": [span],
+            "events": parent_target.get("events") if isinstance(parent_target.get("events"), list) else [],
+            "span_id": span_id,
+            "target_type": "span",
+            "target_id": span_id,
+        }
+
+    async def _score_span_targets(
         self,
         evaluator: dict[str, Any],
         target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
+    ) -> list[dict[str, Any]]:
+        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+        mode = str(filter_config.get("mode") or "rule").strip().lower()
+        spans = self._selected_spans(target, filter_config)
+        if not spans:
+            return [
+                {
+                    "score_name": evaluator.get("name") or "span-quality",
+                    "score_type": "numeric",
+                    "numeric_value": 0.0,
+                    "label": "fail",
+                    "explanation": "No matching spans found for span evaluator.",
+                    "scorer_type": "rule",
+                    "score_source": "rule",
+                    "evaluator_id": evaluator.get("evaluator_id"),
+                    "evaluator_name": evaluator.get("name"),
+                    "evaluator_version": evaluator.get("version"),
+                    "confidence": 1.0,
+                    "target_type": "trace",
+                    "target_id": target.get("trace_id"),
+                }
+            ]
+
+        payloads: list[dict[str, Any]] = []
+        for span in spans:
+            span_target = self._span_target(target, span)
+            component_evaluator = {
+                **evaluator,
+                "name": f"{evaluator.get('name') or 'span'}:{span.get('span_kind')}",
+                "filter_config": _rules_from_filter_config(filter_config),
+            }
+            if mode in {"llm", "llm_judge"}:
+                payload = await self._score_with_llm(component_evaluator, span_target, llm_context=llm_context)
+            else:
+                payload = _score_with_rules(component_evaluator, span_target)
+            payload["span_id"] = span_target.get("span_id")
+            payload["target_type"] = "span"
+            payload["target_id"] = span_target.get("span_id")
+            payload["score_name"] = str(payload.get("score_name") or component_evaluator["name"])
+            payloads.append(payload)
+        return payloads
+
+    async def _score_target_payloads(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
+    ) -> list[dict[str, Any]]:
+        evaluator_type = str(evaluator.get("evaluator_type") or "rule")
+        if evaluator_type == "span":
+            return await self._score_span_targets(evaluator, target, llm_context=llm_context)
+        payload = await self._build_score_payload(evaluator, target, llm_context=llm_context)
+        return [payload]
+
+    async def _build_score_payload(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
     ) -> dict[str, Any]:
         evaluator_type = str(evaluator.get("evaluator_type") or "rule")
         if evaluator_type == "rule":
@@ -429,34 +700,81 @@ class EvaluatorExecutor:
         elif evaluator_type == "trajectory":
             payload = _score_with_trajectory(evaluator, target)
         elif evaluator_type == "composite":
-            payload = await self._score_with_composite(evaluator, target)
+            payload = await self._score_with_composite(evaluator, target, llm_context=llm_context)
         else:
-            payload = await self._score_with_llm(evaluator, target)
+            payload = await self._score_with_llm(evaluator, target, llm_context=llm_context)
         if target.get("target_type"):
             payload["target_type"] = target["target_type"]
         if target.get("target_id"):
             payload["target_id"] = target["target_id"]
+        if target.get("span_id"):
+            payload["span_id"] = target.get("span_id")
         return payload
+
+    async def _invoke_llm_complete(
+        self,
+        model_id: str,
+        prompt: str,
+        context: LlmCompleteContext,
+    ) -> str:
+        if self.llm_complete is None:
+            raise RuntimeError("llm_complete is not configured")
+        try:
+            signature = inspect.signature(self.llm_complete)
+        except (TypeError, ValueError):
+            return await self.llm_complete(model_id, prompt, context)
+        accepts_context = any(
+            parameter.kind is inspect.Parameter.VAR_POSITIONAL
+            for parameter in signature.parameters.values()
+        ) or len(signature.parameters) >= 3
+        if accepts_context:
+            return await self.llm_complete(model_id, prompt, context)
+        return await self.llm_complete(model_id, prompt)
+
+    def _resolve_llm_rubric(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        trace_family: str,
+    ) -> str:
+        rubric = str(evaluator.get("rubric") or "").strip()
+        if rubric:
+            return rubric
+        family = str(target.get("trace_family") or trace_family or "").strip()
+        if family == "rag":
+            return _DEFAULT_RAG_RUBRIC
+        return "Score helpfulness, grounding, and safety from 0 to 1 using bounded previews."
 
     async def _score_with_llm(
         self,
         evaluator: dict[str, Any],
         target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
     ) -> dict[str, Any]:
         metadata = evaluator.get("metadata") or {}
-        judge_model_id = str(metadata.get("judge_model_id") or "gpt-4o-mini")
-        rubric = str(evaluator.get("rubric") or "Score helpfulness from 0 to 1.")
+        judge_model_id = str(metadata.get("judge_model_id") or "qwen3.6-plus")
+        context = llm_context or LlmCompleteContext(tenant_id="default")
+        rubric = self._resolve_llm_rubric(
+            evaluator,
+            target,
+            trace_family=context.trace_family,
+        )
         temperature = float(metadata.get("temperature") or 0)
+        trajectory = build_trajectory_summary(target)
         prompt = (
             "You are an evaluator. Return JSON only with keys: "
             "numeric_value (0-1), label, explanation, confidence (0-1).\n"
+            f"Trace family: {context.trace_family}\n"
             f"Rubric:\n{rubric}\n\n"
             f"Input preview:\n{target.get('input_preview') or ''}\n\n"
-            f"Output preview:\n{target.get('output_preview') or ''}\n"
+            f"Output preview:\n{target.get('output_preview') or ''}\n\n"
+            f"Trajectory summary:\n{trajectory}\n"
         )
         if self.llm_complete is not None:
             try:
-                response = await self.llm_complete(judge_model_id, prompt)
+                response = await self._invoke_llm_complete(judge_model_id, prompt, context)
                 parsed = _parse_llm_score_response(response)
                 if parsed:
                     if "numeric_value" not in parsed:
@@ -489,6 +807,8 @@ class EvaluatorExecutor:
         self,
         evaluator: dict[str, Any],
         target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
     ) -> dict[str, Any]:
         filter_config = evaluator.get("filter_config") or {}
         components = filter_config.get("components")
@@ -515,7 +835,11 @@ class EvaluatorExecutor:
             if component_type == "trajectory":
                 score_payload = _score_with_trajectory(component_evaluator, target)
             elif component_type in {"llm", "llm_judge"}:
-                score_payload = await self._score_with_llm(component_evaluator, target)
+                score_payload = await self._score_with_llm(
+                    component_evaluator,
+                    target,
+                    llm_context=llm_context,
+                )
             else:
                 score_payload = _score_with_rules(component_evaluator, target)
             score = _score_number(score_payload)

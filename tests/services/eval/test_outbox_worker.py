@@ -75,6 +75,40 @@ async def test_outbox_worker_executes_eval_job_and_marks_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_outbox_worker_schedules_online_eval_on_trace_ingested(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduled: list[dict[str, Any]] = []
+
+    async def _schedule(repository, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN001
+        scheduled.append(kwargs)
+        return {"scheduled": 1}
+
+    monkeypatch.setattr(
+        "ai_gateway_core.eval.outbox_worker.schedule_online_eval_for_trace",
+        _schedule,
+    )
+    repo = FakeEvalRepository()
+    worker = EvalOutboxWorker(repo, FakeEvaluatorExecutor(), poll_interval_s=0.01, batch_size=1)
+
+    await worker._handle_job(
+        {
+            "job_id": "job-trace",
+            "tenant_id": "tenant-a",
+            "job_type": "trace.ingested",
+            "payload": {
+                "trace_id": "trace-1",
+                "trace_family": "assistant",
+                "status": "succeeded",
+            },
+            "attempts": 1,
+        }
+    )
+
+    assert repo.succeeded == ["job-trace"]
+    assert scheduled[0]["tenant_id"] == "tenant-a"
+    assert scheduled[0]["payload"]["trace_id"] == "trace-1"
+
+
+@pytest.mark.asyncio
 async def test_outbox_worker_marks_failed_job_for_retry() -> None:
     repo = FakeEvalRepository()
 
@@ -144,6 +178,52 @@ class FakePoolHolder:
 
     def acquire(self) -> FakePoolAcquire:
         return FakePoolAcquire(self.conn)
+
+
+class _TraceIngestRepo:
+    def __init__(self) -> None:
+        self.pending_trace_ids: set[str] = set()
+        self.created: list[dict[str, Any]] = []
+
+    async def has_pending_trace_ingested_job(self, *, tenant_id: str, trace_id: str) -> bool:  # noqa: ARG002
+        return trace_id in self.pending_trace_ids
+
+    async def create_outbox_job(self, **kwargs: Any) -> dict[str, Any]:
+        self.created.append(kwargs)
+        return {"job_id": "job-ingest-1"}
+
+    async def create_trace_ingested_outbox_job(self, **kwargs: Any) -> dict[str, Any] | None:
+        trace_id = str(kwargs.get("trace_id") or "")
+        if await self.has_pending_trace_ingested_job(tenant_id=str(kwargs.get("tenant_id")), trace_id=trace_id):
+            return None
+        self.pending_trace_ids.add(trace_id)
+        return await self.create_outbox_job(
+            tenant_id=str(kwargs.get("tenant_id")),
+            job_type="trace.ingested",
+            payload={
+                "trace_id": trace_id,
+                "trace_family": kwargs.get("trace_family"),
+                "status": kwargs.get("status"),
+                "source_adapter": kwargs.get("source_adapter"),
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_trace_ingested_outbox_job_dedupes_pending_trace() -> None:
+    repo = _TraceIngestRepo()
+    repo.pending_trace_ids.add("trace-dup")
+
+    result = await repo.create_trace_ingested_outbox_job(
+        tenant_id="tenant-a",
+        trace_id="trace-dup",
+        trace_family="assistant",
+        status="succeeded",
+        source_adapter="api",
+    )
+
+    assert result is None
+    assert repo.created == []
 
 
 @pytest.mark.asyncio

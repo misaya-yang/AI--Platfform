@@ -122,6 +122,112 @@ function parseJsonObjectDraft(text: string, fallback: Record<string, unknown>): 
   return parsed as Record<string, unknown>;
 }
 
+function evaluatorPresetForType(
+  evaluatorType: EvalEvaluator["evaluator_type"],
+  traceFamily: TraceFamily,
+): {
+  rubric: string;
+  filterConfigText: string;
+  samplingConfigText: string;
+} {
+  const defaultSampling = JSON.stringify(
+    {
+      online: {
+        enabled: false,
+        rate: 0.05,
+        trace_families: [traceFamily],
+        only_failed: false,
+      },
+    },
+    null,
+    2,
+  );
+
+  if (evaluatorType === "llm" || evaluatorType === "llm_judge") {
+    const rubric =
+      traceFamily === "rag"
+        ? "Score RAG faithfulness and retrieval usefulness from 0 to 1 using bounded previews and trajectory summary."
+        : "Score helpfulness, grounding, tool-use quality, and safety from 0 to 1 using bounded previews and trajectory summary.";
+    return { rubric, filterConfigText: "{}", samplingConfigText: defaultSampling };
+  }
+  if (evaluatorType === "span") {
+    const spanKinds =
+      traceFamily === "rag"
+        ? ["retriever", "model_invocation", "lifecycle"]
+        : ["tool_execution", "model_invocation", "retriever"];
+    return {
+      rubric: "Score each execution span for correctness, grounding, and failure-free completion.",
+      filterConfigText: JSON.stringify(
+        {
+          mode: "rule",
+          span_kinds: spanKinds,
+          rules: [{ type: "no_error_spans" }, { type: "output_not_empty" }],
+          pass_threshold: 0.8,
+        },
+        null,
+        2,
+      ),
+      samplingConfigText: defaultSampling,
+    };
+  }
+  if (evaluatorType === "rule") {
+    const rules =
+      traceFamily === "rag"
+        ? [
+            { type: "status_eq", value: "succeeded" },
+            { type: "retrieval_document_count_gte", value: 1 },
+            { type: "output_not_empty" },
+            { type: "no_error_spans" },
+          ]
+        : [
+            { type: "status_eq", value: "succeeded" },
+            { type: "output_not_empty" },
+            { type: "no_error_spans" },
+          ];
+    return {
+      rubric: "",
+      filterConfigText: JSON.stringify({ rules, pass_threshold: 0.8 }, null, 2),
+      samplingConfigText: defaultSampling,
+    };
+  }
+  if (evaluatorType === "trajectory") {
+    const required =
+      traceFamily === "assistant"
+        ? ["lifecycle", "model_invocation"]
+        : traceFamily === "rag"
+          ? ["lifecycle", "retriever"]
+          : ["lifecycle"];
+    return {
+      rubric: "",
+      filterConfigText: JSON.stringify({ required_span_kinds: required }, null, 2),
+      samplingConfigText: defaultSampling,
+    };
+  }
+  if (evaluatorType === "composite") {
+    return {
+      rubric: "",
+      filterConfigText: JSON.stringify(
+        {
+          pass_threshold: 0.8,
+          components: [
+            { type: "rule", weight: 0.4, config: { rules: [{ type: "output_not_empty" }] } },
+            { type: "trajectory", weight: 0.3, config: { required_span_kinds: ["lifecycle"] } },
+            { type: "llm_judge", weight: 0.3 },
+          ],
+        },
+        null,
+        2,
+      ),
+      samplingConfigText: defaultSampling,
+    };
+  }
+  return {
+    rubric: "Score helpfulness, grounding, and safety from bounded trace previews.",
+    filterConfigText: "{}",
+    samplingConfigText: defaultSampling,
+  };
+}
+
 function buildServerFilters(
   filters: AssistantTraceFilters,
   traceFamily: TraceFamily
@@ -402,16 +508,24 @@ export function EvalPage() {
     });
 
   const evaluatorMutation = useMutation({
-    mutationFn: () =>
-      createEvalEvaluator({
+    mutationFn: () => {
+      const metadata: Record<string, unknown> = {
+        source: "eval_console",
+        trace_family: activeTraceFamily,
+      };
+      if (evaluatorDraft.evaluator_type === "llm" || evaluatorDraft.evaluator_type === "llm_judge") {
+        metadata.judge_model_id = "qwen3.6-plus";
+      }
+      return createEvalEvaluator({
         name: evaluatorDraft.name.trim() || "quality",
         evaluator_type: evaluatorDraft.evaluator_type,
         rubric: evaluatorDraft.rubric.trim(),
         version: evaluatorDraft.version.trim() || "v1",
         sampling_config: parseJsonObjectDraft(evaluatorDraft.samplingConfigText, {}),
         filter_config: parseJsonObjectDraft(evaluatorDraft.filterConfigText, {}),
-        metadata: { source: "eval_console", trace_family: activeTraceFamily },
-      }),
+        metadata,
+      });
+    },
     onSuccess: async (evaluator) => {
       setCreatedEvaluator(evaluator);
       setSelectedEvaluatorId(evaluator.evaluator_id);
@@ -1016,12 +1130,21 @@ export function EvalPage() {
             { label: "Human", value: "human" },
             { label: "Rule", value: "rule" },
             { label: "Trajectory", value: "trajectory" },
+            { label: "Span", value: "span" },
             { label: "LLM", value: "llm" },
             { label: "LLM Judge", value: "llm_judge" },
             { label: "Composite", value: "composite" },
           ]}
-          onChange={(value: EvalEvaluator["evaluator_type"]) =>
-            setEvaluatorDraft((draft) => ({ ...draft, evaluator_type: value }))}
+          onChange={(value: EvalEvaluator["evaluator_type"]) => {
+            const preset = evaluatorPresetForType(value, activeTraceFamily);
+            setEvaluatorDraft((draft) => ({
+              ...draft,
+              evaluator_type: value,
+              rubric: preset.rubric,
+              filterConfigText: preset.filterConfigText,
+              samplingConfigText: preset.samplingConfigText,
+            }));
+          }}
         />
         <Input
           value={evaluatorDraft.version}

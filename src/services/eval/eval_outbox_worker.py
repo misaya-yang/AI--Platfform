@@ -6,6 +6,8 @@ from ai_gateway_core.eval import EvalOutboxWorker, EvaluatorExecutor
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
 
+from .eval_llm_client import build_eval_llm_complete, load_eval_llm_settings
+
 logger = get_logger(__name__)
 
 _eval_outbox_worker: EvalOutboxWorker | None = None
@@ -23,7 +25,21 @@ def init_eval_outbox_worker(
         _eval_outbox_worker = None
         return None
     repository = AgentTraceRepository(database)
-    executor = EvaluatorExecutor(repository, created_by="eval-worker")
+    llm_settings = load_eval_llm_settings()
+    llm_complete = build_eval_llm_complete(llm_settings)
+    executor = EvaluatorExecutor(
+        repository,
+        llm_complete=llm_complete,
+        created_by="eval-worker",
+    )
+    if llm_complete is not None:
+        logger.info(
+            "Eval LLM judge enabled model=%s assistant=%s",
+            llm_settings.default_judge_model_id,
+            llm_settings.assistant_base_url,
+        )
+    else:
+        logger.warning("Eval LLM judge disabled; llm evaluators will require manual review")
     _eval_outbox_worker = EvalOutboxWorker(
         repository,
         executor,

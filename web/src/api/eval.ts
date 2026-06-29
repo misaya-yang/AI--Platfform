@@ -227,7 +227,7 @@ export interface EvalEvaluator {
   evaluator_id: string;
   tenant_id: string;
   name: string;
-  evaluator_type: "human" | "rule" | "trajectory" | "llm" | "llm_judge" | "composite";
+  evaluator_type: "human" | "rule" | "trajectory" | "span" | "llm" | "llm_judge" | "composite";
   rubric: string;
   version: string;
   sampling_config: Record<string, unknown>;

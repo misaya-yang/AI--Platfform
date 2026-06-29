@@ -7,6 +7,7 @@ from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
 
 from .evaluator_executor import EvaluatorExecutor
+from .online_sampling import schedule_online_eval_for_trace
 
 logger = get_logger(__name__)
 
@@ -88,7 +89,12 @@ class EvalOutboxWorker:
                 if result.status == "failed":
                     raise RuntimeError(result.error_message or "evaluator run failed")
             elif job_type == "trace.ingested":
-                pass
+                await schedule_online_eval_for_trace(
+                    self.repository,
+                    tenant_id=tenant_id,
+                    payload=payload if isinstance(payload, dict) else {},
+                    created_by="eval-online-sampler",
+                )
             else:
                 logger.info("Skipping unsupported outbox job_type=%s", job_type)
             await self.repository.mark_outbox_succeeded(job_id)

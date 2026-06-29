@@ -181,9 +181,13 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@uv run pytest -q --no-cov \
 		tests/services/eval/test_evaluator_executor.py \
 		tests/services/eval/test_outbox_worker.py \
+		tests/services/eval/test_online_sampling.py \
+		tests/services/eval/test_eval_llm_client.py \
+		tests/services/eval/test_golden_regression_gate.py \
 		tests/services/eval/test_trace_retention_scheduler.py \
 		tests/services/eval/test_search_indexes.py \
 		tests/services/eval/test_drive_shipped_entrypoints.py
+	@$(MAKE) eval-regression-gate
 	@uv run --package assistant-service pytest -q --no-cov \
 		tests/services/assistant/test_agent_trace_capture.py
 	@uv run --package assistant-service pytest -q --no-cov \
