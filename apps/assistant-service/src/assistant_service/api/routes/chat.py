@@ -98,7 +98,30 @@ async def _stub_stream_lines(text: str) -> AsyncIterator[str]:
     yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n"
 
 
-def _build_config(body: ChatRequest, model_registry):
+def _otel_trace_id_from_traceparent(traceparent: str | None) -> str | None:
+    if not traceparent or not traceparent.startswith("00-"):
+        return None
+    parts = traceparent.split("-")
+    if len(parts) >= 4 and parts[1]:
+        return parts[1]
+    return None
+
+
+def _request_traceparent(request: Request) -> str | None:
+    return (
+        getattr(request.state, "traceparent", None)
+        or request.headers.get("traceparent")
+        or None
+    )
+
+
+def _build_config(
+    body: ChatRequest,
+    model_registry,
+    *,
+    traceparent: str | None = None,
+    otel_trace_id: str | None = None,
+):
     """Build AssistantConfig from request body."""
     from ...core.assistant_service import AssistantConfig, RAGMode
     from ...core.models.model_registry import ModelProvider
@@ -159,6 +182,8 @@ def _build_config(body: ChatRequest, model_registry):
         context_detail=body.context_detail,
         skills_enabled=body.skills_enabled,
         memory_profile=body.memory_profile,
+        traceparent=traceparent,
+        otel_trace_id=otel_trace_id or _otel_trace_id_from_traceparent(traceparent),
     )
 
 
@@ -171,7 +196,8 @@ async def chat(
     """Non-streaming chat completion."""
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
-    config = _build_config(body, model_registry)
+    traceparent = _request_traceparent(request)
+    config = _build_config(body, model_registry, traceparent=traceparent)
     session_id = body.session_id or str(uuid.uuid4())
     history = body.history
 
@@ -225,7 +251,8 @@ async def chat_stream(
 
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
-    config = _build_config(body, model_registry)
+    traceparent = _request_traceparent(request)
+    config = _build_config(body, model_registry, traceparent=traceparent)
     history = body.history
 
     async def _agent_lines():

@@ -8,6 +8,7 @@ Implements Manus-style context caching with three cache layers:
 """
 
 import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -37,6 +38,8 @@ class CacheMetrics:
     layer1_hit: bool = False
     layer2_hit: bool = False
     cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     total_input_tokens: int = 0
     cache_hit_rate: float = 0.0
     estimated_savings_usd: float = 0.0
@@ -82,6 +85,7 @@ class ContextCacheOptimizer:
         Returns:
             List of messages optimized for cache hit rate.
         """
+        del provider  # Reserved for provider-specific message formatting.
         messages = []
 
         # === Layer 1: Static Prefix ===
@@ -139,7 +143,7 @@ class ContextCacheOptimizer:
             parts.append(tools_section)
 
         system_content = "\n".join(parts)
-        self._system_prefix_hash = hashlib.md5(system_content.encode()).hexdigest()[:16]
+        self._system_prefix_hash = stable_cache_hash(system_content)
 
         return system_content
 
@@ -163,14 +167,12 @@ class ContextCacheOptimizer:
     def parse_cache_metrics(self, response_usage: dict[str, Any], provider: str) -> CacheMetrics:
         """Extract cache metrics from LLM API response."""
         metrics = CacheMetrics()
+        normalized = normalize_provider_cache_usage(response_usage, provider)
 
-        if provider == "gemini":
-            metrics.total_input_tokens = response_usage.get("promptTokenCount", 0)
-            metrics.cached_tokens = response_usage.get("cachedContentTokenCount", 0)
-        elif provider == "dashscope":
-            usage = response_usage.get("prompt_tokens_details", {})
-            metrics.total_input_tokens = response_usage.get("input_tokens", 0)
-            metrics.cached_tokens = usage.get("cached_tokens", 0)
+        metrics.total_input_tokens = normalized.get("input_tokens", 0)
+        metrics.cached_tokens = normalized.get("cached_input_tokens", 0)
+        metrics.cache_read_tokens = normalized.get("cache_read_input_tokens", 0)
+        metrics.cache_creation_tokens = normalized.get("cache_creation_input_tokens", 0)
 
         if metrics.total_input_tokens > 0:
             metrics.cache_hit_rate = metrics.cached_tokens / metrics.total_input_tokens
@@ -181,3 +183,180 @@ class ContextCacheOptimizer:
         metrics.system_prefix_hash = self._system_prefix_hash or ""
 
         return metrics
+
+
+def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+def stable_cache_hash(value: Any) -> str:
+    """Return a stable bounded identity hash without exposing raw payloads."""
+    if isinstance(value, str):
+        payload = value
+    else:
+        payload = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_provider_cache_usage(
+    response_usage: dict[str, Any] | None,
+    provider: str | None = None,
+) -> dict[str, int]:
+    """Normalize provider usage fields into bounded integer telemetry.
+
+    The returned shape is intentionally flat so it can pass through existing
+    StreamDelta, AgentLoop usage aggregation, trace payloads, and JSONB storage.
+    """
+    del provider  # Provider is accepted for future provider-specific aliases.
+    if not isinstance(response_usage, dict):
+        return {}
+
+    result: dict[str, int] = {}
+
+    aliases = {
+        "input_tokens": "input_tokens",
+        "prompt_tokens": "input_tokens",
+        "promptTokenCount": "input_tokens",
+        "output_tokens": "output_tokens",
+        "completion_tokens": "output_tokens",
+        "candidatesTokenCount": "output_tokens",
+        "total_tokens": "total_tokens",
+        "totalTokenCount": "total_tokens",
+        "cached_input_tokens": "cached_input_tokens",
+        "cached_tokens": "cached_input_tokens",
+        "cachedContentTokenCount": "cached_input_tokens",
+        "cache_read_input_tokens": "cache_read_input_tokens",
+        "cache_creation_input_tokens": "cache_creation_input_tokens",
+    }
+    for source_key, target_key in aliases.items():
+        parsed = _safe_int(response_usage.get(source_key))
+        if parsed is not None:
+            result[target_key] = max(result.get(target_key, 0), parsed)
+
+    for source_key, value in response_usage.items():
+        if source_key in aliases or isinstance(value, (dict, list)):
+            continue
+        parsed = _safe_int(value)
+        if parsed is not None:
+            result[str(source_key)] = max(result.get(str(source_key), 0), parsed)
+
+    for detail_key in ("prompt_tokens_details", "input_tokens_details"):
+        details = response_usage.get(detail_key)
+        if not isinstance(details, dict):
+            continue
+        cached = _safe_int(details.get("cached_tokens"))
+        if cached is not None:
+            result["cached_input_tokens"] = max(result.get("cached_input_tokens", 0), cached)
+
+    if "cached_input_tokens" not in result and result.get("cache_read_input_tokens"):
+        result["cached_input_tokens"] = result["cache_read_input_tokens"]
+
+    return result
+
+
+def build_cache_usage_metrics(
+    usage: dict[str, Any] | None,
+    provider: str | None = None,
+) -> dict[str, Any]:
+    """Build a trace-safe cache usage metrics payload."""
+    normalized = normalize_provider_cache_usage(usage, provider)
+    if not normalized:
+        return {}
+    total_input_tokens = normalized.get("input_tokens", 0)
+    cached_tokens = normalized.get("cached_input_tokens", 0)
+    payload: dict[str, Any] = {
+        "provider": str(provider or "unknown"),
+        "input_tokens": total_input_tokens,
+        "cached_input_tokens": cached_tokens,
+    }
+    if "cache_read_input_tokens" in normalized:
+        payload["cache_read_input_tokens"] = normalized["cache_read_input_tokens"]
+    if "cache_creation_input_tokens" in normalized:
+        payload["cache_creation_input_tokens"] = normalized["cache_creation_input_tokens"]
+    if total_input_tokens > 0:
+        payload["cache_hit_rate"] = round(cached_tokens / total_input_tokens, 6)
+    return payload
+
+
+def _tool_schema_name(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+    return str(function.get("name") or tool.get("name") or "")
+
+
+def _stable_tool_identity(tool: dict[str, Any]) -> dict[str, Any]:
+    variable_fields = {"created_at", "updated_at", "last_used", "usage_count"}
+
+    def _clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): _clean(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+                if str(key) not in variable_fields
+            }
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        return value
+
+    return _clean(tool)
+
+
+def build_cache_context_metrics(
+    *,
+    system_prompt: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    usage: dict[str, Any] | None = None,
+    provider: str | None = None,
+    context_estimated_input_tokens: int | None = None,
+    model_context_window: int | None = None,
+) -> dict[str, Any]:
+    """Build trace-safe prompt-prefix, tool-schema, cache, and context metrics."""
+    tool_schemas = [tool for tool in (tools or []) if isinstance(tool, dict)]
+    tool_names = [_tool_schema_name(tool) for tool in tool_schemas]
+    stable_tool_schemas = [_stable_tool_identity(tool) for tool in tool_schemas]
+    prefix_identity = {
+        "system_prompt": system_prompt,
+        "tools": stable_tool_schemas,
+    }
+
+    prefix_message_count = 0
+    for message in messages:
+        if message.get("role") == "system":
+            prefix_message_count += 1
+            continue
+        break
+
+    payload: dict[str, Any] = {
+        "prompt_prefix_hash": stable_cache_hash(prefix_identity),
+        "prompt_prefix_message_count": prefix_message_count,
+        "prompt_prefix_chars": len(system_prompt or ""),
+        "tool_schema_count": len(tool_schemas),
+        "tool_schema_order_hash": stable_cache_hash(tool_names),
+        "tool_schema_names_hash": stable_cache_hash(sorted(tool_names)),
+    }
+
+    if context_estimated_input_tokens is not None:
+        payload["context_estimated_input_tokens"] = max(0, int(context_estimated_input_tokens))
+    if model_context_window:
+        window = max(0, int(model_context_window))
+        payload["context_window_tokens"] = window
+        estimated = int(context_estimated_input_tokens or 0)
+        if window > 0:
+            payload["context_utilization"] = round(min(estimated / window, 1.0), 6)
+
+    cache_metrics = build_cache_usage_metrics(usage, provider)
+    if cache_metrics:
+        payload["provider_cache_metrics"] = cache_metrics
+
+    return payload

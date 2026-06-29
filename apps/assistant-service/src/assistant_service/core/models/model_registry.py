@@ -11,6 +11,7 @@ Supports (default catalog as of 2026-04):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from collections.abc import AsyncIterator
@@ -18,9 +19,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-
 from ai_gateway_core.enums import ModelAccessLevel, ModelProvider
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.models import ChatMessage
+from ai_gateway_core.models import normalize_chat_message as _normalize_message
+
+from ..quality.cache_optimizer import normalize_provider_cache_usage
 
 # Re-export so existing ``from ...model_registry import ModelProvider`` sites
 # keep working. Phase 5d moved the enum definitions to ``ai_gateway_core``
@@ -137,24 +141,13 @@ def _sanitize_usage(raw_usage: dict[str, Any]) -> dict[str, int]:
     """
     Sanitize and normalize usage dict.
 
-    - Only include integer values (filter out nested dicts)
+    - Only include integer values and known cache-token fields
     - Normalize OpenAI keys (prompt_tokens -> input_tokens, completion_tokens -> output_tokens)
 
     Some providers (e.g., DashScope) return nested dicts like:
     {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0}}
     """
-    result: dict[str, int] = {}
-    for k, v in raw_usage.items():
-        if not isinstance(v, int):
-            continue
-        # Normalize OpenAI-style keys to standard format
-        if k == "prompt_tokens":
-            result["input_tokens"] = v
-        elif k == "completion_tokens":
-            result["output_tokens"] = v
-        else:
-            result[k] = v
-    return result
+    return normalize_provider_cache_usage(raw_usage)
 
 
 # --- Streaming smoother for Vertex-style chunked upstreams ---
@@ -211,15 +204,6 @@ class StreamDelta:
     usage: dict[str, int] | None = None
     thought_signature: str | None = None  # Gemini 3 thought signature
     thinking_content: str | None = None  # Qwen reasoning_content / Gemini thought parts
-
-
-# ``ChatMessage`` moved to ``ai_gateway_core.models.chat_message`` in Phase 5d
-# so gateway-side code (quiz, skills, streaming writer) can reference the
-# shape without a compile-time dep on this module. Re-exported here for AS
-# internal sites; delete once every AS ``from ..models.model_registry import
-# ChatMessage`` caller migrates to the shared import.
-from ai_gateway_core.models import ChatMessage
-from ai_gateway_core.models import normalize_chat_message as _normalize_message  # noqa: F401
 
 
 @dataclass
@@ -718,9 +702,10 @@ class ModelRegistry:
           3. Default: ``ai_studio``.
         """
         vertex_models_env = os.environ.get("GOOGLE_VERTEX_MODELS", "").strip()
-        if vertex_models_env:
-            if model_id in {m.strip() for m in vertex_models_env.split(",") if m.strip()}:
-                return "vertex"
+        if vertex_models_env and model_id in {
+            m.strip() for m in vertex_models_env.split(",") if m.strip()
+        }:
+            return "vertex"
         cfg = self._configs.get(ModelProvider.GOOGLE)
         return cfg.backend if cfg else "ai_studio"
 
@@ -1179,6 +1164,7 @@ class ModelRegistry:
         native_search_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Google Gemini API request body."""
+        del stream
         contents = []
         system_instruction = None
 
@@ -1449,20 +1435,13 @@ class ModelRegistry:
                 for part in parts:
                     if "text" in part:
                         content += part["text"]
-            usage_meta = data.get("usageMetadata", {})
-            usage = {
-                "input_tokens": usage_meta.get("promptTokenCount", 0),
-                "output_tokens": usage_meta.get("candidatesTokenCount", 0),
-            }
+            usage = _sanitize_usage(data.get("usageMetadata", {}))
         elif model.provider == ModelProvider.ANTHROPIC:
             content = ""
             for block in data.get("content", []):
                 if block.get("type") == "text":
                     content += block.get("text", "")
-            usage = {
-                "input_tokens": data.get("usage", {}).get("input_tokens", 0),
-                "output_tokens": data.get("usage", {}).get("output_tokens", 0),
-            }
+            usage = _sanitize_usage(data.get("usage", {}))
         else:
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             usage = _sanitize_usage(data.get("usage", {}))
@@ -1813,10 +1792,13 @@ class ModelRegistry:
                             # ``\n`` strings AND no real newlines, unescape.
                             _thought_text = part["text"]
                             if "\\n" in _thought_text and "\n" not in _thought_text:
-                                try:
-                                    _thought_text = _thought_text.encode("utf-8").decode("unicode_escape")
-                                except (UnicodeDecodeError, UnicodeEncodeError):
-                                    pass  # fall through to raw text
+                                with contextlib.suppress(
+                                    UnicodeDecodeError,
+                                    UnicodeEncodeError,
+                                ):
+                                    _thought_text = _thought_text.encode("utf-8").decode(
+                                        "unicode_escape"
+                                    )
                             yield StreamDelta(thinking_content=_thought_text)
                         elif "text" in part:
                             # SMOOTHER: Vertex Express Mode streams ~1 SSE frame
@@ -1910,11 +1892,7 @@ class ModelRegistry:
                 # Handle usage metadata
                 usage_meta = evt.get("usageMetadata", {})
                 if usage_meta:
-                    usage = {}
-                    if "promptTokenCount" in usage_meta:
-                        usage["input_tokens"] = usage_meta["promptTokenCount"]
-                    if "candidatesTokenCount" in usage_meta:
-                        usage["output_tokens"] = usage_meta["candidatesTokenCount"]
+                    usage = _sanitize_usage(usage_meta)
                     if usage:
                         yield StreamDelta(usage=usage)
 

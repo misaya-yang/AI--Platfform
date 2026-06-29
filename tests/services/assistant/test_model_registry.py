@@ -365,13 +365,13 @@ class TestSanitizeUsage:
         assert result["input_tokens"] == 100
         assert result["output_tokens"] == 50
 
-    def test_sanitize_filters_nested_dicts(self):
-        """Should filter out nested dictionaries."""
+    def test_sanitize_preserves_nested_cache_tokens(self):
+        """Should flatten provider cache token details without keeping nested dicts."""
         from assistant_service.core.models.model_registry import _sanitize_usage
 
         raw = {
             "prompt_tokens": 100,
-            "prompt_tokens_details": {"cached_tokens": 0},  # Should be filtered
+            "prompt_tokens_details": {"cached_tokens": 42},
             "completion_tokens": 50,
         }
         result = _sanitize_usage(raw)
@@ -379,6 +379,40 @@ class TestSanitizeUsage:
         assert "prompt_tokens_details" not in result
         assert result["input_tokens"] == 100
         assert result["output_tokens"] == 50
+        assert result["cached_input_tokens"] == 42
+
+    def test_sanitize_gemini_cache_usage(self):
+        """Should normalize Gemini usage metadata cache token fields."""
+        from assistant_service.core.models.model_registry import _sanitize_usage
+
+        raw = {
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 25,
+            "cachedContentTokenCount": 60,
+        }
+        result = _sanitize_usage(raw)
+
+        assert result["input_tokens"] == 100
+        assert result["output_tokens"] == 25
+        assert result["cached_input_tokens"] == 60
+
+    def test_sanitize_anthropic_cache_usage(self):
+        """Should preserve Anthropic cache read and write token metrics."""
+        from assistant_service.core.models.model_registry import _sanitize_usage
+
+        raw = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 70,
+        }
+        result = _sanitize_usage(raw)
+
+        assert result["input_tokens"] == 100
+        assert result["output_tokens"] == 20
+        assert result["cached_input_tokens"] == 30
+        assert result["cache_read_input_tokens"] == 30
+        assert result["cache_creation_input_tokens"] == 70
 
 
 class TestStreamDelta:

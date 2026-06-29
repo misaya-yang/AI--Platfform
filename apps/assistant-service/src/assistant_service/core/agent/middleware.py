@@ -19,12 +19,14 @@ Hooks supported this revision:
   returning None leaves the result unchanged. The chain threads the
   result through every middleware in order so transforms compose
   (e.g. redact → truncate).
+- `on_stream_event(ctx, event)` — run before an AgentLoopEvent is emitted
+  to the caller. Middlewares may return a replacement event; returning
+  None leaves the event unchanged.
+- `on_error(ctx, error, phase)` — run when the streaming-first loop sees
+  an internal error. Middlewares may yield diagnostic AgentLoopEvents.
 
 All hooks are optional: middlewares implement only the ones they need.
 The chain calls `getattr(mw, hook, None)` and skips missing hooks.
-
-Future hooks (not yet wired): `on_stream_event`, `on_error`. Keep the
-protocol small; add hooks only when a concrete middleware demands one.
 """
 
 from __future__ import annotations
@@ -59,22 +61,22 @@ class ToolVerdict:
     source: str = ""
 
     @classmethod
-    def allow(cls, source: str = "") -> "ToolVerdict":
+    def allow(cls, source: str = "") -> ToolVerdict:
         return cls(kind=VerdictKind.ALLOW, source=source)
 
     @classmethod
-    def deny(cls, reason: str, source: str = "") -> "ToolVerdict":
+    def deny(cls, reason: str, source: str = "") -> ToolVerdict:
         return cls(kind=VerdictKind.DENY, reason=reason, source=source)
 
     @classmethod
-    def confirm(cls, reason: str, source: str = "") -> "ToolVerdict":
+    def confirm(cls, reason: str, source: str = "") -> ToolVerdict:
         return cls(kind=VerdictKind.CONFIRM, reason=reason, source=source)
 
     @property
     def is_allow(self) -> bool:
         return self.kind is VerdictKind.ALLOW
 
-    def with_source(self, source: str) -> "ToolVerdict":
+    def with_source(self, source: str) -> ToolVerdict:
         """Return a copy with `source` set. Used by middleware to audit-tag
         verdicts that were produced by a policy that didn't set one."""
         return replace(self, source=source)
@@ -99,6 +101,12 @@ class MiddlewareChain:
       - `run_before_call(ctx, messages)` — async generator of events.
       - `run_on_tool_call(ctx, tool_name, arguments)` — returns first
         non-allow `ToolVerdict`, else `ToolVerdict.allow()`.
+      - `run_on_tool_result(ctx, tool_name, arguments, result)` — threads
+        a tool result through transforms.
+      - `run_on_stream_event(ctx, event)` — lets middlewares observe or
+        replace an outbound AgentLoopEvent.
+      - `run_on_error(ctx, error, phase)` — forwards diagnostic events from
+        error sensors without letting a buggy sensor crash the turn.
     """
 
     def __init__(self, middlewares: list[AgentMiddleware] | None = None) -> None:
@@ -113,9 +121,9 @@ class MiddlewareChain:
 
     async def run_before_call(
         self,
-        ctx: "AgentLoopContext",
+        ctx: AgentLoopContext,
         messages: list[dict[str, Any]],
-    ) -> AsyncGenerator["AgentLoopEvent", None]:
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         """Run every middleware's `before_call` once per turn, in order, and
         forward any events each yields. A buggy middleware shouldn't take down
         the turn — exceptions are logged and skipped."""
@@ -134,7 +142,7 @@ class MiddlewareChain:
 
     async def run_on_tool_result(
         self,
-        ctx: "AgentLoopContext",
+        ctx: AgentLoopContext,
         tool_name: str,
         arguments: dict[str, Any],
         result: Any,
@@ -161,9 +169,57 @@ class MiddlewareChain:
                 current = replacement
         return current
 
+    async def run_on_stream_event(
+        self,
+        ctx: AgentLoopContext,
+        event: AgentLoopEvent,
+    ) -> AgentLoopEvent:
+        """Thread an outbound stream event through every middleware.
+
+        A middleware may return a replacement event. Returning None keeps
+        the current event. Exceptions are logged and skipped so event
+        emission remains best-effort and ordered.
+        """
+        current = event
+        for mw in self._middlewares:
+            hook = getattr(mw, "on_stream_event", None)
+            if hook is None:
+                continue
+            try:
+                replacement = await hook(ctx, current)
+            except Exception:
+                logger.exception(
+                    "middleware %r on_stream_event raised; leaving event unchanged",
+                    getattr(mw, "name", type(mw).__name__),
+                )
+                continue
+            if replacement is not None:
+                current = replacement
+        return current
+
+    async def run_on_error(
+        self,
+        ctx: AgentLoopContext,
+        error: BaseException,
+        phase: Any | None = None,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        """Run error sensors and forward any diagnostic events they yield."""
+        for mw in self._middlewares:
+            hook = getattr(mw, "on_error", None)
+            if hook is None:
+                continue
+            try:
+                async for event in hook(ctx, error, phase):
+                    yield event
+            except Exception:
+                logger.exception(
+                    "middleware %r on_error raised; skipping",
+                    getattr(mw, "name", type(mw).__name__),
+                )
+
     async def run_on_tool_call(
         self,
-        ctx: "AgentLoopContext",
+        ctx: AgentLoopContext,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> ToolVerdict:

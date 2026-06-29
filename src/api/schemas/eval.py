@@ -410,6 +410,35 @@ class EvalGateDryRunResponse(BaseModel):
     report: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvalTraceFeedbackRequest(BaseModel):
+    trace_ids: list[str] = Field(..., min_length=1, max_length=50)
+    trace_family: TraceFamily = "assistant"
+    split: str = Field(default="regression", max_length=32)
+    dataset_id: str | None = None
+    proposed_by: str = Field(default="eval-feedback-api", max_length=128)
+    low_score_threshold: float = Field(default=0.75, ge=0, le=1)
+    latency_threshold_ms: int = Field(default=30_000, ge=1)
+
+
+class EvalTraceFailurePattern(BaseModel):
+    trace_id: str
+    trace_family: TraceFamily
+    failure_mode: str
+    reasons: list[str] = Field(default_factory=list)
+    severity: str = "medium"
+
+
+class EvalTraceFeedbackResponse(BaseModel):
+    trace_family: TraceFamily
+    dataset_id: str | None = None
+    patterns: list[EvalTraceFailurePattern] = Field(default_factory=list)
+    clusters: list[dict[str, Any]] = Field(default_factory=list)
+    dataset_cases: list[EvalExampleImportItem] = Field(default_factory=list)
+    import_request: EvalExamplesImportRequest | None = None
+    proposals: list[dict[str, Any]] = Field(default_factory=list)
+    redaction_policy: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvalDatasetListResponse(BaseModel):
     datasets: list[EvalDataset]
     total: int

@@ -752,10 +752,13 @@ class AgentTraceRepository(BaseRepository):
         skipped = 0
         for example in examples:
             case_id = str(example.get("case_id") or "").strip()
-            if mode == "skip_duplicates" and case_id:
-                if case_id in existing_case_ids or case_id in seen_in_request:
-                    skipped += 1
-                    continue
+            if (
+                mode == "skip_duplicates"
+                and case_id
+                and (case_id in existing_case_ids or case_id in seen_in_request)
+            ):
+                skipped += 1
+                continue
             created = await self.create_example(
                 tenant_id=tenant_id,
                 dataset_id=dataset_id,

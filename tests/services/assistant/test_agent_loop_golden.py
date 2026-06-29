@@ -41,6 +41,9 @@ EXPECTED_STREAM_EVENT_TYPES: frozenset[str] = frozenset(
         "tool_call_end",
         # Context and retrieval
         "context_retrieved",
+        "rag_retrieval_started",
+        "rag_retrieval_completed",
+        "rag_retrieval_failed",
         "web_search_results",
         "rag_evaluation",
         "context_budget",
@@ -172,6 +175,8 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "context_detail",
         "skills_enabled",
         "memory_profile",
+        "traceparent",
+        "otel_trace_id",
     }
 )
 

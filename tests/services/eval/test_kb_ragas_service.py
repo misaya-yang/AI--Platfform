@@ -25,7 +25,7 @@ class FakeKbRagasRepository:
         self.existing_scores: set[str] = set()
         self.active_runs: set[str] = set()
 
-    async def get_evaluator(self, **kwargs: Any) -> dict[str, Any] | None:
+    async def get_evaluator(self, **_kwargs: Any) -> dict[str, Any] | None:
         return self.evaluator
 
     async def list_traces(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:

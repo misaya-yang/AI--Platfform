@@ -31,7 +31,7 @@ class _AppendMiddleware:
         self.name = name
 
     async def before_call(
-        self, ctx: Any, messages: list[dict[str, Any]]
+        self, _ctx: Any, messages: list[dict[str, Any]]
     ) -> AsyncGenerator[_FakeEvent, None]:
         messages.append({"role": "system", "content": f"from-{self.name}"})
         yield _FakeEvent(phase="test", event_type=f"{self.name}_ran", data={})
@@ -43,9 +43,65 @@ class _SilentMiddleware:
     name = "silent"
 
     async def before_call(
-        self, ctx: Any, messages: list[dict[str, Any]]
+        self, _ctx: Any, _messages: list[dict[str, Any]]
     ) -> AsyncGenerator[_FakeEvent, None]:
         return
+        yield  # unreachable, keeps the function an async generator
+
+
+class _StreamMiddleware:
+    def __init__(self, name: str, seen: list[str]) -> None:
+        self.name = name
+        self.seen = seen
+
+    async def on_stream_event(self, ctx: Any, event: _FakeEvent) -> _FakeEvent:
+        del ctx
+        self.seen.append(f"{self.name}:{event.event_type}")
+        return _FakeEvent(
+            phase=event.phase,
+            event_type=f"{event.event_type}_{self.name}",
+            data=event.data,
+        )
+
+
+class _NoopStreamMiddleware:
+    name = "noop-stream"
+
+    async def on_stream_event(self, ctx: Any, event: _FakeEvent) -> None:
+        del ctx, event
+        return None
+
+
+class _RaisingStreamMiddleware:
+    name = "raising-stream"
+
+    async def on_stream_event(self, ctx: Any, event: _FakeEvent) -> _FakeEvent:
+        del ctx, event
+        raise RuntimeError("stream hook failed")
+
+
+class _ErrorMiddleware:
+    name = "error"
+
+    async def on_error(
+        self, ctx: Any, error: BaseException, phase: Any
+    ) -> AsyncGenerator[_FakeEvent, None]:
+        del ctx
+        yield _FakeEvent(
+            phase=str(phase),
+            event_type="error_seen",
+            data={"message": str(error)},
+        )
+
+
+class _RaisingErrorMiddleware:
+    name = "raising-error"
+
+    async def on_error(
+        self, ctx: Any, error: BaseException, phase: Any
+    ) -> AsyncGenerator[_FakeEvent, None]:
+        del ctx, error, phase
+        raise RuntimeError("error hook failed")
         yield  # unreachable, keeps the function an async generator
 
 
@@ -101,3 +157,62 @@ def test_middleware_protocol_runtime_checkable() -> None:
 
     assert isinstance(_SilentMiddleware(), AgentMiddleware)
     assert isinstance(_AppendMiddleware("a"), AgentMiddleware)
+
+
+@pytest.mark.asyncio
+async def test_chain_threads_stream_events_in_registration_order() -> None:
+    from assistant_service.core.agent.middleware import MiddlewareChain
+
+    seen: list[str] = []
+    chain = MiddlewareChain(
+        [
+            _NoopStreamMiddleware(),
+            _StreamMiddleware("first", seen),
+            _StreamMiddleware("second", seen),
+        ]
+    )
+
+    event = await chain.run_on_stream_event(
+        ctx=None,  # type: ignore[arg-type]
+        event=_FakeEvent(phase="test", event_type="started", data={}),  # type: ignore[arg-type]
+    )
+
+    assert seen == ["first:started", "second:started_first"]
+    assert event.event_type == "started_first_second"
+
+
+@pytest.mark.asyncio
+async def test_chain_isolates_stream_event_hook_errors() -> None:
+    from assistant_service.core.agent.middleware import MiddlewareChain
+
+    seen: list[str] = []
+    chain = MiddlewareChain(
+        [_RaisingStreamMiddleware(), _StreamMiddleware("after", seen)]
+    )
+
+    event = await chain.run_on_stream_event(
+        ctx=None,  # type: ignore[arg-type]
+        event=_FakeEvent(phase="test", event_type="started", data={}),  # type: ignore[arg-type]
+    )
+
+    assert seen == ["after:started"]
+    assert event.event_type == "started_after"
+
+
+@pytest.mark.asyncio
+async def test_chain_runs_error_hooks_and_isolates_failures() -> None:
+    from assistant_service.core.agent.middleware import MiddlewareChain
+
+    chain = MiddlewareChain([_RaisingErrorMiddleware(), _ErrorMiddleware()])
+
+    events = [
+        ev
+        async for ev in chain.run_on_error(
+            ctx=None,  # type: ignore[arg-type]
+            error=RuntimeError("boom"),
+            phase="generation",
+        )
+    ]
+
+    assert [ev.event_type for ev in events] == ["error_seen"]
+    assert events[0].data == {"message": "boom"}

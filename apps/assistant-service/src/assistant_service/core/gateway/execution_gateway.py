@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -12,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ..runtime.security.sandbox_resolver import SandboxResolver
 from ..runtime.tools.lane_scheduler import LaneScheduler
 from ..runtime.tools.policy_lattice import ToolPolicyLattice
@@ -67,8 +69,31 @@ class RunRecord:
     finished_at: datetime | None = None
 
 
+@dataclass
+class RunCheckpointRecord:
+    """In-memory fallback checkpoint record."""
+
+    checkpoint_id: str
+    run_id: str
+    tenant_id: str
+    user_id: str
+    session_id: str
+    phase: str
+    iteration: int
+    message_state_hash: str
+    pending_tool: dict[str, Any] = field(default_factory=dict)
+    approval_id: str | None = None
+    idempotency_keys: dict[str, Any] = field(default_factory=dict)
+    resume_payload: dict[str, Any] = field(default_factory=dict)
+    status: str = "running"
+    error: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class AssistantExecutionGateway:
     """Gateway wrapper around tool invocation and run lifecycle."""
+
+    _CONTROL_ARGUMENT_KEYS = {"_approval_id", "_steer_payload"}
 
     def __init__(
         self,
@@ -99,6 +124,7 @@ class AssistantExecutionGateway:
         self._runs: dict[str, RunRecord] = {}
         self._approvals: dict[str, ApprovalRecord] = {}
         self._commands: dict[str, dict[str, Any]] = {}
+        self._checkpoints: dict[str, list[RunCheckpointRecord]] = {}
         self._lane_scheduler = LaneScheduler()
         self._policy_lattice = ToolPolicyLattice()
         self._sandbox_resolver = SandboxResolver()
@@ -114,6 +140,124 @@ class AssistantExecutionGateway:
             return str(uuid.UUID(str(value)))
         except Exception:
             return None
+
+    @classmethod
+    def _message_state_hash(cls, messages: list[dict[str, Any]] | None) -> str:
+        digest = cls._message_state_digest(messages or [])
+        encoded = json.dumps(digest, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @classmethod
+    def _message_state_digest(cls, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        digest: list[dict[str, Any]] = []
+        for message in messages[-50:]:
+            if not isinstance(message, dict):
+                continue
+            item: dict[str, Any] = {
+                "role": str(message.get("role") or ""),
+                "name": str(message.get("name") or "")[:100] or None,
+                "tool_call_id": str(message.get("tool_call_id") or "")[:100] or None,
+            }
+            content = message.get("content")
+            if content is not None:
+                item["content_chars"] = len(str(content))
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                item["tool_calls"] = [
+                    {
+                        "id": str(call.get("id") or "")[:100],
+                        "name": str((call.get("function") or {}).get("name") or "")[:100],
+                        "arguments_hash": cls._hash_value(
+                            (call.get("function") or {}).get("arguments") or ""
+                        ),
+                    }
+                    for call in tool_calls
+                    if isinstance(call, dict)
+                ][:20]
+            digest.append({key: value for key, value in item.items() if value is not None})
+        return digest
+
+    @classmethod
+    def _hash_value(cls, value: Any) -> str:
+        safe_value = cls._sanitize_checkpoint_value(value)
+        encoded = json.dumps(safe_value, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @classmethod
+    def _sanitize_pending_tool(cls, pending_tool: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(pending_tool, dict):
+            return {}
+        arguments = pending_tool.get("arguments")
+        comparable_arguments = (
+            cls._without_control_args(arguments)
+            if isinstance(arguments, dict)
+            else arguments
+        )
+        return {
+            key: value
+            for key, value in {
+                "tool_id": str(pending_tool.get("tool_id") or "")[:100],
+                "tool_name": str(pending_tool.get("tool_name") or "")[:100],
+                "arguments_hash": cls._hash_value(comparable_arguments or {}),
+                "has_arguments": bool(arguments),
+            }.items()
+            if value not in {"", None}
+        }
+
+    @classmethod
+    def _sanitize_checkpoint_value(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            safe: dict[str, Any] = {}
+            for key, item in list(value.items())[:100]:
+                key_str = str(key)
+                if cls._is_secret_key(key_str):
+                    safe[key_str] = "[redacted]"
+                else:
+                    safe[key_str] = cls._sanitize_checkpoint_value(item)
+            return safe
+        if isinstance(value, list):
+            return [cls._sanitize_checkpoint_value(item) for item in value[:100]]
+        if isinstance(value, str):
+            if cls._looks_sensitive(value):
+                return "[redacted]"
+            return value[:500]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return str(value)[:500]
+
+    @staticmethod
+    def _is_secret_key(key: str) -> bool:
+        lowered = key.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "authorization",
+                "api_key",
+                "apikey",
+                "password",
+                "secret",
+                "token",
+                "cookie",
+                "credential",
+            )
+        )
+
+    @staticmethod
+    def _looks_sensitive(value: str) -> bool:
+        lowered = value.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "authorization:",
+                "bearer ",
+                "api_key=",
+                "apikey=",
+                "password=",
+                "secret=",
+                "token=",
+                "cookie:",
+            )
+        )
 
     # ---------------------------------------------------------------------
     # Public API - policies / runs / approvals
@@ -253,13 +397,23 @@ class AssistantExecutionGateway:
         """
         if self.database:
             try:
-                return await self._fetch_run_from_db(run_id, tenant_id, user_id)
+                run = await self._fetch_run_from_db(run_id, tenant_id, user_id)
+                if run:
+                    run["checkpoint"] = await self.get_run_checkpoint(
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                    )
+                return run
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "get_run DB query failed, falling back to in-memory mirror: %s",
                     exc,
                 )
-        return self._get_run_from_memory(run_id, tenant_id, user_id)
+        run = self._get_run_from_memory(run_id, tenant_id, user_id)
+        if run:
+            run["checkpoint"] = self._get_checkpoint_from_memory(run_id, tenant_id, user_id)
+        return run
 
     def _get_run_from_memory(
         self, run_id: str, tenant_id: str, user_id: str
@@ -325,6 +479,278 @@ class AssistantExecutionGateway:
             "error": row.get("error"),
             "started_at": row.get("started_at").isoformat() if row.get("started_at") else None,
             "finished_at": row.get("finished_at").isoformat() if row.get("finished_at") else None,
+        }
+
+    async def save_run_checkpoint(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+        phase: str,
+        iteration: int = 0,
+        messages: list[dict[str, Any]] | None = None,
+        pending_tool: dict[str, Any] | None = None,
+        approval_id: str | None = None,
+        idempotency_keys: dict[str, Any] | None = None,
+        resume_payload: dict[str, Any] | None = None,
+        status: str = "running",
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a bounded checkpoint summary for safe resume preparation."""
+        checkpoint_id = str(uuid.uuid4())
+        record = RunCheckpointRecord(
+            checkpoint_id=checkpoint_id,
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            phase=str(phase)[:64],
+            iteration=max(0, int(iteration or 0)),
+            message_state_hash=self._message_state_hash(messages),
+            pending_tool=self._sanitize_pending_tool(pending_tool),
+            approval_id=self._safe_uuid(approval_id),
+            idempotency_keys=self._sanitize_checkpoint_value(idempotency_keys or {}),
+            resume_payload=self._sanitize_checkpoint_value(resume_payload or {}),
+            status=str(status or "running")[:32],
+            error=str(error)[:500] if error else None,
+        )
+        self._checkpoints.setdefault(run_id, []).append(record)
+        self._checkpoints[run_id] = self._checkpoints[run_id][-20:]
+
+        if self.database and self._safe_uuid(run_id):
+            try:
+                await self.database.execute(
+                    """
+                    INSERT INTO assistant_run_checkpoints (
+                        checkpoint_id, run_id, tenant_id, user_id, session_id,
+                        phase, iteration, message_state_hash, pending_tool,
+                        approval_id, idempotency_keys, resume_payload, status,
+                        error, created_at
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                        $13, $14, $15
+                    );
+                    """,
+                    checkpoint_id,
+                    self._safe_uuid(run_id),
+                    tenant_id,
+                    user_id,
+                    session_id,
+                    record.phase,
+                    record.iteration,
+                    record.message_state_hash,
+                    json.dumps(record.pending_tool),
+                    record.approval_id,
+                    json.dumps(record.idempotency_keys),
+                    json.dumps(record.resume_payload),
+                    record.status,
+                    record.error,
+                    record.created_at,
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist assistant run checkpoint: %s", exc)
+        return self._checkpoint_to_dict(record)
+
+    async def get_run_checkpoint(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch the latest checkpoint, DB-authoritative when configured."""
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT checkpoint_id, run_id, tenant_id, user_id, session_id,
+                           phase, iteration, message_state_hash, pending_tool,
+                           approval_id, idempotency_keys, resume_payload, status,
+                           error, created_at
+                      FROM assistant_run_checkpoints
+                     WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+                     ORDER BY created_at DESC
+                     LIMIT 1;
+                    """,
+                    run_id,
+                    tenant_id,
+                    user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "get_run_checkpoint DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+            else:
+                return self._checkpoint_row_to_dict(row) if row else None
+        return self._get_checkpoint_from_memory(run_id, tenant_id, user_id)
+
+    async def prepare_run_resume(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Validate latest checkpoint and return a non-executing resume plan."""
+        run = await self.get_run(run_id=run_id, tenant_id=tenant_id, user_id=user_id)
+        if not run:
+            return None
+        checkpoint = run.get("checkpoint") or await self.get_run_checkpoint(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        if not checkpoint:
+            return await self._resume_blocked_response(
+                run=run,
+                reason="checkpoint_missing",
+                checkpoint=None,
+            )
+
+        if checkpoint.get("status") in {"succeeded", "failed", "cancelled"}:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "run_already_terminal",
+                "checkpoint": checkpoint,
+            }
+
+        if checkpoint.get("phase") == "approval_pending":
+            expected_approval_id = checkpoint.get("approval_id")
+            if not approval_id:
+                return await self._resume_blocked_response(
+                    run=run,
+                    reason="approval_required",
+                    checkpoint=checkpoint,
+                )
+            if expected_approval_id and approval_id != expected_approval_id:
+                return await self._resume_blocked_response(
+                    run=run,
+                    reason="approval_id_mismatch",
+                    checkpoint=checkpoint,
+                )
+            pending_tool = checkpoint.get("pending_tool") or {}
+            tool_name = str(pending_tool.get("tool_name") or "")
+            if tool_name and not await self._approval_granted_for_checkpoint(
+                approval_id=approval_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                tool_name=tool_name,
+                pending_tool=pending_tool,
+            ):
+                return await self._resume_blocked_response(
+                    run=run,
+                    reason="approval_not_granted",
+                    checkpoint=checkpoint,
+                )
+
+        return {
+            "run_id": run_id,
+            "status": "ready",
+            "reason": None,
+            "checkpoint": checkpoint,
+            "resume_mode": "checkpoint",
+        }
+
+    async def _resume_blocked_response(
+        self,
+        *,
+        run: dict[str, Any],
+        reason: str,
+        checkpoint: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        run_id = str(run.get("run_id") or "")
+        tenant_id = str(run.get("tenant_id") or "")
+        user_id = str(run.get("user_id") or "")
+        session_id = str(run.get("session_id") or "")
+        blocked_checkpoint = await self.save_run_checkpoint(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            phase="resume_blocked",
+            iteration=int((checkpoint or {}).get("iteration") or 0),
+            status="blocked",
+            error=reason,
+            resume_payload={
+                "reason": reason,
+                "source_phase": (checkpoint or {}).get("phase"),
+            },
+        )
+        await self.finish_run(run_id=run_id, status="blocked", error=reason)
+        return {
+            "run_id": run_id,
+            "status": "blocked",
+            "reason": reason,
+            "checkpoint": blocked_checkpoint,
+        }
+
+    def _get_checkpoint_from_memory(
+        self,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        records = self._checkpoints.get(run_id) or []
+        for record in reversed(records):
+            if record.tenant_id == tenant_id and record.user_id == user_id:
+                return self._checkpoint_to_dict(record)
+        return None
+
+    @staticmethod
+    def _checkpoint_to_dict(record: RunCheckpointRecord) -> dict[str, Any]:
+        return {
+            "checkpoint_id": record.checkpoint_id,
+            "run_id": record.run_id,
+            "tenant_id": record.tenant_id,
+            "user_id": record.user_id,
+            "session_id": record.session_id,
+            "phase": record.phase,
+            "iteration": record.iteration,
+            "message_state_hash": record.message_state_hash,
+            "pending_tool": record.pending_tool,
+            "approval_id": record.approval_id,
+            "idempotency_keys": record.idempotency_keys,
+            "resume_payload": record.resume_payload,
+            "status": record.status,
+            "error": record.error,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+    @classmethod
+    def _checkpoint_row_to_dict(cls, row: Any) -> dict[str, Any]:
+        def _json_dict(value: Any) -> dict[str, Any]:
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    decoded = json.loads(value)
+                except Exception:
+                    return {}
+                return decoded if isinstance(decoded, dict) else {}
+            return {}
+
+        created_at = row.get("created_at")
+        return {
+            "checkpoint_id": str(row.get("checkpoint_id") or ""),
+            "run_id": str(row.get("run_id") or ""),
+            "tenant_id": str(row.get("tenant_id") or ""),
+            "user_id": str(row.get("user_id") or ""),
+            "session_id": str(row.get("session_id") or ""),
+            "phase": str(row.get("phase") or ""),
+            "iteration": int(row.get("iteration") or 0),
+            "message_state_hash": str(row.get("message_state_hash") or ""),
+            "pending_tool": _json_dict(row.get("pending_tool")),
+            "approval_id": str(row.get("approval_id") or "") or None,
+            "idempotency_keys": _json_dict(row.get("idempotency_keys")),
+            "resume_payload": _json_dict(row.get("resume_payload")),
+            "status": str(row.get("status") or ""),
+            "error": row.get("error"),
+            "created_at": created_at.isoformat() if created_at else None,
         }
 
     async def approve(
@@ -435,6 +861,50 @@ class AssistantExecutionGateway:
             "expires_at": record.expires_at.isoformat() if record.expires_at else None,
             "created_at": None,
         }
+
+    async def request_tool_approval(
+        self,
+        context: ToolInvocationContext,
+        tool_name: str,
+        arguments: dict[str, Any],
+        reason: str,
+    ) -> str:
+        return await self._create_approval(
+            context=context,
+            tool_name=tool_name,
+            arguments=arguments,
+            reason=reason,
+        )
+
+    async def is_approval_granted(
+        self,
+        approval_id: str | None,
+        tenant_id: str,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> bool:
+        return await self._approval_granted(
+            approval_id=approval_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+
+    async def consume_tool_approval(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        tool_name: str,
+    ) -> None:
+        await self._consume_approval(
+            approval_id=approval_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            tool_name=tool_name,
+        )
 
     async def invoke_tool(
         self,
@@ -576,12 +1046,16 @@ class AssistantExecutionGateway:
         )
 
         approval_id = arguments.get("_approval_id")
-        if decision.requires_approval and not await self._approval_granted(
-            approval_id=approval_id,
-            tenant_id=context.tenant_id,
-            user_id=context.user_id,
-            tool_name=tool_name,
-        ):
+        approval_granted = False
+        if decision.requires_approval:
+            approval_granted = await self._approval_granted(
+                approval_id=approval_id,
+                tenant_id=context.tenant_id,
+                user_id=context.user_id,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+        if decision.requires_approval and not approval_granted:
             pending_approval_id = await self._create_approval(
                 context=context,
                 tool_name=tool_name,
@@ -626,7 +1100,16 @@ class AssistantExecutionGateway:
                 cancel_event=cancel_event,
             )
 
-        result = await self._lane_scheduler.run_in_lane(lane, _invoke)
+        try:
+            result = await self._lane_scheduler.run_in_lane(lane, _invoke)
+        finally:
+            if approval_granted and isinstance(approval_id, str):
+                await self._consume_approval(
+                    approval_id=approval_id,
+                    tenant_id=context.tenant_id,
+                    user_id=context.user_id,
+                    tool_name=tool_name,
+                )
 
         final_state = "succeeded" if result.success else "failed"
         await self._update_command(
@@ -838,12 +1321,54 @@ class AssistantExecutionGateway:
 
         return approval_id
 
+    async def _consume_approval(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        tool_name: str,
+    ) -> None:
+        """Mark an approved tool approval as single-use after a resume attempt."""
+        record = self._approvals.get(approval_id)  # AUDIT-OK: write-through mirror
+        if (
+            record
+            and record.tenant_id == tenant_id
+            and record.user_id == user_id
+            and record.tool_name == tool_name
+            and record.status == "approved"
+        ):
+            record.status = "consumed"
+
+        if not self.database:
+            return
+
+        try:
+            await self.database.execute(
+                """
+                UPDATE assistant_tool_approvals
+                   SET status = 'consumed',
+                       updated_at = NOW()
+                 WHERE approval_id = $1
+                   AND tenant_id = $2
+                   AND user_id = $3
+                   AND tool_name = $4
+                   AND status = 'approved';
+                """,
+                approval_id,
+                tenant_id,
+                user_id,
+                tool_name,
+            )
+        except Exception as exc:
+            logger.warning("Failed to consume approval: %s", exc)
+
     async def _approval_granted(
         self,
         approval_id: str | None,
         tenant_id: str,
         user_id: str,
         tool_name: str,
+        arguments: dict[str, Any] | None = None,
     ) -> bool:
         if not approval_id:
             return False
@@ -857,7 +1382,7 @@ class AssistantExecutionGateway:
             try:
                 row = await self.database.fetchrow(
                     """
-                    SELECT status, expires_at, tool_name
+                    SELECT status, expires_at, tool_name, arguments
                     FROM assistant_tool_approvals
                     WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
                     LIMIT 1;
@@ -872,11 +1397,13 @@ class AssistantExecutionGateway:
                     exc,
                 )
                 return self._approval_granted_from_memory(
-                    approval_id, tenant_id, user_id, tool_name
+                    approval_id, tenant_id, user_id, tool_name, arguments
                 )
             if not row:
                 return False
             if row.get("tool_name") != tool_name:
+                return False
+            if not self._approval_arguments_match(row.get("arguments"), arguments):
                 return False
             expires_at = row.get("expires_at")
             if expires_at and expires_at < datetime.now(timezone.utc):
@@ -885,7 +1412,7 @@ class AssistantExecutionGateway:
 
         # DB-less path
         return self._approval_granted_from_memory(
-            approval_id, tenant_id, user_id, tool_name
+            approval_id, tenant_id, user_id, tool_name, arguments
         )
 
     def _approval_granted_from_memory(
@@ -894,6 +1421,7 @@ class AssistantExecutionGateway:
         tenant_id: str,
         user_id: str,
         tool_name: str,
+        arguments: dict[str, Any] | None = None,
     ) -> bool:
         record = self._approvals.get(approval_id)  # AUDIT-OK: DB-less / DB-error fallback only
         if not record:
@@ -902,9 +1430,127 @@ class AssistantExecutionGateway:
             return False
         if record.tool_name != tool_name:
             return False
+        if not self._approval_arguments_match(record.arguments, arguments):
+            return False
         if record.expires_at and record.expires_at < datetime.now(timezone.utc):
             return False
         return record.status == "approved"
+
+    async def _approval_granted_for_checkpoint(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+        tool_name: str,
+        pending_tool: dict[str, Any],
+    ) -> bool:
+        expected_hash = str(pending_tool.get("arguments_hash") or "")
+        if not expected_hash:
+            return await self.is_approval_granted(
+                approval_id=approval_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                tool_name=tool_name,
+                arguments=None,
+            )
+
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT status, expires_at, tool_name, arguments
+                    FROM assistant_tool_approvals
+                    WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
+                    LIMIT 1;
+                    """,
+                    approval_id,
+                    tenant_id,
+                    user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_approval_granted_for_checkpoint DB query failed, falling back "
+                    "to in-memory mirror: %s",
+                    exc,
+                )
+            else:
+                return self._approval_row_matches_checkpoint(
+                    row=row,
+                    tool_name=tool_name,
+                    expected_arguments_hash=expected_hash,
+                )
+
+        record = self._approvals.get(approval_id)  # AUDIT-OK: DB-less / DB-error fallback only
+        if not record:
+            return False
+        return self._approval_row_matches_checkpoint(
+            row={
+                "status": record.status,
+                "expires_at": record.expires_at,
+                "tool_name": record.tool_name,
+                "arguments": record.arguments,
+            },
+            tool_name=tool_name,
+            expected_arguments_hash=expected_hash,
+        )
+
+    @classmethod
+    def _approval_row_matches_checkpoint(
+        cls,
+        *,
+        row: Any,
+        tool_name: str,
+        expected_arguments_hash: str,
+    ) -> bool:
+        if not row:
+            return False
+        if row.get("tool_name") != tool_name:
+            return False
+        expires_at = row.get("expires_at")
+        if expires_at and expires_at < datetime.now(timezone.utc):
+            return False
+        if row.get("status") != "approved":
+            return False
+        return cls._approval_arguments_hash(row.get("arguments")) == expected_arguments_hash
+
+    @classmethod
+    def _approval_arguments_hash(cls, arguments: Any) -> str:
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except Exception:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        return cls._hash_value(cls._without_control_args(arguments))
+
+    @classmethod
+    def _without_control_args(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in cls._CONTROL_ARGUMENT_KEYS
+        }
+
+    @classmethod
+    def _approval_arguments_match(
+        cls,
+        stored_arguments: Any,
+        current_arguments: dict[str, Any] | None,
+    ) -> bool:
+        if current_arguments is None:
+            return True
+        if isinstance(stored_arguments, str):
+            try:
+                stored_arguments = json.loads(stored_arguments)
+            except Exception:
+                return False
+        if not isinstance(stored_arguments, dict):
+            stored_arguments = {}
+
+        return cls._without_control_args(stored_arguments) == cls._without_control_args(
+            current_arguments
+        )
 
     async def _find_active_command(self, command_key: str) -> str | None:
         """Return the command_id of an active dedup match, or None.

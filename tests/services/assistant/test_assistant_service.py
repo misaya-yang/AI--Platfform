@@ -190,6 +190,21 @@ class TestAssistantConfig:
         assert config.kb_top_k == 10
         assert config.web_search_enabled is True
 
+    def test_route_config_carries_traceparent(self):
+        """HTTP route config should preserve request trace correlation."""
+        from assistant_service.api.routes.chat import ChatRequest, _build_config
+
+        traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+        config = _build_config(
+            ChatRequest(message="hello"),
+            None,
+            traceparent=traceparent,
+        )
+
+        assert config.traceparent == traceparent
+        assert config.otel_trace_id == "4bf92f3577b34da6a3ce929d0e0e4736"
+
 
 class TestAssistantE2EStub:
     """Tests for explicit local-E2E deterministic assistant behavior."""

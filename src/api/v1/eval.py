@@ -16,6 +16,12 @@ from ...services.eval.kb_ragas_service import (
     get_kb_ragas_knowledge_summary,
     score_retrieval_with_kb_ragas,
 )
+from ...services.eval.trace_feedback import (
+    build_harness_profile_proposal,
+    build_redacted_dataset_case,
+    classify_trace_failure,
+    cluster_failure_patterns,
+)
 from ..eval_export import EXPORT_REDACTION_POLICY, export_trace
 from ..schemas.eval import (
     AgentTraceDetailResponse,
@@ -50,6 +56,12 @@ from ..schemas.eval import (
     EvalExperimentRunCreate,
     EvalGateDryRunRequest,
     EvalGateDryRunResponse,
+    EvalTraceExportResponse,
+    EvalTraceFailurePattern,
+    EvalTraceFeedbackRequest,
+    EvalTraceFeedbackResponse,
+    EvalTraceMonitoringSummary,
+    EvalTraceThreadResponse,
     KbRagasBatchScoreRequest,
     KbRagasBatchScoreResponse,
     KbRagasKnowledgeSummaryResponse,
@@ -57,9 +69,6 @@ from ..schemas.eval import (
     KbRagasScoreRetrievalRequest,
     KbRagasScoreRetrievalResponse,
     KbRagasScoreRetrievalResult,
-    EvalTraceExportResponse,
-    EvalTraceMonitoringSummary,
-    EvalTraceThreadResponse,
     TraceExportFormat,
 )
 
@@ -525,6 +534,68 @@ async def create_eval_example_from_trace(
     if not example:
         raise HTTPException(status_code=404, detail="Trace not found")
     return EvalExample(**example)
+
+
+@router.post("/trace-feedback:preview", response_model=EvalTraceFeedbackResponse)
+async def preview_eval_trace_feedback(
+    body: EvalTraceFeedbackRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalTraceFeedbackResponse:
+    _require_supported_family(body.trace_family)
+    _require_eval_run_access(request, auth)
+    repo = _get_trace_repository(request)
+    patterns = []
+    dataset_cases = []
+    for trace_id in body.trace_ids:
+        detail = await repo.get_trace_detail(
+            tenant_id=auth.tenant_id,
+            trace_id=trace_id,
+            user_id=_scoped_user_id(auth),
+            trace_family=body.trace_family,
+        )
+        if not detail:
+            raise HTTPException(status_code=404, detail=f"Trace not found: {trace_id}")
+        pattern = classify_trace_failure(
+            detail,
+            low_score_threshold=body.low_score_threshold,
+            latency_threshold_ms=body.latency_threshold_ms,
+        )
+        patterns.append(pattern)
+        dataset_cases.append(
+            build_redacted_dataset_case(
+                detail,
+                pattern,
+                split=body.split,
+            )
+        )
+
+    clusters = cluster_failure_patterns(patterns)
+    import_request = (
+        EvalExamplesImportRequest(examples=dataset_cases) if body.dataset_id else None
+    )
+    return EvalTraceFeedbackResponse(
+        trace_family=body.trace_family,
+        dataset_id=body.dataset_id,
+        patterns=[
+            EvalTraceFailurePattern(
+                trace_id=pattern.trace_id,
+                trace_family=pattern.trace_family,
+                failure_mode=pattern.failure_mode,
+                reasons=pattern.reasons,
+                severity=pattern.severity,
+            )
+            for pattern in patterns
+        ],
+        clusters=clusters,
+        dataset_cases=dataset_cases,
+        import_request=import_request,
+        proposals=[
+            build_harness_profile_proposal(cluster, proposed_by=body.proposed_by)
+            for cluster in clusters
+        ],
+        redaction_policy=EXPORT_REDACTION_POLICY,
+    )
 
 
 @router.get("/evaluators", response_model=EvalEvaluatorListResponse)

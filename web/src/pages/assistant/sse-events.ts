@@ -18,6 +18,9 @@ export const SSEEventType = {
 
   // Retrieval and files
   CONTEXT_RETRIEVED: "context_retrieved",
+  RAG_RETRIEVAL_STARTED: "rag_retrieval_started",
+  RAG_RETRIEVAL_COMPLETED: "rag_retrieval_completed",
+  RAG_RETRIEVAL_FAILED: "rag_retrieval_failed",
   WEB_SEARCH_RESULTS: "web_search_results",
   FILE_PROCESSED: "file_processed",
   RAG_EVALUATION: "rag_evaluation",
@@ -112,4 +115,3 @@ export const SSEEventType = {
 } as const;
 
 export type SSEEventTypeValue = (typeof SSEEventType)[keyof typeof SSEEventType];
-

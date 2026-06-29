@@ -24,11 +24,13 @@ from src.api.schemas.eval import (
     EvalExperimentCreate,
     EvalExperimentRunCreate,
     EvalGateDryRunRequest,
+    EvalTraceFeedbackRequest,
     KbRagasBatchScoreRequest,
     KbRagasScoreRetrievalRequest,
 )
 from src.api.v1 import eval as eval_routes
 from src.api.v1.eval import (
+    batch_score_kb_ragas_dataset,
     compare_eval_experiment_runs,
     create_eval_dataset,
     create_eval_evaluator,
@@ -53,7 +55,7 @@ from src.api.v1.eval import (
     list_eval_examples,
     list_eval_experiments,
     list_eval_traces,
-    batch_score_kb_ragas_dataset,
+    preview_eval_trace_feedback,
     run_eval_evaluator_async,
     run_eval_experiment,
     score_kb_ragas_retrieval,
@@ -324,10 +326,13 @@ class FakeTraceRepository:
         skipped = 0
         for item in kwargs["examples"]:
             case_id = str(item.get("case_id") or "").strip()
-            if mode == "skip_duplicates" and case_id:
-                if case_id in existing_case_ids or case_id in seen_in_request:
-                    skipped += 1
-                    continue
+            if (
+                mode == "skip_duplicates"
+                and case_id
+                and (case_id in existing_case_ids or case_id in seen_in_request)
+            ):
+                skipped += 1
+                continue
             examples.append(
                 {
                     **self.example,
@@ -976,6 +981,47 @@ async def test_eval_example_from_trace_preserves_requested_trace_family(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_eval_trace_feedback_preview_builds_redacted_case_and_proposal(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.detail = {
+        "trace": _trace_row(
+            status="failed",
+            input_preview="Authorization: Bearer raw-token user asks",
+            output_preview="api_key=secret-value failed",
+            metadata={"raw_input": "do not copy", "note": "token=secret-value"},
+        ),
+        "events": [{"event_type": "tool_error", "payload": {"tool_name": "search"}}],
+        "spans": [{"span_kind": "tool", "name": "search", "status": "failed"}],
+        "scores": [],
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await preview_eval_trace_feedback(
+        body=EvalTraceFeedbackRequest(
+            trace_ids=["11111111-1111-4111-8111-111111111111"],
+            dataset_id=repo.dataset["dataset_id"],
+        ),
+        request=_request(),
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    serialized = json.dumps(result.model_dump(), default=str)
+    assert result.patterns[0].failure_mode == "tool_error"
+    assert result.clusters[0]["count"] == 1
+    assert result.dataset_cases[0].metadata["tenant_id"] == "tenant-a"
+    assert result.dataset_cases[0].source_trace_id == "11111111-1111-4111-8111-111111111111"
+    assert result.dataset_cases[0].expected_trajectory["replay"]["trace_family"] == "assistant"
+    assert result.import_request is not None
+    assert result.proposals[0]["status"] == "proposed"
+    assert result.proposals[0]["auto_apply"] is False
+    assert "raw-token" not in serialized
+    assert "secret-value" not in serialized
+    assert repo.calls[-1][0] == "detail"
+    assert repo.calls[-1][1]["tenant_id"] == "tenant-a"
+    assert repo.calls[-1][1]["user_id"] == "user-a"
+
+
+@pytest.mark.asyncio
 async def test_eval_list_get_endpoints_use_trace_read_capability(monkeypatch) -> None:
     repo = FakeTraceRepository()
     monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
@@ -1220,6 +1266,7 @@ def test_eval_openapi_paths_are_registered() -> None:
     assert "/api/v1/eval/datasets/{dataset_id}/examples:import" in paths
     assert "/api/v1/eval/datasets/{dataset_id}/examples:export" in paths
     assert "/api/v1/eval/datasets/{dataset_id}/examples:from-trace" in paths
+    assert "/api/v1/eval/trace-feedback:preview" in paths
     assert "/api/v1/eval/evaluators" in paths
     assert "/api/v1/eval/evaluators/{evaluator_id}:run-async" in paths
     assert "/api/v1/eval/experiments" in paths

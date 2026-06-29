@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -33,6 +33,7 @@ class MockUserContext:
 
 class FakeModelInfo:
     supports_vision = False
+    context_window = 128000
 
 
 class FakeModelRegistry:
@@ -185,6 +186,48 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_first_persists_checkpoints_without_prompt_text() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    model = FakeModelRegistry(
+        scripted=[
+            [{"content": "Hello", "usage": {"input_tokens": 1, "output_tokens": 1}}],
+        ]
+    )
+    tool_invoker = FakeToolInvoker({})
+    gateway = AssistantExecutionGateway(tool_invoker=tool_invoker, database=None)
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    user = MockUserContext(user_id="u1")
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=2)
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi with Authorization: Bearer raw-token",
+        config=cfg,
+        history=[],
+    ):
+        events.append(ev)
+
+    run_id = next(ev.data["run_id"] for ev in events if ev.event_type == "run_started")
+    checkpoints = gateway._checkpoints[run_id]  # AUDIT-OK: DB-less test fallback only
+    phases = [checkpoint.phase for checkpoint in checkpoints]
+    serialized = str([gateway._checkpoint_to_dict(checkpoint) for checkpoint in checkpoints])
+
+    assert "run_started" in phases
+    assert "model_turn_started" in phases
+    assert "run_succeeded" in phases
+    assert "raw-token" not in serialized
+    assert all(checkpoint.message_state_hash for checkpoint in checkpoints)
+
+
+@pytest.mark.asyncio
 async def test_streaming_first_emits_context_budget_without_prompt_text() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -218,7 +261,55 @@ async def test_streaming_first_emits_context_budget_without_prompt_text() -> Non
     assert budget_payload["message_count"] >= 2
     assert budget_payload["tool_count"] >= 0
     assert budget_payload["system_prompt_chars"] > 0
+    assert len(budget_payload["prompt_prefix_hash"]) == 16
+    assert budget_payload["prompt_prefix_message_count"] == 1
+    assert budget_payload["prompt_prefix_chars"] == budget_payload["system_prompt_chars"]
+    assert len(budget_payload["tool_schema_order_hash"]) == 16
+    assert len(budget_payload["tool_schema_names_hash"]) == 16
+    assert budget_payload["context_estimated_input_tokens"] > 0
+    assert budget_payload["context_window_tokens"] == 128000
+    assert 0 <= budget_payload["context_utilization"] <= 1
     assert "super-secret-value" not in json.dumps(budget_payload, default=str)
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_usage_preserves_provider_cache_metrics() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "content": "Hello",
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "prompt_tokens_details": {"cached_tokens": 44},
+                        "completion_tokens": 12,
+                    },
+                }
+            ],
+        ]
+    )
+    loop = AgentLoop(model_registry=model)
+    user = MockUserContext(user_id="u1")
+    cfg = AgentLoopConfig(model_id="test", max_tool_iterations=2)
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi",
+        config=cfg,
+        history=[],
+    ):
+        events.append(ev)
+
+    run_finished = next(ev.data for ev in events if ev.event_type == "run_finished")
+    usage = run_finished["metadata"]["usage"]
+
+    assert usage["input_tokens"] == 100
+    assert usage["output_tokens"] == 12
+    assert usage["cached_input_tokens"] == 44
 
 
 @pytest.mark.asyncio
@@ -496,6 +587,220 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
     assert approval_payload["tool_name"] == "generate_image"
     assert approval_payload["status"] == "pending"
     assert "super-secret-value" not in json.dumps(approval_payload, default=str)
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_confirm_approval_resume_executes_once() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    user = MockUserContext(user_id="u1")
+
+    def make_loop(arguments: dict[str, Any]) -> AgentLoop:
+        tool_calls = [
+            {
+                "id": "tc_approval",
+                "function": {
+                    "name": "generate_image",
+                    "arguments": json.dumps(arguments),
+                },
+            }
+        ]
+        model = FakeModelRegistry(
+            scripted=[[{"tool_calls": tool_calls}], [{"content": "done"}]]
+        )
+        loop = AgentLoop(
+            model_registry=model,
+            tool_invoker=invoker,
+            execution_gateway=gateway,
+        )
+        loop.middleware_chain.add(
+            PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
+        )
+        return loop
+
+    first_events = []
+    async for ev in make_loop({"prompt": "cat"}).execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        first_events.append(ev)
+
+    first_approval = next(
+        ev.data for ev in first_events if ev.event_type == "approval_required"
+    )
+    approval_id = first_approval["approval_id"]
+    assert approval_id
+    assert invoker.invocation_count == 0
+
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+    assert approved["status"] == "approved"
+
+    async for _ev in make_loop({"prompt": "cat", "_approval_id": approval_id}).execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        pass
+
+    assert invoker.invocation_count == 1
+    assert invoker.invocations == [("generate_image", {"prompt": "cat"})]
+
+    duplicate_events = []
+    async for ev in make_loop({"prompt": "cat", "_approval_id": approval_id}).execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        duplicate_events.append(ev)
+
+    assert invoker.invocation_count == 1
+    duplicate_approval = next(
+        ev.data for ev in duplicate_events if ev.event_type == "approval_required"
+    )
+    assert duplicate_approval["approval_id"] != approval_id
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_runs_stream_event_middleware() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    seen: list[str] = []
+
+    class RecordingStreamMiddleware:
+        name = "recording-stream"
+
+        async def on_stream_event(self, ctx: Any, event: Any) -> Any:
+            del ctx
+            seen.append(event.event_type)
+            if event.event_type == "text_delta":
+                return replace(event, data=f"{event.data}!")
+            return event
+
+    model = FakeModelRegistry(scripted=[[{"content": "hello"}]])
+    loop = AgentLoop(model_registry=model)
+    loop.middleware_chain.add(RecordingStreamMiddleware())
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    assert seen.index("run_started") < seen.index("text_delta")
+    assert "text_delta" in seen
+    assert seen[-1] == "run_finished"
+    assert next(ev.data for ev in events if ev.event_type == "text_delta") == "hello!"
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_rewritten_terminal_error_marks_run_failed() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    class TerminalErrorMiddleware:
+        name = "terminal-error"
+
+        async def on_stream_event(self, ctx: Any, event: Any) -> Any:
+            del ctx
+            if event.event_type != "run_finished":
+                return None
+            return replace(
+                event,
+                event_type="run_error",
+                data={"run_id": event.data["run_id"], "error": "rewritten_terminal_error"},
+            )
+
+    model = FakeModelRegistry(scripted=[[{"content": "ok"}]])
+    tool_invoker = FakeToolInvoker({})
+    gateway = AssistantExecutionGateway(tool_invoker=tool_invoker, database=None)
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+        execution_gateway=gateway,
+    )
+    loop.middleware_chain.add(TerminalErrorMiddleware())
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    event_types = [ev.event_type for ev in events]
+    run_id = next(ev.data["run_id"] for ev in events if ev.event_type == "run_started")
+    run_error = next(ev.data for ev in events if ev.event_type == "run_error")
+
+    assert "run_finished" not in event_types
+    assert run_error["error"] == "rewritten_terminal_error"
+    assert gateway._runs[run_id].status == "failed"  # AUDIT-OK: DB-less test fallback only
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_runs_error_middleware() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig, AgentLoopEvent
+
+    seen: list[str] = []
+
+    class RecordingErrorMiddleware:
+        name = "recording-error"
+
+        async def on_error(self, ctx: Any, error: BaseException, phase: Any):
+            seen.append(str(error))
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type="middleware_error_seen",
+                data={"run_id": ctx.run_id},
+            )
+
+    model = FakeFailingModelRegistry("provider failure")
+    loop = AgentLoop(model_registry=model)
+    loop.middleware_chain.add(RecordingErrorMiddleware())
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    assert seen == ["provider failure"]
+    assert any(ev.event_type == "middleware_error_seen" for ev in events)
+    assert any(ev.event_type == "error" for ev in events)
 
 
 @pytest.mark.asyncio

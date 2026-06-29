@@ -12,9 +12,10 @@ a scoring system that:
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ai_gateway_core.logging import get_logger
+
 from .constants import ToolName
 
 if TYPE_CHECKING:
@@ -257,7 +258,16 @@ def select_tools(
     # higher. For builtins vs skills vs MCP, a user's actual intent —
     # captured in the score — is a better budget heuristic than a static
     # tier preference.
-    scored.sort(key=lambda x: (0 if x[2] == TIER_ALWAYS else 1, -x[1]))
+    # Tie-break by tier and name so the model sees deterministic tool schema
+    # order even when registries return tools in a different order.
+    scored.sort(
+        key=lambda x: (
+            0 if x[2] == TIER_ALWAYS else 1,
+            -x[1],
+            x[2],
+            x[0].name.lower(),
+        )
+    )
 
     # Select within budget
     selected: list[ToolDefinition] = []

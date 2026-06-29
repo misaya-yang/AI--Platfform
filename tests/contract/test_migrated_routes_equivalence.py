@@ -13,19 +13,17 @@ from __future__ import annotations
 
 import httpx
 import jwt as pyjwt
-import pytest
-from fastapi import Depends, FastAPI, Request
-from fastapi.testclient import TestClient
-
 from ai_gateway_core.auth.gateway_secret import GatewaySecret, InMemoryReplayStore
 from assistant_service.auth import GatewaySecretAuthMiddleware
-
+from fastapi import Depends, FastAPI, Request
+from fastapi.testclient import TestClient
 
 JWT_SECRET = "e2e-jwt-secret-32-chars-XXXXXXXXX"
 GATEWAY_SECRET = "e2e-gateway-secret-32-chars-YYYYYYY"
 
 
-def _token(*, roles: list[str] = ["admin"], tier: str = "admin") -> str:
+def _token(*, roles: list[str] | None = None, tier: str = "admin") -> str:
+    roles = roles or ["admin"]
     return pyjwt.encode(
         {
             "sub": "t-user",
@@ -222,7 +220,7 @@ def test_models_response_has_required_keys(monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert "models" in body and body["models"]
-    assert MODELS_REQUIRED_KEYS <= set(body["models"][0].keys()), (
+    assert set(body["models"][0].keys()) >= MODELS_REQUIRED_KEYS, (
         f"missing keys: {MODELS_REQUIRED_KEYS - set(body['models'][0].keys())}"
     )
 
@@ -237,7 +235,7 @@ def test_datasets_response_has_required_keys(monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert "datasets" in body and body["datasets"]
-    assert DATASETS_REQUIRED_KEYS <= set(body["datasets"][0].keys())
+    assert set(body["datasets"][0].keys()) >= DATASETS_REQUIRED_KEYS
 
 
 def test_config_response_has_required_keys(monkeypatch):
@@ -249,7 +247,7 @@ def test_config_response_has_required_keys(monkeypatch):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert CONFIG_REQUIRED_KEYS <= set(body.keys())
+    assert set(body.keys()) >= CONFIG_REQUIRED_KEYS
 
 
 def test_as_models_returns_gateway_schema_keys():
@@ -354,7 +352,7 @@ def test_tools_response_has_required_keys(monkeypatch):
     body = r.json()
     assert "tools" in body and body["tools"]
     first = body["tools"][0]
-    assert TOOLS_REQUIRED_KEYS <= set(first.keys())
+    assert set(first.keys()) >= TOOLS_REQUIRED_KEYS
     # Type checks
     assert isinstance(first["name"], str)
     assert isinstance(first["description"], str)
@@ -371,7 +369,7 @@ def test_policies_response_has_required_keys(monkeypatch):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert POLICIES_REQUIRED_TOP_LEVEL <= set(body.keys())
+    assert set(body.keys()) >= POLICIES_REQUIRED_TOP_LEVEL
     # policies must be a dict (shape: Dict[str, Any])
     assert isinstance(body["policies"], dict)
 
@@ -395,7 +393,7 @@ def test_chat_response_has_required_keys(monkeypatch):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert CHAT_REQUIRED_KEYS <= set(body.keys()), (
+    assert set(body.keys()) >= CHAT_REQUIRED_KEYS, (
         f"missing: {CHAT_REQUIRED_KEYS - set(body.keys())}"
     )
     assert isinstance(body["content"], str)
@@ -407,13 +405,16 @@ def test_chat_response_has_required_keys(monkeypatch):
 def test_as_tools_returns_gateway_schema_keys():
     import inspect
 
-    from assistant_service.api.routes.tools import list_tools
+    from assistant_service.api.routes.tools import _tool_catalog_entry, list_tools
 
-    source = inspect.getsource(list_tools)
+    source = inspect.getsource(_tool_catalog_entry)
     for key in TOOLS_REQUIRED_KEYS | {"when_to_use", "when_not_to_use"}:
         assert f'"{key}"' in source, (
-            f"AS /tools handler missing schema key: {key}"
+            f"AS /tools serializer missing schema key: {key}"
         )
+    assert '"tools"' in inspect.getsource(list_tools), (
+        "AS /tools handler missing top-level tools key"
+    )
 
 
 def test_as_policies_returns_top_level_policies_key():
@@ -492,7 +493,8 @@ def test_run_response_has_required_top_level_key(monkeypatch):
     """Proxied GET /runs/{id} → AS returns {"run": {...}} — top-level key
     matches gateway's RunStatusResponse."""
     fake_as_app = FastAPI()
-    from assistant_service.auth import GatewaySecretAuthMiddleware, get_user_context as as_get_user_context
+    from assistant_service.auth import GatewaySecretAuthMiddleware
+    from assistant_service.auth import get_user_context as as_get_user_context
 
     gs = GatewaySecret(secret=GATEWAY_SECRET, replay_store=InMemoryReplayStore())
     fake_as_app.add_middleware(
@@ -522,7 +524,7 @@ def test_run_response_has_required_top_level_key(monkeypatch):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert RUN_REQUIRED_TOP_LEVEL <= set(body.keys())
+    assert set(body.keys()) >= RUN_REQUIRED_TOP_LEVEL
     assert isinstance(body["run"], dict)
     assert body["run"]["run_id"] == "r1"
 
@@ -530,7 +532,8 @@ def test_run_response_has_required_top_level_key(monkeypatch):
 def test_approval_response_has_required_top_level_key(monkeypatch):
     """Proxied POST /approvals/{id} → AS returns {"approval": {...}}."""
     fake_as_app = FastAPI()
-    from assistant_service.auth import GatewaySecretAuthMiddleware, get_user_context as as_get_user_context
+    from assistant_service.auth import GatewaySecretAuthMiddleware
+    from assistant_service.auth import get_user_context as as_get_user_context
 
     gs = GatewaySecret(secret=GATEWAY_SECRET, replay_store=InMemoryReplayStore())
     fake_as_app.add_middleware(
@@ -569,23 +572,29 @@ def test_approval_response_has_required_top_level_key(monkeypatch):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert APPROVAL_REQUIRED_TOP_LEVEL <= set(body.keys())
+    assert set(body.keys()) >= APPROVAL_REQUIRED_TOP_LEVEL
     assert isinstance(body["approval"], dict)
     assert body["approval"]["status"] == "approved"
 
 
 def test_as_run_approval_routes_exist_and_delegate_to_assistant_service():
-    """AS-side runs/approvals must delegate to AssistantService methods,
+    """AS-side runs/approvals/resume must delegate to AssistantService methods,
     not return stubs."""
     import inspect
 
     from assistant_service.api.routes.runs_approvals import (
-        get_run_status as as_run,
         approve_tool_call as as_approval,
+    )
+    from assistant_service.api.routes.runs_approvals import (
+        get_run_status as as_run,
+    )
+    from assistant_service.api.routes.runs_approvals import (
+        prepare_run_resume as as_resume,
     )
 
     run_src = inspect.getsource(as_run)
     approval_src = inspect.getsource(as_approval)
+    resume_src = inspect.getsource(as_resume)
 
     assert "get_run_status" in run_src, (
         "AS /runs/{id} must delegate to AssistantService.get_run_status()"
@@ -593,3 +602,17 @@ def test_as_run_approval_routes_exist_and_delegate_to_assistant_service():
     assert "approve_tool_request" in approval_src, (
         "AS /approvals/{id} must delegate to AssistantService.approve_tool_request()"
     )
+    assert "prepare_run_resume" in resume_src, (
+        "AS /runs/{id}/resume must delegate to AssistantService.prepare_run_resume()"
+    )
+
+
+def test_as_resume_route_body_is_optional_for_probe_requests():
+    """POST /runs/{id}/resume should allow a probe without approval_id."""
+    import inspect
+
+    from assistant_service.api.routes.runs_approvals import prepare_run_resume
+
+    body = inspect.signature(prepare_run_resume).parameters["body"]
+
+    assert body.default is None

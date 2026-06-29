@@ -66,11 +66,16 @@ from ..memory.compressor import (
     ContextCompressor,
     ModelRegistryLLMService,
 )
+from ..quality.cache_optimizer import (
+    build_cache_context_metrics,
+    normalize_provider_cache_usage,
+)
 from ..rag.context_engine import (
     ContextBudgetManager,
     ContextEngine,
     ContextStructure,
     estimate_history_tokens,
+    estimate_message_tokens,
     format_long_term_memory,
 )
 from ..rag.context_metrics import ContextMetricsBuilder
@@ -102,7 +107,7 @@ from .artifact_persister import (
 from .artifact_persister import (
     sanitize_output_files as _artifact_sanitize_output_files,
 )
-from .middleware import MiddlewareChain, VerdictKind
+from .middleware import MiddlewareChain, ToolVerdict, VerdictKind
 from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
 from .middlewares.runtime_memory import RuntimeMemoryMiddleware
@@ -624,6 +629,18 @@ class AgentLoop:
             occurred_at=event.timestamp,
         )
 
+    async def _prepare_stream_event(
+        self, ctx: AgentLoopContext, event: AgentLoopEvent
+    ) -> AgentLoopEvent:
+        return await self.middleware_chain.run_on_stream_event(ctx, event)
+
+    async def _capture_and_prepare_stream_event(
+        self, ctx: AgentLoopContext, event: AgentLoopEvent
+    ) -> AgentLoopEvent:
+        prepared = await self._prepare_stream_event(ctx, event)
+        self._capture_trace_event(ctx, prepared)
+        return prepared
+
     def _capture_rag_retrieval_trace(
         self,
         ctx: AgentLoopContext,
@@ -661,6 +678,41 @@ class AgentLoop:
             terminal_event_type=terminal_event_type,
             terminal_sequence_no=self._next_trace_sequence(ctx) if terminal_event_type else None,
         )
+
+    async def _save_checkpoint(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        phase: str,
+        iteration: int = 0,
+        messages: list[dict[str, Any]] | None = None,
+        pending_tool: dict[str, Any] | None = None,
+        approval_id: str | None = None,
+        idempotency_keys: dict[str, Any] | None = None,
+        resume_payload: dict[str, Any] | None = None,
+        status: str = "running",
+        error: str | None = None,
+    ) -> None:
+        if not (self.execution_gateway and self.execution_gateway.enabled):
+            return
+        try:
+            await self.execution_gateway.save_run_checkpoint(
+                run_id=ctx.run_id,
+                tenant_id=ctx.tenant_id,
+                user_id=ctx.user_id,
+                session_id=ctx.session_id,
+                phase=phase,
+                iteration=iteration,
+                messages=messages,
+                pending_tool=pending_tool,
+                approval_id=approval_id,
+                idempotency_keys=idempotency_keys,
+                resume_payload=resume_payload,
+                status=status,
+                error=error,
+            )
+        except Exception:
+            logger.exception("Failed to persist assistant run checkpoint")
 
     def _get_subagent_manager(self) -> SubAgentManager:
         """Return a reusable SubAgentManager, creating it on first access."""
@@ -890,6 +942,11 @@ class AgentLoop:
             run_error: str | None = None
             terminal_event_recorded = False
 
+            def _terminal_error_message(event: AgentLoopEvent) -> str:
+                if isinstance(event.data, dict):
+                    return str(event.data.get("message") or event.data.get("error") or "")
+                return str(event.data or "")
+
             try:
                 if self.execution_gateway and self.execution_gateway.enabled:
                     await self.execution_gateway.start_run(
@@ -913,6 +970,16 @@ class AgentLoop:
                         else None,
                         request_preview=ctx.message[:500],
                     )
+                    await self._save_checkpoint(
+                        ctx,
+                        phase="run_started",
+                        status="running",
+                        resume_payload={
+                            "mode": "streaming_first",
+                            "task_id": task_id,
+                            "queue_mode": config.queue_mode,
+                        },
+                    )
 
                 if ctx.routed_request:
                     gateway_event = AgentLoopEvent(
@@ -931,7 +998,9 @@ class AgentLoop:
                             "context_detail": ctx.routed_request.context_detail,
                         },
                     )
-                    self._capture_trace_event(ctx, gateway_event)
+                    gateway_event = await self._capture_and_prepare_stream_event(
+                        ctx, gateway_event
+                    )
                     yield gateway_event
 
                 # Emit run_started with task_id for cancellation
@@ -948,7 +1017,9 @@ class AgentLoop:
                         "mode": "streaming_first",
                     },
                 )
-                self._capture_trace_event(ctx, run_started_event)
+                run_started_event = await self._capture_and_prepare_stream_event(
+                    ctx, run_started_event
+                )
                 yield run_started_event
                 if config.queue_mode != "collect":
                     queue_event = AgentLoopEvent(
@@ -960,7 +1031,9 @@ class AgentLoop:
                             "run_id": ctx.run_id,
                         },
                     )
-                    self._capture_trace_event(ctx, queue_event)
+                    queue_event = await self._capture_and_prepare_stream_event(
+                        ctx, queue_event
+                    )
                     yield queue_event
 
                 # Model-driven streaming loop (Manus-style).
@@ -979,17 +1052,17 @@ class AgentLoop:
                     history=history,
                     task_ctx=task_ctx,
                 ):
+                    event = await self._capture_and_prepare_stream_event(ctx, event)
                     # If streaming-first hits an unexpected internal exception, it emits an "error" event.
                     # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
                     if event.event_type == "error" and not had_fatal_error:
                         had_fatal_error = True
-                        if isinstance(event.data, dict):
-                            fatal_error_message = str(
-                                event.data.get("message") or event.data.get("error") or ""
-                            )
-                        else:
-                            fatal_error_message = str(event.data)
-                    self._capture_trace_event(ctx, event)
+                        fatal_error_message = _terminal_error_message(event)
+                    elif event.event_type == StreamEventType.RUN_ERROR.value:
+                        had_fatal_error = True
+                        terminal_event_recorded = True
+                        fatal_error_message = _terminal_error_message(event)
+                        run_status = "failed"
                     yield event
 
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
@@ -998,18 +1071,23 @@ class AgentLoop:
                     run_error = _redact_trace_text(
                         fatal_error_message or "AgentLoop streaming-first failed"
                     )
-                    run_error_event = AgentLoopEvent(
-                        phase=AgentLoopPhase.GENERATION_STORAGE,
-                        event_type=StreamEventType.RUN_ERROR.value,
-                        data={
-                            "run_id": ctx.run_id,
-                            "thread_id": session_id,
-                            "error": run_error,
-                        },
-                    )
-                    self._capture_trace_event(ctx, run_error_event)
-                    terminal_event_recorded = True
-                    yield run_error_event
+                    if not terminal_event_recorded:
+                        run_error_event = AgentLoopEvent(
+                            phase=AgentLoopPhase.GENERATION_STORAGE,
+                            event_type=StreamEventType.RUN_ERROR.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": session_id,
+                                "error": run_error,
+                            },
+                        )
+                        run_error_event = await self._capture_and_prepare_stream_event(
+                            ctx, run_error_event
+                        )
+                        terminal_event_recorded = (
+                            run_error_event.event_type == StreamEventType.RUN_ERROR.value
+                        )
+                        yield run_error_event
                 else:
                     run_status = "succeeded"
                     run_finished_event = AgentLoopEvent(
@@ -1024,13 +1102,33 @@ class AgentLoop:
                             },
                         },
                     )
-                    self._capture_trace_event(ctx, run_finished_event)
-                    terminal_event_recorded = True
+                    run_finished_event = await self._capture_and_prepare_stream_event(
+                        ctx, run_finished_event
+                    )
+                    if run_finished_event.event_type == StreamEventType.RUN_ERROR.value:
+                        run_status = "failed"
+                        run_error = _redact_trace_text(
+                            _terminal_error_message(run_finished_event)
+                            or "AgentLoop streaming-first failed"
+                        )
+                        terminal_event_recorded = True
+                    else:
+                        terminal_event_recorded = (
+                            run_finished_event.event_type
+                            == StreamEventType.RUN_FINISHED.value
+                        )
                     yield run_finished_event
 
             except Exception as loop_error:
                 run_status = "failed"
                 run_error = _redact_trace_text(loop_error)
+                async for error_event in self.middleware_chain.run_on_error(
+                    ctx, loop_error, AgentLoopPhase.GENERATION_STORAGE
+                ):
+                    error_event = await self._capture_and_prepare_stream_event(
+                        ctx, error_event
+                    )
+                    yield error_event
                 raise  # re-raise after recording status
             finally:
                 final_status = run_status
@@ -1051,6 +1149,17 @@ class AgentLoop:
                         )
                     except Exception:
                         logger.exception("Failed to persist run completion")
+                    await self._save_checkpoint(
+                        ctx,
+                        phase=f"run_{final_status}",
+                        status=final_status,
+                        resume_payload={
+                            "mode": "streaming_first",
+                            "usage": ctx.usage or {},
+                            "generated_content_chars": len(ctx.generated_content or ""),
+                        },
+                        error=run_error,
+                    )
                 terminal_event_type = None
                 if not terminal_event_recorded:
                     terminal_event_type = (
@@ -1618,6 +1727,8 @@ class AgentLoop:
             model_info = (
                 self.model_registry.get_model(ctx.config.model_id) if self.model_registry else None
             )
+            model_provider = getattr(model_info, "provider", None)
+            provider_name = str(getattr(model_provider, "value", model_provider) or "")
             model_supports_vision = bool(getattr(model_info, "supports_vision", False))
 
             # Fire-and-forget persist user message for session restoration.
@@ -2056,6 +2167,19 @@ class AgentLoop:
             processed_file_metadata = (
                 getattr(processed_files, "file_metadata", []) if processed_files else []
             )
+            tool_schema_chars = len(json.dumps(tools, ensure_ascii=False, default=str)) if tools else 0
+            context_estimated_input_tokens = sum(
+                estimate_message_tokens(message) for message in messages
+            ) + max(0, tool_schema_chars // 4)
+            model_context_window = int(getattr(model_info, "context_window", 0) or 0)
+            cache_context_metrics = build_cache_context_metrics(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=tools,
+                provider=provider_name,
+                context_estimated_input_tokens=context_estimated_input_tokens,
+                model_context_window=model_context_window,
+            )
             yield AgentLoopEvent(
                 phase=phase,
                 event_type=StreamEventType.CONTEXT_BUDGET.value,
@@ -2072,6 +2196,7 @@ class AgentLoop:
                     "dynamic_context_chars": len(dynamic_context_block),
                     "file_count": len(processed_file_metadata),
                     "context_detail_enabled": bool(ctx.config.context_detail),
+                    **cache_context_metrics,
                 },
             )
 
@@ -2157,6 +2282,17 @@ class AgentLoop:
                         not in denied_tools
                     ]
 
+                await self._save_checkpoint(
+                    ctx,
+                    phase="model_turn_started",
+                    iteration=iteration,
+                    messages=messages,
+                    resume_payload={
+                        "tool_count": len(tools_for_call or []),
+                        "generated_content_chars": len(ctx.generated_content or ""),
+                    },
+                )
+
                 tool_calls_accumulated: dict[str, dict[str, Any]] = {}
                 tool_call_order: list[str] = []
                 anonymous_tool_counter = 0
@@ -2233,7 +2369,11 @@ class AgentLoop:
 
                     # Track usage
                     if delta.usage:
-                        for key, value in delta.usage.items():
+                        normalized_usage = normalize_provider_cache_usage(
+                            delta.usage,
+                            provider_name,
+                        )
+                        for key, value in normalized_usage.items():
                             if isinstance(value, (int, float)):
                                 ivalue = int(value)
                                 call_usage[key] = max(call_usage.get(key, 0), ivalue)
@@ -2413,8 +2553,76 @@ class AgentLoop:
                     _verdict = await self.middleware_chain.run_on_tool_call(
                         ctx, tool_name, tool_args
                     )
+                    middleware_approval_id_to_consume: str | None = None
+                    if not _verdict.is_allow:
+                        existing_approval_id = tool_args.get("_approval_id")
+                        if (
+                            _verdict.kind is VerdictKind.CONFIRM
+                            and isinstance(existing_approval_id, str)
+                            and existing_approval_id
+                            and self.execution_gateway
+                            and self.execution_gateway.enabled
+                        ):
+                            try:
+                                approval_granted = await self.execution_gateway.is_approval_granted(
+                                    approval_id=existing_approval_id,
+                                    tenant_id=ctx.tenant_id,
+                                    user_id=ctx.user_id,
+                                    tool_name=tool_name,
+                                    arguments=tool_args,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to validate middleware approval %s",
+                                    existing_approval_id,
+                                )
+                                approval_granted = False
+                            if approval_granted:
+                                middleware_approval_id_to_consume = existing_approval_id
+                                _verdict = ToolVerdict.allow(
+                                    source=_verdict.source or "approval"
+                                )
+
                     if not _verdict.is_allow:
                         if _verdict.kind is VerdictKind.CONFIRM:
+                            pending_approval_id: str | None = None
+                            if self.execution_gateway and self.execution_gateway.enabled:
+                                try:
+                                    approval_args = {
+                                        key: value
+                                        for key, value in tool_args.items()
+                                        if key not in {"_approval_id", "_steer_payload"}
+                                    }
+                                    pending_approval_id = (
+                                        await self.execution_gateway.request_tool_approval(
+                                            context=self._build_invocation_context(
+                                                ctx, user=user
+                                            ),
+                                            tool_name=tool_name,
+                                            arguments=approval_args,
+                                            reason=_verdict.reason
+                                            or "Approval required by middleware policy",
+                                        )
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to persist middleware approval for %s",
+                                        tool_name,
+                                    )
+                            await self._save_checkpoint(
+                                ctx,
+                                phase="approval_pending",
+                                iteration=iteration,
+                                messages=messages,
+                                pending_tool={
+                                    "tool_id": tool_id,
+                                    "tool_name": tool_name,
+                                    "arguments": tool_args,
+                                },
+                                approval_id=pending_approval_id,
+                                status="blocked",
+                                resume_payload={"source": "middleware_confirm"},
+                            )
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type="approval_required",
@@ -2424,6 +2632,7 @@ class AgentLoop:
                                     "session_id": ctx.session_id,
                                     "tool_id": tool_id,
                                     "tool_name": tool_name,
+                                    "approval_id": pending_approval_id,
                                     "reason": _redact_trace_text(_verdict.reason),
                                     "source": _verdict.source,
                                     "status": "pending",
@@ -2451,6 +2660,19 @@ class AgentLoop:
                         )
                         denied_tools.add(tool_name)
                         continue
+
+                    await self._save_checkpoint(
+                        ctx,
+                        phase="tool_call_pending",
+                        iteration=iteration,
+                        messages=messages,
+                        pending_tool={
+                            "tool_id": tool_id,
+                            "tool_name": tool_name,
+                            "arguments": tool_args,
+                        },
+                        status="running",
+                    )
 
                     # Manus-style step card (parent) for this tool call
                     step_id = f"step_{tool_id}"
@@ -2664,12 +2886,25 @@ class AgentLoop:
                                             tool_id=tool_id,
                                         ),
                                     )
-                            result = await self._invoke_tool(
-                                ctx=ctx,
-                                user=user,
-                                tool_name=tool_name,
-                                arguments=tool_args,
-                            )
+                            try:
+                                result = await self._invoke_tool(
+                                    ctx=ctx,
+                                    user=user,
+                                    tool_name=tool_name,
+                                    arguments=tool_args,
+                                )
+                            finally:
+                                if (
+                                    middleware_approval_id_to_consume
+                                    and self.execution_gateway
+                                    and self.execution_gateway.enabled
+                                ):
+                                    await self.execution_gateway.consume_tool_approval(
+                                        approval_id=middleware_approval_id_to_consume,
+                                        tenant_id=ctx.tenant_id,
+                                        user_id=ctx.user_id,
+                                        tool_name=tool_name,
+                                    )
                             # Thread result through on_tool_result middlewares
                             # (response cap, future sanitizers). Middlewares
                             # return None to pass through or a replacement
@@ -2779,6 +3014,24 @@ class AgentLoop:
                                 )
 
                             if tool_error == "APPROVAL_REQUIRED":
+                                await self._save_checkpoint(
+                                    ctx,
+                                    phase="approval_pending",
+                                    iteration=iteration,
+                                    messages=messages,
+                                    pending_tool={
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        "arguments": tool_args,
+                                    },
+                                    approval_id=tool_metadata.get("approval_id"),
+                                    idempotency_keys={
+                                        "command_id": tool_metadata.get("command_id"),
+                                        "queue_state": tool_metadata.get("queue_state"),
+                                    },
+                                    status="blocked",
+                                    resume_payload={"source": "execution_gateway"},
+                                )
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="approval_required",
@@ -3026,6 +3279,32 @@ class AgentLoop:
                             },
                         )
                         tool_status = "completed" if tool_success else "error"
+                        await self._save_checkpoint(
+                            ctx,
+                            phase="tool_call_completed",
+                            iteration=iteration,
+                            messages=messages,
+                            pending_tool={
+                                "tool_id": tool_id,
+                                "tool_name": tool_name,
+                                "arguments": tool_args,
+                            },
+                            idempotency_keys={
+                                "command_id": tool_metadata.get("command_id")
+                                if isinstance(tool_metadata, dict)
+                                else None,
+                                "queue_state": tool_metadata.get("queue_state")
+                                if isinstance(tool_metadata, dict)
+                                else None,
+                            },
+                            status="running",
+                            resume_payload={
+                                "tool_success": tool_success,
+                                "tool_status": tool_status,
+                                "duration_ms": tool_duration_ms,
+                            },
+                            error=tool_error_for_event,
+                        )
                         yield AgentLoopEvent(
                             phase=phase,
                             event_type=StreamEventType.TOOL_CALL_RESULT.value,
@@ -3105,6 +3384,20 @@ class AgentLoop:
                             tool_name=tool_name,
                             tool_result_text=tool_result,
                             tool_metadata={},
+                        )
+                        await self._save_checkpoint(
+                            ctx,
+                            phase="tool_call_failed",
+                            iteration=iteration,
+                            messages=messages,
+                            pending_tool={
+                                "tool_id": tool_id,
+                                "tool_name": tool_name,
+                                "arguments": tool_args,
+                            },
+                            status="running",
+                            resume_payload={"tool_success": False},
+                            error=safe_error,
                         )
                         yield AgentLoopEvent(
                             phase=phase,
@@ -3345,7 +3638,10 @@ class AgentLoop:
                                     data=_text_chunk,
                                 )
                         if _delta.usage:
-                            for _k, _v in _delta.usage.items():
+                            for _k, _v in normalize_provider_cache_usage(
+                                _delta.usage,
+                                provider_name,
+                            ).items():
                                 if isinstance(_v, (int, float)):
                                     forced_usage[_k] = max(forced_usage.get(_k, 0), int(_v))
                                 elif _v is not None:
@@ -3659,6 +3955,8 @@ class AgentLoop:
         except Exception as e:
             safe_error = _redact_trace_text(e)
             logger.error("[STREAMING-FIRST] Error: %s", safe_error)
+            async for error_event in self.middleware_chain.run_on_error(ctx, e, phase):
+                yield error_event
             yield AgentLoopEvent(
                 phase=phase,
                 event_type="error",

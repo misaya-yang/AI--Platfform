@@ -2584,6 +2584,23 @@ Please use this web search context to inform your response when relevant."""
             user_id=user_id,
         )
 
+    async def prepare_run_resume(
+        self,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+        approval_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Validate latest checkpoint and return a non-executing resume plan."""
+        if not self.execution_gateway:
+            return None
+        return await self.execution_gateway.prepare_run_resume(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            approval_id=approval_id,
+        )
+
     async def close(self) -> None:
         """Cleanup resources."""
         await self.trace_writer.drain(timeout_s=0.5)

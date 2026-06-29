@@ -30,6 +30,10 @@ class ApprovalRequest(BaseModel):
     reason: str | None = None
 
 
+class ResumeRequest(BaseModel):
+    approval_id: str | None = None
+
+
 @router.get("/runs/{run_id}")
 async def get_run_status(
     run_id: str,
@@ -49,6 +53,26 @@ async def get_run_status(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return {"run": run}
+
+
+@router.post("/runs/{run_id}/resume")
+async def prepare_run_resume(
+    run_id: str,
+    request: Request,
+    body: ResumeRequest | None = None,
+    user: UserContext = Depends(get_user_context),
+):
+    """Return a non-executing resume plan from the latest safe checkpoint."""
+    assistant = get_assistant_service(request)
+    resume = await assistant.prepare_run_resume(
+        run_id=run_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approval_id=body.approval_id if body else None,
+    )
+    if not resume:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"resume": resume}
 
 
 @router.post("/approvals/{approval_id}")
