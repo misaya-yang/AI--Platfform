@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -313,6 +313,7 @@ async def delete_conversation(
 async def send_message(
     conversation_id: str,
     data: MessageCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -345,6 +346,7 @@ async def send_message(
             assistant_id=assistant_id,
             input_data=input_data,
             metadata=data.metadata,
+            http_request=request,
         )
 
         # 提取回复消息
@@ -404,6 +406,7 @@ async def get_messages(
 async def stream_message(
     conversation_id: str,
     data: StreamMessageCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -440,6 +443,7 @@ async def stream_message(
                 input_data=input_data,
                 stream_mode=data.stream_mode,
                 skip_thread_validation=True,  # 已在上面验证过
+                http_request=request,
             ):
                 event_type = chunk.get("event", "message")
                 event_data = chunk.get("data", {})

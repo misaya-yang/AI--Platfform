@@ -77,7 +77,16 @@ class ResponseCache:
             return "{}"
 
     @classmethod
-    def _normalize_body(cls, body: bytes | None) -> tuple[str, str | None]:
+    def _normalize_body(
+        cls,
+        body: bytes | None,
+        *,
+        parsed_body: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        if isinstance(parsed_body, dict):
+            stable_payload = cls._stable_json_payload(parsed_body)
+            model = extract_model(parsed_body)
+            return stable_payload, (model or "").strip() or None
         if not body:
             return "{}", None
         try:
@@ -108,8 +117,12 @@ class ResponseCache:
         path: str,
         body: bytes | None,
         query_params: dict[str, Any],
+        parsed_body: dict[str, Any] | None = None,
     ) -> tuple[str, str | None]:
-        normalized_body, extracted_model = self._normalize_body(body)
+        normalized_body, extracted_model = self._normalize_body(
+            body,
+            parsed_body=parsed_body,
+        )
         normalized_path = self._normalize_path(path)
 
         identity = (context.api_key_id or context.user_id or "anonymous").strip() or "anonymous"
@@ -141,6 +154,7 @@ class ResponseCache:
         body: bytes | None,
         query_params: dict[str, Any],
         stream: bool,
+        parsed_body: dict[str, Any] | None = None,
     ) -> tuple[str, str | None, CachedProxyResponse | None]:
         if not self.should_use_cache(config=config, method=method, path=path, stream=stream):
             return "BYPASS", None, None
@@ -154,6 +168,7 @@ class ResponseCache:
             path=path,
             body=body,
             query_params=query_params,
+            parsed_body=parsed_body,
         )
 
         try:
@@ -204,6 +219,7 @@ class ResponseCache:
         response_headers: dict[str, str],
         response_body: bytes,
         stream: bool,
+        parsed_body: dict[str, Any] | None = None,
     ) -> None:
         if response_status >= 400:
             return
@@ -216,7 +232,7 @@ class ResponseCache:
 
         model: str | None
         if cache_hash:
-            _, extracted_model = self._normalize_body(body)
+            _, extracted_model = self._normalize_body(body, parsed_body=parsed_body)
             model = extracted_model or config.default_model
         else:
             cache_hash, model = self._build_cache_hash(
@@ -226,6 +242,7 @@ class ResponseCache:
                 path=path,
                 body=body,
                 query_params=query_params,
+                parsed_body=parsed_body,
             )
         ttl_seconds = max(int(config.cache_ttl or 0), 1)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)

@@ -184,6 +184,22 @@ async def test_run_config_injects_gateway_resolved_gateway_model():
 
 
 @pytest.mark.asyncio
+async def test_enabled_model_override_requires_control_plane():
+    adapter = LangGraphAdapter(
+        _service(
+            {
+                "enabled": True,
+                "provider_id": "dashscope-prod",
+                "model_id": "qwen-max",
+            }
+        )
+    )
+
+    with pytest.raises(ValidationFailedError, match="control plane is not initialized"):
+        await adapter._build_run_config(_request())
+
+
+@pytest.mark.asyncio
 async def test_adapter_injects_failover_candidate_shape():
     LangGraphAdapter.configure_model_control_plane(FakeProviderService(), FakeModelService())
     adapter = LangGraphAdapter(

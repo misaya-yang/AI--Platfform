@@ -12,6 +12,14 @@ from src.api.v1.proxy import (
     _safe_model_override_debug,
 )
 from src.proxy.config_loader import ProxyServiceConfig
+from src.proxy.langgraph_run_body import clear_runtime_model_override_cache
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_model_override_cache() -> None:
+    clear_runtime_model_override_cache()
+    yield
+    clear_runtime_model_override_cache()
 
 
 class FakeProviderService:

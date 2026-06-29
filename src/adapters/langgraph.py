@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable
 
 # 定义流事件的结构
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from ai_gateway_core.enums import ConnectorType, ContentType, StreamEventType
@@ -14,9 +15,10 @@ from ai_gateway_core.exceptions import ValidationFailedError
 
 from ..models.request import ContentItem, UnifiedRequest
 from ..models.response import StreamChunk, ToolCall, UnifiedResponse
-from ..services.llm.model_failover import (
-    ModelOverrideRuntimeError,
-    build_runtime_model_override_config,
+from ..proxy.langgraph_run_body import (
+    build_control_plane_request,
+    prepare_and_finalize_langgraph_run_payload,
+    proxy_service_config_from_connector,
 )
 from ..services.metrics.redaction import redact_sensitive_text
 from .base import ProtocolAdapter
@@ -184,37 +186,87 @@ class LangGraphAdapter(ProtocolAdapter):
         run_config["configurable"] = configurable
         return run_config
 
-    async def _build_model_override_config(
+    @staticmethod
+    def _adapter_user_namespace(request: UnifiedRequest) -> SimpleNamespace:
+        return SimpleNamespace(
+            user_id=request.user_id,
+            tenant_id=request.tenant_id,
+            tier="anonymous",
+        )
+
+    def _proxy_service_config(self) -> Any:
+        return proxy_service_config_from_connector(
+            self.config,
+            service_id=self.service.service_id,
+            service_name=self.service.name,
+            assistant_id=self.assistant_id,
+            metadata=self.service.metadata,
+        )
+
+    async def _prepare_remote_run_payload(
         self,
         request: UnifiedRequest,
-    ) -> dict[str, Any] | None:
-        model_override = self.config.get("model_override")
-        if not isinstance(model_override, dict) or not model_override.get("enabled"):
-            return None
-
+        *,
+        payload: dict[str, Any],
+        path: str,
+    ) -> dict[str, Any]:
         provider_service = self._provider_service
         model_service = self._model_service
         if provider_service is None or model_service is None:
-            raise ValidationFailedError("LangGraph model control plane is not initialized")
-
-        try:
-            return await build_runtime_model_override_config(
-                tenant_id=request.tenant_id or "default",
-                model_override=model_override,
-                provider_service=provider_service,
-                model_service=model_service,
+            model_override = self.config.get("model_override")
+            if isinstance(model_override, dict) and model_override.get("enabled"):
+                raise ValidationFailedError("LangGraph model control plane is not initialized")
+            payload["config"] = self._build_base_run_config(
+                request,
+                thread_id=path.split("/")[1] if path.startswith("threads/") else None,
             )
-        except ModelOverrideRuntimeError as exc:
-            raise ValidationFailedError(f"LangGraph model_override invalid: {exc.code}") from exc
+            return payload
+
+        cp_request = build_control_plane_request(
+            provider_service=provider_service,
+            model_service=model_service,
+            request_id=request.request_id,
+            trace_id=request.request_id,
+        )
+        try:
+            return await prepare_and_finalize_langgraph_run_payload(
+                payload,
+                method="POST",
+                path=path,
+                request=cp_request,
+                user=self._adapter_user_namespace(request),
+                service_config=self._proxy_service_config(),
+                assistant_id=self.assistant_id,
+                tenant_id=request.tenant_id,
+            )
+        except Exception as exc:
+            from fastapi import HTTPException
+
+            if isinstance(exc, HTTPException) and exc.status_code == 422:
+                raise ValidationFailedError(
+                    f"LangGraph model_override invalid: {exc.detail}"
+                ) from exc
+            if isinstance(exc, HTTPException) and exc.status_code == 503:
+                raise ValidationFailedError(
+                    "LangGraph model control plane is not initialized"
+                ) from exc
+            raise
 
     async def _build_run_config(
         self, request: UnifiedRequest, thread_id: str | None = None
     ) -> dict[str, Any]:
-        run_config = self._build_base_run_config(request, thread_id=thread_id)
-        model_override = await self._build_model_override_config(request)
-        if model_override:
-            run_config["configurable"]["gateway_model"] = model_override
-        return run_config
+        path = f"threads/{thread_id}/runs/wait" if thread_id else "runs/wait"
+        payload = {
+            "assistant_id": self.assistant_id,
+            "config": self._build_base_run_config(request, thread_id=thread_id),
+        }
+        prepared = await self._prepare_remote_run_payload(
+            request,
+            payload=payload,
+            path=path,
+        )
+        run_config = prepared.get("config")
+        return dict(run_config) if isinstance(run_config, dict) else {}
 
     async def invoke(self, request: UnifiedRequest) -> UnifiedResponse:
         messages = self._build_messages(request.inputs)
@@ -497,17 +549,25 @@ class LangGraphAdapter(ProtocolAdapter):
                 "user_id": request.user_id,
                 "tenant_id": request.tenant_id,
             },
+            "config": self._build_base_run_config(request),
         }
         if request.callback_url:
             payload["webhook"] = request.callback_url
         if self.service.session_enabled and request.session_id:
-            # 确保 thread 存在并获取有效的 UUID thread_id
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             endpoint = self.thread_invoke_endpoint.format(thread_id=valid_thread_id)
-            payload["config"] = await self._build_run_config(request, thread_id=valid_thread_id)
+            payload["config"] = self._build_base_run_config(
+                request, thread_id=valid_thread_id
+            )
+            prep_path = f"threads/{valid_thread_id}/runs/wait"
         else:
             endpoint = self.invoke_endpoint
-            payload["config"] = await self._build_run_config(request)
+            prep_path = "runs/wait"
+        payload = await self._prepare_remote_run_payload(
+            request,
+            payload=payload,
+            path=prep_path,
+        )
         try:
             # 构建认证头部
             auth_headers = self._build_auth_headers(request)
@@ -562,14 +622,14 @@ class LangGraphAdapter(ProtocolAdapter):
         payload: dict[str, Any] = {
             "assistant_id": self.assistant_id,
             "input": input_payload,
-            "stream_mode": stream_mode,  # allow string or list
+            "stream_mode": stream_mode,
             "metadata": {
                 "request_id": request.request_id,
                 "user_id": request.user_id,
                 "tenant_id": request.tenant_id,
             },
+            "config": self._build_base_run_config(request),
         }
-        # Optional: enable subgraph streaming (LangGraph 0.4+ token streaming compatibility)
         stream_subgraphs = None
         if isinstance(params, dict):
             stream_subgraphs = params.get("stream_subgraphs")
@@ -585,20 +645,26 @@ class LangGraphAdapter(ProtocolAdapter):
 
         logger = logging.getLogger(__name__)
 
-        # 详细时间追踪：帮助定位首 token 延迟来源
         t_method_start = time.perf_counter()
 
         if self.service.session_enabled and request.session_id:
-            # 确保 thread 存在并获取有效的 UUID thread_id
             t_ensure_start = time.perf_counter()
             valid_thread_id = await self._ensure_thread(request.session_id, request)
             t_ensure_end = time.perf_counter()
             logger.info(f"[TIMING] _ensure_thread: {(t_ensure_end - t_ensure_start) * 1000:.2f}ms")
             endpoint = self.thread_stream_endpoint.format(thread_id=valid_thread_id)
-            payload["config"] = await self._build_run_config(request, thread_id=valid_thread_id)
+            payload["config"] = self._build_base_run_config(
+                request, thread_id=valid_thread_id
+            )
+            prep_path = f"threads/{valid_thread_id}/runs/stream"
         else:
             endpoint = self.stream_endpoint
-            payload["config"] = await self._build_run_config(request)
+            prep_path = "runs/stream"
+        payload = await self._prepare_remote_run_payload(
+            request,
+            payload=payload,
+            path=prep_path,
+        )
 
         client = getattr(self.connector, "_client", None)
         if client is None:

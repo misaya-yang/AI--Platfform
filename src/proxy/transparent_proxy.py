@@ -134,6 +134,19 @@ class ProxyRequest:
     # 是否期望流式响应
     stream: bool = False
 
+    # Pre-parsed JSON body (avoids duplicate decode in core proxy path)
+    parsed_body: dict[str, Any] | None = None
+
+    # Route layer already applied LangGraph run body mutations
+    langgraph_body_prepared: bool = False
+
+    # Optional config snapshot from route layer (skips duplicate config load)
+    preloaded_config: ProxyServiceConfig | None = None
+
+    # Route-resolved billing hints (override extract_model on redacted snapshots)
+    effective_model: str | None = None
+    effective_provider: str | None = None
+
 
 @dataclass
 class ProxyResponse:
@@ -222,6 +235,7 @@ class TransparentProxy:
         self._service_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
         self._availability: dict[str, dict[str, Any]] = {}
         self._availability_lock = asyncio.Lock()
+        self._availability_refresh_inflight: dict[str, asyncio.Task[None]] = {}
 
     async def close(self) -> None:
         """关闭所有 HTTP 客户端"""
@@ -331,8 +345,13 @@ class TransparentProxy:
         return "sync"
 
     @staticmethod
-    def _provider_hint_for_capacity(body: bytes | None, config: ProxyServiceConfig) -> str | None:
-        request_data = TransparentProxy._parse_json_body(body)
+    def _provider_hint_for_capacity(
+        body: bytes | None,
+        config: ProxyServiceConfig,
+        *,
+        parsed_body: dict[str, Any] | None = None,
+    ) -> str | None:
+        request_data = parsed_body if parsed_body is not None else TransparentProxy._parse_json_body(body)
         return (
             extract_provider(request_data)
             or config.default_provider
@@ -366,7 +385,11 @@ class TransparentProxy:
             service_id=config.service_id or request.service_name,
             request_class=request_class,
             upstream_group=service_upstream_group(config.service_id or request.service_name, configured_group),
-            provider_id=self._provider_hint_for_capacity(body, config),
+            provider_id=self._provider_hint_for_capacity(
+                body,
+                config,
+                parsed_body=request.parsed_body,
+            ),
             service_config=capacity_config,
         )
         return await self.admission_controller.acquire(
@@ -434,10 +457,31 @@ class TransparentProxy:
             self._availability[config.service_id] = snapshot
         return snapshot
 
+    async def _schedule_availability_refresh(self, config: ProxyServiceConfig) -> None:
+        service_id = config.service_id
+        async with self._availability_lock:
+            inflight = self._availability_refresh_inflight.get(service_id)
+            if inflight is not None and not inflight.done():
+                return
+            task = asyncio.create_task(self._run_availability_refresh(config))
+            self._availability_refresh_inflight[service_id] = task
+
+    async def _run_availability_refresh(self, config: ProxyServiceConfig) -> None:
+        try:
+            await self._refresh_service_availability(config)
+        finally:
+            async with self._availability_lock:
+                current = self._availability_refresh_inflight.get(config.service_id)
+                if current is asyncio.current_task():
+                    self._availability_refresh_inflight.pop(config.service_id, None)
+
     async def get_service_availability(self, config: ProxyServiceConfig) -> dict[str, Any]:
         async with self._availability_lock:
             cached = self._availability.get(config.service_id)
-        if cached and (time.time() - float(cached.get("last_health_check_at") or 0.0)) <= self.availability_cache_ttl:
+        if cached:
+            age = time.time() - float(cached.get("last_health_check_at") or 0.0)
+            if age > self.availability_cache_ttl:
+                await self._schedule_availability_refresh(config)
             return cached
         return await self._refresh_service_availability(config)
 
@@ -585,7 +629,9 @@ class TransparentProxy:
         t_config_start = start_time
 
         # 1. 获取服务配置
-        config = await self.config_loader.get_config(request.service_name)
+        config = request.preloaded_config or await self.config_loader.get_config(
+            request.service_name
+        )
         t_config_done = time.perf_counter()
         if not config:
             return ProxyResponse(
@@ -701,10 +747,9 @@ class TransparentProxy:
 
         # 6. LangGraph assistant_id 自动注入 + 流式默认参数
         body = request.body
-        if request.method in ("POST", "PUT", "PATCH"):
+        if request.method in ("POST", "PUT", "PATCH") and not request.langgraph_body_prepared:
             if config.assistant_id:
                 body = self._inject_assistant_id(body, request.path, config.assistant_id)
-            # 为流式请求设置默认参数
             body = self._ensure_stream_defaults(body, request.path)
         t_body_done = time.perf_counter()
         capacity_headers = capacity_lease.headers if capacity_lease is not None else {}
@@ -744,6 +789,9 @@ class TransparentProxy:
                     context=context,
                     path=request.path,
                     release_slot=release_all,
+                    parsed_body=request.parsed_body,
+                    effective_model=request.effective_model,
+                    effective_provider=request.effective_provider,
                 )
                 response.headers.update(capacity_headers)
                 return response
@@ -760,6 +808,9 @@ class TransparentProxy:
                         path=request.path,
                         config=config,
                         context=context,
+                        parsed_body=request.parsed_body,
+                        effective_model=request.effective_model,
+                        effective_provider=request.effective_provider,
                     )
                     response.headers.update(capacity_headers)
                     return response
@@ -1138,6 +1189,33 @@ class TransparentProxy:
             offset += duration
         return steps
 
+    @staticmethod
+    def _resolve_billing_hints(
+        request_data: dict[str, Any] | None,
+        *,
+        config: ProxyServiceConfig,
+        effective_model: str | None = None,
+        effective_provider: str | None = None,
+        is_run_operation: bool = False,
+    ) -> tuple[str, str]:
+        model = (
+            str(effective_model or "").strip()
+            or extract_model(request_data)
+            or config.default_model
+            or ("langgraph-agent" if is_run_operation else "")
+        )
+        provider = (
+            str(effective_provider or "").strip()
+            or extract_provider(request_data)
+            or config.default_provider
+            or ""
+        )
+        if not provider:
+            model_override = config.model_override
+            if isinstance(model_override, dict):
+                provider = str(model_override.get("provider_id") or "").strip()
+        return model, provider
+
     async def _record_non_stream_usage(
         self,
         response_body: bytes,
@@ -1149,6 +1227,10 @@ class TransparentProxy:
         path: str,
         duration_ms: float,
         status_code: int,
+        *,
+        parsed_body: dict[str, Any] | None = None,
+        effective_model: str | None = None,
+        effective_provider: str | None = None,
     ) -> None:
         operation = self.detect_operation_type(method, path)
         is_run_operation = operation.startswith("run_")
@@ -1162,7 +1244,9 @@ class TransparentProxy:
             return
 
         usage = extract_token_usage(response_data) if response_data is not None else None
-        request_data = self._parse_json_body(request_body)
+        request_data = (
+            parsed_body if parsed_body is not None else self._parse_json_body(request_body)
+        )
 
         input_tokens = int((usage or {}).get("input_tokens") or 0)
         output_tokens = int((usage or {}).get("output_tokens") or 0)
@@ -1184,17 +1268,14 @@ class TransparentProxy:
             or extract_assistant_id(response_data)
             or ""
         )
-        model = (
-            extract_model(response_data)
-            or extract_model(request_data)
-            or config.default_model
-            or ("langgraph-agent" if is_run_operation else "")
-        )
-        provider = (
-            extract_provider(response_data)
-            or extract_provider(request_data)
-            or config.default_provider
-            or ""
+        response_model = extract_model(response_data)
+        response_provider = extract_provider(response_data)
+        model, provider = self._resolve_billing_hints(
+            request_data if isinstance(request_data, dict) else None,
+            config=config,
+            effective_model=response_model or effective_model,
+            effective_provider=response_provider or effective_provider,
+            is_run_operation=is_run_operation,
         )
 
         request_type = f"proxy_{operation}"
@@ -1297,6 +1378,10 @@ class TransparentProxy:
         path: str,
         config: ProxyServiceConfig,
         context: RequestContext,
+        *,
+        parsed_body: dict[str, Any] | None = None,
+        effective_model: str | None = None,
+        effective_provider: str | None = None,
     ) -> ProxyResponse:
         """执行普通（非流式）代理请求"""
         request_started = time.perf_counter()
@@ -1316,6 +1401,7 @@ class TransparentProxy:
                 body=body,
                 query_params=params,
                 stream=False,
+                parsed_body=parsed_body,
             )
             if cached_response:
                 cached_headers = self._filter_response_headers(dict(cached_response.headers))
@@ -1368,6 +1454,9 @@ class TransparentProxy:
             path=path,
             duration_ms=duration_ms,
             status_code=response.status_code,
+            parsed_body=parsed_body,
+            effective_model=effective_model,
+            effective_provider=effective_provider,
         )
 
         if self.response_cache and cache_status == "MISS":
@@ -1383,6 +1472,7 @@ class TransparentProxy:
                 response_headers=response_headers,
                 response_body=response.content,
                 stream=False,
+                parsed_body=parsed_body,
             )
 
         # 错误透传：原样返回上游的 4xx/5xx 响应，不用网关错误覆盖
@@ -1407,6 +1497,10 @@ class TransparentProxy:
         context: RequestContext,
         path: str,
         release_slot,
+        *,
+        parsed_body: dict[str, Any] | None = None,
+        effective_model: str | None = None,
+        effective_provider: str | None = None,
     ) -> ProxyResponse:
         """
         执行流式代理请求
@@ -1417,7 +1511,7 @@ class TransparentProxy:
         - 计费拦截
         """
         request_started = time.perf_counter()
-        request_data = self._parse_json_body(body)
+        request_data = parsed_body if parsed_body is not None else self._parse_json_body(body)
 
         # 创建流处理器（用于计费）
         stream_processor: StreamProcessor | None = None
@@ -1425,6 +1519,13 @@ class TransparentProxy:
             assistant_id = config.assistant_id or extract_assistant_id(request_data) or ""
             operation = self.detect_operation_type(method, path)
             request_type = f"proxy_{operation}"
+            model_hint, provider_hint = self._resolve_billing_hints(
+                request_data if isinstance(request_data, dict) else None,
+                config=config,
+                effective_model=effective_model,
+                effective_provider=effective_provider,
+                is_run_operation=operation.startswith("run_"),
+            )
             stream_processor = self.billing_interceptor.create_stream_processor(
                 request_id=context.request_id,
                 service_id=config.service_id,
@@ -1432,8 +1533,8 @@ class TransparentProxy:
                 tenant_id=context.tenant_id,
                 assistant_id=assistant_id,
                 request_type=request_type,
-                model_hint=extract_model(request_data) or config.default_model or "langgraph-agent",
-                provider_hint=extract_provider(request_data) or config.default_provider or "",
+                model_hint=model_hint or "langgraph-agent",
+                provider_hint=provider_hint,
             )
 
         # 先获取响应头，判断是否真的是流式响应

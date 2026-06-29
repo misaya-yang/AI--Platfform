@@ -63,7 +63,7 @@ async def _apply(
     model_hint: str | None = "primary-model",
 ) -> tuple[bytes | None, str | None]:
     raw_body = json.dumps(body or {"input": {"message": "hello"}}).encode("utf-8")
-    return await proxy_module._apply_quota_policy(
+    body_bytes, model, _ = await proxy_module._apply_quota_policy(
         request=request,
         user=_user(),
         auth=_auth(),
@@ -73,6 +73,7 @@ async def _apply(
         body=raw_body,
         model_hint=model_hint,
     )
+    return body_bytes, model
 
 
 class _FakeQuotaService:
@@ -218,6 +219,45 @@ async def test_downgrade_model_only_mutates_model_fields(monkeypatch) -> None:
     assert payload["config"]["configurable"]["model"] == "safe-model"
     assert payload["provider_api_key"] == "secret-provider-key"
     assert payload["config"]["configurable"]["provider_api_key"] == "nested-secret"
+
+
+@pytest.mark.asyncio
+async def test_downgrade_model_mutates_deferred_parsed_payload(monkeypatch) -> None:
+    service = _FakeQuotaService(
+        QuotaCheckResult(
+            status=QuotaStatus.EXCEEDED,
+            message="downgrade",
+            overage_strategy=OverageStrategy.DOWNGRADE_MODEL,
+            downgraded_model="safe-model",
+        )
+    )
+    monkeypatch.setattr(proxy_module, "get_quota_service", lambda: service)
+    monkeypatch.setattr(proxy_module, "_record_security_event", _ignore_event)
+    payload = {
+        "model": "expensive-model",
+        "input": {"model": "expensive-model", "text": "hello"},
+        "config": {"configurable": {"model": "expensive-model"}},
+    }
+
+    body, model, mutated = await proxy_module._apply_quota_policy(
+        request=_request(),
+        user=_user(),
+        auth=_auth(),
+        service_name="agent",
+        operation="run_wait",
+        path="threads/t1/runs/wait",
+        body=json.dumps(payload).encode("utf-8"),
+        model_hint="expensive-model",
+        payload=payload,
+        defer_encode=True,
+    )
+
+    assert body is None
+    assert model == "safe-model"
+    assert mutated is True
+    assert payload["model"] == "safe-model"
+    assert payload["input"]["model"] == "safe-model"
+    assert payload["config"]["configurable"]["model"] == "safe-model"
 
 
 @pytest.mark.asyncio

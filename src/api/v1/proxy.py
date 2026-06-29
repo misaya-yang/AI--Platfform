@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import time
+from types import SimpleNamespace
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
@@ -50,13 +51,29 @@ from ...proxy import (
     RequestContext,
     TransparentProxy,
 )
+from ...core.auth.service_access_resolver import load_service_access_constraints
+from ...proxy.langgraph_run_body import (
+    LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST,
+    apply_domain_policy_metadata,
+    apply_langgraph_model_override,
+    apply_quota_model_downgrade,
+    billing_request_snapshot,
+    encode_json_body,
+    inject_resolved_model_override,
+    is_langgraph_proxy_service,
+    is_langgraph_run_path,
+    normalize_domain_policy,
+    prepare_langgraph_run_body,
+    prepare_langgraph_run_payload,
+    resolve_langgraph_model_override,
+    sanitize_langgraph_caller_configurable,
+    scrub_caller_gateway_model,
+    should_prepare_langgraph_run_body,
+)
+from ._route_trace import current_trace_id
 from ...services.billing import get_quota_service
 from ...services.billing.quota_service import OverageStrategy, QuotaStatus
-from ...services.llm.model_failover import (
-    ModelOverrideRuntimeError,
-    build_runtime_model_override_config,
-)
-from ...services.metrics.usage_parser import extract_model
+from ...services.metrics.usage_parser import extract_model, extract_provider
 from ..deps import (
     AuthContext,
     get_auth_context,
@@ -70,19 +87,7 @@ router = APIRouter(prefix="/proxy", tags=["Transparent Proxy"])
 
 
 def _normalize_domain_policy(value: Any) -> str:
-    policy = str(value or "").strip().lower()
-    if not policy or policy == "none":
-        return "none"
-    if len(policy) <= 64 and all(ch.isalnum() or ch in "._-" for ch in policy):
-        return policy
-    return "none"
-
-
-_SERVICE_ACCESS_CACHE: dict[
-    str, tuple[float, list[tuple[str, list[str]]], ServiceAccessPolicy]
-] = {}
-_SERVICE_ACCESS_CACHE_LOCK = asyncio.Lock()
-_SERVICE_ACCESS_CACHE_MAX_SIZE = 5000
+    return normalize_domain_policy(value)
 
 
 async def _record_security_event(
@@ -108,13 +113,7 @@ async def _record_security_event(
 
 
 def _current_trace_id(request: Request) -> str:
-    request_id = getattr(request.state, "request_id", "")
-    if isinstance(request_id, str) and request_id:
-        return request_id
-    trace_id = getattr(request.state, "trace_id", "")
-    if isinstance(trace_id, str):
-        return trace_id
-    return ""
+    return current_trace_id(request)
 
 
 def _record_rate_limit_decision(dimension: str, service_name: str, allowed: bool) -> None:
@@ -282,6 +281,26 @@ def _encode_json_body(payload: Any) -> bytes | None:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+def _resolve_effective_provider(
+    parsed_body: dict[str, Any] | None,
+    service_config: ProxyServiceConfig | None,
+) -> str | None:
+    if isinstance(parsed_body, dict):
+        provider = extract_provider(parsed_body)
+        if provider:
+            return provider
+    if service_config:
+        model_override = service_config.model_override
+        if isinstance(model_override, dict):
+            provider_id = str(model_override.get("provider_id") or "").strip()
+            if provider_id:
+                return provider_id
+        default_provider = str(service_config.default_provider or "").strip()
+        if default_provider:
+            return default_provider
+    return None
+
+
 def _should_apply_quota_policy(method: str, operation: str, path: str) -> bool:
     if method.upper() not in {"POST", "PUT", "PATCH"}:
         return False
@@ -390,59 +409,22 @@ def _inject_gateway_domain_policy_metadata(
     service_config: ProxyServiceConfig | None,
 ) -> bytes | None:
     """Inject service-level domain policy into LangGraph run metadata when configured."""
-    if method.upper() not in {"POST", "PUT", "PATCH"} or not body or not service_config:
+    if not should_prepare_langgraph_run_body(method, path, service_config):
         return body
-
-    normalized_path = "/" + str(path or "").strip().lstrip("/").lower()
-    if "/runs" not in normalized_path:
-        return body
-
-    service_meta = service_config.metadata if isinstance(service_config.metadata, dict) else {}
-    domain_policy = _normalize_domain_policy(service_meta.get("domain_policy"))
-    if domain_policy == "none":
-        return body
-
-    adapter_type = str(service_meta.get("adapter_type") or "").strip().lower()
-    is_langgraph_service = (
-        adapter_type == "langgraph"
-        or bool((service_config.assistant_id or "").strip())
-        or bool((service_config.graph_id or "").strip())
-    )
-    if not is_langgraph_service:
-        return body
-
     payload = _decode_json_body(body)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or service_config is None:
         return body
-
-    updated_payload = dict(payload)
-    run_metadata = updated_payload.get("metadata")
-    metadata_dict = dict(run_metadata) if isinstance(run_metadata, dict) else {}
-    gateway_meta = metadata_dict.get("gateway")
-    gateway_dict = dict(gateway_meta) if isinstance(gateway_meta, dict) else {}
-    gateway_dict.setdefault("domain_policy", domain_policy)
-    metadata_dict["gateway"] = gateway_dict
-    updated_payload["metadata"] = metadata_dict
-    return _encode_json_body(updated_payload)
+    if not apply_domain_policy_metadata(payload, service_config=service_config):
+        return body
+    return encode_json_body(payload)
 
 
 def _is_langgraph_proxy_service(service_config: ProxyServiceConfig | None) -> bool:
-    if not service_config:
-        return False
-    service_meta = service_config.metadata if isinstance(service_config.metadata, dict) else {}
-    adapter_type = str(service_meta.get("adapter_type") or "").strip().lower()
-    return (
-        adapter_type == "langgraph"
-        or bool((service_config.assistant_id or "").strip())
-        or bool((service_config.graph_id or "").strip())
-    )
+    return is_langgraph_proxy_service(service_config)
 
 
 def _is_langgraph_run_path(method: str, path: str) -> bool:
-    if method.upper() not in {"POST", "PUT", "PATCH"}:
-        return False
-    normalized_path = "/" + str(path or "").strip().lstrip("/").lower()
-    return "/runs" in normalized_path
+    return is_langgraph_run_path(method, path)
 
 
 def _scrub_caller_gateway_model(body: bytes | None, method: str, path: str) -> tuple[bytes | None, dict[str, Any] | None]:
@@ -454,77 +436,13 @@ def _scrub_caller_gateway_model(body: bytes | None, method: str, path: str) -> t
     if not isinstance(payload, dict):
         return body, None
 
-    updated_payload = dict(payload)
-    run_config = updated_payload.get("config")
-    if not isinstance(run_config, dict):
-        return body, updated_payload
-
-    updated_config = dict(run_config)
-    configurable = updated_config.get("configurable")
-    if isinstance(configurable, dict) and "gateway_model" in configurable:
-        updated_config["configurable"] = {
-            k: v for k, v in configurable.items() if k != "gateway_model"
-        }
-        updated_payload["config"] = updated_config
-        return _encode_json_body(updated_payload), updated_payload
-
-    return body, updated_payload
-
-
-LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST = {
-    "user_id",
-    "tenant_id",
-    "checkpoint_ns",
-    "gateway_model",
-    "_api_key",
-    "api_key",
-    "apikey",
-    "api-key",
-    "provider_api_key",
-    "provider_credentials",
-    "credential",
-    "credentials",
-    "password",
-    "secret",
-    "token",
-    "auth_token",
-    "access_token",
-    "authorization",
-    "service_id",
-    "assistant_id",
-}
-
-
-def _normalize_configurable_key(key: Any) -> str:
-    return str(key or "").strip().lower().replace("-", "_")
+    if scrub_caller_gateway_model(payload):
+        return encode_json_body(payload), payload
+    return body, payload
 
 
 def _sanitize_langgraph_caller_configurable(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    sanitized: dict[str, Any] = {}
-    for key, child in value.items():
-        normalized = _normalize_configurable_key(key)
-        if (
-            normalized in LANGGRAPH_CALLER_CONFIGURABLE_BLOCKLIST
-            or normalized.endswith("_api_key")
-            or normalized.endswith("_token")
-            or normalized.endswith("_secret")
-            or normalized.endswith("_credentials")
-        ):
-            continue
-        sanitized[key] = child
-    return sanitized
-
-
-def _extract_langgraph_thread_id(path: str) -> str | None:
-    segments = [segment for segment in str(path or "").strip("/").split("/") if segment]
-    for index, segment in enumerate(segments):
-        if segment.lower() != "threads":
-            continue
-        if index + 2 < len(segments) and segments[index + 2].lower() == "runs":
-            return segments[index + 1]
-    return None
+    return sanitize_langgraph_caller_configurable(value)
 
 
 def _inject_langgraph_gateway_configurable(
@@ -544,49 +462,22 @@ def _inject_langgraph_gateway_configurable(
     if not isinstance(payload, dict):
         return body
 
-    updated_payload = dict(payload)
-    run_config = updated_payload.get("config")
-    updated_config = dict(run_config) if isinstance(run_config, dict) else {}
-    configurable = _sanitize_langgraph_caller_configurable(
-        updated_config.get("configurable")
+    service_config = ProxyServiceConfig(
+        service_id="langgraph",
+        service_name="langgraph",
+        upstream_url="",
+        metadata={"adapter_type": "langgraph"},
     )
-
-    gateway_user_id = str(
-        getattr(auth, "user_id", "") or getattr(user, "user_id", "") or "anonymous"
+    _, changed = prepare_langgraph_run_payload(
+        payload,
+        method=method,
+        path=path,
+        request=request,
+        user=user,
+        auth=auth,
+        service_config=service_config,
     )
-    gateway_tenant_id = str(
-        getattr(auth, "tenant_id", "") or getattr(user, "tenant_id", "") or "default"
-    )
-    configurable["user_id"] = gateway_user_id
-    configurable["tenant_id"] = gateway_tenant_id
-    configurable["checkpoint_ns"] = gateway_tenant_id
-
-    thread_id = _extract_langgraph_thread_id(path)
-    if thread_id:
-        configurable["thread_id"] = thread_id
-    elif not configurable.get("thread_id"):
-        fallback_thread_id = str(
-            payload.get("thread_id")
-            or getattr(request.state, "thread_id", "")
-            or getattr(request.state, "request_id", "")
-            or getattr(request.state, "trace_id", "")
-        ).strip()
-        if fallback_thread_id:
-            configurable["thread_id"] = fallback_thread_id
-
-    metadata = updated_config.get("metadata")
-    metadata = dict(metadata) if isinstance(metadata, dict) else {}
-    request_id = str(getattr(request.state, "request_id", "") or _current_trace_id(request))
-    trace_id = str(getattr(request.state, "trace_id", "") or _current_trace_id(request))
-    if request_id:
-        metadata["gateway_request_id"] = request_id
-    if trace_id:
-        metadata["gateway_trace_id"] = trace_id
-
-    updated_config["configurable"] = configurable
-    updated_config["metadata"] = metadata
-    updated_payload["config"] = updated_config
-    return _encode_json_body(updated_payload)
+    return encode_json_body(payload) if changed else body
 
 
 async def _inject_langgraph_model_override_config(
@@ -609,53 +500,17 @@ async def _inject_langgraph_model_override_config(
         not body
         or payload is None
         or not service_config
-        or not _is_langgraph_run_path(method, path)
-        or not _is_langgraph_proxy_service(service_config)
+        or not should_prepare_langgraph_run_body(method, path, service_config)
     ):
         return body
 
-    model_override = service_config.model_override
-    if not isinstance(model_override, dict) or not model_override.get("enabled"):
-        return body
-
-    provider_service = getattr(request.app.state, "provider_service", None)
-    model_service = getattr(request.app.state, "model_service", None)
-    if provider_service is None or model_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="MODEL_OVERRIDE_CONTROL_PLANE_UNAVAILABLE",
-        )
-
-    try:
-        runtime_config = await build_runtime_model_override_config(
-            tenant_id=tenant_id or "default",
-            model_override=model_override,
-            provider_service=provider_service,
-            model_service=model_service,
-        )
-    except ModelOverrideRuntimeError as exc:
-        raise HTTPException(status_code=422, detail=exc.code) from exc
-
-    updated_payload = dict(payload)
-    run_config = updated_payload.get("config")
-    updated_config = dict(run_config) if isinstance(run_config, dict) else {}
-    configurable = updated_config.get("configurable")
-    updated_config["configurable"] = dict(configurable) if isinstance(configurable, dict) else {}
-    updated_config["configurable"]["gateway_model"] = runtime_config
-    updated_payload["config"] = updated_config
-
-    logger.info(
-        "Injected LangGraph model override provider_id=%s model_id=%s cache_epoch=%s "
-        "api_key_fingerprint=%s failover_candidates=%s failover_warnings=%s",
-        runtime_config.get("provider_id"),
-        runtime_config.get("model_id"),
-        runtime_config["cache_epoch"],
-        runtime_config.get("api_key_fingerprint"),
-        len((runtime_config.get("failover") or {}).get("candidates") or []),
-        len((runtime_config.get("failover") or {}).get("warnings") or []),
+    await apply_langgraph_model_override(
+        request=request,
+        payload=payload,
+        service_config=service_config,
+        tenant_id=tenant_id,
     )
-
-    return _encode_json_body(updated_payload)
+    return encode_json_body(payload)
 
 
 async def _enforce_model_allowlist(
@@ -697,21 +552,32 @@ async def _apply_quota_policy(
     path: str,
     body: bytes | None,
     model_hint: str | None,
-) -> tuple[bytes | None, str | None]:
+    payload: Any | None = None,
+    defer_encode: bool = False,
+) -> tuple[bytes | None, str | None, bool]:
     """
     Enforce quota governance policy before proxying.
 
     Returns:
-        (possibly mutated body, final model to use)
+        (possibly mutated body, final model to use, payload mutated flag)
     """
     if not _should_apply_quota_policy(request.method, operation, path):
-        return body, model_hint
+        return (
+            (None, model_hint, False)
+            if defer_encode
+            else (body, model_hint, False)
+        )
 
     quota_service = get_quota_service()
     if not quota_service or not quota_service.database:
-        return body, model_hint
+        return (
+            (None, model_hint, False)
+            if defer_encode
+            else (body, model_hint, False)
+        )
 
-    payload = _decode_json_body(body)
+    if payload is None:
+        payload = _decode_json_body(body)
     estimated_tokens = _estimate_tokens_from_payload(payload)
 
     try:
@@ -748,8 +614,13 @@ async def _apply_quota_policy(
                     "policy": failure_mode,
                 },
             ) from exc
-        return body, model_hint
+        return (
+            (None, model_hint, False)
+            if defer_encode
+            else (body, model_hint, False)
+        )
 
+    payload_mutated = False
     if check.status == QuotaStatus.BLOCKED:
         await _record_quota_exceeded_decision(
             request=request,
@@ -800,8 +671,15 @@ async def _apply_quota_policy(
         if check.overage_strategy == OverageStrategy.DOWNGRADE_MODEL and check.downgraded_model:
             downgraded_model = check.downgraded_model.strip()
             if downgraded_model and payload is not None:
-                payload = _override_model_in_request_payload(payload, downgraded_model)
-                body = _encode_json_body(payload)
+                downgraded_payload = _override_model_in_request_payload(payload, downgraded_model)
+                if defer_encode and isinstance(payload, dict) and isinstance(downgraded_payload, dict):
+                    payload.clear()
+                    payload.update(downgraded_payload)
+                else:
+                    payload = downgraded_payload
+                payload_mutated = True
+                if not defer_encode:
+                    body = _encode_json_body(payload)
             final_model = downgraded_model
         elif check.overage_strategy == OverageStrategy.ALLOW_BUT_ALERT:
             with contextlib.suppress(Exception):
@@ -823,7 +701,9 @@ async def _apply_quota_policy(
                         message=check.message,
                     )
 
-    return body, final_model
+    if defer_encode:
+        return None, final_model, payload_mutated
+    return body, final_model, payload_mutated
 
 
 async def _resolve_service_definition(registry, service_name: str):
@@ -846,138 +726,11 @@ def _service_allowed(allowed: list[str], candidates: set) -> bool:
     return service_scope_matches(allowed, list(candidates))
 
 
-def _build_service_access_cache_key(request: Request, user: UserContext) -> str:
-    api_key_hash = str(getattr(request.state, "api_key_hash", "") or "")
-    api_key_info = getattr(request.state, "api_key_info", None)
-    api_allowed_key = ""
-    if isinstance(api_key_info, dict):
-        api_allowed_key = ",".join(
-            _normalize_allowed_services(api_key_info.get("allowed_services"))
-        )
-    db_identity = id(getattr(request.app.state, "database", None))
-    role_key = ",".join(sorted(str(role) for role in (user.roles or [])))
-    return "|".join(
-        (
-            str(db_identity),
-            str(user.user_id or ""),
-            str(user.tenant_id or ""),
-            api_key_hash,
-            api_allowed_key,
-            role_key,
-        )
-    )
-
-
-def _proxy_constraint_cache_ttl_seconds(request: Request) -> float:
-    db = getattr(request.app.state, "database", None)
-    if type(db).__module__ in {"types", "unittest.mock"}:
-        return 0.0
-    settings = getattr(request.app.state, "settings", None)
-    ttl = getattr(getattr(settings, "proxy", None), "constraint_cache_ttl_seconds", 0.0)
-    try:
-        return max(float(ttl or 0.0), 0.0)
-    except Exception:
-        return 0.0
-
-
-async def _get_cached_service_access_constraints(
-    request: Request, user: UserContext
-) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy] | None:
-    ttl = _proxy_constraint_cache_ttl_seconds(request)
-    if ttl <= 0:
-        return None
-    now = time.monotonic()
-    cache_key = _build_service_access_cache_key(request, user)
-    async with _SERVICE_ACCESS_CACHE_LOCK:
-        entry = _SERVICE_ACCESS_CACHE.get(cache_key)
-        if not entry:
-            return None
-        expires_at, allowed_sources, user_policy = entry
-        if now >= expires_at:
-            _SERVICE_ACCESS_CACHE.pop(cache_key, None)
-            return None
-    copied_sources = [(source, list(scope)) for source, scope in allowed_sources]
-    return copied_sources, user_policy
-
-
-async def _set_cached_service_access_constraints(
-    request: Request,
-    user: UserContext,
-    allowed_sources: list[tuple[str, list[str]]],
-    user_policy: ServiceAccessPolicy,
-) -> None:
-    ttl = _proxy_constraint_cache_ttl_seconds(request)
-    if ttl <= 0:
-        return
-    cache_key = _build_service_access_cache_key(request, user)
-    expires_at = time.monotonic() + ttl
-    copied_sources = [(source, list(scope)) for source, scope in allowed_sources]
-    async with _SERVICE_ACCESS_CACHE_LOCK:
-        while len(_SERVICE_ACCESS_CACHE) >= _SERVICE_ACCESS_CACHE_MAX_SIZE:
-            _SERVICE_ACCESS_CACHE.pop(next(iter(_SERVICE_ACCESS_CACHE)))
-        _SERVICE_ACCESS_CACHE[cache_key] = (expires_at, copied_sources, user_policy)
-
-
 async def _load_service_access_constraints(
     request: Request,
     user: UserContext,
 ) -> tuple[list[tuple[str, list[str]]], ServiceAccessPolicy]:
-    """Collect API key / tenant / user-level service access constraints."""
-    request_cached = getattr(request.state, "_service_access_constraints_cache", None)
-    if isinstance(request_cached, tuple) and len(request_cached) == 2:
-        return request_cached
-
-    cached = await _get_cached_service_access_constraints(request, user)
-    if cached is not None:
-        request.state._service_access_constraints_cache = cached
-        return cached
-
-    allowed_sources: list[tuple[str, list[str]]] = []
-    user_policy = ServiceAccessPolicy()
-
-    api_key_info = getattr(request.state, "api_key_info", None)
-    if api_key_info:
-        api_allowed = _normalize_allowed_services(api_key_info.get("allowed_services"))
-        if api_allowed:
-            allowed_sources.append(("api_key", api_allowed))
-
-    db = getattr(request.app.state, "database", None)
-    if not db or not getattr(db, "enabled", False) or not user.is_authenticated:
-        result = (allowed_sources, user_policy)
-        request.state._service_access_constraints_cache = result
-        await _set_cached_service_access_constraints(request, user, allowed_sources, user_policy)
-        return result
-
-    if user.tenant_id:
-        try:
-            tenant = await db.get_tenant(user.tenant_id)
-            if tenant:
-                tenant_allowed = _normalize_allowed_services(tenant.get("allowed_services"))
-                if tenant_allowed:
-                    allowed_sources.append(("tenant", tenant_allowed))
-        except Exception as exc:
-            logger.warning(
-                "[ProxyAuth] Failed to load tenant allowed_services for tenant %s: %s",
-                user.tenant_id,
-                exc,
-            )
-
-    if user.user_id:
-        try:
-            user_record = await db.get_user(user.user_id)
-            if user_record:
-                user_policy = service_access_policy_from_metadata(user_record.get("metadata"))
-        except Exception as exc:
-            logger.warning(
-                "[ProxyAuth] Failed to load user service access policy for user %s: %s",
-                user.user_id,
-                exc,
-            )
-
-    result = (allowed_sources, user_policy)
-    request.state._service_access_constraints_cache = result
-    await _set_cached_service_access_constraints(request, user, allowed_sources, user_policy)
-    return result
+    return await load_service_access_constraints(request, user)
 
 
 async def _enforce_service_access_constraints(
@@ -1404,32 +1157,30 @@ async def transparent_proxy_handler(
 
     # 6. 读取请求体
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
-    body = _inject_gateway_domain_policy_metadata(
-        body=body,
-        method=request.method,
-        path=path,
-        service_config=service_config,
-    )
-    body = _inject_langgraph_gateway_configurable(
-        request=request,
-        body=body,
-        method=request.method,
-        path=path,
-        user=user,
-        auth=auth,
-    )
-    body = await _inject_langgraph_model_override_config(
-        request=request,
-        body=body,
-        method=request.method,
-        path=path,
-        service_config=service_config,
-        tenant_id=auth.tenant_id or user.tenant_id or "default",
-    )
+    parsed_body: dict[str, Any] | None = None
+    langgraph_body_prepared = False
+    tenant_id = auth.tenant_id or user.tenant_id or "default"
+
+    body_changed = False
+    if should_prepare_langgraph_run_body(request.method, path, service_config):
+        body, parsed_body, body_changed = prepare_langgraph_run_body(
+            body=body,
+            method=request.method,
+            path=path,
+            request=request,
+            user=user,
+            auth=auth,
+            service_config=service_config,
+        )
+        langgraph_body_prepared = True
+    elif body and request.method in ("POST", "PUT", "PATCH"):
+        decoded = _decode_json_body(body)
+        if isinstance(decoded, dict):
+            parsed_body = decoded
     t_body = time.perf_counter()
 
     # 7. 解析请求模型并应用服务默认值
-    request_payload = _decode_json_body(body)
+    request_payload = parsed_body if parsed_body is not None else _decode_json_body(body)
     requested_model = extract_model(request_payload)
     if not requested_model and service_config:
         requested_model = service_config.default_model
@@ -1444,18 +1195,57 @@ async def transparent_proxy_handler(
     )
 
     # 9. 配额策略预检查（可触发拒绝/降级/告警）
-    body, effective_model = await _apply_quota_policy(
-        request=request,
-        user=user,
-        auth=auth,
-        service_name=service_name,
-        operation=operation,
-        path=path,
-        body=body,
-        model_hint=requested_model,
-    )
+    if langgraph_body_prepared and isinstance(parsed_body, dict):
+        runtime_config, (_, effective_model, quota_mutated) = await asyncio.gather(
+            resolve_langgraph_model_override(
+                request=request,
+                service_config=service_config,
+                tenant_id=tenant_id,
+            ),
+            _apply_quota_policy(
+                request=request,
+                user=user,
+                auth=auth,
+                service_name=service_name,
+                operation=operation,
+                path=path,
+                body=body,
+                model_hint=requested_model,
+                payload=parsed_body,
+                defer_encode=True,
+            ),
+        )
+        post_mutated = False
+        if runtime_config is not None:
+            inject_resolved_model_override(parsed_body, runtime_config)
+            post_mutated = True
+            if apply_quota_model_downgrade(
+                parsed_body,
+                downgraded_model=effective_model,
+                requested_model=requested_model,
+            ):
+                post_mutated = True
+        if body_changed or quota_mutated or post_mutated:
+            body = encode_json_body(parsed_body)
+    else:
+        defer_encode = isinstance(parsed_body, dict)
+        body, effective_model, quota_mutated = await _apply_quota_policy(
+            request=request,
+            user=user,
+            auth=auth,
+            service_name=service_name,
+            operation=operation,
+            path=path,
+            body=body,
+            model_hint=requested_model,
+            payload=parsed_body if defer_encode else None,
+            defer_encode=defer_encode,
+        )
+        if defer_encode and quota_mutated and isinstance(parsed_body, dict):
+            body = encode_json_body(parsed_body)
     if effective_model:
         request.state.effective_model = effective_model
+    effective_provider = _resolve_effective_provider(parsed_body, service_config)
     t_policy = time.perf_counter()
 
     # 10b. 检查是否期望流式响应
@@ -1470,6 +1260,11 @@ async def transparent_proxy_handler(
         query_params=dict(request.query_params),
         context=context,
         stream=wants_stream,
+        parsed_body=billing_request_snapshot(parsed_body),
+        langgraph_body_prepared=langgraph_body_prepared,
+        preloaded_config=service_config,
+        effective_model=effective_model,
+        effective_provider=effective_provider,
     )
     t_build = time.perf_counter()
 

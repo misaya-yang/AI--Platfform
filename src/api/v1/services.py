@@ -96,14 +96,11 @@ _DEFAULT_LANGGRAPH_FAILOVER_PROVIDER_PRIORITY = (
 _DEFAULT_LANGGRAPH_FAILOVER_MAX_CANDIDATES = 2
 
 
+from ._route_trace import current_trace_id
+
+
 def _current_trace_id(request: Request) -> str:
-    request_id = getattr(request.state, "request_id", "")
-    if isinstance(request_id, str) and request_id:
-        return request_id
-    trace_id = getattr(request.state, "trace_id", "")
-    if isinstance(trace_id, str):
-        return trace_id
-    return ""
+    return current_trace_id(request)
 
 
 def _invalidate_proxy_config_cache(request: Request, service_id: str | None = None) -> None:

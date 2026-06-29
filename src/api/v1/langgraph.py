@@ -40,6 +40,7 @@ from ...core.gateway.multi_dimension_rate_limiter import (
     RateLimitHeaders,
 )
 from ...proxy.context_injector import ContextInjector, RequestContext
+from ...proxy.langgraph_run_body import prepare_langgraph_run_body_for_passthrough
 from ...services.eval.langgraph_trace_capture import record_langgraph_proxy_trace
 from ..deps import get_rate_limiter, get_user_context, require_langgraph_proxy
 
@@ -376,6 +377,7 @@ async def get_thread_history(
 async def create_run(
     thread_id: str,
     data: RunCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -399,6 +401,7 @@ async def create_run(
             webhook=data.webhook,
             interrupt_before=data.interrupt_before,
             interrupt_after=data.interrupt_after,
+            http_request=request,
         )
     except Exception as e:
         handle_proxy_error(e)
@@ -408,6 +411,7 @@ async def create_run(
 async def create_run_wait(
     thread_id: str,
     data: RunCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -428,6 +432,7 @@ async def create_run_wait(
             input_data=data.input,
             config=data.config,
             metadata=data.metadata,
+            http_request=request,
         )
     except Exception as e:
         handle_proxy_error(e)
@@ -437,6 +442,7 @@ async def create_run_wait(
 async def stream_run(
     thread_id: str,
     data: RunCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -459,6 +465,7 @@ async def stream_run(
                 config=data.config,
                 metadata=data.metadata,
                 stream_mode=data.stream_mode,
+                http_request=request,
             ):
                 yield {
                     "event": chunk.get("event", "message"),
@@ -533,6 +540,7 @@ async def cancel_run(
 @router.post("/runs/stream")
 async def stream_stateless_run(
     data: RunCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -555,6 +563,7 @@ async def stream_stateless_run(
                 config=data.config,
                 metadata=data.metadata,
                 stream_mode=data.stream_mode,
+                http_request=request,
             ):
                 yield {
                     "event": chunk.get("event", "message"),
@@ -576,6 +585,7 @@ async def stream_stateless_run(
 @router.post("/runs/wait")
 async def create_stateless_run(
     data: RunCreate,
+    request: Request,
     proxy: LangGraphProxy = Depends(require_langgraph_proxy),
     user: UserContext = Depends(get_user_context),
     rate_limiter: MultiDimensionRateLimiter = Depends(get_rate_limiter),
@@ -595,6 +605,7 @@ async def create_stateless_run(
             input_data=data.input,
             config=data.config,
             metadata=data.metadata,
+            http_request=request,
         )
     except Exception as e:
         handle_proxy_error(e)
@@ -719,6 +730,13 @@ async def passthrough(
     headers = _build_langgraph_passthrough_headers(request, user, proxy)
 
     body = await request.body()
+    body = await prepare_langgraph_run_body_for_passthrough(
+        body,
+        method=method,
+        path=full_path,
+        request=request,
+        user=user,
+    )
     wants_stream = (
         "text/event-stream" in (headers.get("accept", "") or "")
         or upstream_path.endswith("/stream")
