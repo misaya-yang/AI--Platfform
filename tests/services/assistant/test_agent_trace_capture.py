@@ -203,6 +203,12 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
         usage={"input_tokens": 1, "output_tokens": 2},
         terminal_event_type="run_finished",
         terminal_sequence_no=2,
+        terminal_envelope={
+            "schema_version": "assistant-turn-contract/v1",
+            "run_id": ctx.run_id,
+            "status": "succeeded",
+            "exit_reason": "succeeded",
+        },
     )
     await writer.drain(timeout_s=1.0)
 
@@ -213,8 +219,45 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
     assert "ON CONFLICT (trace_id, sequence_no)" in queries
     assert "run_started" in db.serialized_calls()
     assert "run_finished" in db.serialized_calls()
+    assert "assistant-turn-contract/v1" in db.serialized_calls()
     assert "failed_writes" in db.serialized_calls()
+    runtime_docs = _json_args_containing(db, "runtime_trajectory")
+    runtime = next(doc["runtime_trajectory"] for doc in runtime_docs if "runtime_trajectory" in doc)
+    assert runtime["schema_version"] == "assistant-runtime-trajectory/v1"
+    assert runtime["status"] == "succeeded"
+    assert runtime["exit_reason"] == "succeeded"
+    assert runtime["context_snapshot_id"] is None
+    assert runtime["trace_writer_health"]["redacted_writes"] == 1
+    assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
     assert writer.telemetry_snapshot()["pending_writes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_non_stream_chat_returns_turn_contract_and_trace_metadata() -> None:
+    db = RecordingDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    service = AssistantService(
+        model_registry=FakeModelRegistry(content="done"),
+        db=db,
+        trace_writer=writer,
+    )
+
+    result = await service.chat(
+        user=MockUserContext(),
+        session_id="session-a",
+        message="hello Authorization: Bearer super-secret-value",
+        config=AssistantConfig(model_id="test-model"),
+        history=[],
+        persist_messages=False,
+    )
+    await writer.drain(timeout_s=1.0)
+
+    assert result["terminal_envelope"]["schema_version"] == "assistant-turn-contract/v1"
+    assert result["terminal_envelope"]["exit_reason"] == "succeeded"
+    assert result["terminal_envelope"]["context_snapshot_id"].startswith("ctx_")
+    assert result["context_snapshot"]["mode"] == "non_stream"
+    assert "super-secret-value" not in json.dumps(result, default=str)
+    assert "terminal_envelope" in db.serialized_calls()
 
 
 @pytest.mark.asyncio
@@ -244,6 +287,40 @@ async def test_trace_writer_redacts_and_bounds_payloads() -> None:
     assert "abc123SECRET" not in serialized
     assert "super-secret" not in serialized
     assert "[truncated]" in serialized
+
+
+@pytest.mark.asyncio
+async def test_trace_writer_records_tool_safety_attributes_for_eval_detail() -> None:
+    db = RecordingDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    writer.record_event(
+        ctx=ctx,
+        event_type="tool_call_completed",
+        sequence_no=3,
+        payload={
+            "tool_id": "tool-1",
+            "tool_name": "code_executor",
+            "gateway_policy_decision": {"decision": "allow", "policy_source": "tenant_policy"},
+            "sandbox_decision": {"profile": "docker-gvisor-no-network", "available": True},
+            "approval_consumed": True,
+            "risk_level": "high",
+            "requires_confirmation": True,
+            "audit_shape": {"input": "code_hash_and_redacted_summary"},
+            "redaction_policy": "redact_secrets_and_provider_env",
+            "result_preview": "completed",
+        },
+        phase="tool_execution",
+    )
+    await writer.drain(timeout_s=1.0)
+
+    serialized = db.serialized_calls()
+    assert "gateway_policy_decision" in serialized
+    assert "sandbox_decision" in serialized
+    assert "approval_consumed" in serialized
+    assert "docker-gvisor-no-network" in serialized
+    assert "redact_secrets_and_provider_env" in serialized
 
 
 @pytest.mark.asyncio

@@ -130,7 +130,7 @@ class AssistantChatRequest(BaseModel):
     )
 
     # Model settings
-    model_id: str = Field(default="qwen3.6-plus", description="Model ID to use")
+    model_id: str = Field(default="qwen3.7-plus", description="Model ID to use")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int | None = Field(default=None, description="Maximum tokens to generate")
 

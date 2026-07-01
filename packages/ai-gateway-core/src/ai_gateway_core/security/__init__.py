@@ -1,5 +1,6 @@
 """Security primitives shared across gateway and microservices."""
 
+from .redaction import REDACTION_PATTERNS, SENSITIVE_KEY_RE, redact_trace_text
 from .safe_fetch import (
     SafeFetchError,
     SafeFetchResponse,
@@ -11,9 +12,12 @@ from .safe_fetch import (
 )
 
 __all__ = [
+    "REDACTION_PATTERNS",
+    "SENSITIVE_KEY_RE",
     "SafeFetchError",
     "SafeFetchResponse",
     "is_safe_destination",
+    "redact_trace_text",
     "safe_callback_post",
     "safe_fetch",
     "safe_fetch_with_response",

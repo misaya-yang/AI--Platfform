@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import SENSITIVE_KEY_RE, redact_trace_text
 
 logger = get_logger(__name__)
 
@@ -125,8 +126,28 @@ class ToolAuditService:
         """Create a safe summary of tool input arguments."""
         if not arguments:
             return ""
+        safe_arguments = ToolAuditService._redact_arguments(arguments)
         try:
-            text = json.dumps(arguments, ensure_ascii=False, default=str)
+            text = json.dumps(safe_arguments, ensure_ascii=False, default=str)
         except Exception:
-            text = str(arguments)
-        return text[:max_len]
+            text = str(safe_arguments)
+        return redact_trace_text(text, limit=max_len)
+
+    @staticmethod
+    def _redact_arguments(value: Any) -> Any:
+        if isinstance(value, dict):
+            safe: dict[str, Any] = {}
+            for key, item in list(value.items())[:100]:
+                key_text = str(key)
+                if SENSITIVE_KEY_RE.search(key_text):
+                    safe[key_text] = "[redacted]"
+                else:
+                    safe[key_text] = ToolAuditService._redact_arguments(item)
+            return safe
+        if isinstance(value, list):
+            return [ToolAuditService._redact_arguments(item) for item in value[:100]]
+        if isinstance(value, str):
+            return redact_trace_text(value, limit=500)
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return redact_trace_text(value, limit=500)

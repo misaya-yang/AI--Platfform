@@ -406,7 +406,7 @@ export function AssistantPage() {
           listModels().catch(() => []),
           listDatasets().catch(() => []),
           getConfig().catch(() => ({
-            default_model_id: "qwen3.6-plus",
+            default_model_id: "qwen3.7-plus",
             available_providers: [],
             kb_enabled: false,
             web_search_enabled: false,

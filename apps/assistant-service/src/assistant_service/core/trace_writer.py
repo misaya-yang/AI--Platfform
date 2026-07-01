@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import hashlib
 import json
-import re
 import time
 import uuid
 from collections.abc import Coroutine
@@ -21,6 +20,8 @@ from typing import Any
 
 from ai_gateway_core.billing.pricing_catalog import calculate_token_cost_cents
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import SENSITIVE_KEY_RE as _SENSITIVE_KEY_RE
+from ai_gateway_core.security import redact_trace_text as _redact_trace_text_impl
 
 logger = get_logger(__name__)
 
@@ -34,46 +35,9 @@ _MAX_LOCATOR_HISTORY_MESSAGES = 8
 _MAX_LOCATOR_MESSAGE_CHARS = 260
 _MAX_LOCATOR_EXCERPT_CHARS = 2200
 
-_TRACE_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]+"),
-        "Authorization: Bearer [redacted]",
-    ),
-    (
-        re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
-        "Bearer [redacted]",
-    ),
-    (
-        re.compile(
-            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
-            r"\s*[:=]\s*[\"']?[^\"'\s,;}]+"
-        ),
-        r"\1=[redacted]",
-    ),
-    (
-        re.compile(
-            r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
-            r"[\"']?\s*:\s*)[\"'][^\"']+[\"']"
-        ),
-        r"\1\"[redacted]\"",
-    ),
-    (
-        re.compile(r"(?i)\b(postgres|postgresql|mysql|redis)://[^\s\"']+"),
-        r"\1://[redacted]",
-    ),
-)
-_SENSITIVE_KEY_RE = re.compile(
-    r"(?i)(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
-)
-
 
 def _redact_trace_text(value: Any, *, limit: int = _MAX_PREVIEW_CHARS) -> str:
-    text = str(value or "")
-    for pattern, replacement in _TRACE_REDACTION_PATTERNS:
-        text = pattern.sub(replacement, text)
-    if len(text) > limit:
-        return f"{text[:limit]}...[truncated]"
-    return text
+    return _redact_trace_text_impl(value, limit=limit)
 
 
 def _trace_uuid(value: str | None) -> str:
@@ -241,6 +205,96 @@ def _event_payload_for_storage(event_type: str, payload: Any) -> Any:
     if event_type == "context_retrieved":
         return _bounded_context_retrieved_payload(payload)
     return payload
+
+
+def _runtime_trajectory_summary(
+    *,
+    ctx: AssistantTraceContext,
+    status: str,
+    terminal_envelope: dict[str, Any] | None,
+    trace_writer_health: dict[str, int],
+    redaction_state: dict[str, Any],
+) -> dict[str, Any]:
+    envelope = terminal_envelope if isinstance(terminal_envelope, dict) else {}
+    context_snapshot = (
+        envelope.get("context_snapshot")
+        if isinstance(envelope.get("context_snapshot"), dict)
+        else {}
+    )
+    memory = context_snapshot.get("memory") if isinstance(context_snapshot.get("memory"), dict) else {}
+    tools = context_snapshot.get("tools") if isinstance(context_snapshot.get("tools"), dict) else {}
+    policy = context_snapshot.get("policy") if isinstance(context_snapshot.get("policy"), dict) else {}
+    surface = context_snapshot.get("surface") if isinstance(context_snapshot.get("surface"), dict) else {}
+    trace_writer_issues = sum(
+        int(trace_writer_health.get(key) or 0)
+        for key in ("dropped_writes", "failed_writes", "timed_out_writes")
+    )
+    return _sanitize_payload(
+        {
+            "schema_version": "assistant-runtime-trajectory/v1",
+            "trace_family": "assistant",
+            "run_id": ctx.run_id,
+            "thread_id": ctx.session_id,
+            "session_id": ctx.session_id,
+            "request_id": ctx.request_id,
+            "status": status,
+            "exit_reason": envelope.get("exit_reason") or status,
+            "resume_ready": bool(envelope.get("resume_ready")),
+            "checkpoint_id": envelope.get("checkpoint_id"),
+            "approval_id": envelope.get("approval_id"),
+            "context_snapshot_id": envelope.get("context_snapshot_id")
+            or context_snapshot.get("snapshot_id"),
+            "context_snapshot_hash": context_snapshot.get("snapshot_hash"),
+            "memory": {
+                "runtime_memory_snippets": memory.get("runtime_memory_snippets"),
+                "runtime_memory_provenance_count": memory.get(
+                    "runtime_memory_provenance_count"
+                ),
+                "history_message_count": memory.get("history_message_count"),
+                "has_session_memory": memory.get("has_session_memory"),
+                "has_long_term_memory": memory.get("has_long_term_memory"),
+            },
+            "tools": {
+                "tool_count": tools.get("tool_count"),
+                "selected_tool_count": tools.get("selected_tool_count"),
+                "prompt_exposed_count": tools.get("prompt_exposed_count"),
+            },
+            "policy": {
+                "execution_profile": policy.get("execution_profile"),
+                "memory_mode": policy.get("memory_mode"),
+                "runtime_mode": policy.get("runtime_mode"),
+                "queue_mode": policy.get("queue_mode"),
+                "kb_mode": policy.get("kb_mode"),
+                "web_search_enabled": policy.get("web_search_enabled"),
+            },
+            "surface": {
+                "stream": surface.get("stream"),
+                "task_id": surface.get("task_id"),
+                "resume_run_id": surface.get("resume_run_id"),
+                "resume_approval_id": surface.get("resume_approval_id"),
+            },
+            "transcript_locator": {
+                "turn_index": ctx.transcript_locator.get("turn_index"),
+                "turn_id": ctx.transcript_locator.get("turn_id"),
+                "history_message_count": ctx.transcript_locator.get(
+                    "history_message_count"
+                ),
+                "message_index": ctx.transcript_locator.get("message_index"),
+                "transcript_fingerprint": ctx.transcript_locator.get(
+                    "transcript_fingerprint"
+                ),
+                "bounded": bool(ctx.transcript_locator),
+            },
+            "trace_writer_health": {
+                **trace_writer_health,
+                "redacted_writes": 1,
+                "queued_writes": trace_writer_health.get("pending_writes", 0),
+                "issue_count": trace_writer_issues,
+            },
+            "redaction_state": redaction_state,
+            "privacy": {"payloads": "bounded_redacted_preview"},
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -429,6 +483,7 @@ class AssistantTraceWriter:
         total_latency_ms: int | None = None,
         terminal_event_type: str | None = None,
         terminal_sequence_no: int | None = None,
+        terminal_envelope: dict[str, Any] | None = None,
     ) -> bool:
         return self._submit(
             self._finish_trace(
@@ -440,6 +495,7 @@ class AssistantTraceWriter:
                 total_latency_ms=total_latency_ms,
                 terminal_event_type=terminal_event_type,
                 terminal_sequence_no=terminal_sequence_no,
+                terminal_envelope=terminal_envelope,
             )
         )
 
@@ -609,6 +665,7 @@ class AssistantTraceWriter:
         total_latency_ms: int | None,
         terminal_event_type: str | None,
         terminal_sequence_no: int | None,
+        terminal_envelope: dict[str, Any] | None,
     ) -> None:
         ended_at = time.time()
         await self._upsert_trace_root(ctx)
@@ -624,14 +681,29 @@ class AssistantTraceWriter:
                 input_tokens,
                 output_tokens,
             )
+        trace_writer_health = self.telemetry_snapshot()
+        redaction_state = {
+            "input_preview": "redacted_truncated",
+            "output_preview": "redacted_truncated",
+            "payloads": "redacted_truncated",
+        }
         metadata = {
             "mode": ctx.mode,
             "trace_writer": "assistant-service",
-            **self.telemetry_snapshot(),
+            **trace_writer_health,
             "pricing_status": pricing_status,
+            "runtime_trajectory": _runtime_trajectory_summary(
+                ctx=ctx,
+                status=status,
+                terminal_envelope=terminal_envelope,
+                trace_writer_health=trace_writer_health,
+                redaction_state=redaction_state,
+            ),
         }
         if ctx.transcript_locator:
             metadata["transcript_locator"] = _sanitize_payload(ctx.transcript_locator)
+        if terminal_envelope:
+            metadata["terminal_envelope"] = _sanitize_payload(terminal_envelope)
         await self.database.execute(
             """
             UPDATE agent_traces
@@ -676,6 +748,9 @@ class AssistantTraceWriter:
                     "status": status,
                     "error": _redact_trace_text(error) if error else None,
                     "usage": usage or {},
+                    "terminal_envelope": _sanitize_payload(terminal_envelope)
+                    if terminal_envelope
+                    else None,
                 },
                 phase="generation_storage",
                 occurred_at=ended_at,
@@ -1009,7 +1084,18 @@ class AssistantTraceWriter:
                 ended_at=now if status != "running" else None,
                 input_preview=data.get("arguments") or "",
                 output_preview=data.get("result_preview") or data.get("result") or "",
-                attributes={"tool_id": tool_id, "step_id": data.get("step_id")},
+                attributes={
+                    "tool_id": tool_id,
+                    "step_id": data.get("step_id"),
+                    "gateway_policy_decision": data.get("gateway_policy_decision"),
+                    "sandbox_decision": data.get("sandbox_decision"),
+                    "approval_consumed": data.get("approval_consumed"),
+                    "direct_registry_denied": data.get("direct_registry_denied"),
+                    "risk_level": data.get("risk_level"),
+                    "requires_confirmation": data.get("requires_confirmation"),
+                    "audit_shape": data.get("audit_shape"),
+                    "redaction_policy": data.get("redaction_policy"),
+                },
                 error_message=data.get("error"),
                 parent_span_id=self._lifecycle_parent_id(ctx.trace_id),
             )

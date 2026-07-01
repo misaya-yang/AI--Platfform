@@ -1,0 +1,9 @@
+{
+  "schema_version": "prd-phase-harness/loop-state/v1",
+  "active_phase": "AHR-05",
+  "active_feature": "AHR-F006",
+  "iteration": 0,
+  "status": "passed",
+  "last_decision": "AHR-05 passed with the Assistant Runtime Operating Model runbook, offline `make verify-assistant-runtime-dev` regression gate (5/5 groups, 162 tests + 16 golden cases), JSON/Markdown reports under reports/assistant-runtime-regression/, CI adoption policy (local/offline stage), waiver policy, no-go thresholds, terminology invariants, and whole-demand regression across AHR-F001 through AHR-F006. All six feature-oracle items are passing. The full requirement chain AHR-00 through AHR-05 is complete.",
+  "next_action": "No further phases. The requirement chain is complete. Future work should start from a new PRD or extension phase. Promote verify-assistant-runtime-dev to optional/manual CI stage after 3+ stable consecutive runs."
+}

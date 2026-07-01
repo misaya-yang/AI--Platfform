@@ -5,7 +5,7 @@ Supports (default catalog as of 2026-04):
 - OpenAI (gpt-4o, o1)
 - Anthropic (claude-opus-4-5, claude-sonnet-4-5)
 - DeepSeek (deepseek-chat, deepseek-reasoner)
-- DashScope/Qwen (qwen3.6-plus, qwen-max)
+- DashScope/Qwen (qwen3.7-plus, qwen3.6-plus, qwen-max)
 - Google / Google Vertex (gemini-3-pro-preview, gemini-3-flash-preview)
 """
 
@@ -80,6 +80,7 @@ NATIVE_SEARCH_CAPABLE: dict[tuple[ModelProvider, str], dict[str, Any]] = {
     # Ref: https://help.aliyun.com/zh/model-studio/qwen-web-search
     # Note: qwen-turbo / qwen-plus retired from catalog (2026-04).
     (ModelProvider.DASHSCOPE, "qwen-max"): {"enable_search": True},
+    (ModelProvider.DASHSCOPE, "qwen3.7-plus"): {"enable_search": True},
     (ModelProvider.DASHSCOPE, "qwen3.6-plus"): {"enable_search": True},
     # Google Gemini — `google_search` tool (2.0+).
     # Ref: https://ai.google.dev/gemini-api/docs/grounding
@@ -405,6 +406,16 @@ DEFAULT_MODELS: dict[ModelProvider, list[ModelInfo]] = {
         # Qwen pricing — international (Singapore) DashScope endpoint,
         # verified 2026-04-22. Mainland CN endpoint is cheaper but our
         # gateway targets international.
+        ModelInfo(
+            id="qwen3.7-plus",
+            name="Qwen 3.7 Plus",
+            provider=ModelProvider.DASHSCOPE,
+            context_window=1000000,
+            max_output_tokens=65536,
+            supports_vision=False,
+            input_price_per_1k=0.0005,
+            output_price_per_1k=0.003,
+        ),
         ModelInfo(
             id="qwen3.6-plus",
             name="Qwen 3.6 Plus",

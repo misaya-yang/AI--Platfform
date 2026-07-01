@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Tool signal contract
 # ---------------------------------------------------------------------------
@@ -109,7 +108,7 @@ class _NoopModelRegistry:
     """Minimal stand-in so compressor instantiation succeeds; we don't exercise
     the summary path in these tests — see test_no_op_when_not_enough_turns."""
 
-    async def chat(self, *args, **kwargs):
+    async def chat(self, *_args, **_kwargs):
         return ("fallback summary", {})
 
 
@@ -150,6 +149,14 @@ async def test_compact_preserves_recent_turns_and_system_head():
     assert stats["compacted"] is True
     assert stats["turns_kept"] == 2
     assert stats["turns_total"] == 6
+    assert stats["compaction_lineage"]["schema_version"] == "assistant-memory-lifecycle/v1"
+    assert stats["compaction_lineage"]["parent_context_hash"]
+    assert stats["compaction_lineage"]["child_context_hash"]
+    assert (
+        stats["compaction_lineage"]["parent_context_hash"]
+        != stats["compaction_lineage"]["child_context_hash"]
+    )
+    assert stats["compaction_lineage"]["summary_provenance"]["untrusted"] is True
 
     # Result must be: [system, summary_user_block, turn4..turn5]
     assert messages[0]["role"] == "system"

@@ -38,10 +38,12 @@ def test_compose_uses_gateway_bucket_fallback_and_named_volume_data_dir():
 
 def test_deploy_stops_app_services_before_migrations():
     script = _read("scripts/new/deploy.sh")
+    common = _read("scripts/new/common.sh")
 
-    assert "assert_compose_owner()" in script
-    assert 'com.docker.compose.project.working_dir' in script
-    assert "Refusing to mutate Docker project 'ai-gateway'" in script
+    assert "assert_compose_owner()" in common
+    assert 'com.docker.compose.project.working_dir' in common
+    assert "Refusing to mutate Docker project 'ai-gateway'" in common
+    assert "\nassert_compose_owner\n" in script
     assert "Stopping application services before migrations" in script
     assert "Application services will start after migrations" in script
     assert "migrate.sh" in script and "--auto" in script

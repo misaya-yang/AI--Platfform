@@ -15,7 +15,7 @@ from ai_gateway_core.logging import get_logger
 logger = get_logger(__name__)
 
 ASSISTANT_CHAT_PATH = "/api/v1/assistant/chat"
-DEFAULT_JUDGE_MODEL_ID = "qwen3.6-plus"
+DEFAULT_JUDGE_MODEL_ID = "qwen3.7-plus"
 EVAL_WORKER_USER_ID = "eval-worker"
 
 

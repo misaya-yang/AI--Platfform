@@ -516,8 +516,28 @@ query_enabled_model_providers() {
     fi
 }
 
+query_enabled_default_qwen_model() {
+    local sql="
+        SELECT COUNT(*)
+        FROM llm_models
+        WHERE tenant_id = 'default'
+          AND provider_id = 'dashscope'
+          AND model_id = 'qwen3.7-plus'
+          AND is_enabled = true;
+    "
+
+    if docker ps --format '{{.Names}}' | grep -q "^$(pg_container)$" 2>/dev/null; then
+        docker exec -i "$(pg_container)" psql -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    elif command -v psql &>/dev/null; then
+        PGPASSWORD="$(pg_password)" psql -h "$(pg_host)" -p "$(pg_port)" \
+            -U "$(pg_user)" -d "$(pg_database)" -Atc "$sql" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
 validate_assistant_model_alignment() {
-    local configured providers_summary rows available_count enabled_summary provider count
+    local configured providers_summary rows available_count enabled_summary provider count default_qwen_count
 
     configured="$(configured_chat_providers)"
     rows="$(query_enabled_model_providers)" || {
@@ -543,6 +563,15 @@ validate_assistant_model_alignment() {
     providers_summary="${configured:-none}"
     if [ "$available_count" -le 0 ]; then
         fail "No enabled assistant models match configured chat providers. Configured providers: ${providers_summary}. Enabled model providers: ${enabled_summary}."
+        return
+    fi
+
+    default_qwen_count="$(query_enabled_default_qwen_model)" || {
+        fail "Unable to query llm_models for default Qwen model readiness."
+        return
+    }
+    if [ "${default_qwen_count:-0}" -le 0 ]; then
+        fail "Default chat model qwen3.7-plus is not enabled for provider dashscope in llm_models."
         return
     fi
 
@@ -606,8 +635,8 @@ validate_config() {
     require_non_empty KB_EMBEDDING_API_KEY
     require_positive_int KB_EMBEDDING_DIMENSION 1024
 
-    if [ -z "$(configured_chat_providers)" ]; then
-        fail "Set at least one usable chat model API key: DASHSCOPE_CHAT_API_KEY, DASHSCOPE_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, VERTEX_API_KEY, or VERTEX_CHAT_API_KEY with GOOGLE_CHAT_BACKEND=vertex."
+    if ! has_any_key DASHSCOPE_CHAT_API_KEY DASHSCOPE_API_KEY; then
+        fail "Set a usable Qwen/DashScope chat API key: DASHSCOPE_CHAT_API_KEY or DASHSCOPE_API_KEY. OpenAI/Google keys are optional fallback keys and do not satisfy this project's default chat readiness gate."
     fi
 
     require_url ASSISTANT_SERVICE_URL

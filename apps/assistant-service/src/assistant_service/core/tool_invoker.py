@@ -576,6 +576,7 @@ class RegistryToolInvoker(ToolInvoker):
             arguments=final_arguments,
             user=context.user,  # Pass user context for tools that need permissions
             metadata={
+                **(context.metadata or {}),
                 "session_id": context.session_id,
                 "user_id": context.user_id,
                 "tenant_id": context.tenant_id,

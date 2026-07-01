@@ -232,7 +232,7 @@ class MCPManager:
             params.append(ToolParameter(
                 name=name,
                 type=prop.get("type", "string"),
-                description=prop.get("description", ""),
+                description=self._sanitize_external_text(prop.get("description", "")),
                 required=name in required,
             ))
         return params
@@ -248,6 +248,11 @@ class MCPManager:
         sanitized = re.sub(
             r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+",
             r"\1=[REDACTED]",
+            sanitized,
+        )
+        sanitized = re.sub(
+            r"(?i)(ignore\s+(all\s+)?previous|system\s+prompt|developer\s+message|jailbreak)",
+            "[untrusted-instruction]",
             sanitized,
         )
         sanitized = " ".join(sanitized.split())

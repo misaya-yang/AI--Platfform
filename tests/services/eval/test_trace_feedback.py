@@ -103,15 +103,40 @@ def test_builds_redacted_dataset_case_from_trace() -> None:
             "output_preview": "api_key=secret-value failed",
             "thread_id": "thread-1",
             "run_id": "run-1",
+            "redaction_state": {"payloads": "redacted_truncated"},
             "metadata": {
                 "raw_input": "do not copy",
                 "Authorization": "Bearer raw-token",
                 "api_key": "secret-value",
                 "note": "token=secret-value",
+                "runtime_trajectory": {
+                    "schema_version": "assistant-runtime-trajectory/v1",
+                    "exit_reason": "approval_required",
+                    "context_snapshot_id": "ctx_safe",
+                    "memory": {"runtime_memory_provenance_count": 2},
+                    "trace_writer_health": {"issue_count": 0},
+                    "transcript_locator": {"turn_index": 3, "bounded": True},
+                },
             },
         },
-        "events": [{"event_type": "approval_required", "payload": {}}],
-        "spans": [{"span_kind": "tool"}],
+        "events": [
+            {"event_type": "approval_required", "payload": {}},
+            {"event_type": "memory_sync", "payload": {"memory_sync": {"status": "skipped"}}},
+            {
+                "event_type": "context_compacted",
+                "payload": {"pre_compaction_flush": {"status": "flushed"}},
+            },
+        ],
+        "spans": [
+            {
+                "span_kind": "tool",
+                "attributes": {
+                    "gateway_policy_decision": {"decision": "deny"},
+                    "sandbox_decision": {"decision": "blocked"},
+                    "direct_registry_denied": True,
+                },
+            }
+        ],
     }
     pattern = classify_trace_failure(detail)
     case = build_redacted_dataset_case(detail, pattern)
@@ -124,6 +149,14 @@ def test_builds_redacted_dataset_case_from_trace() -> None:
     assert case["metadata"]["tenant_id"] is None
     assert case["expected_trajectory"]["replay"]["trace_family"] == "assistant"
     assert case["expected_trajectory"]["evaluator"]["candidate_gate"] == "evaluate_harness_candidate_gate"
+    runtime = case["expected_trajectory"]["runtime"]
+    assert runtime["schema_version"] == "assistant-runtime-trajectory/v1"
+    assert runtime["observed_exit_reason"] == "approval_required"
+    assert runtime["context_snapshot_id"] == "ctx_safe"
+    assert runtime["has_memory_sync_evidence"] is True
+    assert runtime["has_pre_compaction_flush_evidence"] is True
+    assert runtime["tool_safety"]["direct_registry_denied"] is True
+    assert runtime["tool_safety"]["gateway_decisions"][0]["decision"] == "deny"
     assert "raw-token" not in serialized
     assert "secret-value" not in serialized
     assert "raw_input" not in case["metadata"]

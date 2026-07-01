@@ -213,6 +213,7 @@ def build_redacted_dataset_case(
         "expected_trajectory": {
             "source_failure_mode": resolved.failure_mode,
             "required_span_kinds": _span_kinds(detail),
+            "runtime": _runtime_trajectory_expectation(detail),
             "replay": {
                 "trace_family": resolved.trace_family,
                 "source_trace_id": trace_id,
@@ -345,6 +346,75 @@ def _span_kinds(detail: dict[str, Any]) -> list[str]:
         if span.get("span_kind") or span.get("kind")
     ]
     return sorted(set(kinds))
+
+
+def _runtime_trajectory_expectation(detail: dict[str, Any]) -> dict[str, Any]:
+    trace = _trace(detail)
+    metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+    runtime = (
+        metadata.get("runtime_trajectory")
+        if isinstance(metadata.get("runtime_trajectory"), dict)
+        else {}
+    )
+    terminal = (
+        metadata.get("terminal_envelope")
+        if isinstance(metadata.get("terminal_envelope"), dict)
+        else {}
+    )
+    event_types = sorted(
+        {
+            str(event.get("event_type") or "")
+            for event in _events(detail)
+            if event.get("event_type")
+        }
+    )
+    span_attributes = [
+        span.get("attributes")
+        for span in _spans(detail)
+        if isinstance(span.get("attributes"), dict)
+    ]
+    gateway_decisions = [
+        attributes.get("gateway_policy_decision")
+        for attributes in span_attributes
+        if attributes.get("gateway_policy_decision") is not None
+    ]
+    sandbox_decisions = [
+        attributes.get("sandbox_decision")
+        for attributes in span_attributes
+        if attributes.get("sandbox_decision") is not None
+    ]
+    return _safe_export_value(
+        {
+            "schema_version": "assistant-runtime-trajectory/v1",
+            "expected_status": "succeeded",
+            "observed_status": trace.get("status"),
+            "observed_exit_reason": runtime.get("exit_reason") or terminal.get("exit_reason"),
+            "context_snapshot_id": runtime.get("context_snapshot_id")
+            or terminal.get("context_snapshot_id"),
+            "requires_redaction": True,
+            "redaction_state": trace.get("redaction_state") or runtime.get("redaction_state") or {},
+            "memory": runtime.get("memory") or {},
+            "trace_writer_health": runtime.get("trace_writer_health") or {},
+            "transcript_locator": runtime.get("transcript_locator")
+            or metadata.get("transcript_locator")
+            or {},
+            "event_types": event_types,
+            "has_memory_sync_evidence": _event_payload_contains(_events(detail), "memory_sync"),
+            "has_pre_compaction_flush_evidence": _event_payload_contains(
+                _events(detail),
+                "pre_compaction_flush",
+            ),
+            "tool_safety": {
+                "gateway_decisions": gateway_decisions[:8],
+                "sandbox_decisions": sandbox_decisions[:8],
+                "direct_registry_denied": any(
+                    attributes.get("direct_registry_denied") is True
+                    or str(attributes.get("direct_registry_denied")).lower() == "true"
+                    for attributes in span_attributes
+                ),
+            },
+        }
+    )
 
 
 def _redacted_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

@@ -16,7 +16,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
-
 from assistant_service.core.code_executor import (
     MATPLOTLIB_SETUP,
     CodeExecutionConfig,
@@ -319,6 +318,7 @@ class TestDockerAvailability:
         """Test Docker available when Docker is working."""
         mock_client = MagicMock()
         mock_client.ping.return_value = True
+        mock_client.info.return_value = {"Runtimes": {"runsc": {}}}
         mock_client_prop.return_value = mock_client
 
         executor = CodeExecutorService()
@@ -326,6 +326,22 @@ class TestDockerAvailability:
 
         assert result is True
         mock_client.ping.assert_called()
+
+    @patch(
+        "assistant_service.core.code_executor.CodeExecutorService.docker_client",
+        new_callable=PropertyMock,
+    )
+    def test_is_docker_available_requires_configured_sandbox_runtime(self, mock_client_prop):
+        """Docker without the configured sandbox runtime fails closed by default."""
+        mock_client = MagicMock()
+        mock_client.ping.return_value = True
+        mock_client.info.return_value = {"Runtimes": {"runc": {}}}
+        mock_client_prop.return_value = mock_client
+
+        executor = CodeExecutorService()
+        result = executor.is_docker_available()
+
+        assert result is False
 
     @patch(
         "assistant_service.core.code_executor.CodeExecutorService.docker_client",
@@ -656,7 +672,7 @@ class TestExecuteWithMocks:
         mock_cleanup_workspace,
         mock_cleanup_container,
         mock_run_container,
-        mock_docker_available,
+        _mock_docker_available,
     ):
         """Test successful code execution."""
         mock_container = MagicMock()
@@ -679,10 +695,10 @@ class TestExecuteWithMocks:
     @patch.object(CodeExecutorService, "_cleanup_workspace")
     async def test_execute_with_error(
         self,
-        mock_cleanup_workspace,
-        mock_cleanup_container,
+        _mock_cleanup_workspace,
+        _mock_cleanup_container,
         mock_run_container,
-        mock_docker_available,
+        _mock_docker_available,
     ):
         """Test code execution with error."""
         mock_container = MagicMock()
@@ -707,10 +723,10 @@ class TestExecuteWithMocks:
     @patch.object(CodeExecutorService, "_cleanup_workspace")
     async def test_execute_timeout(
         self,
-        mock_cleanup_workspace,
-        mock_cleanup_container,
+        _mock_cleanup_workspace,
+        _mock_cleanup_container,
         mock_run_container,
-        mock_docker_available,
+        _mock_docker_available,
     ):
         """Test code execution with timeout."""
         mock_run_container.side_effect = asyncio.TimeoutError()
@@ -727,9 +743,9 @@ class TestExecuteWithMocks:
     @patch.object(CodeExecutorService, "_cleanup_workspace")
     async def test_execute_with_input_files(
         self,
-        mock_cleanup_workspace,
+        _mock_cleanup_workspace,
         mock_setup_workspace,
-        mock_docker_available,
+        _mock_docker_available,
     ):
         """Test execute passes input files to workspace setup."""
         mock_setup_workspace.side_effect = Exception("Test stop")

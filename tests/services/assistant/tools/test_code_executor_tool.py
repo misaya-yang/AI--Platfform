@@ -8,7 +8,6 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from assistant_service.core.code_executor import (
     CodeExecutionResult,
     CodeExecutorService,
@@ -448,6 +447,7 @@ class TestToolRegistryIntegration:
             call_id="registry-test-123",
             tool_name="execute_python_code",
             arguments={"code": "print(6 * 7)"},
+            metadata={"execution_gateway_approved": True},
         )
 
         result = await registry.execute(request)

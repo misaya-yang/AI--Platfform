@@ -85,43 +85,6 @@ cd "$PROJECT_ROOT"
 INFRA_SERVICES="postgres redis qdrant"
 FULL_APP_SERVICES="gateway frontend knowledge-service assistant-service mcp-docgen-server"
 
-assert_compose_owner() {
-    local expected_owner="$PROJECT_ROOT"
-    local inspected_names=(
-        ai-gateway-pg
-        ai-gateway-redis
-        ai-gateway-qdrant
-        ai-gateway-backend
-        ai-gateway-frontend
-        ai-gateway-assistant-service
-        ai-gateway-knowledge-service
-        ai-gateway-mcp-docgen-server
-        assistant-service
-        ai-gateway-knowledge
-        mcp-docgen-server
-        islamic-content-service
-    )
-    local container owner project service mismatch=false
-
-    for container in "${inspected_names[@]}"; do
-        if ! docker inspect "$container" >/dev/null 2>&1; then
-            continue
-        fi
-        owner=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null || true)
-        project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container" 2>/dev/null || true)
-        service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container" 2>/dev/null || true)
-        if [ "$project" = "ai-gateway" ] && [ -n "$owner" ] && [ "$owner" != "$expected_owner" ]; then
-            log_error "Container '$container' (service=${service:-unknown}) belongs to a different checkout: $owner"
-            mismatch=true
-        fi
-    done
-
-    if [ "$mismatch" = true ]; then
-        log_error "Refusing to mutate Docker project 'ai-gateway' from $PROJECT_ROOT until wrong-checkout containers are stopped or removed explicitly."
-        exit 1
-    fi
-}
-
 assert_compose_owner
 
 # -- Determine services to deploy --------------------------------------------

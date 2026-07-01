@@ -123,7 +123,7 @@ class TestAssistantConfig:
         config = AssistantConfig()
 
         # Model defaults
-        assert config.model_id == "qwen3.6-plus"  # Gateway default
+        assert config.model_id == "qwen3.7-plus"  # Gateway default
         assert config.temperature == 0.7
         assert config.max_tokens is None
 
@@ -156,8 +156,8 @@ class TestAssistantConfig:
         from assistant_service.core.models.model_registry import ModelInfo, ModelProvider
 
         dashscope_model = ModelInfo(
-            id="qwen3.6-plus",
-            name="Qwen 3.6 Plus",
+            id="qwen3.7-plus",
+            name="Qwen 3.7 Plus",
             provider=ModelProvider.DASHSCOPE,
         )
         openai_model = ModelInfo(

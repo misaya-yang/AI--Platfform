@@ -1,21 +1,22 @@
 """
-Agent Loop - Unified 8-Step Enterprise AI Assistant Flow.
+Agent Loop - Streaming-First Enterprise AI Assistant Flow.
 
 This module provides the AgentLoop class that orchestrates all assistant
 components into a unified, streaming execution pipeline.
 
-The 8 Steps:
-1. Memory Loading - Load session and user memory
-2. Scenario Analysis - Detect user intent and scenario
-3. Task Planning - Create execution plan for complex requests
-4. RAG Retrieval - Scenario-aware knowledge base retrieval
-5. Context Building - Build optimized LLM context
-6. Execution Loop - ReAct or tool orchestration
-7. Context Compression - Compress for next iteration
-8. Content Generation & Storage - Generate and persist
+``execute()`` dispatches unconditionally to ``_execute_streaming_first()``:
+the LLM streams text and decides when to call tools; there is no separate
+planning/RAG/compression phase gating the response. The legacy 8-step
+pipeline (memory loading -> scenario analysis -> task planning -> RAG ->
+context building -> execution -> compression -> generation) this docstring
+used to describe was removed in commit bbfbd239
+("delete legacy 8-step pipeline + ReAct phases (-2435 LOC)"). Retrieval,
+memory, and tool selection now happen as part of building the single
+streaming-first context (see ``_execute_streaming_first`` and
+``turn_contract.py`` for the run/session/turn envelope it emits).
 
 Design Philosophy:
-- Streaming-first: Every step yields events for responsive UI
+- Streaming-first: minimal setup, immediate streaming, model-driven tool use
 - Component reuse: Leverages existing implementations
 - Backward compatible: Works alongside existing AssistantService
 - Enterprise-ready: Session isolation and concurrency control
@@ -50,7 +51,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.enums import StreamEventType
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text as _redact_trace_text_shared
 
 from ..gateway import AssistantExecutionGateway, AssistantRequestRouter, RoutedAssistantRequest
 from ..memory.compressor import (
@@ -93,6 +94,7 @@ from ..rag.rag_metrics import (
 from ..rag.scenario_analyzer import ScenarioAnalyzer, ScenarioDetectionResult
 from ..rag.scenario_aware_retriever import ScenarioAwareRetriever, ScenarioRetrievalContext
 from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+from ..runtime.memory.lifecycle import build_compaction_lineage, should_sync_turn_to_memory
 from ..tasks.task_manager import TaskManager, get_task_manager
 from ..tasks.task_planner import ExecutionPlan, TaskPlanner
 from ..tool_invoker import ToolInvocationContext, ToolInvoker, create_tool_invoker
@@ -100,6 +102,7 @@ from ..tool_orchestrator import ToolExecutionResult
 from ..tools.tool_selector import select_tools
 from ..trace_payloads import build_rag_trace_payload
 from ..trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
+from ..turn_contract import build_context_snapshot, build_terminal_envelope
 from ..working_memory import WorkingMemory
 from .artifact_persister import (
     persist_and_collect_events as _artifact_persist_and_collect_events,
@@ -156,42 +159,9 @@ logger = get_logger(__name__)
 # file silently regresses cross-model context.
 PRIOR_TOOL_RESULTS_MARKER = "[Previous tool results"
 
-_TRACE_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (
-        re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]+"),
-        "Authorization: Bearer [redacted]",
-    ),
-    (
-        re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
-        "Bearer [redacted]",
-    ),
-    (
-        re.compile(
-            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)"
-            r"\s*[:=]\s*[\"']?[^\"'\s,;}]+"
-        ),
-        r"\1=[redacted]",
-    ),
-    (
-        re.compile(r"\bsk-[A-Za-z0-9_*.\-]{6,}"),
-        "sk-[redacted]",
-    ),
-    (
-        re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}"),
-        "AIza[redacted]",
-    ),
-)
-
-
-def _redact_trace_text(value: Any) -> str:
-    if isinstance(value, BaseException):
-        detail = str(value).strip() or repr(value)
-        text = f"{type(value).__name__}: {detail}" if detail else type(value).__name__
-    else:
-        text = str(value or "")
-    for pattern, replacement in _TRACE_REDACTION_PATTERNS:
-        text = pattern.sub(replacement, text)
-    return text
+# Redaction lives in ai_gateway_core.security so trace_writer.py and agent_loop.py
+# share one pattern set instead of maintaining copies that can drift out of sync.
+_redact_trace_text = _redact_trace_text_shared
 
 
 # =============================================================================
@@ -320,7 +290,7 @@ class AgentLoopConfig:
     """
 
     # Model configuration
-    model_id: str = "qwen3.6-plus"
+    model_id: str = "qwen3.7-plus"
     temperature: float = 0.5  # Lower for more deterministic answers (was 0.7)
     max_tokens: int = 4096
 
@@ -459,6 +429,7 @@ class AgentLoopContext:
     session_memory: dict[str, Any] | None = None
     long_term_memory: dict[str, Any] | None = None
     runtime_memory_snippets: list[str] = field(default_factory=list)
+    runtime_memory_provenance: list[dict[str, Any]] = field(default_factory=list)
 
     # Step 2: Scenario
     scenario: ScenarioDetectionResult | None = None
@@ -496,6 +467,15 @@ class AgentLoopContext:
     trace_sequence_no: int = 0
     traceparent: str | None = None
     otel_trace_id: str | None = None
+    context_snapshot: dict[str, Any] = field(default_factory=dict)
+    terminal_envelope: dict[str, Any] = field(default_factory=dict)
+    terminal_exit_reason: str | None = None
+    last_checkpoint_id: str | None = None
+    last_approval_id: str | None = None
+    cancelled: bool = False
+    tool_error_seen: bool = False
+    model_error_seen: bool = False
+    max_iterations_reached: bool = False
 
 
 # =============================================================================
@@ -630,6 +610,130 @@ class AgentLoop:
     def _trace_context(self, ctx: AgentLoopContext) -> AssistantTraceContext:
         return AssistantTraceContext.from_agent_context(ctx)
 
+    def _model_provider_snapshot(self, ctx: AgentLoopContext) -> Any:
+        with contextlib.suppress(Exception):
+            model_info = self.model_registry.get_model(ctx.config.model_id) if self.model_registry else None
+            provider = getattr(model_info, "provider", None)
+            return getattr(provider, "value", provider)
+        return None
+
+    def _context_snapshot(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        tools: dict[str, Any] | None = None,
+        bootstrap: dict[str, Any] | None = None,
+        workspace: dict[str, Any] | None = None,
+        surface: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        trace_ctx = self._trace_context(ctx)
+        ctx.context_snapshot = build_context_snapshot(
+            run_id=ctx.run_id,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            mode="streaming_first",
+            model_id=ctx.config.model_id,
+            provider=self._model_provider_snapshot(ctx),
+            trace_id=trace_ctx.trace_id,
+            otel_trace_id=ctx.otel_trace_id,
+            policy={
+                "execution_profile": ctx.config.execution_profile,
+                "memory_mode": ctx.config.memory_mode,
+                "runtime_mode": ctx.config.runtime_mode,
+                "queue_mode": ctx.config.queue_mode,
+                "context_detail": ctx.config.context_detail,
+                "kb_mode": ctx.config.kb_mode,
+                "web_search_enabled": ctx.config.web_search_enabled,
+            },
+            memory={
+                "runtime_memory_snippets": len(ctx.runtime_memory_snippets),
+                "runtime_memory_provenance_count": len(ctx.runtime_memory_provenance),
+                "has_session_memory": bool(ctx.session_memory),
+                "has_long_term_memory": bool(ctx.long_term_memory),
+                "working_memory_tasks": len(ctx.working_memory.tasks)
+                if ctx.working_memory
+                else 0,
+            },
+            workspace={
+                "file_count": len(ctx.config.file_paths or []),
+                **(workspace or {}),
+            },
+            tools=tools or {},
+            bootstrap=bootstrap or {},
+            surface={
+                "stream": True,
+                "task_id": ctx.task_id,
+                "resume_run_id": ctx.config.resume_run_id,
+                "resume_approval_id": ctx.config.resume_approval_id,
+                **(surface or {}),
+            },
+        )
+        return ctx.context_snapshot
+
+    def _terminal_exit_reason(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        status: str,
+        error: Any = None,
+    ) -> str:
+        if ctx.terminal_exit_reason:
+            return ctx.terminal_exit_reason
+        if ctx.approval_paused:
+            return "approval_pending"
+        if ctx.cancelled or status == "cancelled":
+            return "cancelled"
+        if ctx.max_iterations_reached:
+            return "max_iterations"
+        if status == "succeeded":
+            return "succeeded"
+        if ctx.model_error_seen:
+            return "model_error"
+        if ctx.tool_error_seen:
+            return "tool_error"
+        if error:
+            return "failed"
+        return "failed"
+
+    def _terminal_envelope(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        status: str,
+        error: Any = None,
+        exit_reason: str | None = None,
+    ) -> dict[str, Any]:
+        ctx.terminal_exit_reason = exit_reason or self._terminal_exit_reason(
+            ctx, status=status, error=error
+        )
+        snapshot = ctx.context_snapshot or self._context_snapshot(ctx)
+        trace_ctx = self._trace_context(ctx)
+        ctx.terminal_envelope = build_terminal_envelope(
+            run_id=ctx.run_id,
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            mode="streaming_first",
+            status=status,
+            exit_reason=ctx.terminal_exit_reason,
+            started_at=ctx.trace_started_at,
+            model_id=ctx.config.model_id,
+            provider=self._model_provider_snapshot(ctx),
+            trace_id=trace_ctx.trace_id,
+            otel_trace_id=ctx.otel_trace_id,
+            checkpoint_id=ctx.last_checkpoint_id,
+            context_snapshot=snapshot,
+            usage=ctx.usage,
+            error=_redact_trace_text(error) if error else None,
+            resume_ready=bool(ctx.approval_paused),
+            approval_id=ctx.last_approval_id,
+            task_id=ctx.task_id,
+        )
+        return ctx.terminal_envelope
+
     def _capture_trace_start(self, ctx: AgentLoopContext) -> None:
         if not self.trace_writer:
             return
@@ -696,6 +800,8 @@ class AgentLoop:
             total_latency_ms=int((time.time() - ctx.trace_started_at) * 1000),
             terminal_event_type=terminal_event_type,
             terminal_sequence_no=self._next_trace_sequence(ctx) if terminal_event_type else None,
+            terminal_envelope=ctx.terminal_envelope
+            or self._terminal_envelope(ctx, status=status, error=error),
         )
 
     async def _save_checkpoint(
@@ -711,11 +817,11 @@ class AgentLoop:
         resume_payload: dict[str, Any] | None = None,
         status: str = "running",
         error: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if not (self.execution_gateway and self.execution_gateway.enabled):
-            return
+            return None
         try:
-            await self.execution_gateway.save_run_checkpoint(
+            checkpoint = await self.execution_gateway.save_run_checkpoint(
                 run_id=ctx.run_id,
                 tenant_id=ctx.tenant_id,
                 user_id=ctx.user_id,
@@ -730,8 +836,14 @@ class AgentLoop:
                 status=status,
                 error=error,
             )
+            if isinstance(checkpoint, dict):
+                ctx.last_checkpoint_id = str(checkpoint.get("checkpoint_id") or "") or None
+            if approval_id:
+                ctx.last_approval_id = approval_id
+            return checkpoint if isinstance(checkpoint, dict) else None
         except Exception:
             logger.exception("Failed to persist assistant run checkpoint")
+        return None
 
     def _get_subagent_manager(self) -> SubAgentManager:
         """Return a reusable SubAgentManager, creating it on first access."""
@@ -1324,6 +1436,13 @@ class AgentLoop:
             run_status = "running"
             run_error: str | None = None
             terminal_event_recorded = False
+            ctx.context_snapshot = self._context_snapshot(
+                ctx,
+                bootstrap={
+                    "history_message_count": len(history or []),
+                    "message_count": len(history or []) + 1,
+                },
+            )
 
             def _terminal_error_message(event: AgentLoopEvent) -> str:
                 if isinstance(event.data, dict):
@@ -1361,6 +1480,9 @@ class AgentLoop:
                             "mode": "streaming_first",
                             "task_id": task_id,
                             "queue_mode": config.queue_mode,
+                            "context_snapshot_id": ctx.context_snapshot.get(
+                                "snapshot_id"
+                            ),
                         },
                     )
 
@@ -1398,6 +1520,7 @@ class AgentLoop:
                         "task_id": task_id,
                         "request_id": ctx.request_id,
                         "mode": "streaming_first",
+                        "context_snapshot": ctx.context_snapshot,
                     },
                 )
                 run_started_event = await self._capture_and_prepare_stream_event(
@@ -1458,21 +1581,57 @@ class AgentLoop:
                     yield event
 
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
-                if ctx.approval_paused:
-                    run_status = "blocked"
-                elif had_fatal_error:
-                    run_status = "failed"
-                    run_error = _redact_trace_text(
-                        fatal_error_message or "AgentLoop streaming-first failed"
-                    )
+                if ctx.cancelled:
+                    run_status = "cancelled"
+                    run_error = run_error or "Cancelled by user"
                     if not terminal_event_recorded:
+                        envelope = self._terminal_envelope(
+                            ctx,
+                            status="cancelled",
+                            error=run_error,
+                            exit_reason="cancelled",
+                        )
                         run_error_event = AgentLoopEvent(
                             phase=AgentLoopPhase.GENERATION_STORAGE,
                             event_type=StreamEventType.RUN_ERROR.value,
                             data={
                                 "run_id": ctx.run_id,
                                 "thread_id": session_id,
+                                "session_id": session_id,
                                 "error": run_error,
+                                "terminal_envelope": envelope,
+                                "context_snapshot": ctx.context_snapshot,
+                            },
+                        )
+                        run_error_event = await self._capture_and_prepare_stream_event(
+                            ctx, run_error_event
+                        )
+                        terminal_event_recorded = (
+                            run_error_event.event_type == StreamEventType.RUN_ERROR.value
+                        )
+                        yield run_error_event
+                elif ctx.approval_paused:
+                    run_status = "blocked"
+                elif had_fatal_error:
+                    run_status = "failed"
+                    ctx.model_error_seen = True
+                    run_error = _redact_trace_text(
+                        fatal_error_message or "AgentLoop streaming-first failed"
+                    )
+                    if not terminal_event_recorded:
+                        envelope = self._terminal_envelope(
+                            ctx, status="failed", error=run_error
+                        )
+                        run_error_event = AgentLoopEvent(
+                            phase=AgentLoopPhase.GENERATION_STORAGE,
+                            event_type=StreamEventType.RUN_ERROR.value,
+                            data={
+                                "run_id": ctx.run_id,
+                                "thread_id": session_id,
+                                "session_id": session_id,
+                                "error": run_error,
+                                "terminal_envelope": envelope,
+                                "context_snapshot": ctx.context_snapshot,
                             },
                         )
                         run_error_event = await self._capture_and_prepare_stream_event(
@@ -1484,15 +1643,20 @@ class AgentLoop:
                         yield run_error_event
                 elif not ctx.approval_paused:
                     run_status = "succeeded"
+                    envelope = self._terminal_envelope(ctx, status="succeeded")
                     run_finished_event = AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
                         event_type=StreamEventType.RUN_FINISHED.value,
                         data={
                             "run_id": ctx.run_id,
                             "thread_id": session_id,
+                            "session_id": session_id,
+                            "terminal_envelope": envelope,
+                            "context_snapshot": ctx.context_snapshot,
                             "metadata": {
                                 "usage": ctx.usage or {},
                                 "mode": "streaming_first",
+                                "terminal_envelope": envelope,
                             },
                         },
                     )
@@ -1531,9 +1695,13 @@ class AgentLoop:
                 elif final_status == "running":
                     if task_ctx and task_ctx.cancelled:
                         final_status = "cancelled"
+                        ctx.cancelled = True
                         run_error = run_error or "Cancelled by user"
                     else:
                         final_status = "succeeded"
+                ctx.terminal_envelope = self._terminal_envelope(
+                    ctx, status=final_status, error=run_error
+                )
 
                 if self.execution_gateway and self.execution_gateway.enabled:
                     try:
@@ -1558,8 +1726,17 @@ class AgentLoop:
                                 "generated_content_chars": len(
                                     ctx.generated_content or ""
                                 ),
+                                "context_snapshot_id": ctx.context_snapshot.get(
+                                    "snapshot_id"
+                                ),
+                                "terminal_exit_reason": ctx.terminal_envelope.get(
+                                    "exit_reason"
+                                ),
                             },
                             error=run_error,
+                        )
+                        ctx.terminal_envelope = self._terminal_envelope(
+                            ctx, status=final_status, error=run_error
                         )
                 terminal_event_type = None
                 if not terminal_event_recorded:
@@ -1663,7 +1840,7 @@ class AgentLoop:
                 compressor = ContextCompressor(
                     llm_service=ModelRegistryLLMService(
                         self.model_registry,
-                        model_id=model_id or "qwen3.6-plus",
+                        model_id=model_id or "qwen3.7-plus",
                         max_tokens=min(summary_budget, 500),
                     ),
                     max_summary_tokens=min(summary_budget, 500),
@@ -1770,6 +1947,7 @@ class AgentLoop:
             }
 
         before_tokens = estimate_history_tokens(messages)
+        parent_messages = [dict(message) for message in messages]
 
         summary_block: str | None = None
         if self.model_registry:
@@ -1826,6 +2004,15 @@ class AgentLoop:
         messages.extend(recent_messages)
 
         after_tokens = estimate_history_tokens(messages)
+        compaction_lineage = build_compaction_lineage(
+            parent_messages=parent_messages,
+            child_messages=messages,
+            summary_text=summary_block,
+            reason="context_compact",
+            turns_total=len(user_indices),
+            turns_kept=keep_recent_turns,
+            messages_summarized=len(old_messages),
+        )
         logger.info(
             "context_compact: %d → %d tokens (kept %d turns, summarized %d msgs)",
             before_tokens,
@@ -1840,6 +2027,7 @@ class AgentLoop:
             "messages_summarized": len(old_messages),
             "tokens_before": before_tokens,
             "tokens_after": after_tokens,
+            "compaction_lineage": compaction_lineage,
         }
 
     async def _summarize_history(
@@ -2023,6 +2211,7 @@ class AgentLoop:
             web_search_results_for_persistence: dict[str, Any] | None = None
             quiz_id_for_persistence: str | None = None
             created_artifact_ids: list[str] = []
+            memory_sync_result: dict[str, Any] | None = None
             # Turn-level accumulators for activity-drawer persistence.
             # These cross iteration boundaries (per-iteration `accumulated_thinking`
             # and `tool_calls_accumulated` get reset), so we append to these from
@@ -2581,6 +2770,28 @@ class AgentLoop:
                 context_estimated_input_tokens=context_estimated_input_tokens,
                 model_context_window=model_context_window,
             )
+            context_snapshot = self._context_snapshot(
+                ctx,
+                tools={
+                    "tool_count": len(available_tool_names),
+                    "selected_tool_names": available_tool_names,
+                    "tool_schema_order_hash": cache_context_metrics.get(
+                        "tool_schema_order_hash"
+                    ),
+                    "tool_schema_names_hash": cache_context_metrics.get(
+                        "tool_schema_names_hash"
+                    ),
+                },
+                bootstrap={
+                    "message_count": len(messages),
+                    "history_message_count": len(trimmed_history),
+                    "system_prompt_chars": len(system_prompt),
+                    "dynamic_context_chars": len(dynamic_context_block),
+                    "context_estimated_input_tokens": context_estimated_input_tokens,
+                    "context_window_tokens": model_context_window,
+                },
+                workspace={"file_count": len(processed_file_metadata)},
+            )
             yield AgentLoopEvent(
                 phase=phase,
                 event_type=StreamEventType.CONTEXT_BUDGET.value,
@@ -2597,6 +2808,7 @@ class AgentLoop:
                     "dynamic_context_chars": len(dynamic_context_block),
                     "file_count": len(processed_file_metadata),
                     "context_detail_enabled": bool(ctx.config.context_detail),
+                    "context_snapshot": context_snapshot,
                     **cache_context_metrics,
                 },
             )
@@ -2630,10 +2842,25 @@ class AgentLoop:
 
                 # Check for cancellation
                 if task_ctx and task_ctx.cancelled:
+                    ctx.cancelled = True
+                    ctx.terminal_exit_reason = "cancelled"
+                    envelope = self._terminal_envelope(
+                        ctx,
+                        status="cancelled",
+                        error="Cancelled by user",
+                        exit_reason="cancelled",
+                    )
                     yield AgentLoopEvent(
                         phase=phase,
                         event_type="cancelled",
-                        data={"reason": "User requested cancellation"},
+                        data={
+                            "run_id": ctx.run_id,
+                            "thread_id": ctx.session_id,
+                            "session_id": ctx.session_id,
+                            "reason": "User requested cancellation",
+                            "terminal_envelope": envelope,
+                            "context_snapshot": ctx.context_snapshot,
+                        },
                     )
                     return
 
@@ -3043,6 +3270,13 @@ class AgentLoop:
                                 status="blocked",
                                 resume_payload={"source": "middleware_confirm"},
                             )
+                            ctx.approval_paused = True
+                            ctx.last_approval_id = pending_approval_id
+                            envelope = self._terminal_envelope(
+                                ctx,
+                                status="blocked",
+                                exit_reason="approval_pending",
+                            )
                             yield AgentLoopEvent(
                                 phase=phase,
                                 event_type="approval_required",
@@ -3056,9 +3290,11 @@ class AgentLoop:
                                     "reason": _redact_trace_text(_verdict.reason),
                                     "source": _verdict.source,
                                     "status": "pending",
+                                    "checkpoint_id": ctx.last_checkpoint_id,
+                                    "terminal_envelope": envelope,
+                                    "context_snapshot": ctx.context_snapshot,
                                 },
                             )
-                            ctx.approval_paused = True
                             return
                         logger.info(
                             "[STREAMING-FIRST] Tool %s %s by %s: %s",
@@ -3434,6 +3670,7 @@ class AgentLoop:
                                 )
 
                             if tool_error == "APPROVAL_REQUIRED":
+                                approval_id = tool_metadata.get("approval_id")
                                 await self._save_checkpoint(
                                     ctx,
                                     phase="approval_pending",
@@ -3444,13 +3681,20 @@ class AgentLoop:
                                         "tool_name": tool_name,
                                         "arguments": tool_args,
                                     },
-                                    approval_id=tool_metadata.get("approval_id"),
+                                    approval_id=approval_id,
                                     idempotency_keys={
                                         "command_id": tool_metadata.get("command_id"),
                                         "queue_state": tool_metadata.get("queue_state"),
                                     },
                                     status="blocked",
                                     resume_payload={"source": "execution_gateway"},
+                                )
+                                ctx.approval_paused = True
+                                ctx.last_approval_id = approval_id
+                                envelope = self._terminal_envelope(
+                                    ctx,
+                                    status="blocked",
+                                    exit_reason="approval_pending",
                                 )
                                 yield AgentLoopEvent(
                                     phase=phase,
@@ -3461,16 +3705,18 @@ class AgentLoop:
                                         "session_id": ctx.session_id,
                                         "tool_id": tool_id,
                                         "tool_name": tool_name,
-                                        "approval_id": tool_metadata.get("approval_id"),
+                                        "approval_id": approval_id,
                                         "reason": _redact_trace_text(
                                             gateway_decision.get("reason")
                                         )
                                         if isinstance(gateway_decision, dict)
                                         else None,
                                         "status": "pending",
+                                        "checkpoint_id": ctx.last_checkpoint_id,
+                                        "terminal_envelope": envelope,
+                                        "context_snapshot": ctx.context_snapshot,
                                     },
                                 )
-                                ctx.approval_paused = True
                                 return
 
                             # Check if cancelled (via metadata or error message)
@@ -3483,10 +3729,26 @@ class AgentLoop:
                                 step_status_override = "skipped"
                                 step_success = False
                                 step_error = tool_error or "cancelled"
+                                ctx.cancelled = True
+                                ctx.terminal_exit_reason = "cancelled"
+                                envelope = self._terminal_envelope(
+                                    ctx,
+                                    status="cancelled",
+                                    error=step_error,
+                                    exit_reason="cancelled",
+                                )
                                 yield AgentLoopEvent(
                                     phase=phase,
                                     event_type="tool_call_cancelled",
-                                    data={"tool_id": tool_id, "tool_name": tool_name},
+                                    data={
+                                        "run_id": ctx.run_id,
+                                        "thread_id": ctx.session_id,
+                                        "session_id": ctx.session_id,
+                                        "tool_id": tool_id,
+                                        "tool_name": tool_name,
+                                        "terminal_envelope": envelope,
+                                        "context_snapshot": ctx.context_snapshot,
+                                    },
                                 )
                                 return  # Exit streaming-first mode on cancellation
                         else:
@@ -3776,6 +4038,7 @@ class AgentLoop:
                         step_error = tool_error_for_event
                         step_result_preview = tool_result_preview or None
                         last_tool_failed = not tool_success
+                        ctx.tool_error_seen = ctx.tool_error_seen or not tool_success
 
                     except Exception as e:
                         safe_error = _redact_trace_text(e)
@@ -3801,6 +4064,7 @@ class AgentLoop:
                             safe_error,
                         )
                         last_tool_failed = True
+                        ctx.tool_error_seen = True
                         tool_result = f"Error executing {tool_name}: {safe_error}"
                         tool_result_for_model = _compact_tool_result_for_model(
                             tool_name=tool_name,
@@ -3959,6 +4223,18 @@ class AgentLoop:
                     if isinstance(_compact_signal, dict):
                         _keep_turns = int(_compact_signal.get("keep_recent_turns") or 3)
                         try:
+                            _compact_reason = str(_compact_signal.get("reason") or "")
+                            _pre_compaction_flush: dict[str, Any] | None = None
+                            if self.assistant_runtime is not None:
+                                _pre_compaction_flush = (
+                                    await self.assistant_runtime.on_pre_compact(
+                                        tenant_id=ctx.tenant_id,
+                                        user_id=ctx.user_id,
+                                        session_id=ctx.session_id,
+                                        run_id=ctx.run_id,
+                                        reason=_compact_reason,
+                                    )
+                                )
                             _stats = await self._compact_messages_by_turns(
                                 messages=messages,
                                 keep_recent_turns=_keep_turns,
@@ -3973,7 +4249,8 @@ class AgentLoop:
                                     "thread_id": ctx.session_id,
                                     "session_id": ctx.session_id,
                                     "trigger": "tool:context_compact",
-                                    "reason": _compact_signal.get("reason", ""),
+                                    "reason": _compact_reason,
+                                    "pre_compaction_flush": _pre_compaction_flush,
                                 },
                             )
                         except Exception:
@@ -4085,6 +4362,7 @@ class AgentLoop:
             max_iter_exhausted = (
                 not model_terminated_cleanly and iteration >= max_iterations
             )
+            ctx.max_iterations_reached = bool(max_iter_exhausted)
             if (
                 not ctx.generated_content.strip()
                 or max_iter_exhausted
@@ -4283,7 +4561,12 @@ class AgentLoop:
                 except Exception:
                     logger.exception("Failed to persist assistant message (streaming-first)")
 
-            if self.memory_service and ctx.message:
+            turn_terminal_envelope = self._terminal_envelope(ctx, status="succeeded")
+            memory_sync_allowed, memory_sync_reason = should_sync_turn_to_memory(
+                turn_terminal_envelope
+            )
+
+            if self.memory_service and ctx.message and memory_sync_allowed:
                 try:
                     from ..memory.preference_extractor import (
                         extract_preferences,
@@ -4318,6 +4601,12 @@ class AgentLoop:
                         )
                 except Exception:
                     logger.exception("Failed to persist structured user memory")
+            elif self.memory_service and ctx.message:
+                logger.info(
+                    "Skipping structured user memory sync for run=%s: %s",
+                    ctx.run_id,
+                    memory_sync_reason,
+                )
 
             if (
                 self.assistant_runtime
@@ -4326,46 +4615,39 @@ class AgentLoop:
                 and str(ctx.config.memory_profile or "basic").lower() != "off"
             ):
                 try:
-                    conversation_snapshot = (
-                        f"User: {ctx.message.strip()}\n\nAssistant: {ctx.generated_content.strip()}"
-                    )
-                    if len(conversation_snapshot) > 6000:
-                        conversation_snapshot = conversation_snapshot[:6000]
-                    redacted_text, findings = self.assistant_runtime.pii_filter.redact(
-                        conversation_snapshot
-                    )
-                    source_path = self.assistant_runtime.memory_store.append_daily_entry(
-                        ctx.tenant_id,
-                        ctx.user_id,
-                        redacted_text,
-                    )
-                    source_content = ""
-                    with open(source_path, encoding="utf-8") as file_obj:
-                        source_content = file_obj.read()
-                    await self.assistant_runtime.memory_indexer.index_source(
+                    sync_result = await self.assistant_runtime.sync_turn_to_memory(
                         tenant_id=ctx.tenant_id,
                         user_id=ctx.user_id,
-                        source_path=source_path,
-                        source_type="daily",
-                        content=source_content,
-                        metadata={
-                            "run_id": ctx.run_id,
-                            "session_id": ctx.session_id,
-                            "pii_findings": [finding.pattern for finding in findings],
-                        },
+                        session_id=ctx.session_id,
+                        user_message=ctx.message,
+                        assistant_message=ctx.generated_content,
+                        terminal_envelope=turn_terminal_envelope,
                     )
+                    memory_sync_result = sync_result.to_dict()
                 except Exception:
                     logger.exception("Failed to persist assistant runtime daily memory")
+                    memory_sync_result = {
+                        "synced": False,
+                        "skipped": True,
+                        "reason": "memory_sync_failed",
+                    }
 
             yield AgentLoopEvent(
                 phase=phase,
                 event_type="streaming_first_completed",
                 data={
                     "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
                     "total_time_ms": round(total_time_ms, 2),
                     "iterations": iteration,
                     "content_length": len(ctx.generated_content),
                     "usage": ctx.usage,
+                    "memory_sync": memory_sync_result,
+                    "terminal_envelope": self._terminal_envelope(
+                        ctx, status="succeeded"
+                    ),
+                    "context_snapshot": ctx.context_snapshot,
                 },
             )
 
@@ -4376,6 +4658,7 @@ class AgentLoop:
 
         except Exception as e:
             safe_error = _redact_trace_text(e)
+            ctx.model_error_seen = True
             logger.error("[STREAMING-FIRST] Error: %s", safe_error)
             async for error_event in self.middleware_chain.run_on_error(ctx, e, phase):
                 yield error_event

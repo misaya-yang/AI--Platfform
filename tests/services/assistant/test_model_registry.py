@@ -130,6 +130,16 @@ class TestDefaultCatalogPricing:
         assert qwen36.input_price_per_1k > 0, "input price must be set"
         assert qwen36.output_price_per_1k > 0, "output price must be set"
 
+    def test_qwen37_plus_is_default_catalog_head(self):
+        """Qwen 3.7 Plus is the preferred DashScope chat default."""
+        from assistant_service.core.models.model_registry import DEFAULT_MODELS, ModelProvider
+
+        dashscope_models = DEFAULT_MODELS[ModelProvider.DASHSCOPE]
+        assert dashscope_models[0].id == "qwen3.7-plus"
+        qwen37 = dashscope_models[0]
+        assert qwen37.input_price_per_1k > 0
+        assert qwen37.output_price_per_1k > 0
+
     def test_claude_opus_4_5_pricing_corrected(self):
         """Opus 4.5 list price is $5/$25 per 1M (not $15/$75 of Opus 4.1)."""
         from assistant_service.core.models.model_registry import DEFAULT_MODELS, ModelProvider
@@ -163,10 +173,10 @@ class TestDefaultCatalogPricing:
         )
 
         # A model that IS in the capability map should auto-populate.
-        qwen = ModelInfo(id="qwen3.6-plus", name="Qwen 3.6 Plus", provider=ModelProvider.DASHSCOPE)
+        qwen = ModelInfo(id="qwen3.7-plus", name="Qwen 3.7 Plus", provider=ModelProvider.DASHSCOPE)
         assert qwen.supports_native_search is True
         assert qwen.native_search_config == NATIVE_SEARCH_CAPABLE[
-            (ModelProvider.DASHSCOPE, "qwen3.6-plus")
+            (ModelProvider.DASHSCOPE, "qwen3.7-plus")
         ]
 
         # A model NOT in the map should remain False.

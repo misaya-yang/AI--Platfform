@@ -609,7 +609,7 @@ export function EvalPage() {
         trace_family: activeTraceFamily,
       };
       if (evaluatorDraft.evaluator_type === "llm" || evaluatorDraft.evaluator_type === "llm_judge") {
-        metadata.judge_model_id = "qwen3.6-plus";
+        metadata.judge_model_id = "qwen3.7-plus";
       }
       return createEvalEvaluator({
         name: evaluatorDraft.name.trim() || "quality",
@@ -877,6 +877,7 @@ export function EvalPage() {
   };
 
   const dashboardMetrics = dashboardQuery.data?.metrics || {};
+  const runtimeHealth = dashboardQuery.data?.runtime_health || {};
   const overviewTab = (
     <div className="eval-platform-grid">
       {[
@@ -887,6 +888,7 @@ export function EvalPage() {
         { key: "pass", label: t("eval.workbench.passRate", "Pass rate"), value: pct(dashboardMetrics.pass_rate) },
         { key: "trajectory", label: t("eval.workbench.trajectoryPass", "Trajectory pass"), value: pct(dashboardMetrics.trajectory_pass_rate) },
         { key: "critical", label: t("eval.workbench.criticalFailures", "Critical failures"), value: dashboardMetrics.critical_failures ?? 0 },
+        { key: "toolSafety", label: t("eval.workbench.toolSafetyFailures", "Tool-safety failures"), value: runtimeHealth.tool_safety_failures ?? 0 },
         { key: "outbox", label: t("eval.workbench.outboxFailures", "Outbox failures"), value: dashboardQuery.data?.queue_health?.failed_jobs ?? 0 },
         { key: "judge", label: t("eval.workbench.judgePending", "Judge pending"), value: dashboardMetrics.judge_pending_count ?? 0 },
       ].map((card) => (
@@ -919,6 +921,11 @@ export function EvalPage() {
           bordered
           column={1}
           items={[
+            { key: "assistant", label: t("eval.workbench.assistantRuntime", "Assistant runtime"), children: String(runtimeHealth.assistant_status || "unknown") },
+            { key: "ragRuntime", label: t("eval.workbench.ragRuntime", "RAG runtime"), children: String(runtimeHealth.rag_status || "partial") },
+            { key: "langgraphRuntime", label: t("eval.workbench.langgraphRuntime", "LangGraph runtime"), children: String(runtimeHealth.langgraph_status || "partial") },
+            { key: "trajectoryTraces", label: t("eval.workbench.runtimeTrajectoryTraces", "Runtime trajectories"), children: String(runtimeHealth.runtime_trajectory_traces ?? 0) },
+            { key: "traceWriterIssues", label: t("eval.workbench.traceWriterIssues", "Trace writer issues"), children: String(runtimeHealth.trace_writer_issue_traces ?? 0) },
             { key: "baseline", label: t("eval.workbench.latestBaseline", "Latest baseline"), children: String(dashboardMetrics.latest_baseline || "-") },
             { key: "candidate", label: t("eval.workbench.latestCandidate", "Latest candidate"), children: String(dashboardMetrics.latest_candidate || "-") },
             { key: "gate", label: t("eval.workbench.latestGate", "Latest gate"), children: String(dashboardQuery.data?.latest_gate_status?.status || "not_run") },

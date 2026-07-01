@@ -12,9 +12,11 @@ import asyncio
 import json
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from .stream_helpers import merge_stream_tool_calls
 from .subagent_types import (
     SUBAGENT_DEFAULTS,
@@ -26,7 +28,7 @@ from .subagent_types import (
 
 if TYPE_CHECKING:
     from ..models.model_registry import ModelRegistry
-    from ..tools.tool_registry import ToolCallRequest, ToolCallResult, ToolRegistry
+    from ..tools.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -63,6 +65,7 @@ class SubAgentManager:
         kb_dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Spawn a single sub-agent. Yields SSE-compatible event dicts."""
+        del parent_tenant_id
         agent_id = f"sub_{uuid.uuid4().hex[:12]}"
         defaults = SUBAGENT_DEFAULTS.get(config.agent_type, {})
 
@@ -174,6 +177,7 @@ class SubAgentManager:
         return messages
 
     def _get_tools(self, config: SubAgentConfig, defaults: dict, user: Any | None) -> list:
+        del config
         all_tools = self.tool_registry.list_tools(user=user)
         allowed = defaults.get("allowed_tool_categories")
         if allowed is None:
@@ -185,7 +189,7 @@ class SubAgentManager:
         """Select model by agent type — explore prefers fast models, others prefer strongest."""
         models = list(self.model_registry._models.values())
         if not models:
-            return "qwen3.6-plus"
+            return "qwen3.7-plus"
         if config.agent_type == SubAgentType.EXPLORE:
             for m in models:
                 if "flash" in m.id.lower() or "turbo" in m.id.lower():
@@ -219,6 +223,7 @@ Rules:
         kb_dataset_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Simplified agent loop for sub-agents."""
+        del defaults
         from ..tools.tool_registry import ToolCallRequest, ToolCallResult
 
         tool_schemas = [t.to_openai_schema(compact=True) for t in tools] if tools else None

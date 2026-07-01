@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    """Read DB rows from mappings, asyncpg.Record, or simple objects."""
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return getattr(row, key, default)
 
 
 @dataclass
@@ -117,24 +128,30 @@ class HybridMemoryRetriever:
         top_chunk_ids = [item[0] for item in scored[:max_results]]
         chunk_rows = await self._load_chunks(top_chunk_ids)
 
-        lookup = {chunk.chunk_id: chunk for chunk in chunk_rows}
+        lookup = {str(_row_value(chunk, "chunk_id")): chunk for chunk in chunk_rows}
         results: list[MemorySearchHit] = []
         for chunk_id, vector_score, text_score, final_score in scored:
             row = lookup.get(chunk_id)
             if not row:
                 continue
+            metadata = _row_value(row, "metadata", {}) or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
             results.append(
                 MemorySearchHit(
                     chunk_id=chunk_id,
-                    content=row.content,
-                    source_path=row.source_path,
-                    source_type=row.source_type,
-                    start_line=row.start_line,
-                    end_line=row.end_line,
+                    content=str(_row_value(row, "content", "")),
+                    source_path=str(_row_value(row, "source_path", "")),
+                    source_type=str(_row_value(row, "source_type", "")),
+                    start_line=int(_row_value(row, "start_line", 0) or 0),
+                    end_line=int(_row_value(row, "end_line", 0) or 0),
                     vector_score=vector_score,
                     text_score=text_score,
                     final_score=final_score,
-                    metadata=row.metadata,
+                    metadata={
+                        **metadata,
+                        "source_id": str(_row_value(row, "source_id", "") or ""),
+                    },
                 )
             )
             if len(results) >= max_results:
@@ -180,8 +197,10 @@ class HybridMemoryRetriever:
         rows = await self.database.fetch(sql, *params)
         scores: dict[str, float] = {}
         for row in rows:
-            chunk_id = str(row.get("chunk_id"))
-            scores[chunk_id] = float(row.get("text_score") or 0.0)
+            chunk_id = str(_row_value(row, "chunk_id", ""))
+            if not chunk_id:
+                continue
+            scores[chunk_id] = float(_row_value(row, "text_score", 0.0) or 0.0)
         return scores
 
     async def _search_vector(
@@ -254,6 +273,7 @@ class HybridMemoryRetriever:
                 c.start_line,
                 c.end_line,
                 c.metadata,
+                s.source_id,
                 s.source_path,
                 s.source_type
             FROM assistant_memory_chunks c

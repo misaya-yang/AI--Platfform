@@ -452,6 +452,17 @@ class FakeTraceRepository:
             },
             "run_health": {"succeeded_runs": 2, "failed_runs": 0},
             "queue_health": {"queued_jobs": 0, "failed_jobs": 1},
+            "runtime_health": {
+                "assistant_status": "enabled",
+                "assistant_captured_traces": 8,
+                "runtime_trajectory_traces": 7,
+                "pass_rate": 0.9,
+                "trajectory_pass_rate": 0.875,
+                "tool_safety_failures": 1,
+                "critical_runtime_failures": 1,
+                "rag_status": "wired",
+                "langgraph_status": "partial",
+            },
             "latest_gate_status": {"status": "pass"},
         }
 
@@ -489,6 +500,44 @@ class FakeTraceRepository:
             "deltas": {"overall_score": -0.02, "trajectory_pass_rate": -0.04},
             "regression_summary": {"regressed_metrics": ["overall_score", "trajectory_pass_rate"]},
             "case_diffs": [],
+        }
+
+
+class ExampleFromTraceRepository(AgentTraceRepository):
+    def __init__(self) -> None:
+        super().__init__(SimpleNamespace(_pool=None, enabled=False))
+        self.insert_args: tuple[Any, ...] | None = None
+
+    async def get_trace_detail(self, **_kwargs: Any) -> dict[str, Any] | None:
+        return {
+            "trace": _trace_row(
+                metadata={
+                    "runtime_trajectory": {
+                        "context_snapshot_id": "ctx_runtime",
+                        "trace_writer_health": {"issue_count": 0},
+                    }
+                },
+                redaction_state={"payloads": "redacted_truncated"},
+            ),
+            "spans": [{"span_kind": "lifecycle"}, {"span_kind": "tool_execution"}],
+            "events": [],
+            "scores": [],
+        }
+
+    async def fetchrow(self, _query: str, *args: Any) -> dict[str, Any] | None:
+        self.insert_args = args
+        return {
+            "example_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "dataset_id": args[0],
+            "tenant_id": args[1],
+            "split": args[2],
+            "input": args[3],
+            "expected_output": args[4],
+            "metadata": args[5],
+            "source_trace_id": args[6],
+            "source_span_id": args[7],
+            "created_by": args[8],
+            "created_at": datetime.now(timezone.utc),
         }
 
 
@@ -981,6 +1030,37 @@ async def test_eval_example_from_trace_preserves_requested_trace_family(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_repository_example_from_trace_records_runtime_trajectory_metadata() -> None:
+    repo = ExampleFromTraceRepository()
+
+    example = await repo.create_example_from_trace(
+        tenant_id="tenant-a",
+        dataset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        created_by="user-a",
+        user_id="user-a",
+        trace_family="assistant",
+        payload={
+            "source_trace_id": "11111111-1111-4111-8111-111111111111",
+            "metadata": {"review_status": "pending"},
+        },
+    )
+
+    assert example is not None
+    assert repo.insert_args is not None
+    metadata = example["metadata"]
+    assert metadata["review_status"] == "pending"
+    assert metadata["expected_trajectory"]["required_span_kinds"] == [
+        "lifecycle",
+        "tool_execution",
+    ]
+    runtime = metadata["expected_trajectory"]["runtime"]
+    assert runtime["schema_version"] == "assistant-runtime-trajectory/v1"
+    assert runtime["context_snapshot_id"] == "ctx_runtime"
+    assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
+    assert {"type": "required_runtime_trajectory"} in metadata["assertions"]
+
+
+@pytest.mark.asyncio
 async def test_eval_trace_feedback_preview_builds_redacted_case_and_proposal(monkeypatch) -> None:
     repo = FakeTraceRepository()
     repo.detail = {
@@ -1099,6 +1179,8 @@ async def test_eval_dashboard_returns_platform_health(monkeypatch) -> None:
 
     assert result.metrics["example_count"] == 10
     assert result.queue_health["failed_jobs"] == 1
+    assert result.runtime_health["assistant_status"] == "enabled"
+    assert result.runtime_health["tool_safety_failures"] == 1
     assert result.latest_gate_status["status"] == "pass"
     assert repo.calls[-1] == ("dashboard", {"tenant_id": "tenant-a", "days": 14})
 
@@ -1294,6 +1376,7 @@ def test_eval_openapi_and_web_types_expose_shared_trace_contract() -> None:
         "confidence",
     }.issubset(schemas["AgentTraceScore"]["properties"])
     assert "redaction_policy" in schemas["EvalTraceExportResponse"]["properties"]
+    assert "runtime_health" in schemas["EvalDashboardResponse"]["properties"]
 
     web_types = Path("web/src/api/eval.ts").read_text(encoding="utf-8")
     for token in (
@@ -1310,6 +1393,7 @@ def test_eval_openapi_and_web_types_expose_shared_trace_contract() -> None:
         "redaction_policy: Record<string, unknown>",
         "runs: EvalExperimentRun[]",
         "EvalDashboardResponse",
+        "runtime_health: Record<string, unknown>",
         "updateEvalExample",
         "importEvalExamples",
         "exportEvalExamples",

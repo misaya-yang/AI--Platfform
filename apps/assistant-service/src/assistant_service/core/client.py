@@ -29,7 +29,7 @@ class ChatRequest:
     """Unified chat request for both in-process and remote."""
     message: str
     session_id: str
-    model_id: str = "qwen3.6-plus"
+    model_id: str = "qwen3.7-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
     kb_dataset_ids: list[str] | None = None
@@ -186,32 +186,31 @@ class RemoteAssistantClient:
         import httpx
 
         payload = self._build_payload(user, session_id, message, config, history)
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/api/v1/assistant/chat/stream",
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                buffer = ""
-                async for chunk in resp.aiter_text():
-                    buffer += chunk
-                    while "\n\n" in buffer:
-                        event_str, buffer = buffer.split("\n\n", 1)
-                        for line in event_str.split("\n"):
-                            if line.startswith("data: "):
-                                data_str = line[6:]
-                                if data_str == "[DONE]":
-                                    return
-                                try:
-                                    event_data = json.loads(data_str)
-                                    yield StreamEvent(
-                                        event_type=event_data.get("event_type", ""),
-                                        data=event_data.get("data"),
-                                        timestamp=event_data.get("timestamp", time.time()),
-                                    )
-                                except json.JSONDecodeError:
-                                    pass
+        async with httpx.AsyncClient(timeout=300.0) as client, client.stream(
+            "POST",
+            f"{self.base_url}/api/v1/assistant/chat/stream",
+            json=payload,
+        ) as resp:
+            resp.raise_for_status()
+            buffer = ""
+            async for chunk in resp.aiter_text():
+                buffer += chunk
+                while "\n\n" in buffer:
+                    event_str, buffer = buffer.split("\n\n", 1)
+                    for line in event_str.split("\n"):
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                return
+                            try:
+                                event_data = json.loads(data_str)
+                                yield StreamEvent(
+                                    event_type=event_data.get("event_type", ""),
+                                    data=event_data.get("data"),
+                                    timestamp=event_data.get("timestamp", time.time()),
+                                )
+                            except json.JSONDecodeError:
+                                pass
 
     def get_available_models(self) -> list[dict[str, Any]]:
         import httpx
@@ -229,7 +228,7 @@ class RemoteAssistantClient:
         payload: dict[str, Any] = {
             "message": message,
             "session_id": session_id,
-            "model_id": getattr(config, "model_id", "qwen3.6-plus"),
+            "model_id": getattr(config, "model_id", "qwen3.7-plus"),
             "temperature": getattr(config, "temperature", 0.7),
             "max_tokens": getattr(config, "max_tokens", None),
             "kb_dataset_ids": getattr(config, "kb_dataset_ids", None),

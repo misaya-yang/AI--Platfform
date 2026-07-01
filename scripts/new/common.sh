@@ -107,6 +107,47 @@ qdrant_container() { echo "${QDRANT_CONTAINER:-ai-gateway-qdrant}"; }
 assistant_container() { echo "${ASSISTANT_CONTAINER:-ai-gateway-assistant-service}"; }
 knowledge_container() { echo "${KNOWLEDGE_CONTAINER:-ai-gateway-knowledge-service}"; }
 docgen_container()    { echo "${DOCGEN_CONTAINER:-ai-gateway-mcp-docgen-server}"; }
+gateway_container()   { echo "${GATEWAY_CONTAINER:-ai-gateway-backend}"; }
+frontend_container()  { echo "${FRONTEND_CONTAINER:-ai-gateway-frontend}"; }
+
+# -- Compose ownership guard -------------------------------------------------
+assert_compose_owner() {
+    local expected_owner="${1:-$PROJECT_ROOT}"
+    local inspected_names=(
+        "$(pg_container)"
+        "$(redis_container)"
+        "$(qdrant_container)"
+        "$(gateway_container)"
+        "$(frontend_container)"
+        "$(assistant_container)"
+        "$(knowledge_container)"
+        "$(docgen_container)"
+        # Legacy/other-checkout names that have caused local stack confusion.
+        assistant-service
+        ai-gateway-knowledge
+        mcp-docgen-server
+        islamic-content-service
+    )
+    local container owner project service mismatch=false
+
+    for container in "${inspected_names[@]}"; do
+        if ! docker inspect "$container" >/dev/null 2>&1; then
+            continue
+        fi
+        owner=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null || true)
+        project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container" 2>/dev/null || true)
+        service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container" 2>/dev/null || true)
+        if [ "$project" = "ai-gateway" ] && [ -n "$owner" ] && [ "$owner" != "$expected_owner" ]; then
+            log_error "Container '$container' (service=${service:-unknown}) belongs to a different checkout: $owner"
+            mismatch=true
+        fi
+    done
+
+    if [ "$mismatch" = true ]; then
+        log_error "Refusing to mutate Docker project 'ai-gateway' from $PROJECT_ROOT until wrong-checkout containers are stopped or removed explicitly."
+        exit 1
+    fi
+}
 
 # -- SQL execution helpers ---------------------------------------------------
 # Run SQL via docker exec (production) or psql (dev)
@@ -176,9 +217,23 @@ check_gateway_health() {
 
 check_gateway_metrics() {
     local body
-    body="$(curl -fsS "http://localhost:${GATEWAY_PORT:-8080}/metrics" 2>/dev/null)" || return 1
-    printf '%s\n' "$body" | grep -Eq '^# HELP |^# TYPE ' || return 1
-    printf '%s\n' "$body" | grep -Eq '^gateway_up($|[ {])'
+    local status
+    local url="http://localhost:${GATEWAY_PORT:-8080}/metrics"
+
+    body="$(curl -fsS "$url" 2>/dev/null)" && {
+        printf '%s\n' "$body" | grep -Eq '^# HELP |^# TYPE ' || return 1
+        printf '%s\n' "$body" | grep -Eq '^gateway_up($|[ {])'
+        return
+    }
+
+    # Hardened deployments require auth for the Prometheus scrape endpoint.
+    # Treat 401/403 as reachable-but-protected; connection errors and 5xx fail.
+    status="$(curl -sS -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"
+    if [ "$status" = "401" ] || [ "$status" = "403" ]; then
+        return 0
+    fi
+
+    return 1
 }
 
 check_frontend_health() {

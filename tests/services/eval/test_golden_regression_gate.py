@@ -30,6 +30,17 @@ def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
     assert result["case_count"] >= 10
     assert any(case["metadata"].get("critical") is True for case in cases)
     assert all("expected_trajectory" in case for case in cases)
+    case_ids = {case["case_id"] for case in cases}
+    assert {
+        "assistant.runtime.approval_denial",
+        "assistant.runtime.approval_argument_mismatch",
+        "assistant.runtime.sandbox_unavailable",
+        "assistant.runtime.interrupted_memory_skip",
+        "assistant.runtime.stop_resume",
+        "assistant.runtime.max_iterations",
+        "assistant.tool.failure_recovery",
+        "assistant.export.redaction",
+    }.issubset(case_ids)
 
 
 def test_offline_gate_passes_seed_fixture_without_model_calls(tmp_path: Path) -> None:

@@ -940,14 +940,14 @@ test.describe("Eval trace console", () => {
       "../../tests/fixtures/eval/golden/assistant_regression_v1.jsonl"
     );
     await page.locator('[data-testid="golden-jsonl-import"] input[type="file"]').setInputFiles(goldenFixture);
-    await expect(page.getByText("10 case(s) passed validation")).toBeVisible();
+    await expect(page.getByText("16 case(s) passed validation")).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 10 case(s) across 1 batch(es). Skipped 0.")
+      page.getByTestId("golden-jsonl-import").getByText("Imported 16 case(s) across 1 batch(es). Skipped 0.")
     ).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 10.")
+      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 16.")
     ).toBeVisible();
 
     await page.getByRole("tab", { name: "Evaluators" }).click();
@@ -958,7 +958,7 @@ test.describe("Eval trace console", () => {
     await page.getByRole("button", { name: "Create experiment" }).click();
     await expect(page.getByText("Experiment created")).toBeVisible();
     await page.getByRole("button", { name: "Queue evaluator" }).click();
-    await expect(page.getByText("Evaluator run queued")).toBeVisible();
+    await expect(page.getByText("Evaluator run queued").last()).toBeVisible();
 
     await page.getByRole("tab", { name: "Traces" }).click();
     await page.locator(".ant-segmented-item").filter({ hasText: "LangGraph Proxy" }).click();
@@ -987,7 +987,7 @@ test.describe("Eval trace console", () => {
     await page.getByRole("button", { name: "Create KB RAGAS evaluator" }).click();
     await expect(page.getByText("KB RAGAS evaluator created")).toBeVisible();
     await page.getByRole("button", { name: "Score selected trace" }).click();
-    await expect(page.getByText("Evaluator run queued")).toBeVisible();
+    await expect(page.getByText("Evaluator run queued").last()).toBeVisible();
     await page.getByRole("button", { name: "Batch score dataset traces" }).click();
     await expect(page.getByText("Queued 1 trace(s), skipped 0")).toBeVisible();
 

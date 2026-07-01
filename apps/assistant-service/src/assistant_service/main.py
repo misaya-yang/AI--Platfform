@@ -12,13 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
+from ai_gateway_core.logging import configure_structured_logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from ai_gateway_core.logging import configure_structured_logging
 
 from .config import get_settings
 
@@ -185,7 +184,7 @@ async def lifespan(app: FastAPI):
             continue
 
         try:
-            kwargs = dict(api_key=api_key, base_url=base_url)
+            kwargs = {"api_key": api_key, "base_url": base_url}
             if pid == "google":
                 kwargs["backend"] = google_backend
             model_registry.configure_provider(ModelProvider(pid), **kwargs)
@@ -202,20 +201,19 @@ async def lifespan(app: FastAPI):
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT model_id, display_name, provider_id, context_window, max_output_tokens "
-                    "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true", "default",
+                    "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true "
+                    "ORDER BY sort_order ASC, model_id ASC", "default",
                 )
                 if rows:
                     model_registry._models.clear()
                     for r in rows:
-                        try:
+                        with suppress(ValueError):
                             model_registry._models[r["model_id"]] = ModelInfo(
                                 id=r["model_id"], provider=ModelProvider(r["provider_id"]),
                                 name=r["display_name"] or r["model_id"],
                                 context_window=r["context_window"] or 32000,
                                 max_output_tokens=r["max_output_tokens"] or 4096,
                             )
-                        except ValueError:
-                            pass
                     logger.info(f"Loaded {len(rows)} models from DB")
         except Exception as e:
             logger.warning(f"DB model load failed: {e}")
@@ -266,10 +264,8 @@ async def lifespan(app: FastAPI):
         memory_service=memory_service, database=database,
     )
     register_document_generation_tool()
-    try:
+    with suppress(Exception):
         register_pptx_generation_tool()
-    except Exception:
-        pass
     register_image_generation_tool()
 
     # ── Todo tools (Phase 5) — always on; exposes the per-session
@@ -299,13 +295,12 @@ async def lifespan(app: FastAPI):
     # apps/assistant-service/ uses the Protocols from ai-gateway-core.
     # Storage stack itself moved to ai_gateway_core in Phase 5f Batch B, so
     # storage helpers no longer require a src.* import here.
+    from ai_gateway_core.metrics import get_realtime_metrics, get_usage_recorder
     from ai_gateway_core.storage import (
         get_artifact_storage,
         get_file_storage,
         init_artifact_storage,
     )
-
-    from ai_gateway_core.metrics import get_realtime_metrics, get_usage_recorder
 
     from .core import AssistantService
 
@@ -487,7 +482,11 @@ from ai_gateway_core.proxy import RequestIDMiddleware  # noqa: E402
 
 app.add_middleware(RequestIDMiddleware)
 
-from ai_gateway_core.comm import IdempotencyMiddleware, InMemoryIdempotencyStore, RedisIdempotencyStore  # noqa: E402
+from ai_gateway_core.comm import (  # noqa: E402
+    IdempotencyMiddleware,
+    InMemoryIdempotencyStore,
+    RedisIdempotencyStore,
+)
 
 
 def _idempotency_store_from_env():
@@ -593,6 +592,6 @@ async def security_headers(request, call_next):
     return response
 
 # ── Register API routes ──
-from .api.router import router as api_router
+from .api.router import router as api_router  # noqa: E402
 
 app.include_router(api_router, prefix="/api/v1/assistant")

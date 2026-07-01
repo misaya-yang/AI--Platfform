@@ -56,6 +56,27 @@ async def test_config_uses_first_visible_available_model_as_default() -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_prefers_qwen37_plus_when_dashscope_is_configured() -> None:
+    gemini = ModelInfo(
+        id="gemini-3-pro-preview",
+        name="Gemini 3 Pro",
+        provider=ModelProvider.GOOGLE,
+        access_level=ModelAccessLevel.PUBLIC,
+    )
+    qwen = ModelInfo(
+        id="qwen3.7-plus",
+        name="Qwen 3.7 Plus",
+        provider=ModelProvider.DASHSCOPE,
+        access_level=ModelAccessLevel.PUBLIC,
+    )
+    registry = _FakeModelRegistry([gemini, qwen], {ModelProvider.GOOGLE, ModelProvider.DASHSCOPE})
+
+    body = await get_config(_request(registry), _user())
+
+    assert body["default_model_id"] == "qwen3.7-plus"
+
+
+@pytest.mark.asyncio
 async def test_config_returns_empty_default_when_no_models_match_configured_providers() -> None:
     model = ModelInfo(
         id="gemini-3-flash-preview",

@@ -93,6 +93,7 @@ from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .trace_payloads import build_rag_trace_payload as _rag_trace_payload
 from .trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
+from .turn_contract import build_context_snapshot, build_terminal_envelope
 from .working_memory import WorkingMemory
 
 if TYPE_CHECKING:
@@ -214,7 +215,7 @@ class AssistantConfig:
 
     # Model settings
     model_provider: ModelProvider = ModelProvider.DASHSCOPE
-    model_id: str = "qwen3.6-plus"
+    model_id: str = "qwen3.7-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
 
@@ -471,7 +472,7 @@ class AssistantService:
         assistant = AssistantService(model_registry, kb_service)
 
         config = AssistantConfig(
-            model_id="qwen3.6-plus",
+            model_id="qwen3.7-plus",
             kb_dataset_ids=["docs", "wiki"],
         )
 
@@ -783,6 +784,16 @@ Please use this web search context to inform your response when relevant."""
         history: list[dict[str, str]] | None = None,
         retrieved_contexts: list[RetrievedContext] | None = None,
     ) -> AsyncIterator[AssistantStreamEvent]:
+        """Opt-in multi-step task-planning mode (``config.enable_task_planning=True``).
+
+        Not the default execution path: ``AssistantConfig.enable_task_planning``
+        defaults to ``False``, in which case streaming requests go through
+        ``AgentLoop._execute_streaming_first`` instead. This mode builds an
+        explicit task plan up front and executes it via ``ToolOrchestrator``
+        rather than letting the model drive tool calls turn-by-turn; use it for
+        complex multi-step requests where an inspectable plan is wanted before
+        execution starts.
+        """
         del history, retrieved_contexts
         working_memory = self.get_working_memory(session_id)
         working_memory.set_goal(message)
@@ -1117,6 +1128,9 @@ Please use this web search context to inform your response when relevant."""
                     "session_id": session_id,
                     "duration_ms": result.get("duration_ms", 0),
                     "total_length": len(result.get("content", "")),
+                    "run_id": result.get("run_id"),
+                    "terminal_envelope": result.get("terminal_envelope"),
+                    "context_snapshot": result.get("context_snapshot"),
                 },
             )
             return
@@ -1172,6 +1186,9 @@ Please use this web search context to inform your response when relevant."""
                     "session_id": session_id,
                     "duration_ms": result.get("duration_ms", 0),
                     "total_length": len(result.get("content", "")),
+                    "run_id": result.get("run_id"),
+                    "terminal_envelope": result.get("terminal_envelope"),
+                    "context_snapshot": result.get("context_snapshot"),
                 },
             )
             return
@@ -1237,6 +1254,72 @@ Please use this web search context to inform your response when relevant."""
         )
         trace_sequence_no = 0
         trace_finished = False
+        context_snapshot: dict[str, Any] = {}
+
+        def _refresh_context_snapshot(
+            *,
+            history_count: int,
+            message_count: int,
+            retrieved_context_count: int = 0,
+            domain_policy_enabled: bool = False,
+        ) -> dict[str, Any]:
+            nonlocal context_snapshot
+            context_snapshot = build_context_snapshot(
+                run_id=run_id,
+                request_id=request_id,
+                session_id=session_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                mode="non_stream",
+                model_id=config.model_id,
+                provider=provider,
+                trace_id=trace_ctx.trace_id,
+                otel_trace_id=config.otel_trace_id,
+                policy={
+                    "kb_mode": getattr(config.kb_mode, "value", str(config.kb_mode)),
+                    "web_search_enabled": config.web_search_enabled,
+                    "domain_policy_enabled": domain_policy_enabled,
+                },
+                memory={
+                    "history_message_count": history_count,
+                    "session_manager_enabled": bool(self.session_manager),
+                },
+                workspace={"file_count": len(config.file_paths or [])},
+                tools={"tool_count": len(config.tools_enabled or [])},
+                bootstrap={
+                    "message_count": message_count,
+                    "retrieved_context_count": retrieved_context_count,
+                },
+                surface={"stream": False},
+            )
+            return context_snapshot
+
+        def _make_terminal_envelope(
+            *,
+            status: str,
+            exit_reason: str,
+            usage: dict[str, Any] | None = None,
+            error: Any = None,
+        ) -> dict[str, Any]:
+            return build_terminal_envelope(
+                run_id=run_id,
+                request_id=request_id,
+                session_id=session_id,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                mode="non_stream",
+                status=status,
+                exit_reason=exit_reason,
+                started_at=start_time,
+                model_id=config.model_id,
+                provider=provider,
+                trace_id=trace_ctx.trace_id,
+                otel_trace_id=config.otel_trace_id,
+                context_snapshot=context_snapshot
+                or _refresh_context_snapshot(history_count=0, message_count=1),
+                usage=usage,
+                error=error,
+            )
 
         def _next_trace_sequence() -> int:
             nonlocal trace_sequence_no
@@ -1259,6 +1342,7 @@ Please use this web search context to inform your response when relevant."""
             usage: dict[str, Any] | None = None,
             error: Any = None,
             terminal_event_type: str,
+            terminal_envelope: dict[str, Any] | None = None,
         ) -> None:
             nonlocal trace_finished
             if trace_finished:
@@ -1273,6 +1357,13 @@ Please use this web search context to inform your response when relevant."""
                 total_latency_ms=int((time.time() - start_time) * 1000),
                 terminal_event_type=terminal_event_type,
                 terminal_sequence_no=_next_trace_sequence(),
+                terminal_envelope=terminal_envelope
+                or _make_terminal_envelope(
+                    status=status,
+                    exit_reason="succeeded" if status == "succeeded" else "failed",
+                    usage=usage,
+                    error=error,
+                ),
             )
 
         def _fail_trace(error: Exception) -> None:
@@ -1280,6 +1371,11 @@ Please use this web search context to inform your response when relevant."""
                 status="failed",
                 error=error,
                 terminal_event_type=StreamEventType.RUN_ERROR.value,
+                terminal_envelope=_make_terminal_envelope(
+                    status="failed",
+                    exit_reason="model_error",
+                    error=error,
+                ),
             )
 
         async def _guard_trace_await(awaitable: Any) -> Any:
@@ -1297,6 +1393,7 @@ Please use this web search context to inform your response when relevant."""
                 raise
 
         self.trace_writer.start_trace(trace_ctx)
+        _refresh_context_snapshot(history_count=len(initial_history), message_count=1)
         _record_trace_event(
             StreamEventType.RUN_STARTED.value,
             {
@@ -1305,6 +1402,7 @@ Please use this web search context to inform your response when relevant."""
                 "session_id": session_id,
                 "request_id": request_id,
                 "mode": "non_stream",
+                "context_snapshot": context_snapshot,
             },
         )
         await _guard_trace_await(self._ensure_session_exists(user=user, session_id=session_id))
@@ -1343,6 +1441,10 @@ Please use this web search context to inform your response when relevant."""
             otel_trace_id=config.otel_trace_id,
         )
         # Later writes carry the history-aware transcript locator; avoid a second root upsert.
+        _refresh_context_snapshot(
+            history_count=len(history),
+            message_count=len(history) + 1,
+        )
 
         if persist_messages and self.session_manager:
             try:
@@ -1378,15 +1480,26 @@ Please use this web search context to inform your response when relevant."""
         domain_policy, _ = await _guard_trace_await(
             self._resolve_domain_policy(user, config.kb_dataset_ids)
         )
+        _refresh_context_snapshot(
+            history_count=len(history),
+            message_count=len(history) + 1,
+            domain_policy_enabled=bool(domain_policy),
+        )
         if domain_policy:
             decision = _guard_trace_call(domain_policy.precheck_query, message)
             if decision and decision.action == "decline":
                 await _persist_assistant_chat_message(decision.response or "")
+                terminal_envelope = _make_terminal_envelope(
+                    status="succeeded",
+                    exit_reason="succeeded",
+                    usage={},
+                )
                 _finish_trace(
                     status="succeeded",
                     output_preview=decision.response or "",
                     usage={},
                     terminal_event_type=StreamEventType.RUN_FINISHED.value,
+                    terminal_envelope=terminal_envelope,
                 )
                 return {
                     "content": decision.response or "",
@@ -1395,6 +1508,8 @@ Please use this web search context to inform your response when relevant."""
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
                     "run_id": run_id,
+                    "terminal_envelope": terminal_envelope,
+                    "context_snapshot": context_snapshot,
                 }
 
         # Retrieve KB context
@@ -1451,6 +1566,12 @@ Please use this web search context to inform your response when relevant."""
                     contexts=retrieved_contexts,
                 ),
             )
+            _refresh_context_snapshot(
+                history_count=len(history),
+                message_count=len(history) + 1,
+                retrieved_context_count=len(retrieved_contexts),
+                domain_policy_enabled=bool(domain_policy),
+            )
 
         if domain_policy:
             ctx_payload = [
@@ -1464,11 +1585,17 @@ Please use this web search context to inform your response when relevant."""
             decision = _guard_trace_call(domain_policy.precheck_context, message, ctx_payload)
             if decision and decision.action == "decline":
                 await _persist_assistant_chat_message(decision.response or "", contexts=ctx_payload)
+                terminal_envelope = _make_terminal_envelope(
+                    status="succeeded",
+                    exit_reason="succeeded",
+                    usage={},
+                )
                 _finish_trace(
                     status="succeeded",
                     output_preview=decision.response or "",
                     usage={},
                     terminal_event_type=StreamEventType.RUN_FINISHED.value,
+                    terminal_envelope=terminal_envelope,
                 )
                 return {
                     "content": decision.response or "",
@@ -1477,6 +1604,8 @@ Please use this web search context to inform your response when relevant."""
                     "duration_ms": (time.time() - start_time) * 1000,
                     "model_id": config.model_id,
                     "run_id": run_id,
+                    "terminal_envelope": terminal_envelope,
+                    "context_snapshot": context_snapshot,
                 }
 
         # Build messages
@@ -1501,10 +1630,16 @@ Please use this web search context to inform your response when relevant."""
                 max_tokens=config.max_tokens,
             )
         except Exception as exc:
+            terminal_envelope = _make_terminal_envelope(
+                status="failed",
+                exit_reason="model_error",
+                error=exc,
+            )
             _finish_trace(
                 status="failed",
                 error=exc,
                 terminal_event_type=StreamEventType.RUN_ERROR.value,
+                terminal_envelope=terminal_envelope,
             )
             raise
         self.trace_writer.record_span(
@@ -1606,11 +1741,17 @@ Please use this web search context to inform your response when relevant."""
             output_preview=content,
             attributes={"persist_messages": persist_messages},
         )
+        terminal_envelope = _make_terminal_envelope(
+            status="succeeded",
+            exit_reason="succeeded",
+            usage=usage,
+        )
         _finish_trace(
             status="succeeded",
             output_preview=content,
             usage=usage,
             terminal_event_type=StreamEventType.RUN_FINISHED.value,
+            terminal_envelope=terminal_envelope,
         )
 
         return {
@@ -1627,6 +1768,8 @@ Please use this web search context to inform your response when relevant."""
             "duration_ms": elapsed_ms,
             "model_id": config.model_id,
             "run_id": run_id,
+            "terminal_envelope": terminal_envelope,
+            "context_snapshot": context_snapshot,
         }
 
     async def _retrieve_context(
@@ -1878,6 +2021,12 @@ Please use this web search context to inform your response when relevant."""
                         else None,
                         "duration_ms": duration_ms,
                         "total_length": content_length,
+                        "terminal_envelope": event.data.get("terminal_envelope")
+                        if isinstance(event.data, dict)
+                        else None,
+                        "context_snapshot": event.data.get("context_snapshot")
+                        if isinstance(event.data, dict)
+                        else None,
                     },
                 )
                 continue
@@ -2621,7 +2770,7 @@ Please use this web search context to inform your response when relevant."""
 
         registry = get_tool_registry()
         executor = CodeExecutorToolExecutor(code_executor=self.code_executor)
-        registry.register(CODE_EXECUTOR_TOOL, executor)
+        registry.register(CODE_EXECUTOR_TOOL, executor, allow_override=True)
         logger.info("Registered code executor tool")
 
     def _get_provider_from_model(self, model_id: str) -> str:

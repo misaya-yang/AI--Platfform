@@ -40,6 +40,7 @@ from ai_gateway_core.logging import get_logger
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
     from ai_gateway_core.knowledge import KnowledgeClientLike
+
     from .assistant_service import AssistantService
 
 logger = get_logger(__name__)
@@ -197,7 +198,7 @@ class StreamingWriter:
         user: UserContextLike | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        model_id: str = "qwen3.6-plus",
+        model_id: str = "qwen3.7-plus",
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Generate text while verifying facts against knowledge base.
@@ -218,7 +219,7 @@ class StreamingWriter:
             user: User context for KB access authorization
             temperature: Model temperature for generation (default: 0.7)
             max_tokens: Maximum tokens to generate (None for model default)
-            model_id: Model ID to use for generation (default: "qwen3.6-plus")
+            model_id: Model ID to use for generation (default: "qwen3.7-plus")
 
         Yields:
             StreamChunk objects with different types:
@@ -592,7 +593,7 @@ class StreamingWriter:
     async def _generate_text(
         self,
         prompt: str,
-        model_id: str = "qwen3.6-plus",
+        model_id: str = "qwen3.7-plus",
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> AsyncGenerator[str, None]:

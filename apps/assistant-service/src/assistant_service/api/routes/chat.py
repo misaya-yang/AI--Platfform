@@ -35,7 +35,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     history: list[dict[str, str]] | None = None
-    model_id: str = "qwen3.6-plus"
+    model_id: str = "qwen3.7-plus"
     temperature: float = 0.7
     max_tokens: int | None = None
     system_prompt: str | None = None

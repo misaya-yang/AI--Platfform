@@ -39,7 +39,7 @@ async def main() -> int:
     if not api_key:
         _fail("DASHSCOPE_API_KEY not set in env")
 
-    # Import registry and install capability for qwen3.6-plus
+    # Import registry and install capability for qwen3.7-plus
     from src.services.assistant.models.model_registry import (
         ChatMessage,
         ModelProvider,
@@ -53,12 +53,12 @@ async def main() -> int:
         base_url="https://dashscope.aliyuncs.com/compatible-mode",
     )
 
-    model = registry.get_model("qwen3.6-plus")
+    model = registry.get_model("qwen3.7-plus")
     if model is None:
-        _fail("qwen3.6-plus not in default catalog")
+        _fail("qwen3.7-plus not in default catalog")
     if not model.supports_native_search:
-        _fail(f"qwen3.6-plus missing native-search capability: {model.native_search_config}")
-    _ok(f"qwen3.6-plus supports_native_search={model.supports_native_search} cfg={model.native_search_config}")
+        _fail(f"qwen3.7-plus missing native-search capability: {model.native_search_config}")
+    _ok(f"qwen3.7-plus supports_native_search={model.supports_native_search} cfg={model.native_search_config}")
 
     # --- Capture the request body via monkeypatching httpx.AsyncClient.stream ---
     captured: dict[str, Any] = {}
@@ -75,10 +75,9 @@ async def main() -> int:
     streamed_text = ""
     thinking_text = ""
     billing_blocked = False
-    upstream_error: str | None = None
     try:
         async for delta in registry.chat_stream(
-            model_id="qwen3.6-plus",
+            model_id="qwen3.7-plus",
             messages=[
                 ChatMessage(
                     role="user",
@@ -121,7 +120,6 @@ async def main() -> int:
                 body_text = probe_resp.text
         except Exception as e:
             body_text = f"<probe failed: {e!r}>"
-        upstream_error = body_text
         sys.stderr.write(f"\n[SMOKE] HTTP {exc.response.status_code}: {body_text}\n")
         sys.stderr.write(
             f"[SMOKE] request body we sent:\n{json.dumps(captured.get('body'), ensure_ascii=False, indent=2)}\n"

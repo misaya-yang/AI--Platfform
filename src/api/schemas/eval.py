@@ -486,6 +486,7 @@ class EvalDashboardResponse(BaseModel):
     metrics: dict[str, Any] = Field(default_factory=dict)
     run_health: dict[str, Any] = Field(default_factory=dict)
     queue_health: dict[str, Any] = Field(default_factory=dict)
+    runtime_health: dict[str, Any] = Field(default_factory=dict)
     latest_gate_status: dict[str, Any] = Field(default_factory=dict)
 
 

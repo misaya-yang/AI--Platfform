@@ -344,6 +344,7 @@ export interface EvalDashboardResponse {
   metrics: Record<string, unknown>;
   run_health: Record<string, unknown>;
   queue_health: Record<string, unknown>;
+  runtime_health: Record<string, unknown>;
   latest_gate_status: Record<string, unknown>;
 }
 

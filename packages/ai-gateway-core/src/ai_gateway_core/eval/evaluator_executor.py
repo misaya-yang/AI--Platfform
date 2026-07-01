@@ -913,7 +913,7 @@ class EvaluatorExecutor:
         llm_context: LlmCompleteContext | None = None,
     ) -> dict[str, Any]:
         metadata = evaluator.get("metadata") or {}
-        judge_model_id = str(metadata.get("judge_model_id") or "qwen3.6-plus")
+        judge_model_id = str(metadata.get("judge_model_id") or "qwen3.7-plus")
         context = llm_context or LlmCompleteContext(tenant_id="default")
         rubric = self._resolve_llm_rubric(
             evaluator,

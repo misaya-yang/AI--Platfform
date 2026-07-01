@@ -9,9 +9,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any
-
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
@@ -369,7 +367,7 @@ class ExamService:
 
         # Score distribution
         dist = {"0-20%": 0, "20-40%": 0, "40-60%": 0, "60-80%": 0, "80-100%": 0}
-        for att in attempts:
+        for _att in attempts:
             # Re-query to get score — or compute from stats
             pass  # Will be computed from attempt list
 
@@ -379,11 +377,16 @@ class ExamService:
         )
         for sr in score_rows:
             s = float(sr["total_score"]) if sr["total_score"] is not None else 0
-            if s < 0.2: dist["0-20%"] += 1
-            elif s < 0.4: dist["20-40%"] += 1
-            elif s < 0.6: dist["40-60%"] += 1
-            elif s < 0.8: dist["60-80%"] += 1
-            else: dist["80-100%"] += 1
+            if s < 0.2:
+                dist["0-20%"] += 1
+            elif s < 0.4:
+                dist["20-40%"] += 1
+            elif s < 0.6:
+                dist["40-60%"] += 1
+            elif s < 0.8:
+                dist["60-80%"] += 1
+            else:
+                dist["80-100%"] += 1
 
         return {
             "total_participants": stats["total"] if stats else 0,
@@ -473,7 +476,7 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
         from ai_gateway_core.models import ChatMessage as ModelChatMessage
 
         content, _usage = await model_registry.chat(
-            model_id="qwen3.6-plus",
+            model_id="qwen3.7-plus",
             messages=[ModelChatMessage(role="user", content=prompt)],
             temperature=0.3,
             max_tokens=4096,
@@ -488,7 +491,7 @@ Use the exam language (Chinese if title is Chinese, otherwise English).
             """,
             uuid.UUID(report_id), uuid.UUID(exam_id),
             json.dumps({"markdown": content, "input": analysis_input}, ensure_ascii=False),
-            "qwen3.6-plus",
+            "qwen3.7-plus",
             datetime.now(timezone.utc),
         )
 

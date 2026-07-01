@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from .base import BaseRepository
@@ -31,6 +32,31 @@ def _import_example_metadata(example: dict[str, Any]) -> dict[str, Any]:
         "assertions": example.get("assertions") or [],
         **(example.get("metadata") or {}),
     }
+
+
+def _coerce_timestamptz(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        if value <= 0:
+            return None
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return None
 
 
 class AgentTraceRepository(BaseRepository):
@@ -428,8 +454,8 @@ class AgentTraceRepository(BaseRepository):
             trace.get("model_id"),
             trace.get("provider"),
             trace.get("status") or "succeeded",
-            trace.get("started_at"),
-            trace.get("ended_at"),
+            _coerce_timestamptz(trace.get("started_at")),
+            _coerce_timestamptz(trace.get("ended_at")),
             int(metrics.get("total_latency_ms") or trace.get("total_latency_ms") or 0),
             int(metrics.get("first_token_latency_ms") or trace.get("first_token_latency_ms") or 0),
             int(metrics.get("input_tokens") or trace.get("input_tokens") or 0),
@@ -443,7 +469,7 @@ class AgentTraceRepository(BaseRepository):
             self._json_dumps(metrics),
             self._json_dumps(privacy),
             trace.get("source_adapter") or "api",
-            trace.get("retention_expires_at"),
+            _coerce_timestamptz(trace.get("retention_expires_at")),
         )
         for span in trace.get("spans") or []:
             await self._upsert_ingested_span(trace_id, span)
@@ -495,8 +521,8 @@ class AgentTraceRepository(BaseRepository):
             str(span.get("name") or "span")[:160],
             span.get("status") or "succeeded",
             int(span.get("sequence_no") or 0),
-            span.get("started_at"),
-            span.get("ended_at"),
+            _coerce_timestamptz(span.get("started_at")),
+            _coerce_timestamptz(span.get("ended_at")),
             int(span.get("duration_ms") or 0),
             span.get("input_preview") or "",
             span.get("output_preview") or "",
@@ -528,7 +554,7 @@ class AgentTraceRepository(BaseRepository):
             event.get("span_id"),
             event.get("event_type") or "event",
             int(event.get("sequence_no") or 0),
-            event.get("occurred_at"),
+            _coerce_timestamptz(event.get("occurred_at")),
             self._json_dumps(event.get("payload") or {}),
             int(event.get("payload_size_bytes") or 0),
             bool(event.get("redacted", True)),
@@ -622,6 +648,43 @@ class AgentTraceRepository(BaseRepository):
         expected_output = payload.get("expected_output") or {
             "output_preview": trace.get("output_preview") or "",
         }
+        metadata = dict(payload.get("metadata") or {})
+        trace_metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+        spans = detail.get("spans") if isinstance(detail.get("spans"), list) else []
+        span_kinds = sorted(
+            {
+                str(span.get("span_kind") or "")
+                for span in spans
+                if isinstance(span, dict) and span.get("span_kind")
+            }
+        )
+        metadata.setdefault(
+            "expected_trajectory",
+            {
+                "required_span_kinds": span_kinds,
+                "runtime": {
+                    "schema_version": "assistant-runtime-trajectory/v1",
+                    "expected_status": "succeeded",
+                    "observed_status": trace.get("status"),
+                    "context_snapshot_id": (
+                        trace_metadata.get("runtime_trajectory") or {}
+                    ).get("context_snapshot_id")
+                    if isinstance(trace_metadata.get("runtime_trajectory"), dict)
+                    else None,
+                    "requires_redaction": True,
+                    "redaction_state": trace.get("redaction_state") or {},
+                    "trace_writer_health": (
+                        trace_metadata.get("runtime_trajectory") or {}
+                    ).get("trace_writer_health")
+                    if isinstance(trace_metadata.get("runtime_trajectory"), dict)
+                    else {},
+                },
+            },
+        )
+        metadata.setdefault(
+            "assertions",
+            [{"type": "no_secret_leak"}, {"type": "required_runtime_trajectory"}],
+        )
         row = await self.fetchrow(
             """
             INSERT INTO eval_examples (
@@ -638,7 +701,7 @@ class AgentTraceRepository(BaseRepository):
             payload.get("split") or "regression",
             self._json_dumps(input_payload),
             self._json_dumps(expected_output),
-            self._json_dumps(payload.get("metadata") or {}),
+            self._json_dumps(metadata),
             payload["source_trace_id"],
             payload.get("source_span_id"),
             created_by,
@@ -1242,16 +1305,116 @@ class AgentTraceRepository(BaseRepository):
             """,
             tenant_id,
         )
+        runtime_health = await self.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE trace_family = 'assistant')::int AS assistant_captured_traces,
+                COUNT(*) FILTER (WHERE trace_family = 'assistant' AND status = 'succeeded')::int AS assistant_succeeded_traces,
+                COUNT(*) FILTER (WHERE trace_family = 'assistant' AND status = 'failed')::int AS assistant_failed_traces,
+                COUNT(*) FILTER (WHERE trace_family = 'rag')::int AS rag_captured_traces,
+                COUNT(*) FILTER (WHERE trace_family = 'langgraph_proxy')::int AS langgraph_captured_traces,
+                COUNT(*) FILTER (WHERE trace_family = 'assistant' AND metadata ? 'runtime_trajectory')::int AS runtime_trajectory_traces,
+                COUNT(*) FILTER (
+                    WHERE trace_family = 'assistant'
+                      AND COALESCE(metadata->'runtime_trajectory'->'trace_writer_health'->>'issue_count', '0')::int > 0
+                )::int AS trace_writer_issue_traces,
+                COUNT(*) FILTER (
+                    WHERE trace_family = 'assistant'
+                      AND COALESCE(metadata->'runtime_trajectory'->>'exit_reason', '') IN (
+                          'tool_error',
+                          'approval_denied',
+                          'approval_required',
+                          'max_iterations',
+                          'interrupted',
+                          'cancelled',
+                          'timeout'
+                      )
+                )::int AS critical_runtime_failures
+            FROM agent_traces
+            WHERE tenant_id = $1
+              AND created_at >= NOW() - make_interval(days => $2::int)
+            """,
+            tenant_id,
+            max(1, days),
+        )
+        tool_safety_row = await self.fetchrow(
+            """
+            SELECT COUNT(DISTINCT s.trace_id)::int AS tool_safety_failures
+            FROM agent_trace_spans s
+            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
+            WHERE t.tenant_id = $1
+              AND t.created_at >= NOW() - make_interval(days => $2::int)
+              AND (
+                  s.attributes->>'direct_registry_denied' = 'true'
+                  OR COALESCE(s.attributes->'gateway_policy_decision'->>'decision', '') IN ('deny', 'denied', 'blocked')
+                  OR COALESCE(s.attributes->'sandbox_decision'->>'decision', '') IN ('deny', 'denied', 'blocked')
+                  OR COALESCE(s.attributes->'sandbox_decision'->>'available', 'true') = 'false'
+              )
+            """,
+            tenant_id,
+            max(1, days),
+        )
+        latest_run_row = await self.fetchrow(
+            """
+            SELECT
+                (
+                    SELECT COALESCE(target_snapshot->>'candidate_label', run_id::text)
+                    FROM eval_experiment_runs
+                    WHERE tenant_id = $1
+                      AND COALESCE(target_snapshot->>'candidate_label', '') ILIKE '%baseline%'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) AS latest_baseline,
+                (
+                    SELECT COALESCE(target_snapshot->>'candidate_label', run_id::text)
+                    FROM eval_experiment_runs
+                    WHERE tenant_id = $1
+                      AND (
+                          COALESCE(target_snapshot->>'candidate_label', '') ILIKE '%candidate%'
+                          OR COALESCE(target_snapshot->>'candidate_label', '') = ''
+                      )
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) AS latest_candidate
+            """,
+            tenant_id,
+        )
         metrics = {**summary, **dict(counts or {})}
-        metrics.setdefault("latest_baseline", None)
-        metrics.setdefault("latest_candidate", None)
-        metrics.setdefault("pass_rate", 0)
-        metrics.setdefault("trajectory_pass_rate", 0)
-        metrics.setdefault("critical_failures", 0)
+        runtime_metrics = dict(runtime_health or {})
+        assistant_total = int(runtime_metrics.get("assistant_captured_traces") or 0)
+        assistant_succeeded = int(runtime_metrics.get("assistant_succeeded_traces") or 0)
+        runtime_trajectory_traces = int(runtime_metrics.get("runtime_trajectory_traces") or 0)
+        runtime_metrics["tool_safety_failures"] = int(
+            (tool_safety_row or {}).get("tool_safety_failures") or 0
+        )
+        runtime_metrics["pass_rate"] = (
+            round(assistant_succeeded / assistant_total, 4) if assistant_total else 0
+        )
+        runtime_metrics["trajectory_pass_rate"] = (
+            round(runtime_trajectory_traces / assistant_total, 4) if assistant_total else 0
+        )
+        runtime_metrics["assistant_status"] = "enabled"
+        runtime_metrics["rag_status"] = (
+            "wired" if int(runtime_metrics.get("rag_captured_traces") or 0) > 0 else "partial"
+        )
+        runtime_metrics["langgraph_status"] = (
+            "wired"
+            if int(runtime_metrics.get("langgraph_captured_traces") or 0) > 0
+            else "partial"
+        )
+        metrics["latest_baseline"] = (latest_run_row or {}).get("latest_baseline")
+        metrics["latest_candidate"] = (latest_run_row or {}).get("latest_candidate")
+        metrics["pass_rate"] = runtime_metrics["pass_rate"]
+        metrics["trajectory_pass_rate"] = runtime_metrics["trajectory_pass_rate"]
+        metrics["critical_failures"] = int(
+            runtime_metrics.get("critical_runtime_failures") or 0
+        ) + runtime_metrics["tool_safety_failures"]
+        metrics["tool_safety_failures"] = runtime_metrics["tool_safety_failures"]
         return {
             "metrics": metrics,
             "run_health": dict(run_health or {}),
             "queue_health": dict(queue_health or {}),
+            "runtime_health": runtime_metrics,
             "latest_gate_status": {"status": "not_run", "source": "offline"},
         }
 

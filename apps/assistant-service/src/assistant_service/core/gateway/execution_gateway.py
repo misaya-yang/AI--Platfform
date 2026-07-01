@@ -930,9 +930,10 @@ class AssistantExecutionGateway:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "_fetch_approval_status DB query failed, falling back to in-memory mirror: %s",
+                    "_fetch_approval_status DB query failed, denying approval status: %s",
                     exc,
                 )
+                return None
             else:
                 return str(row.get("status") or "") if row else None
 
@@ -1357,6 +1358,13 @@ class AssistantExecutionGateway:
         }
 
         async def _invoke() -> ToolCallResult:
+            context.metadata = {
+                **(context.metadata or {}),
+                "execution_gateway_approved": True,
+                "gateway_policy_decision": decision_payload,
+                "sandbox_decision": sandbox_payload,
+                "approval_consumed": bool(approval_granted),
+            }
             return await self.tool_invoker.invoke(
                 tool_name=tool_name,
                 arguments=invoke_args,
@@ -1627,7 +1635,7 @@ class AssistantExecutionGateway:
             )
         except Exception as exc:
             logger.warning("Failed to consume approval: %s", exc)
-            return memory_consumed
+            return False
 
         status = await self._fetch_approval_status(
             approval_id=approval_id,
@@ -1667,12 +1675,10 @@ class AssistantExecutionGateway:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "_approval_granted DB query failed, falling back to in-memory mirror: %s",
+                    "_approval_granted DB query failed, denying approval: %s",
                     exc,
                 )
-                return self._approval_granted_from_memory(
-                    approval_id, tenant_id, user_id, tool_name, arguments
-                )
+                return False
             if not row:
                 return False
             if row.get("tool_name") != tool_name:
@@ -1737,10 +1743,10 @@ class AssistantExecutionGateway:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "_approval_granted_for_checkpoint DB query failed, falling back "
-                    "to in-memory mirror: %s",
+                    "_approval_granted_for_checkpoint DB query failed, denying approval: %s",
                     exc,
                 )
+                return False
             else:
                 return self._approval_row_matches_checkpoint(
                     row=row,

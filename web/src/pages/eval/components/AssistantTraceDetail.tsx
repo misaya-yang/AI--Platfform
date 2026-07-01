@@ -88,6 +88,68 @@ function RedactionBanner({ state }: { state: Record<string, unknown> }) {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function RuntimeTrajectoryPanel({ trace }: { trace: AgentTraceSummary }) {
+  const { t } = useTranslation();
+  const runtime = isRecord(trace.metadata?.runtime_trajectory)
+    ? trace.metadata.runtime_trajectory
+    : null;
+  if (!runtime) return null;
+  const memory = isRecord(runtime.memory) ? runtime.memory : {};
+  const writer = isRecord(runtime.trace_writer_health) ? runtime.trace_writer_health : {};
+  const toolSafety = isRecord(runtime.tool_safety) ? runtime.tool_safety : {};
+  return (
+    <div className="eval-runtime-panel" aria-label={t("eval.detail.runtime.title")}>
+      <div className="eval-section-title eval-section-title-compact">
+        <h3>{t("eval.detail.runtime.title")}</h3>
+        <span>{t("eval.detail.runtime.schema")}</span>
+      </div>
+      <Descriptions
+        className="eval-descriptions"
+        size="small"
+        column={2}
+        bordered
+        items={[
+          {
+            key: "exit",
+            label: t("eval.detail.runtime.exitReason"),
+            children: String(runtime.exit_reason || "-"),
+          },
+          {
+            key: "context",
+            label: t("eval.detail.runtime.contextSnapshot"),
+            children: String(runtime.context_snapshot_id || "-"),
+          },
+          {
+            key: "memory",
+            label: t("eval.detail.runtime.memory"),
+            children: String(memory.runtime_memory_provenance_count ?? memory.history_message_count ?? "-"),
+          },
+          {
+            key: "writer",
+            label: t("eval.detail.runtime.traceWriterIssues"),
+            children: String(writer.issue_count ?? 0),
+          },
+          {
+            key: "tool",
+            label: t("eval.detail.runtime.toolSafety"),
+            children: String(toolSafety.direct_registry_denied ?? "-"),
+          },
+          {
+            key: "resume",
+            label: t("eval.detail.runtime.resumeReady"),
+            children: String(runtime.resume_ready ?? false),
+          },
+        ]}
+      />
+      <JsonBlock value={runtime} />
+    </div>
+  );
+}
+
 function RetrievalContextPanel({ detail }: { detail: AgentTraceDetailResponse }) {
   const { t } = useTranslation();
   const contexts = retrievalContextsFromDetail(detail);
@@ -382,6 +444,8 @@ export function AssistantTraceDetail({ detail, loading, error }: AssistantTraceD
       />
 
       <TranscriptLocatorPanel trace={trace} />
+
+      <RuntimeTrajectoryPanel trace={trace} />
 
       <div className="eval-preview-grid">
         <PreviewBlock label={t("eval.detail.inputPreview")} value={trace.input_preview} emptyText={t("eval.detail.noPreview")} />

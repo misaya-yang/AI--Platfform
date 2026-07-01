@@ -26,6 +26,7 @@ def test_dashscope_china_template_owns_raw_provider_metadata() -> None:
     assert template.api_type == "openai"
     assert template.default_base_url == "https://dashscope.aliyuncs.com/compatible-mode"
     assert {field.name for field in template.credential_fields} == {"api_key"}
+    assert "qwen3.7-plus" in {model.model_id for model in template.default_models}
     assert "qwen3.6-plus" in {model.model_id for model in template.default_models}
     assert "qwen3.7-max" in {model.model_id for model in template.default_models}
 

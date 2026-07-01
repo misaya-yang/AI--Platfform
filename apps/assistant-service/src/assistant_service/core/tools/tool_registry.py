@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -106,6 +107,15 @@ class ToolDefinition:
 
     # Access control
     required_permissions: list[str] = field(default_factory=list)
+    sandbox_profile: str = "none"
+    audit_shape: dict[str, Any] = field(
+        default_factory=lambda: {
+            "input": "redacted_summary",
+            "output": "status_only",
+        }
+    )
+    redaction_policy: str = "standard"
+    capability_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_openai_schema(self, compact: bool = False) -> dict[str, Any]:
         """Convert to OpenAI function calling schema."""
@@ -317,10 +327,17 @@ class ToolRegistry:
         self,
         definition: ToolDefinition,
         executor: ToolExecutor,
+        *,
+        allow_override: bool = False,
     ) -> None:
         """Register a tool with its executor (thread-safe)."""
         with self._lock:
             if definition.name in self._tools:
+                if not allow_override:
+                    raise ValueError(
+                        f"Tool already registered: {definition.name}. "
+                        "Use allow_override=True only for trusted startup refresh flows."
+                    )
                 logger.warning(f"Overwriting existing tool: {definition.name}")
 
             self._tools[definition.name] = definition
@@ -474,10 +491,28 @@ class ToolRegistry:
                 error=f"Validation errors: {'; '.join(errors)}",
             )
 
-        # Check if confirmation is required
-        if definition.requires_confirmation:
+        if self._requires_gateway(definition) and not self._direct_execution_allowed(request):
             logger.warning(
-                f"Tool {request.tool_name} requires confirmation but was executed directly"
+                "Direct registry execution denied for tool %s "
+                "(risk=%s, requires_confirmation=%s)",
+                request.tool_name,
+                definition.risk_level.value,
+                definition.requires_confirmation,
+            )
+            return ToolCallResult(
+                call_id=request.call_id,
+                tool_name=request.tool_name,
+                success=False,
+                error=(
+                    "Tool execution requires the AssistantExecutionGateway approval "
+                    "and audit path."
+                ),
+                metadata={
+                    "direct_registry_denied": True,
+                    "risk_level": definition.risk_level.value,
+                    "requires_confirmation": definition.requires_confirmation,
+                    "required_gateway": "AssistantExecutionGateway",
+                },
             )
 
         # Execute tool with timeout enforcement
@@ -534,6 +569,23 @@ class ToolRegistry:
                 duration_ms=duration_ms,
             )
 
+    @staticmethod
+    def _requires_gateway(definition: ToolDefinition) -> bool:
+        return (
+            definition.requires_confirmation
+            or definition.risk_level in {ToolRiskLevel.MEDIUM, ToolRiskLevel.HIGH}
+        )
+
+    @staticmethod
+    def _direct_execution_allowed(request: ToolCallRequest) -> bool:
+        metadata = request.metadata or {}
+        if metadata.get("execution_gateway_approved") is True:
+            return True
+        return (
+            metadata.get("direct_registry_bypass") == "test_only"
+            and os.getenv("PYTEST_CURRENT_TEST")
+        )
+
 
 def _safe_error_message(exc: BaseException, *, tool_name: str = "tool") -> str:
     """Return a client-safe error message that doesn't leak internal details.
@@ -582,6 +634,8 @@ def get_tool_registry() -> ToolRegistry:
 def register_tool(
     definition: ToolDefinition,
     executor: ToolExecutor,
+    *,
+    allow_override: bool = True,
 ) -> None:
     """Register a tool with the global registry."""
-    get_tool_registry().register(definition, executor)
+    get_tool_registry().register(definition, executor, allow_override=allow_override)

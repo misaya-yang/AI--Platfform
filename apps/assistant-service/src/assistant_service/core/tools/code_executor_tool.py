@@ -16,6 +16,7 @@ import ast
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -91,13 +92,17 @@ def _scan_code_for_denied_imports(code: str) -> str | None:
             if (node.module or "") in _DENIED_IMPORTS or mod in _DENIED_IMPORTS:
                 return f"from-import of '{node.module}' is not allowed in the sandbox"
         # Block __import__ calls with literal denied module
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "__import__" and node.args:
-                first = node.args[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    root = first.value.split(".")[0]
-                    if first.value in _DENIED_IMPORTS or root in _DENIED_IMPORTS:
-                        return f"__import__('{first.value}') is not allowed in the sandbox"
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "__import__"
+            and node.args
+        ):
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                root = first.value.split(".")[0]
+                if first.value in _DENIED_IMPORTS or root in _DENIED_IMPORTS:
+                    return f"__import__('{first.value}') is not allowed in the sandbox"
     return None
 
 
@@ -208,6 +213,12 @@ print("Chart saved to /workspace/output/revenue_trend.png")
     category=ToolCategory.ANALYSIS,
     risk_level=ToolRiskLevel.MEDIUM,
     requires_confirmation=False,
+    sandbox_profile="docker-gvisor-no-network",
+    audit_shape={
+        "input": "code_hash_and_redacted_summary",
+        "output": "stdout_stderr_status_and_artifact_metadata",
+    },
+    redaction_policy="redact_secrets_and_provider_env",
     when_to_use="ALWAYS use when user uploads Excel/CSV files and asks to analyze data, trends, growth rates, "
     "statistics, or visualization. Use for any data computation that requires precision beyond LLM estimation. "
     "Use for creating charts, graphs, or any data visualization.",

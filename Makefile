@@ -15,6 +15,7 @@
 #   make logs            查看实时日志
 #   make stop            停止所有服务
 #   make restart         重启所有服务
+#   make hot-update      热更新本地部署容器源码 (不 pip、不重建镜像)
 #
 #   make migrate         运行数据库迁移 (自动跳过已执行的)
 #   make migrate-init    首次初始化数据库 schema
@@ -74,7 +75,7 @@ seed-demo-apply:            ## 写入本地 demo 数据 (仅用于开发/本地�
 
 # -- Deployment ---------------------------------------------------------------
 
-.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status
+.PHONY: deploy deploy-build deploy-cn deploy-infra deploy-app stop logs restart status hot-update
 
 deploy:                     ## 部署全部服务 (启动+迁移+健康检查，不默认重建镜像)
 	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)
@@ -102,6 +103,9 @@ logs:                       ## 查看实时日志
 
 status:                     ## 查看所有服务状态和健康检查
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/status.sh
+
+hot-update:                 ## 热更新本地部署容器源码 (不 pip、不重建镜像)
+	@bash $(SCRIPTS)/hot-update.sh --env "$(ENV_FILE)" $(ARGS)
 
 # -- Database Migrations ------------------------------------------------------
 
@@ -158,7 +162,12 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-eval-dev eval-regression-gate test-isolation snapshot-assistant-openapi
+.PHONY: verify-eval-dev eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+
+verify-assistant-runtime-dev: ## 运行 Assistant Runtime 离线回归门禁 (AHR-01~AHR-04)
+	@uv run python scripts/assistant_runtime_regression.py gate \
+		--output reports/assistant-runtime-regression/latest.json \
+		--markdown reports/assistant-runtime-regression/latest.md
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@uv run ruff check \

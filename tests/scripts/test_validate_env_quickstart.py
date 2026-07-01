@@ -56,6 +56,7 @@ def _write_fake_runtime_commands(tmp_path: Path) -> Path:
         "    *redis-cli*) echo PONG; exit 0 ;;\n"
         "    *psql*)\n"
         "      case \"$*\" in\n"
+        "        *qwen3.7-plus*) printf '%s\\n' \"${FAKE_DEFAULT_QWEN37_COUNT:-1}\"; exit 0 ;;\n"
         "        *provider_id*) printf '%s\\n' \"$FAKE_ENABLED_MODEL_PROVIDERS\"; exit 0 ;;\n"
         "        *) echo 1; exit 0 ;;\n"
         "      esac\n"
@@ -100,6 +101,7 @@ def _run_validate_env(
     *,
     args: list[str],
     enabled_model_providers: str = "",
+    default_qwen37_count: str = "1",
 ) -> subprocess.CompletedProcess[str]:
     env_file = tmp_path / ".env"
     env_file.write_text(env_text)
@@ -108,6 +110,7 @@ def _run_validate_env(
         **os.environ,
         "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
         "FAKE_ENABLED_MODEL_PROVIDERS": enabled_model_providers,
+        "FAKE_DEFAULT_QWEN37_COUNT": default_qwen37_count,
     }
     return subprocess.run(
         ["bash", "scripts/new/validate-env.sh", "--env", str(env_file), *args],
@@ -189,19 +192,19 @@ def test_validate_env_runtime_rejects_enabled_models_without_configured_provider
     tmp_path: Path,
 ) -> None:
     secret = secrets.token_hex(32)
-    chat_key = "test-openai-key"
+    chat_key = "test-dashscope-key"
     result = _run_validate_env(
         tmp_path,
-        _valid_env_text(secret=secret, chat_assignment=f"OPENAI_API_KEY={chat_key}"),
+        _valid_env_text(secret=secret, chat_assignment=f"DASHSCOPE_API_KEY={chat_key}"),
         args=["--runtime"],
-        enabled_model_providers="dashscope|5\ngoogle|5",
+        enabled_model_providers="google|5",
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert "No enabled assistant models match configured chat providers" in output
-    assert "Configured providers: openai" in output
-    assert "Enabled model providers: dashscope:5, google:5" in output
+    assert "Configured providers: dashscope" in output
+    assert "Enabled model providers: google:5" in output
     assert secret not in output
     assert chat_key not in output
 
@@ -210,12 +213,12 @@ def test_validate_env_runtime_accepts_enabled_model_for_configured_provider(
     tmp_path: Path,
 ) -> None:
     secret = secrets.token_hex(32)
-    chat_key = "test-openai-key"
+    chat_key = "test-dashscope-key"
     result = _run_validate_env(
         tmp_path,
-        _valid_env_text(secret=secret, chat_assignment=f"OPENAI_API_KEY={chat_key}"),
+        _valid_env_text(secret=secret, chat_assignment=f"DASHSCOPE_API_KEY={chat_key}"),
         args=["--runtime"],
-        enabled_model_providers="openai|1",
+        enabled_model_providers="dashscope|1",
     )
 
     output = result.stdout + result.stderr
@@ -236,17 +239,18 @@ def test_validate_env_runtime_accepts_vertex_chat_provider(
         _valid_env_text(
             secret=secret,
             chat_assignment=(
+                "DASHSCOPE_API_KEY=test-dashscope-key\n"
                 "GOOGLE_CHAT_BACKEND=vertex\n"
                 f"VERTEX_CHAT_API_KEY={chat_key}"
             ),
         ),
         args=["--runtime"],
-        enabled_model_providers="google-vertex|1",
+        enabled_model_providers="dashscope|1\ngoogle-vertex|1",
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Assistant model/provider alignment is valid (1 available model(s))." in output
+    assert "Assistant model/provider alignment is valid (2 available model(s))." in output
     assert secret not in output
     assert chat_key not in output
 
@@ -261,17 +265,18 @@ def test_validate_env_runtime_accepts_google_models_on_vertex_chat_backend(
         _valid_env_text(
             secret=secret,
             chat_assignment=(
+                "DASHSCOPE_API_KEY=test-dashscope-key\n"
                 "GOOGLE_CHAT_BACKEND=vertex\n"
                 f"VERTEX_CHAT_API_KEY={chat_key}"
             ),
         ),
         args=["--runtime"],
-        enabled_model_providers="google|1",
+        enabled_model_providers="dashscope|1\ngoogle|1",
     )
 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "Assistant model/provider alignment is valid (1 available model(s))." in output
+    assert "Assistant model/provider alignment is valid (2 available model(s))." in output
     assert secret not in output
     assert chat_key not in output
 
@@ -290,8 +295,7 @@ def test_validate_env_runtime_rejects_vertex_chat_key_without_vertex_backend(
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "Set at least one usable chat model API key" in output
-    assert "GOOGLE_CHAT_BACKEND=vertex" in output
+    assert "Set a usable Qwen/DashScope chat API key" in output
     assert secret not in output
     assert chat_key not in output
 
@@ -309,8 +313,7 @@ def test_validate_env_config_rejects_vertex_chat_key_without_vertex_backend(
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert "Set at least one usable chat model API key" in output
-    assert "GOOGLE_CHAT_BACKEND=vertex" in output
+    assert "Set a usable Qwen/DashScope chat API key" in output
     assert secret not in output
     assert chat_key not in output
 
@@ -983,6 +986,12 @@ def test_gateway_metrics_helper_requires_gateway_up_metric(tmp_path: Path) -> No
         "  empty) exit 0 ;;\n"
         "  generic) echo '# HELP other_metric Other'; echo 'other_metric 1'; exit 0 ;;\n"
         "  gateway) echo '# HELP gateway_up Gateway metrics endpoint availability'; echo 'gateway_up 1'; exit 0 ;;\n"
+        "  protected)\n"
+        "    case \"$*\" in\n"
+        "      *\"%{http_code}\"*) printf '403'; exit 0 ;;\n"
+        "      *) exit 22 ;;\n"
+        "    esac\n"
+        "    ;;\n"
         "esac\n"
         "exit 1\n"
     )
@@ -1004,14 +1013,15 @@ def test_gateway_metrics_helper_requires_gateway_up_metric(tmp_path: Path) -> No
         )
         assert result.returncode == 1, result.stdout + result.stderr
 
-    result = subprocess.run(
-        ["bash", "-c", command],
-        text=True,
-        capture_output=True,
-        env={**env, "METRICS_CASE": "gateway"},
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    for metrics_case in ["gateway", "protected"]:
+        result = subprocess.run(
+            ["bash", "-c", command],
+            text=True,
+            capture_output=True,
+            env={**env, "METRICS_CASE": metrics_case},
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_runtime_checks_microservice_readiness_not_only_liveness() -> None:

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_QUIZ_MODEL = "qwen3.6-plus"
+DEFAULT_QUIZ_MODEL = "qwen3.7-plus"
 
 # Base prompt — question type rules are injected dynamically
 _PROMPT_HEADER = """\

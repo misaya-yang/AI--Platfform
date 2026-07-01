@@ -201,7 +201,7 @@ def _build_datasets_handler():
 def _build_config_handler():
     def _handler(user):
         return {
-            "default_model_id": "qwen3.6-plus",
+            "default_model_id": "qwen3.7-plus",
             "available_providers": ["dashscope", "google-vertex"],
             "kb_enabled": True,
             "web_search_enabled": True,
@@ -334,7 +334,7 @@ def _build_chat_handler():
             "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
             "contexts": [],
             "duration_ms": 123.4,
-            "model_id": body.get("model_id", "qwen3.6-plus"),
+            "model_id": body.get("model_id", "qwen3.7-plus"),
             "session_id": body.get("session_id") or "new-sess",
             "run_id": "run-xyz",
         }
@@ -386,7 +386,7 @@ def test_chat_response_has_required_keys(monkeypatch):
             headers={"Authorization": f"Bearer {_token()}"},
             json={
                 "message": "hello",
-                "model_id": "qwen3.6-plus",
+                "model_id": "qwen3.7-plus",
                 "session_id": "sess-1",
             },
         )

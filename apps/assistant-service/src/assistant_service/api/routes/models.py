@@ -105,8 +105,17 @@ async def get_config(request: Request, user: UserContext = Depends(get_user_cont
     # search via native APIs (Qwen `enable_search`, Anthropic
     # `web_search_20250305`) and ``web_fetch`` is always available as the
     # URL-fetch fallback. Frontend can keep its toggle as a model-pref hint.
+    preferred = next(
+        (
+            m for m in visible_models
+            if m.provider == ModelProvider.DASHSCOPE and m.id == "qwen3.7-plus"
+        ),
+        None,
+    )
+    default_model_id = preferred.id if preferred else (visible_models[0].id if visible_models else "")
+
     return {
-        "default_model_id": visible_models[0].id if visible_models else "",
+        "default_model_id": default_model_id,
         "available_providers": available_providers,
         "kb_enabled": kb_proxy is not None,
         "web_search_enabled": True,

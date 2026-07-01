@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ..agent.agui_protocol import create_agui_emitter
 from ..quality.guardrails import (
     DocumentType,
@@ -129,7 +130,7 @@ class DeepContentGenerator:
         self,
         llm_client: Any,
         guardrails: QualityGuardrails | None = None,
-        model_name: str = "qwen3.6-plus",
+        model_name: str = "qwen3.7-plus",
     ):
         """
         Initialize the generator.
@@ -542,6 +543,7 @@ class DeepContentGenerator:
         Returns:
             ContentOutline with structure
         """
+        del context
         # Get guardrail requirements
         thresholds = self.guardrails.thresholds.get(doc_type, {})
         min_sections = thresholds.get("min_sections", 4)
@@ -612,6 +614,7 @@ class DeepContentGenerator:
         Yields:
             Content chunks
         """
+        del context
         thresholds = self.guardrails.thresholds.get(doc_type, {})
         min_words_per_section = thresholds.get("min_words_per_section", 150)
 
@@ -670,6 +673,7 @@ class DeepContentGenerator:
         Yields:
             Repaired content chunks
         """
+        del doc_type
         issues_text = "\n".join(
             f"- [{i.severity.value}] {i.message} (建议: {i.action})" for i in issues
         )
@@ -772,7 +776,7 @@ class DeepContentGenerator:
 def create_content_generator(
     llm_client: Any,
     guardrails: QualityGuardrails | None = None,
-    model_name: str = "qwen3.6-plus",
+    model_name: str = "qwen3.7-plus",
 ) -> DeepContentGenerator:
     """
     Factory function to create a DeepContentGenerator.

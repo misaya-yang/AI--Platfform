@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 from ai_gateway_core.logging import get_logger
 
 if TYPE_CHECKING:
-    from ..agent_loop import AgentLoopContext, AgentLoopEvent
     from ...runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+    from ..agent_loop import AgentLoopContext, AgentLoopEvent
 
 logger = get_logger(__name__)
 
@@ -53,7 +53,7 @@ class RuntimeMemoryMiddleware:
 
     def __init__(
         self,
-        runtime: "AssistantRuntimeAdapter | None",
+        runtime: AssistantRuntimeAdapter | None,
         phase_tag: Any,
     ) -> None:
         """
@@ -67,9 +67,9 @@ class RuntimeMemoryMiddleware:
 
     async def before_call(
         self,
-        ctx: "AgentLoopContext",
-        messages: list[dict[str, Any]],
-    ) -> AsyncGenerator["AgentLoopEvent", None]:
+        ctx: AgentLoopContext,
+        _messages: list[dict[str, Any]],
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
         if not self._runtime:
             return
 
@@ -100,6 +100,7 @@ class RuntimeMemoryMiddleware:
                     _sanitize_snippet(f"({snippet.source_type}) {snippet.content}")
                     for snippet in memory_result.snippets
                 ]
+                ctx.runtime_memory_provenance = list(memory_result.provenance or [])
             yield AgentLoopEvent(
                 phase=self._phase,
                 event_type="memory_retrieved",
@@ -108,6 +109,7 @@ class RuntimeMemoryMiddleware:
                     "snippet_count": len(memory_result.snippets),
                     "fallback_used": memory_result.fallback_used,
                     "fallback_reason": memory_result.fallback_reason,
+                    "provenance": memory_result.provenance,
                 },
             )
         except Exception:

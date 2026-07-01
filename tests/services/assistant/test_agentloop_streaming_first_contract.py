@@ -205,6 +205,41 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_first_emits_turn_contract_snapshot_and_terminal_envelope() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(
+        scripted=[
+            [{"content": "Hello", "usage": {"input_tokens": 1, "output_tokens": 1}}],
+        ]
+    )
+    loop = AgentLoop(model_registry=model)
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Hi with Authorization: Bearer super-secret-value",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        events.append(ev)
+
+    run_started = next(ev.data for ev in events if ev.event_type == "run_started")
+    completed = next(ev.data for ev in events if ev.event_type == "streaming_first_completed")
+    run_finished = next(ev.data for ev in events if ev.event_type == "run_finished")
+
+    assert run_started["context_snapshot"]["schema_version"] == "assistant-turn-contract/v1"
+    assert run_started["context_snapshot"]["snapshot_id"].startswith("ctx_")
+    assert completed["terminal_envelope"]["exit_reason"] == "succeeded"
+    assert completed["terminal_envelope"]["context_snapshot_id"].startswith("ctx_")
+    assert run_finished["terminal_envelope"]["status"] == "succeeded"
+    assert run_finished["terminal_envelope"]["thread_id"] == "s1"
+    assert "super-secret-value" not in json.dumps(run_finished, default=str)
+
+
+@pytest.mark.asyncio
 async def test_streaming_first_persists_checkpoints_without_prompt_text() -> None:
     from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
     from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
@@ -609,6 +644,10 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
     assert approval_payload["tool_id"] == "tc_approval"
     assert approval_payload["tool_name"] == "generate_image"
     assert approval_payload["status"] == "pending"
+    assert approval_payload["checkpoint_id"]
+    assert approval_payload["terminal_envelope"]["exit_reason"] == "approval_pending"
+    assert approval_payload["terminal_envelope"]["resume_ready"] is True
+    assert approval_payload["context_snapshot"]["snapshot_id"].startswith("ctx_")
     assert "super-secret-value" not in json.dumps(approval_payload, default=str)
 
 

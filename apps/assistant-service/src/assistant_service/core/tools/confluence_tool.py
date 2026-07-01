@@ -23,8 +23,8 @@ from base64 import b64encode
 from typing import Any
 
 import httpx
-
 from ai_gateway_core.logging import get_logger
+
 from .connector_registry import get_connector_registry
 from .tool_registry import (
     ToolCallRequest,
@@ -155,6 +155,8 @@ _MD_INLINE_MARKER_RE = re.compile(
     r"|`[^`\n]+`"                    # `code`
     r"|\[[^\]]+\]\([^)\s]+\)"        # [text](url)
 )
+_MD_BULLET_PREFIX_RE = re.compile(r"^\s*[-*]\s+")
+_MD_ORDERED_PREFIX_RE = re.compile(r"^\s*\d+\.\s+")
 
 
 def _looks_like_markdown(text: str) -> bool:
@@ -171,9 +173,7 @@ def _looks_like_markdown(text: str) -> bool:
     # start of a line. Tag-stripping is just for detection — the conversion
     # path below still sees the original text.
     untagged = re.sub(r"<[^>]+>", "\n", text)
-    if _MD_LINE_MARKER_RE.search(untagged) or _MD_INLINE_MARKER_RE.search(untagged):
-        return True
-    return False
+    return bool(_MD_LINE_MARKER_RE.search(untagged) or _MD_INLINE_MARKER_RE.search(untagged))
 
 
 def _markdown_to_storage(content: str) -> str:
@@ -277,7 +277,7 @@ def _markdown_to_storage(content: str) -> str:
         # Bulleted list — all lines start with `- ` or `* `
         if all(re.match(r"^\s*[-*]\s+", line) for line in lines):
             items = [
-                f"<li>{_apply_inline_md(re.sub(r'^\s*[-*]\s+', '', line))}</li>"
+                f"<li>{_apply_inline_md(re.sub(_MD_BULLET_PREFIX_RE, '', line))}</li>"
                 for line in lines
             ]
             out_parts.append("<ul>" + "".join(items) + "</ul>")
@@ -286,7 +286,7 @@ def _markdown_to_storage(content: str) -> str:
         # Ordered list — all lines start with `N. `
         if all(re.match(r"^\s*\d+\.\s+", line) for line in lines):
             items = [
-                f"<li>{_apply_inline_md(re.sub(r'^\s*\d+\.\s+', '', line))}</li>"
+                f"<li>{_apply_inline_md(re.sub(_MD_ORDERED_PREFIX_RE, '', line))}</li>"
                 for line in lines
             ]
             out_parts.append("<ol>" + "".join(items) + "</ol>")
@@ -805,9 +805,7 @@ class ConfluenceAPIClient:
             # Keyword match via title/text (or either, depending on fields).
             if query:
                 safe_query = query.replace("\\", "\\\\").replace('"', '\\"')
-                wanted_fields = set(
-                    f.lower().strip() for f in (fields or ["title", "text"])
-                )
+                wanted_fields = {f.lower().strip() for f in (fields or ["title", "text"])}
                 # Validate field names up front.
                 unknown = wanted_fields - {"title", "text"}
                 if unknown:
@@ -1008,7 +1006,7 @@ class ConfluenceAPIClient:
         if space_type:
             params["type"] = space_type
         if labels:
-            params["labels"] = ",".join(l.strip() for l in labels if l.strip())
+            params["labels"] = ",".join(label.strip() for label in labels if label.strip())
 
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
@@ -1930,7 +1928,7 @@ class ConfluenceReadExecutor(ToolExecutor):
                 space_type = args.get("space_type") or None
                 labels = args.get("labels") or None
                 if isinstance(labels, str):
-                    labels = [l.strip() for l in labels.split(",") if l.strip()]
+                    labels = [label.strip() for label in labels.split(",") if label.strip()]
                 try:
                     limit = max(1, min(int(args.get("limit") or 50), 250))
                 except (TypeError, ValueError):
@@ -2299,8 +2297,8 @@ def register_confluence_tools(
     # "this tenant hasn't connected" — that's the visibility gate, distinct
     # from the execution gate.
     tool_registry = get_tool_registry()
-    tool_registry.register(CONFLUENCE_READ_DEFINITION, read_executor)
-    tool_registry.register(CONFLUENCE_WRITE_DEFINITION, write_executor)
+    tool_registry.register(CONFLUENCE_READ_DEFINITION, read_executor, allow_override=True)
+    tool_registry.register(CONFLUENCE_WRITE_DEFINITION, write_executor, allow_override=True)
 
     predicate = _confluence_has_active_connection_factory(database, static_client)
     get_connector_registry().register(

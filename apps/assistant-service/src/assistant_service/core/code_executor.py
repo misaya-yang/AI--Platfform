@@ -61,6 +61,7 @@ class CodeExecutionConfig:
 
     # Sandbox runtime — "runsc" for gVisor isolation, None for default runc
     sandbox_runtime: str | None = "runsc"
+    allow_default_runtime_fallback: bool = False
 
     # Docker image
     image: str = "python:3.12-slim"
@@ -273,6 +274,14 @@ class CodeExecutorService:
         env_runtime = os.environ.get("SANDBOX_RUNTIME")
         if env_runtime is not None:
             self.config.sandbox_runtime = env_runtime or None
+            self.config.allow_default_runtime_fallback = env_runtime == ""
+        if os.environ.get("ASSISTANT_ALLOW_RUNC_CODE_EXECUTOR", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            self.config.allow_default_runtime_fallback = True
         self._docker_client = None
         self._docker_available: bool | None = None
 
@@ -321,10 +330,16 @@ class CodeExecutorService:
                         logger.info(f"Docker available with sandbox runtime '{rt}' (gVisor)")
                     else:
                         logger.warning(
-                            f"Sandbox runtime '{rt}' not found — falling back to default runc. "
+                            f"Sandbox runtime '{rt}' not found. "
                             f"Available: {list(runtimes.keys())}"
                         )
-                        self.config.sandbox_runtime = None
+                        if self.config.allow_default_runtime_fallback:
+                            logger.warning(
+                                "Explicitly falling back to default Docker runtime for code executor."
+                            )
+                            self.config.sandbox_runtime = None
+                        else:
+                            self._docker_available = False
                 else:
                     logger.info("Docker available (sandbox runtime: runc default)")
             else:
@@ -469,6 +484,7 @@ class CodeExecutorService:
                 kb_docs/        - Knowledge base documents
                 main.py         - User code with matplotlib setup
         """
+        _ = config
         # Create temp directory in shared workspace (accessible by both
         # the gateway container and sibling sandbox containers via Docker socket).
         # Without this, Docker-in-Docker volume mounts fail because the host
@@ -688,6 +704,7 @@ class CodeExecutorService:
         Returns:
             List of OutputFile objects.
         """
+        _ = config
         output_files = []
         output_dir = workspace_dir / "output"
 
