@@ -20,7 +20,12 @@ class Capability(str, Enum):
     GATEWAY_QUOTA_READ = "GatewayQuotaRead"
     GATEWAY_QUOTA_WRITE = "GatewayQuotaWrite"
     GATEWAY_RATE_LIMIT_WRITE = "GatewayRateLimitWrite"
+    GATEWAY_PROVIDER_CONFIG_READ = "GatewayProviderConfigRead"
     GATEWAY_PROVIDER_CONFIG_WRITE = "GatewayProviderConfigWrite"
+    GATEWAY_SKILL_READ = "GatewaySkillRead"
+    GATEWAY_SKILL_WRITE = "GatewaySkillWrite"
+    GATEWAY_MCP_READ = "GatewayMcpRead"
+    GATEWAY_MCP_WRITE = "GatewayMcpWrite"
     GATEWAY_MODEL_CONFIG_WRITE = "GatewayModelConfigWrite"
     GATEWAY_SERVICE_CONFIG_WRITE = "GatewayServiceConfigWrite"
     GATEWAY_EVAL_TRACE_READ = "GatewayEvalTraceRead"
@@ -36,7 +41,12 @@ _CAPABILITY_PERMISSIONS: dict[Capability, str] = {
     Capability.GATEWAY_QUOTA_READ: "console:quota:view",
     Capability.GATEWAY_QUOTA_WRITE: "console:quota:edit",
     Capability.GATEWAY_RATE_LIMIT_WRITE: "console:rate_limits:edit",
+    Capability.GATEWAY_PROVIDER_CONFIG_READ: "console:providers:view",
     Capability.GATEWAY_PROVIDER_CONFIG_WRITE: "console:providers:edit",
+    Capability.GATEWAY_SKILL_READ: "console:skills:view",
+    Capability.GATEWAY_SKILL_WRITE: "console:skills:edit",
+    Capability.GATEWAY_MCP_READ: "console:mcp:view",
+    Capability.GATEWAY_MCP_WRITE: "console:mcp:edit",
     Capability.GATEWAY_MODEL_CONFIG_WRITE: "console:models:edit",
     Capability.GATEWAY_SERVICE_CONFIG_WRITE: "console:services:edit",
     Capability.GATEWAY_EVAL_TRACE_READ: "console:eval:view",
@@ -52,7 +62,24 @@ _CAPABILITY_LEGACY_ALIASES: dict[Capability, tuple[str, ...]] = {
     Capability.GATEWAY_QUOTA_READ: ("quota:view",),
     Capability.GATEWAY_QUOTA_WRITE: ("quota:manage",),
     Capability.GATEWAY_RATE_LIMIT_WRITE: ("rate_limits:manage",),
+    Capability.GATEWAY_PROVIDER_CONFIG_READ: (
+        "providers:view",
+        "console:providers:edit",
+        "providers:manage",
+    ),
     Capability.GATEWAY_PROVIDER_CONFIG_WRITE: ("providers:manage",),
+    Capability.GATEWAY_SKILL_READ: (
+        "skills:view",
+        "console:skills:edit",
+        "skills:manage",
+    ),
+    Capability.GATEWAY_SKILL_WRITE: ("skills:manage",),
+    Capability.GATEWAY_MCP_READ: (
+        "mcp:view",
+        "console:mcp:edit",
+        "mcp:manage",
+    ),
+    Capability.GATEWAY_MCP_WRITE: ("mcp:manage",),
     Capability.GATEWAY_MODEL_CONFIG_WRITE: ("models:manage",),
     Capability.GATEWAY_SERVICE_CONFIG_WRITE: ("service:manage",),
 }

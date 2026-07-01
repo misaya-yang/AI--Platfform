@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
-from scripts.eval_golden import main as eval_golden_main
 from src.services.eval.golden import apply_gate, evaluate_cases, load_jsonl, validate_cases
 
 GOLDEN = Path("tests/fixtures/eval/golden/assistant_regression_v1.jsonl")
+
+
+def _load_eval_golden_main():
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "eval_golden.py"
+    spec = importlib.util.spec_from_file_location("eval_golden_script", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load eval golden script: {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.main
+
+
+eval_golden_main = _load_eval_golden_main()
 
 
 def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:

@@ -12,8 +12,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+from ...api.eval_export import _redact_export_text, _safe_export_value
 from .golden import apply_gate
-from .trace_capture import redact_preview
 
 SUPPORTED_TRACE_FAMILIES = {"assistant", "langgraph_proxy", "rag"}
 
@@ -116,6 +116,17 @@ def classify_trace_failure(
             reasons=reasons,
         )
 
+    if trace_family == "rag" and (
+        status in {"failed", "error"} or _event_payload_contains(events, "no_relevant_chunks")
+    ):
+        reasons.append("rag_trace_failed_or_no_relevant_chunks")
+        return TraceFailurePattern(
+            trace_id=trace_id,
+            trace_family=trace_family,
+            failure_mode=FAILURE_MODE_RAG_MISS,
+            reasons=reasons,
+        )
+
     if not str(trace.get("output_preview") or "").strip() or _run_error_mentions(
         events, "model_produced_no_text"
     ):
@@ -126,17 +137,6 @@ def classify_trace_failure(
             failure_mode=FAILURE_MODE_MODEL_EMPTY_OUTPUT,
             reasons=reasons,
             severity="high",
-        )
-
-    if trace_family == "rag" and (
-        status in {"failed", "error"} or _event_payload_contains(events, "no_relevant_chunks")
-    ):
-        reasons.append("rag_trace_failed_or_no_relevant_chunks")
-        return TraceFailurePattern(
-            trace_id=trace_id,
-            trace_family=trace_family,
-            failure_mode=FAILURE_MODE_RAG_MISS,
-            reasons=reasons,
         )
 
     low_scores = [
@@ -201,13 +201,13 @@ def build_redacted_dataset_case(
         "case_id": f"{resolved.trace_family}-{case_hash}-{resolved.failure_mode}",
         "split": split,
         "input": {
-            "input_preview": redact_preview(trace.get("input_preview") or ""),
+            "input_preview": _redact_export_text(trace.get("input_preview") or ""),
             "trace_family": resolved.trace_family,
             "thread_id": trace.get("thread_id") or trace.get("session_id"),
             "run_id": trace.get("run_id"),
         },
         "expected_output": {
-            "output_preview": redact_preview(trace.get("output_preview") or ""),
+            "output_preview": _redact_export_text(trace.get("output_preview") or ""),
             "expected_status": "succeeded",
         },
         "expected_trajectory": {
@@ -354,11 +354,11 @@ def _redacted_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         if _is_sensitive_metadata_key(key_str):
             continue
         if isinstance(value, str):
-            redacted[key_str] = redact_preview(value)
+            redacted[key_str] = _redact_export_text(value)
         elif isinstance(value, (int, float, bool)) or value is None:
             redacted[key_str] = value
         else:
-            redacted[key_str] = redact_preview(value)
+            redacted[key_str] = _safe_export_value(value)
     return redacted
 
 

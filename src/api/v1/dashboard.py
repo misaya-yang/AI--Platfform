@@ -14,12 +14,21 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel
 
-from ...api.deps import AuthContext, get_auth_context
+from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.jwt import decode_jwt_token
 from ...core.auth.jwt_config import get_jwt_algorithms, get_jwt_secret
+from ...core.auth.permissions import Capability
 from ...services.billing.pricing_catalog import microcents_to_usd
 from ...services.metrics import compute_data_status, get_metrics_recorder
 from ...services.metrics.realtime_metrics import RealtimeSnapshot, get_realtime_metrics
@@ -214,6 +223,35 @@ manager = DashboardConnectionManager()
 # ============ WebSocket Authentication Helper ============
 
 
+async def _merge_db_permissions_for_user(
+    app,
+    *,
+    user_id: str,
+    roles: list[str],
+    permissions: list[str],
+) -> tuple[list[str], list[str]]:
+    merged_roles = list(roles)
+    merged_permissions = list(permissions)
+    for perm in merged_permissions:
+        if perm not in merged_roles:
+            merged_roles.append(perm)
+    db = getattr(app.state, "database", None)
+    if not db or not getattr(db, "enabled", False) or not user_id:
+        return merged_roles, merged_permissions
+    try:
+        db_permissions = await db.get_user_permissions(user_id)
+        for perm in db_permissions:
+            if perm not in merged_permissions:
+                merged_permissions.append(perm)
+            if perm not in merged_roles:
+                merged_roles.append(perm)
+    except Exception as e:
+        logger.warning(
+            f"[AUTH] Failed to fetch DB permissions for WebSocket user {user_id}: {e}"
+        )
+    return merged_roles, merged_permissions
+
+
 async def authenticate_websocket(
     websocket: WebSocket,
     token: str | None = None,
@@ -282,11 +320,26 @@ async def authenticate_websocket(
             else:
                 roles = [str(r) for r in raw_roles] if raw_roles else ["user"]
 
+            permissions = []
+            raw_permissions = payload.get("permissions")
+            if isinstance(raw_permissions, str):
+                permissions = [raw_permissions]
+            elif isinstance(raw_permissions, list):
+                permissions = [str(p) for p in raw_permissions if p is not None]
+
+            roles, permissions = await _merge_db_permissions_for_user(
+                app,
+                user_id=user_id,
+                roles=roles,
+                permissions=permissions,
+            )
+
             return AuthContext(
                 user_id=user_id,
                 tenant_id=tenant_id,
                 roles=roles,
-                permissions=[],
+                permissions=permissions,
+                is_authenticated=True,
             )
 
         except Exception as e:
@@ -302,11 +355,33 @@ async def authenticate_websocket(
             if db and getattr(db, "enabled", False):
                 key_info = await db.get_api_key(key_hash)
                 if key_info:
+                    roles = key_info.get("roles") or ["user"]
+                    if isinstance(roles, str):
+                        roles = [roles]
+                    else:
+                        roles = [str(r) for r in roles] if roles else ["user"]
+                    key_permissions = key_info.get("permissions") or []
+                    if isinstance(key_permissions, str):
+                        permissions = [key_permissions]
+                    else:
+                        permissions = [
+                            str(p) for p in key_permissions if p is not None
+                        ]
+                    user_id = str(
+                        key_info.get("user_id") or f"apikey:{key_hash[:16]}"
+                    )
+                    roles, permissions = await _merge_db_permissions_for_user(
+                        app,
+                        user_id=user_id,
+                        roles=roles,
+                        permissions=permissions,
+                    )
                     return AuthContext(
-                        user_id=str(key_info.get("user_id") or f"apikey:{key_hash[:16]}"),
+                        user_id=user_id,
                         tenant_id=str(key_info.get("tenant_id") or ""),
-                        roles=key_info.get("roles") or ["user"],
-                        permissions=[],
+                        roles=roles,
+                        permissions=permissions,
+                        is_authenticated=True,
                     )
 
             # Static API key check
@@ -345,6 +420,7 @@ async def get_realtime_dashboard(
     - Token consumption and cost
     - LangGraph run statistics
     """
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     realtime = get_realtime_metrics()
     snapshot = await realtime.get_realtime_snapshot()
 
@@ -419,12 +495,20 @@ async def websocket_dashboard(
     if auth_required and not auth:
         await websocket.close(code=4001, reason="Authentication required")
         return
+    if not auth:
+        await websocket.close(code=4001, reason="Authentication configuration unavailable")
+        return
+    try:
+        require_gateway_capability(websocket, auth, Capability.GATEWAY_METRICS_READ)
+    except HTTPException:
+        await websocket.close(code=4003, reason="Metrics permission required")
+        return
 
     # Accept the connection after authentication
     await manager.connect(websocket)
 
     # Get tenant_id for filtering (if multi-tenant)
-    tenant_id = auth.tenant_id if auth else ""
+    tenant_id = auth.tenant_id or ""
 
     realtime = get_realtime_metrics()
 
@@ -484,6 +568,7 @@ async def get_timeseries(
     - cost: Token cost (USD)
     - runs: LangGraph runs
     """
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     # Default to last 24 hours
     if not end:
         end = datetime.now()
@@ -507,7 +592,7 @@ async def get_timeseries(
             elif metric == "cost":
                 metric_key = "cost_usd"
             elif metric == "runs":
-                # Runs might not be fully populated in UsageRecorder yet, fallback or use if available
+                # Runs may be incomplete in UsageRecorder; use requests as fallback.
                 metric_key = "requests"  # Approximation if runs not separate
 
             ts_data = await recorder.get_usage_timeseries(
@@ -589,8 +674,15 @@ async def get_timeseries(
 
                 elif metric == "tokens":
                     if user_id:
-                        input_key = f"metrics:tokens:user:{user_id}:input:{date_str}"
-                        output_key = f"metrics:tokens:user:{user_id}:output:{date_str}"
+                        tenant_id = auth.tenant_id or "public"
+                        input_key = (
+                            f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:"
+                            f"input:{date_str}"
+                        )
+                        output_key = (
+                            f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:"
+                            f"output:{date_str}"
+                        )
                     else:
                         input_key = f"metrics:tokens:input:{date_str}"
                         output_key = f"metrics:tokens:output:{date_str}"
@@ -646,6 +738,7 @@ async def get_usage_breakdown(
     """
     Get usage breakdown by dimension (Service, User, Vendor, Model)
     """
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     if not end:
         end = datetime.now()
     if not start:
@@ -683,6 +776,7 @@ async def get_alerts(
     auth: AuthContext = Depends(get_auth_context),
 ) -> AlertsResponse:
     """Get current alert status"""
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     realtime = get_realtime_metrics()
     snapshot = await realtime.get_realtime_snapshot()
 
@@ -705,8 +799,10 @@ async def get_user_dashboard(
 
     Shows metrics filtered to a specific user.
     """
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     realtime = get_realtime_metrics()
-    user_metrics = await realtime.get_user_metrics(user_id)
+    tenant_id = auth.tenant_id or "public"
+    user_metrics = await realtime.get_user_metrics(user_id, tenant_id=tenant_id)
 
     # Get additional metrics from UsageRecorder first, fall back to MetricsRecorder
     usage_recorder = get_usage_recorder()
@@ -761,6 +857,7 @@ async def get_dashboard_summary(
 
     Returns key metrics for the specified period.
     """
+    require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
     recorder = get_metrics_recorder()
     realtime = get_realtime_metrics()
     usage_recorder = get_usage_recorder()

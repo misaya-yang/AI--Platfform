@@ -251,7 +251,10 @@ async def test_connection_credentials(
 
     except ConfluenceAPIError as exc:
         logger.error(
-            f"Confluence API error during test: {exc}, status_code={exc.status_code}, body={exc.response_body}"
+            "Confluence API error during test: %s, status_code=%s, body=%s",
+            exc,
+            exc.status_code,
+            exc.response_body,
         )
         return {
             "status": "error",
@@ -666,6 +669,7 @@ async def import_from_url(
             tenant_id=user.tenant_id,
             metadata=payload.metadata,
             created_by=user.user_id,
+            user=user,
         )
         return result
     except PermissionDeniedError as exc:
@@ -841,7 +845,9 @@ async def list_synced_pages(
         for p in pages:
             if not p.get("id"):
                 logger.error(
-                    f"Page record missing 'id' field: {p.get('title', 'unknown')} (page_id={p.get('page_id')})"
+                    "Page record missing 'id' field: %s (page_id=%s)",
+                    p.get("title", "unknown"),
+                    p.get("page_id"),
                 )
                 continue
             valid_pages.append(p)

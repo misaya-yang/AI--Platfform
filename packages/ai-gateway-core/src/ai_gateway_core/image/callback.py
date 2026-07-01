@@ -49,22 +49,12 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
 
     Returns True only when the receiver returned ``{"code": 0}``.
 
-    SSRF guard: ``callback_url`` is validated up-front via
-    ``validate_callback_url`` (rejects private/loopback/link-local/non-http).
-    The actual POST uses ``follow_redirects=False`` so the server can't
-    redirect us into the private network mid-transaction.
+    SSRF guard: user-controlled callbacks are posted through
+    ``safe_callback_post`` so the destination is DNS-validated, IP-pinned,
+    and redirects are disabled.
     """
-    # Validate the URL FIRST — fail fast on attacker-controlled callbacks
-    # before any DNS / connect attempt.
-    from ai_gateway_core.security import SafeFetchError, validate_callback_url
+    from ai_gateway_core.security import SafeFetchError, safe_callback_post
 
-    try:
-        validate_callback_url(callback_url)
-    except SafeFetchError as exc:
-        logger.warning(
-            "[ImageCallback] Refusing callback to %s: %s", callback_url, exc,
-        )
-        return False
     images = [
         {
             "artifact_id": img.get("artifact_id"),
@@ -97,12 +87,11 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
         "error_code": task.get("error_code"),
     }
 
-    client = await _get_client()
     task_id = task.get("task_id")
 
     for attempt in range(_CALLBACK_MAX_RETRIES):
         try:
-            resp = await client.post(callback_url, json=payload)
+            resp = await safe_callback_post(callback_url, json=payload, timeout=_CALLBACK_TIMEOUT)
             if resp.status_code == 200:
                 try:
                     body = resp.json()
@@ -131,7 +120,17 @@ async def send_image_callback(callback_url: str, task: dict[str, Any]) -> bool:
                 "[ImageCallback] HTTP %d from %s (attempt %d/%d)",
                 resp.status_code, callback_url, attempt + 1, _CALLBACK_MAX_RETRIES,
             )
-        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
+        except SafeFetchError as exc:
+            logger.warning(
+                "[ImageCallback] Refusing callback to %s: %s", callback_url, exc,
+            )
+            return False
+        except (
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.TimeoutException,
+        ) as e:
             logger.warning(
                 "[ImageCallback] Transport error to %s (attempt %d/%d): %s",
                 callback_url, attempt + 1, _CALLBACK_MAX_RETRIES, e,

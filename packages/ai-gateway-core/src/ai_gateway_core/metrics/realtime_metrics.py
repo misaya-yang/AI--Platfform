@@ -180,6 +180,32 @@ class RealtimeMetricsService:
         """Unsubscribe from updates"""
         self._subscribers.discard(callback)
 
+    @staticmethod
+    def _decode_redis_text(value: Any) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        return str(value or "")
+
+    @classmethod
+    def _tenant_user_member(cls, tenant_id: str = "", user_id: str = "") -> str:
+        if tenant_id:
+            return f"{tenant_id}:{user_id}"
+        return user_id
+
+    @classmethod
+    def _split_tenant_user_member(cls, member: Any) -> tuple[str, str]:
+        value = cls._decode_redis_text(member)
+        if ":" not in value:
+            return "", value
+        tenant_id, user_id = value.split(":", 1)
+        return tenant_id, user_id
+
+    @classmethod
+    def _thread_key(cls, user_id: str, tenant_id: str = "") -> str:
+        if tenant_id:
+            return f"metrics:rt:threads:tenant:{tenant_id}:user:{user_id}"
+        return f"metrics:rt:threads:{user_id}"
+
     async def _broadcast_loop(self, interval: float) -> None:
         """Periodic broadcast loop"""
         while self._running:
@@ -200,7 +226,9 @@ class RealtimeMetricsService:
 
     # ========== Recording Methods ==========
 
-    async def record_request_start(self, request_id: str, user_id: str = "") -> None:
+    async def record_request_start(
+        self, request_id: str, user_id: str = "", tenant_id: str = ""
+    ) -> None:
         """Record request start for concurrent tracking"""
         self._concurrent_requests += 1
 
@@ -217,11 +245,12 @@ class RealtimeMetricsService:
 
             # Track active user
             if user_id:
-                pipe.zadd("metrics:rt:active_users", {user_id: now})
+                active_user = self._tenant_user_member(tenant_id=tenant_id, user_id=user_id)
+                pipe.zadd("metrics:rt:active_users", {active_user: now})
                 pipe.expire("metrics:rt:active_users", TTL_5M)
 
                 # Track user thread count
-                thread_key = f"metrics:rt:threads:{user_id}"
+                thread_key = self._thread_key(user_id=user_id, tenant_id=tenant_id)
                 pipe.incr(thread_key)
                 pipe.expire(thread_key, TTL_5M)
 
@@ -230,7 +259,9 @@ class RealtimeMetricsService:
         except Exception as e:
             logger.debug(f"Failed to record request start: {e}")
 
-    async def record_request_end(self, request_id: str, user_id: str = "") -> None:
+    async def record_request_end(
+        self, request_id: str, user_id: str = "", tenant_id: str = ""
+    ) -> None:
         """Record request end"""
         self._concurrent_requests = max(0, self._concurrent_requests - 1)
 
@@ -245,7 +276,7 @@ class RealtimeMetricsService:
 
             # Decrement user threads
             if user_id:
-                thread_key = f"metrics:rt:threads:{user_id}"
+                thread_key = self._thread_key(user_id=user_id, tenant_id=tenant_id)
                 pipe.decr(thread_key)
 
             await pipe.execute()
@@ -260,6 +291,7 @@ class RealtimeMetricsService:
         user_id: str = "",
     ) -> None:
         """Record completed request for RPS and latency calculations"""
+        del user_id
         if not self.redis or not self.redis._client:
             return
 
@@ -318,6 +350,7 @@ class RealtimeMetricsService:
             output_tokens: Number of output/completion tokens
         """
         # Intentionally no-op: see docstring for single-writer rationale.
+        del input_tokens, output_tokens
         return
 
     # ========== Query Methods ==========
@@ -367,10 +400,17 @@ class RealtimeMetricsService:
 
             # Get threads by user
             threads_by_user = {}
-            for user_id in active_users[:20]:  # Limit to 20 users
-                thread_count = await client.get(f"metrics:rt:threads:{user_id}")
+            for active_user in active_users[:20]:  # Limit to 20 users
+                tenant_id, user_id = self._split_tenant_user_member(active_user)
+                if not user_id:
+                    continue
+                thread_count = await client.get(
+                    self._thread_key(user_id=user_id, tenant_id=tenant_id)
+                )
                 if thread_count:
-                    threads_by_user[user_id] = max(0, int(thread_count))
+                    threads_by_user[user_id] = threads_by_user.get(user_id, 0) + max(
+                        0, int(thread_count)
+                    )
             snapshot.threads_by_user = threads_by_user
             snapshot.total_threads = sum(threads_by_user.values())
 
@@ -505,7 +545,7 @@ class RealtimeMetricsService:
         count = len([d for d in window_data if d["time"] >= cutoff])
         return count / window_seconds if window_seconds > 0 else 0.0
 
-    async def get_user_metrics(self, user_id: str) -> dict[str, Any]:
+    async def get_user_metrics(self, user_id: str, tenant_id: str = "") -> dict[str, Any]:
         """Get metrics for a specific user (multi-tenant support)"""
         if not self.redis or not self.redis._client:
             return {}
@@ -515,9 +555,15 @@ class RealtimeMetricsService:
             client = self.redis._client
 
             pipe = client.pipeline()
-            pipe.get(f"metrics:tokens:user:{user_id}:input:{today}")
-            pipe.get(f"metrics:tokens:user:{user_id}:output:{today}")
-            pipe.get(f"metrics:rt:threads:{user_id}")
+            if tenant_id:
+                input_key = f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:input:{today}"
+                output_key = f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:output:{today}"
+            else:
+                input_key = f"metrics:tokens:user:{user_id}:input:{today}"
+                output_key = f"metrics:tokens:user:{user_id}:output:{today}"
+            pipe.get(input_key)
+            pipe.get(output_key)
+            pipe.get(self._thread_key(user_id=user_id, tenant_id=tenant_id))
 
             results = await pipe.execute()
 

@@ -247,6 +247,7 @@ export function AssistantPage() {
     handleDeleteSession,
     sendMessage,
     stopStreaming,
+    handleToolApproval,
     artifacts,
     setArtifacts,
     showArtifacts,
@@ -911,6 +912,7 @@ export function AssistantPage() {
               onClose={closeActivity}
               message={activeActivityMessage}
               width={380}
+              onToolApproval={handleToolApproval}
             />
           )}
 
@@ -936,6 +938,7 @@ export function AssistantPage() {
                     onClose={closeActivity}
                     message={activeActivityMessage}
                     width={mobilePanelWidth}
+                    onToolApproval={handleToolApproval}
                   />
                 </motion.div>
               </motion.div>

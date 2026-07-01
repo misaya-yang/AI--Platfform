@@ -94,6 +94,7 @@ class AssistantExecutionGateway:
     """Gateway wrapper around tool invocation and run lifecycle."""
 
     _CONTROL_ARGUMENT_KEYS = {"_approval_id", "_steer_payload"}
+    _RESUMABLE_CHECKPOINT_PHASES = frozenset({"approval_pending", "tool_call_pending"})
 
     def __init__(
         self,
@@ -284,7 +285,7 @@ class AssistantExecutionGateway:
         runtime_mode: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
-        self._runs[run_id] = RunRecord(
+        record = RunRecord(
             run_id=run_id,
             tenant_id=tenant_id,
             user_id=user_id,
@@ -301,6 +302,12 @@ class AssistantExecutionGateway:
         )
 
         if not self.database:
+            existing_run = self._runs.get(run_id)  # AUDIT-OK: DB-less / DB-error fallback only
+            if existing_run and (
+                existing_run.tenant_id != tenant_id or existing_run.user_id != user_id
+            ):
+                raise PermissionError("run_id already belongs to a different owner")
+            self._runs[run_id] = record
             return
 
         query = """
@@ -317,10 +324,13 @@ class AssistantExecutionGateway:
                 memory_mode = EXCLUDED.memory_mode,
                 os_agent_enabled = EXCLUDED.os_agent_enabled,
                 request_preview = EXCLUDED.request_preview,
-                updated_at = NOW();
+                updated_at = NOW()
+            WHERE assistant_runs.tenant_id = EXCLUDED.tenant_id
+              AND assistant_runs.user_id = EXCLUDED.user_id
+            RETURNING run_id;
         """
         try:
-            await self.database.execute(
+            row = await self.database.fetchrow(
                 query,
                 run_id,
                 tenant_id,
@@ -334,7 +344,12 @@ class AssistantExecutionGateway:
                 request_preview,
                 now,
             )
+            if row is None:
+                raise PermissionError("run_id already belongs to a different owner")
+            self._runs[run_id] = record
         except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
             logger.warning("Failed to persist assistant run start: %s", exc)
 
     async def finish_run(
@@ -343,6 +358,8 @@ class AssistantExecutionGateway:
         status: str,
         usage: dict[str, Any] | None = None,
         error: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         # Write-through mirror for the DB-less fallback path only. When the
@@ -359,24 +376,44 @@ class AssistantExecutionGateway:
         if not self.database:
             return
 
-        query = """
-            UPDATE assistant_runs
-            SET status = $2,
-                usage = $3,
-                error = $4,
-                finished_at = $5,
-                updated_at = NOW()
-            WHERE run_id = $1;
-        """
-        try:
-            await self.database.execute(
-                query,
+        if tenant_id and user_id:
+            query = """
+                UPDATE assistant_runs
+                SET status = $2,
+                    usage = $3,
+                    error = $4,
+                    finished_at = $5,
+                    updated_at = NOW()
+                WHERE run_id = $1 AND tenant_id = $6 AND user_id = $7;
+            """
+            params = (
+                run_id,
+                status,
+                json.dumps(usage or {}),
+                error,
+                now,
+                tenant_id,
+                user_id,
+            )
+        else:
+            query = """
+                UPDATE assistant_runs
+                SET status = $2,
+                    usage = $3,
+                    error = $4,
+                    finished_at = $5,
+                    updated_at = NOW()
+                WHERE run_id = $1;
+            """
+            params = (
                 run_id,
                 status,
                 json.dumps(usage or {}),
                 error,
                 now,
             )
+        try:
+            await self.database.execute(query, *params)
         except Exception as exc:
             logger.warning("Failed to persist assistant run finish: %s", exc)
 
@@ -599,13 +636,30 @@ class AssistantExecutionGateway:
         run = await self.get_run(run_id=run_id, tenant_id=tenant_id, user_id=user_id)
         if not run:
             return None
-        checkpoint = run.get("checkpoint") or await self.get_run_checkpoint(
+
+        checkpoint = await self._get_resume_checkpoint(
             run_id=run_id,
             tenant_id=tenant_id,
             user_id=user_id,
         )
+
+        run_status = str(run.get("status") or "")
+        if (
+            run_status in {"succeeded", "failed", "cancelled"}
+            and not (
+                checkpoint and checkpoint.get("phase") == "approval_pending"
+            )
+        ):
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "run_already_terminal",
+                "checkpoint": run.get("checkpoint"),
+                "recoverable": False,
+            }
+
         if not checkpoint:
-            return await self._resume_blocked_response(
+            return await self._resume_terminal_blocked(
                 run=run,
                 reason="checkpoint_missing",
                 checkpoint=None,
@@ -617,24 +671,32 @@ class AssistantExecutionGateway:
                 "status": "blocked",
                 "reason": "run_already_terminal",
                 "checkpoint": checkpoint,
+                "recoverable": False,
             }
 
         if checkpoint.get("phase") == "approval_pending":
             expected_approval_id = checkpoint.get("approval_id")
             if not approval_id:
-                return await self._resume_blocked_response(
+                return self._resume_recoverable_response(
                     run=run,
                     reason="approval_required",
                     checkpoint=checkpoint,
                 )
             if expected_approval_id and approval_id != expected_approval_id:
-                return await self._resume_blocked_response(
+                return await self._resume_terminal_blocked(
                     run=run,
                     reason="approval_id_mismatch",
                     checkpoint=checkpoint,
                 )
             pending_tool = checkpoint.get("pending_tool") or {}
             tool_name = str(pending_tool.get("tool_name") or "")
+            arguments_hash = str(pending_tool.get("arguments_hash") or "")
+            if tool_name and not arguments_hash:
+                return await self._resume_terminal_blocked(
+                    run=run,
+                    reason="checkpoint_invalid",
+                    checkpoint=checkpoint,
+                )
             if tool_name and not await self._approval_granted_for_checkpoint(
                 approval_id=approval_id,
                 tenant_id=tenant_id,
@@ -642,7 +704,18 @@ class AssistantExecutionGateway:
                 tool_name=tool_name,
                 pending_tool=pending_tool,
             ):
-                return await self._resume_blocked_response(
+                approval_status = await self._fetch_approval_status(
+                    approval_id=approval_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+                if approval_status == "pending":
+                    return self._resume_recoverable_response(
+                        run=run,
+                        reason="approval_not_granted",
+                        checkpoint=checkpoint,
+                    )
+                return await self._resume_terminal_blocked(
                     run=run,
                     reason="approval_not_granted",
                     checkpoint=checkpoint,
@@ -656,13 +729,30 @@ class AssistantExecutionGateway:
             "resume_mode": "checkpoint",
         }
 
-    async def _resume_blocked_response(
+    @staticmethod
+    def _resume_recoverable_response(
+        *,
+        run: dict[str, Any],
+        reason: str,
+        checkpoint: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return a blocked resume plan without mutating run terminal state."""
+        return {
+            "run_id": str(run.get("run_id") or ""),
+            "status": "blocked",
+            "reason": reason,
+            "checkpoint": checkpoint,
+            "recoverable": True,
+        }
+
+    async def _resume_terminal_blocked(
         self,
         *,
         run: dict[str, Any],
         reason: str,
         checkpoint: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """Record a terminal resume failure for hard validation mismatches."""
         run_id = str(run.get("run_id") or "")
         tenant_id = str(run.get("tenant_id") or "")
         user_id = str(run.get("user_id") or "")
@@ -681,13 +771,175 @@ class AssistantExecutionGateway:
                 "source_phase": (checkpoint or {}).get("phase"),
             },
         )
-        await self.finish_run(run_id=run_id, status="blocked", error=reason)
+        await self.finish_run(
+            run_id=run_id,
+            status="blocked",
+            error=reason,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
         return {
             "run_id": run_id,
             "status": "blocked",
             "reason": reason,
             "checkpoint": blocked_checkpoint,
+            "recoverable": False,
         }
+
+    async def _get_resume_checkpoint(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the newest checkpoint that is still resumable."""
+        for checkpoint in await self._list_checkpoints(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=20,
+        ):
+            phase = str(checkpoint.get("phase") or "")
+            if phase == "resume_blocked" or phase.startswith("run_"):
+                continue
+            if phase in self._RESUMABLE_CHECKPOINT_PHASES:
+                return checkpoint
+        return None
+
+    async def _list_checkpoints(
+        self,
+        *,
+        run_id: str,
+        tenant_id: str,
+        user_id: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if self.database:
+            try:
+                rows = await self.database.fetch(
+                    """
+                    SELECT checkpoint_id, run_id, tenant_id, user_id, session_id,
+                           phase, iteration, message_state_hash, pending_tool,
+                           approval_id, idempotency_keys, resume_payload, status,
+                           error, created_at
+                      FROM assistant_run_checkpoints
+                     WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
+                     ORDER BY created_at DESC
+                     LIMIT $4;
+                    """,
+                    run_id,
+                    tenant_id,
+                    user_id,
+                    max(1, int(limit)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_list_checkpoints DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+            else:
+                return [self._checkpoint_row_to_dict(row) for row in rows]
+
+        records = self._checkpoints.get(run_id) or []
+        selected = [
+            record
+            for record in reversed(records)
+            if record.tenant_id == tenant_id and record.user_id == user_id
+        ]
+        return [self._checkpoint_to_dict(record) for record in selected[:limit]]
+
+    async def get_tool_approval(
+        self,
+        *,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Return approval metadata including tool arguments for resume execution."""
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT approval_id, tenant_id, user_id, session_id, run_id,
+                           tool_name, arguments, status, reason
+                      FROM assistant_tool_approvals
+                     WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
+                    """,
+                    approval_id,
+                    tenant_id,
+                    user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "get_tool_approval DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+            else:
+                if row:
+                    arguments = row.get("arguments")
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {}
+                    if not isinstance(arguments, dict):
+                        arguments = {}
+                    return {
+                        "approval_id": str(row.get("approval_id") or ""),
+                        "tool_name": str(row.get("tool_name") or ""),
+                        "arguments": arguments,
+                        "status": str(row.get("status") or ""),
+                        "reason": row.get("reason"),
+                    }
+
+        record = self._approvals.get(approval_id)  # AUDIT-OK: DB-less / DB-error fallback only
+        if (
+            record
+            and record.tenant_id == tenant_id
+            and record.user_id == user_id
+        ):
+            return {
+                "approval_id": record.approval_id,
+                "tool_name": record.tool_name,
+                "arguments": dict(record.arguments or {}),
+                "status": record.status,
+                "reason": record.reason,
+            }
+        return None
+
+    async def _fetch_approval_status(
+        self,
+        *,
+        approval_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> str | None:
+        if self.database:
+            try:
+                row = await self.database.fetchrow(
+                    """
+                    SELECT status
+                      FROM assistant_tool_approvals
+                     WHERE approval_id = $1 AND tenant_id = $2 AND user_id = $3
+                     LIMIT 1;
+                    """,
+                    approval_id,
+                    tenant_id,
+                    user_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_fetch_approval_status DB query failed, falling back to in-memory mirror: %s",
+                    exc,
+                )
+            else:
+                return str(row.get("status") or "") if row else None
+
+        record = self._approvals.get(approval_id)  # AUDIT-OK: DB-less / DB-error fallback only
+        if not record or record.tenant_id != tenant_id or record.user_id != user_id:
+            return None
+        return record.status
 
     def _get_checkpoint_from_memory(
         self,
@@ -770,7 +1022,13 @@ class AssistantExecutionGateway:
         # mutation here keeps the mirror coherent if we later fall
         # back due to DB error. Not a read source.
         record = self._approvals.get(approval_id)  # AUDIT-OK: write-through mirror
-        if record and record.tenant_id == tenant_id and record.user_id == user_id:
+        if (
+            record
+            and record.tenant_id == tenant_id
+            and record.user_id == user_id
+            and record.status == "pending"
+            and (record.expires_at is None or record.expires_at > now)
+        ):
             record.status = status
             record.approved_by = approver_user_id
             record.approved_at = now
@@ -787,6 +1045,8 @@ class AssistantExecutionGateway:
                 WHERE approval_id = $1
                   AND tenant_id = $2
                   AND user_id = $3
+                  AND status = 'pending'
+                  AND (expires_at IS NULL OR expires_at > NOW())
                 RETURNING approval_id, tenant_id, user_id, session_id, run_id,
                           tool_name, arguments, status, reason, approved_by,
                           approved_at, expires_at, created_at;
@@ -899,12 +1159,16 @@ class AssistantExecutionGateway:
         user_id: str,
         tool_name: str,
     ) -> None:
-        await self._consume_approval(
+        consumed = await self._consume_approval(
             approval_id=approval_id,
             tenant_id=tenant_id,
             user_id=user_id,
             tool_name=tool_name,
         )
+        if not consumed:
+            raise RuntimeError(
+                f"Failed to consume approval {approval_id} for tool {tool_name}"
+            )
 
     async def invoke_tool(
         self,
@@ -1327,9 +1591,10 @@ class AssistantExecutionGateway:
         tenant_id: str,
         user_id: str,
         tool_name: str,
-    ) -> None:
+    ) -> bool:
         """Mark an approved tool approval as single-use after a resume attempt."""
         record = self._approvals.get(approval_id)  # AUDIT-OK: write-through mirror
+        memory_consumed = False
         if (
             record
             and record.tenant_id == tenant_id
@@ -1338,9 +1603,10 @@ class AssistantExecutionGateway:
             and record.status == "approved"
         ):
             record.status = "consumed"
+            memory_consumed = True
 
         if not self.database:
-            return
+            return memory_consumed
 
         try:
             await self.database.execute(
@@ -1361,6 +1627,14 @@ class AssistantExecutionGateway:
             )
         except Exception as exc:
             logger.warning("Failed to consume approval: %s", exc)
+            return memory_consumed
+
+        status = await self._fetch_approval_status(
+            approval_id=approval_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        return status == "consumed" or memory_consumed
 
     async def _approval_granted(
         self,
@@ -1446,13 +1720,7 @@ class AssistantExecutionGateway:
     ) -> bool:
         expected_hash = str(pending_tool.get("arguments_hash") or "")
         if not expected_hash:
-            return await self.is_approval_granted(
-                approval_id=approval_id,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                tool_name=tool_name,
-                arguments=None,
-            )
+            return False
 
         if self.database:
             try:

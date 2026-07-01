@@ -182,7 +182,7 @@ class StreamingAuthConfig:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
+
             "/docs",
             "/openapi.json",
         ]
@@ -371,7 +371,10 @@ class StreamingAuthMiddleware(PureASGIMiddleware):
         return ""
 
     def _is_configured_api_key(self, api_key: str) -> bool:
-        return any(secrets.compare_digest(api_key, configured) for configured in self.config.api_keys)
+        return any(
+            secrets.compare_digest(api_key, configured)
+            for configured in self.config.api_keys
+        )
 
     @staticmethod
     def _is_valid_session_id(value: str) -> bool:
@@ -436,7 +439,21 @@ class StreamingRateLimitConfig:
     ip_limit: int = 60
     ip_window: int = 60
     whitelist_paths: list[str] = field(
-        default_factory=lambda: ["/health", "/health/live", "/health/ready", "/metrics"]
+        default_factory=lambda: ["/health", "/health/live", "/health/ready"]
+    )
+
+
+@dataclass
+class StreamingAdmissionConfig:
+    """Active-stream admission settings (config surface for deploy guards).
+
+    Full admission middleware is optional; this dataclass documents the
+    expected whitelist and is used by release security regressions.
+    """
+
+    enabled: bool = True
+    whitelist_paths: list[str] = field(
+        default_factory=lambda: ["/health", "/health/live", "/health/ready"]
     )
 
 
@@ -612,7 +629,7 @@ class StreamingLogConfig:
     log_request_body: bool = False
     log_response_body: bool = False
     exclude_paths: list[str] = field(
-        default_factory=lambda: ["/health", "/health/live", "/health/ready", "/metrics"]
+        default_factory=lambda: ["/health", "/health/live", "/health/ready"]
     )
 
 
@@ -798,7 +815,7 @@ class StreamingTracingConfig:
     log_requests: bool = True
     log_responses: bool = True
     exclude_paths: set[str] = field(
-        default_factory=lambda: {"/health", "/health/live", "/health/ready", "/metrics"}
+        default_factory=lambda: {"/health", "/health/live", "/health/ready"}
     )
 
 

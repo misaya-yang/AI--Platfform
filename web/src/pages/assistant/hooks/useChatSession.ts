@@ -3,12 +3,14 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  approveToolCall,
   chatStream,
   getArtifactDownloadUrl,
+  prepareAssistantRunResume,
   type AssistantMessage,
   type WebSearchResult,
   type ArtifactInfo,
-  getSessionArtifacts
+  getSessionArtifacts,
 } from "@/api/assistant";
 import { SSEEventType } from "../sse-events";
 import {
@@ -480,6 +482,15 @@ function finalizeProcessSummary(
     };
   }
 
+  if (summary.tools.some((tool) => tool.status === "approval_required")) {
+    return {
+      ...summary,
+      status: "running",
+      collapsed: false,
+      totalDurationMs,
+    };
+  }
+
   return {
     ...summary,
     status: "succeeded",
@@ -500,6 +511,7 @@ export function useChatSession() {
   // State
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
+  const messagesRef = useRef<ChatMessageType[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [historyRestoreState, setHistoryRestoreState] = useState<
@@ -523,11 +535,21 @@ export function useChatSession() {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastStreamConfigRef = useRef<{
+    config: SessionConfig;
+    selectedDatasets: string[];
+    models: any[];
+    datasets: any[];
+  } | null>(null);
 
   // 用于跟踪是否已经初始化完成
   const isInitialized = useRef(false);
 
   // Cleanup AbortController on unmount to prevent state updates on unmounted component
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
@@ -793,11 +815,41 @@ export function useChatSession() {
     selectedDatasets: string[];
     models: any[];
     datasets: any[];
+    resumeRunId?: string;
+    resumeApprovalId?: string;
+    targetAssistantMessageId?: string;
   }) => {
-    const { messageContent, filePaths, attachments, config, selectedDatasets, datasets } = params;
+    const {
+      messageContent,
+      filePaths,
+      attachments,
+      config,
+      selectedDatasets,
+      datasets,
+      resumeRunId,
+      resumeApprovalId,
+      targetAssistantMessageId,
+    } = params;
+    const isResume = Boolean(
+      resumeRunId && resumeApprovalId && targetAssistantMessageId,
+    );
+    lastStreamConfigRef.current = {
+      config,
+      selectedDatasets,
+      models: params.models,
+      datasets,
+    };
+
     const createdAt = new Date().toISOString();
     const userMessageId = generateUUID();
-    
+
+    const resumeTarget = isResume
+      ? messages.find((message) => message.id === targetAssistantMessageId)
+      : undefined;
+    if (isResume && !resumeTarget) {
+      return;
+    }
+
     // 1. Setup UI for new message
     const userMessage: ChatMessageType = {
       id: userMessageId,
@@ -827,18 +879,32 @@ export function useChatSession() {
       });
     }
 
-    const assistantMessage: ChatMessageType = {
-      id: generateUUID(),
-      role: "assistant",
-      content: "",
-      createdAt,
-      parts: [],
-      status: "streaming",
-      isStreaming: true,
-      searchStatus: initialSearchStatus.length > 0 ? initialSearchStatus : undefined,
-    };
+    const assistantMessage: ChatMessageType = isResume
+      ? {
+          ...resumeTarget!,
+          status: "streaming",
+          isStreaming: true,
+        }
+      : {
+          id: generateUUID(),
+          role: "assistant",
+          content: "",
+          createdAt,
+          parts: [],
+          status: "streaming",
+          isStreaming: true,
+          searchStatus: initialSearchStatus.length > 0 ? initialSearchStatus : undefined,
+        };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    if (isResume) {
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === assistantMessage.id ? assistantMessage : message,
+        ),
+      );
+    } else {
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    }
     setIsStreaming(true);
 
     // 2. Create/Update Session
@@ -989,6 +1055,8 @@ export function useChatSession() {
         execution_profile: config.execution_profile || "safe",
         memory_mode: config.memory_mode || "auto",
         os_agent_enabled: config.os_agent_enabled ?? false,
+        resume_run_id: resumeRunId,
+        resume_approval_id: resumeApprovalId,
       }, abortControllerRef.current.signal);
 
       for await (const event of stream) {
@@ -1359,11 +1427,16 @@ export function useChatSession() {
               const toolName =
                 existing?.name ||
                 (typeof approvalData.tool_name === "string" ? approvalData.tool_name : toolId);
+              const runId =
+                typeof approvalData.run_id === "string"
+                  ? approvalData.run_id
+                  : prev.runId;
               return {
                 ...m,
                 processSummary: {
                   ...prev,
                   collapsed: false,
+                  runId,
                   tools: upsertTool(prev.tools, {
                     id: toolId,
                     name: toolName,
@@ -1374,6 +1447,40 @@ export function useChatSession() {
                         : existing?.approvalId,
                     summary:
                       typeof approvalData.reason === "string" ? approvalData.reason : existing?.summary,
+                  }),
+                },
+              };
+            });
+            break;
+
+          case SSEEventType.RAG_RETRIEVAL_STARTED:
+          case SSEEventType.RAG_RETRIEVAL_COMPLETED:
+          case SSEEventType.RAG_RETRIEVAL_FAILED:
+            updateAssistantMessage((m) => {
+              const prev = m.processSummary ?? initProcessSummary(undefined, now);
+              const ragData = (event.data || {}) as Record<string, unknown>;
+              const toolId =
+                typeof ragData.tool_id === "string" ? ragData.tool_id : "rag-retrieval";
+              const existing = prev.tools.find((tool) => tool.id === toolId);
+              const status =
+                event.event_type === SSEEventType.RAG_RETRIEVAL_FAILED
+                  ? "error"
+                  : event.event_type === SSEEventType.RAG_RETRIEVAL_COMPLETED
+                    ? "completed"
+                    : "running";
+              return {
+                ...m,
+                processSummary: {
+                  ...prev,
+                  collapsed: false,
+                  tools: upsertTool(prev.tools, {
+                    id: toolId,
+                    name: existing?.name || "search_knowledge_base",
+                    status,
+                    summary:
+                      typeof ragData.query === "string"
+                        ? ragData.query
+                        : existing?.summary,
                   }),
                 },
               };
@@ -2363,7 +2470,124 @@ export function useChatSession() {
       setIsStreaming(false);
       abortControllerRef.current = null;
     }
-  }, [activeSessionId, messages, setActiveSessionId, setAssistantLocalTitles]);
+  }, [activeSessionId, messages, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
+
+  const handleToolApproval = useCallback(
+    async (
+      messageId: string,
+      toolId: string,
+      approvalId: string,
+      approved: boolean,
+    ) => {
+      if (!approvalId || isStreaming) return;
+      try {
+        await approveToolCall(approvalId, { approved });
+      } catch (error) {
+        console.error("Failed to submit tool approval", error);
+        return;
+      }
+
+      const messageSnapshot = messagesRef.current;
+      const targetIndex = messageSnapshot.findIndex((message) => message.id === messageId);
+      const target = targetIndex >= 0 ? messageSnapshot[targetIndex] : undefined;
+      const runId = target?.processSummary?.runId;
+      let resumeMessageContent = "";
+      if (targetIndex > 0) {
+        for (let index = targetIndex - 1; index >= 0; index -= 1) {
+          if (messageSnapshot[index]?.role === "user") {
+            resumeMessageContent = messageSnapshot[index].content;
+            break;
+          }
+        }
+      }
+
+      setMessages((prev) => {
+        return prev.map((message) => {
+          if (message.id !== messageId || !message.processSummary) return message;
+          const tools = message.processSummary.tools.map((tool) =>
+            tool.id === toolId
+              ? {
+                  ...tool,
+                  status: approved ? ("running" as const) : ("error" as const),
+                  summary: approved
+                    ? tool.summary
+                    : tool.summary || "Approval rejected",
+                }
+              : tool,
+          );
+          return {
+            ...message,
+            processSummary: {
+              ...message.processSummary,
+              tools,
+            },
+          };
+        });
+      });
+
+      if (!approved) return;
+      if (!runId) {
+        console.warn("Approval resume skipped: missing run id");
+        return;
+      }
+
+      try {
+        const resumePlan = await prepareAssistantRunResume(runId, {
+          approval_id: approvalId,
+        });
+        if (resumePlan.resume.status !== "ready") {
+          console.warn("Approval resume not ready", resumePlan.resume.reason);
+          setMessages((prev) =>
+            prev.map((message) => {
+              if (message.id !== messageId || !message.processSummary) return message;
+              return {
+                ...message,
+                processSummary: {
+                  ...message.processSummary,
+                  tools: message.processSummary.tools.map((tool) =>
+                    tool.id === toolId
+                      ? {
+                          ...tool,
+                          status: "error" as const,
+                          summary:
+                            tool.summary ||
+                            resumePlan.resume.reason ||
+                            "Resume not ready",
+                        }
+                      : tool,
+                  ),
+                },
+              };
+            }),
+          );
+          return;
+        }
+      } catch (error) {
+        console.warn("Resume probe after approval failed", error);
+        return;
+      }
+
+      const streamConfig = lastStreamConfigRef.current;
+      if (!streamConfig) {
+        console.warn("Approval resume skipped: stream config unavailable");
+        return;
+      }
+
+      await sendMessage({
+        messageContent: resumeMessageContent || "Continue",
+        filePaths: [],
+        attachments: [],
+        config: streamConfig.config,
+        selectedDatasets: streamConfig.selectedDatasets,
+        models: streamConfig.models,
+        datasets: streamConfig.datasets,
+        resumeRunId: runId,
+        resumeApprovalId: approvalId,
+        targetAssistantMessageId: messageId,
+      });
+    },
+    [isStreaming, sendMessage],
+  );
 
   return {
     sessions,
@@ -2380,6 +2604,7 @@ export function useChatSession() {
     handleDeleteSession,
     sendMessage,
     stopStreaming,
+    handleToolApproval,
     // Artifacts & Agent
     artifacts,
     setArtifacts,

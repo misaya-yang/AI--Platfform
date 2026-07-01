@@ -73,6 +73,8 @@ export interface ChatRequest {
   execution_profile?: "safe" | "balanced" | "power";
   memory_mode?: "auto" | "strict" | "off";
   os_agent_enabled?: boolean;
+  resume_run_id?: string;
+  resume_approval_id?: string;
 }
 
 export interface WebSearchResult {
@@ -895,6 +897,68 @@ export async function listMyShares(limit = 50): Promise<{ shares: Array<Record<s
 
 export async function revokeShare(shareCode: string): Promise<void> {
   await api.delete(`/api/v1/assistant/shares/${shareCode}`);
+}
+
+// =============================================================================
+// Run lifecycle + tool approval
+// =============================================================================
+
+export interface ToolApprovalRequest {
+  approved: boolean;
+  reason?: string | null;
+}
+
+export interface ToolApprovalResponse {
+  approval: {
+    approval_id: string;
+    status: string;
+    tool_name?: string;
+    run_id?: string;
+    reason?: string | null;
+  };
+}
+
+export interface RunResumeRequest {
+  approval_id?: string | null;
+}
+
+export interface RunResumeResponse {
+  resume: {
+    run_id: string;
+    status: "ready" | "blocked";
+    reason?: string | null;
+    recoverable?: boolean;
+    checkpoint?: Record<string, unknown>;
+  };
+}
+
+export async function approveToolCall(
+  approvalId: string,
+  body: ToolApprovalRequest,
+): Promise<ToolApprovalResponse> {
+  const { data } = await api.post<ToolApprovalResponse>(
+    `/api/v1/assistant/approvals/${approvalId}`,
+    body,
+  );
+  return data;
+}
+
+export async function getAssistantRunStatus(runId: string): Promise<{ run: Record<string, unknown> }> {
+  const { data } = await api.get<{ run: Record<string, unknown> }>(
+    `/api/v1/assistant/runs/${runId}`,
+  );
+  return data;
+}
+
+export async function prepareAssistantRunResume(
+  runId: string,
+  body: RunResumeRequest = {},
+): Promise<RunResumeResponse> {
+  const { data } = await api.post<RunResumeResponse>(
+    `/api/v1/assistant/runs/${runId}/resume`,
+    body,
+  );
+  return data;
 }
 
 // =========================================================================

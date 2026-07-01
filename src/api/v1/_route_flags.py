@@ -19,6 +19,7 @@ Route names use screaming snake case with dots normalised to underscores::
     TOOLS         → /assistant/tools
     POLICIES      → /assistant/policies
     RUNS          → /assistant/runs/{id}
+    RESUME        → /assistant/runs/{id}/resume
     APPROVALS     → /assistant/approvals/{id}
     SESSIONS      → all /assistant/sessions/*
     ARTIFACTS     → all /assistant/artifacts/*
@@ -40,7 +41,6 @@ from __future__ import annotations
 
 import os
 from typing import Final
-
 
 _GLOBAL_DEFAULT_ENV: Final = "ASSISTANT_ROUTES_PROXIED_DEFAULT"
 _TRUE_VALUES: Final = frozenset({"1", "true", "yes", "on"})

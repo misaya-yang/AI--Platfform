@@ -17,13 +17,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
 from ..auth.user_resolver import UserContext
 from ..client_ip import get_client_ip_from_request
-from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -58,7 +58,7 @@ class AuthConfig:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
+
             "/docs",
             "/openapi.json",
         ]
@@ -400,7 +400,7 @@ class RemoteJWTValidator:
     async def __call__(
         self,
         token: str,
-        **kwargs,
+        **_kwargs,
     ) -> dict[str, Any]:
         """验证 JWT"""
         import httpx

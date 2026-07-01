@@ -316,6 +316,27 @@ class ConfluenceSyncService:
         # 3. 默认拒绝
         raise ConfluenceAccessDeniedError(resource_type, resource_id)
 
+    def _verify_connection_import_access(
+        self,
+        connection: dict[str, Any],
+        *,
+        tenant_id: str | None,
+        created_by: str | None,
+        user: UserContext | None = None,
+    ) -> None:
+        connection_id = str(connection.get("connection_id") or connection.get("id") or "unknown")
+        connection_tenant = connection.get("tenant_id")
+        if connection_tenant and tenant_id and connection_tenant != tenant_id:
+            raise ConfluenceAccessDeniedError("connection", connection_id)
+
+        if user is not None:
+            self._verify_confluence_access(connection, "connection", user)
+            return
+
+        owner_id = connection.get("owner_id") or connection.get("created_by")
+        if owner_id and owner_id != created_by:
+            raise ConfluenceAccessDeniedError("connection", connection_id)
+
     async def _verify_binding_access(
         self,
         binding_id: str,
@@ -460,9 +481,10 @@ class ConfluenceSyncService:
                     generate_vlm_descriptions=self._vlm_service is not None,
                     max_image_size=max_image_size,
                 )
+                vlm_enabled = self._vlm_service is not None
                 logger.debug(
                     f"Created image processor for connection {connection_id} "
-                    f"with custom max_image_size={max_image_size}, vlm={self._vlm_service is not None}"
+                    f"with custom max_image_size={max_image_size}, vlm={vlm_enabled}"
                 )
                 return processor
             except Exception as e:
@@ -775,7 +797,7 @@ class ConfluenceSyncService:
 
         # 构建层级关系
         root_pages = []
-        for page_id, page in all_pages.items():
+        for _page_id, page in all_pages.items():
             parent_id = page.get("parent_id")
             if parent_id and parent_id in all_pages:
                 parent = all_pages[parent_id]
@@ -831,6 +853,7 @@ class ConfluenceSyncService:
         created_by: str | None = None,
         include_children: bool = False,
         max_depth: int = 1,
+        user: UserContext | None = None,
     ) -> dict[str, Any]:
         """
         从 Confluence URL 导入页面
@@ -853,6 +876,15 @@ class ConfluenceSyncService:
 
         # 获取或匹配 connection
         if connection_id:
+            connection = await self.db.get_confluence_connection(connection_id)
+            if not connection:
+                raise ConfluenceSyncError(f"Connection not found: {connection_id}")
+            self._verify_connection_import_access(
+                connection,
+                tenant_id=tenant_id,
+                created_by=created_by,
+                user=user,
+            )
             client = await self._get_client(connection_id)
         else:
             connection = await self.db.find_confluence_connection_by_domain(
@@ -865,6 +897,12 @@ class ConfluenceSyncService:
                     "Please create a Confluence connection first."
                 )
             connection_id = connection["connection_id"]
+            self._verify_connection_import_access(
+                connection,
+                tenant_id=tenant_id,
+                created_by=created_by,
+                user=user,
+            )
             client = await self._get_client(connection_id)
 
         # 获取页面
@@ -1039,7 +1077,8 @@ class ConfluenceSyncService:
                         if image_result.processed_images > 0:
                             vlm_count = sum(1 for s in image_result.segments if s.vlm_description)
                             logger.info(
-                                f"Processed {image_result.processed_images} images for page {page.page_id} "
+                                f"Processed {image_result.processed_images} images "
+                                f"for page {page.page_id} "
                                 f"(vlm_descriptions={vlm_count})"
                             )
                             # Store image segments in database
@@ -1056,7 +1095,9 @@ class ConfluenceSyncService:
                                 )
                         if image_result.errors:
                             logger.warning(
-                                f"Image processing errors for page {page.page_id}: {image_result.errors}"
+                                "Image processing errors for page %s: %s",
+                                page.page_id,
+                                image_result.errors,
                             )
                     except Exception as e:
                         logger.error(f"Failed to process images for page {page.page_id}: {e}")
@@ -1068,7 +1109,7 @@ class ConfluenceSyncService:
         self,
         segment: ImageSegment,
         dataset_id: str,
-        binding_id: str | None = None,
+        _binding_id: str | None = None,
         position: int = 0,
     ) -> None:
         """
@@ -1150,7 +1191,7 @@ class ConfluenceSyncService:
                                     "content_type": "image",
                                     "image_filename": segment.filename,
                                     "image_url": segment.storage_url,
-                                    "vlm_description": segment.vlm_description,  # VLM-generated image description
+                                    "vlm_description": segment.vlm_description,
                                 }
 
                                 # Upsert to Qdrant
@@ -1201,9 +1242,10 @@ class ConfluenceSyncService:
                 "metadata": metadata,
             }
             await self.db.save_image_segment(segment_data)
+            vlm_state = "yes" if segment.vlm_description else "no"
             logger.debug(
                 f"Saved image segment {segment.segment_id} "
-                f"(vlm={'yes' if segment.vlm_description else 'no'}, vector={vector_id is not None})"
+                f"(vlm={vlm_state}, vector={vector_id is not None})"
             )
         except Exception as e:
             logger.error(f"Failed to save image segment {segment.segment_id}: {e}")
@@ -1272,13 +1314,16 @@ class ConfluenceSyncService:
                     metadata = {}
 
                 stored_updated_at = metadata.get("attachment_updated_at")
-                if stored_updated_at and attachment.updated_at:
-                    if attachment.updated_at != stored_updated_at:
-                        logger.debug(
-                            f"Attachment updated: {attachment.filename} "
-                            f"({stored_updated_at} -> {attachment.updated_at})"
-                        )
-                        return True
+                if (
+                    stored_updated_at
+                    and attachment.updated_at
+                    and attachment.updated_at != stored_updated_at
+                ):
+                    logger.debug(
+                        f"Attachment updated: {attachment.filename} "
+                        f"({stored_updated_at} -> {attachment.updated_at})"
+                    )
+                    return True
 
             # 检查是否有删除的附件
             current_ids = {a.attachment_id for a in current_attachments}
@@ -1334,7 +1379,9 @@ class ConfluenceSyncService:
                     )
                     if deleted_count > 0:
                         logger.info(
-                            f"Deleted {deleted_count} old images from storage for document {document_id}"
+                            "Deleted %s old images from storage for document %s",
+                            deleted_count,
+                            document_id,
                         )
                 except Exception as storage_err:
                     logger.warning(f"Failed to delete old images from storage: {storage_err}")
@@ -1463,7 +1510,7 @@ class ConfluenceSyncService:
             "root_page_id": root_page_id,  # Backward compatibility
             "root_page_ids": effective_root_page_ids,  # New multi-select field
             "root_page_title": root_page_title,  # Backward compatibility
-            "root_page_titles": root_page_titles,  # New multi-select field (aligned with root_page_ids)
+            "root_page_titles": root_page_titles,
             "include_patterns": include_patterns or [],
             "exclude_patterns": exclude_patterns or [],
             "max_depth": max_depth,
@@ -1922,13 +1969,14 @@ class ConfluenceSyncService:
                                     )
                                     if image_updates_needed:
                                         logger.info(
-                                            f"Page {page_id} content unchanged but image updates detected, "
-                                            f"reprocessing images..."
+                                            f"Page {page_id} content unchanged but "
+                                            "image updates detected, reprocessing images..."
                                         )
                                         tenant_id = binding.get("tenant_id")
                                         if not tenant_id:
                                             logger.warning(
-                                                f"Binding {binding_id} has no tenant_id, skipping image reprocess"
+                                                f"Binding {binding_id} has no tenant_id, "
+                                                "skipping image reprocess"
                                             )
                                         else:
                                             await self._reprocess_document_images(
@@ -1992,7 +2040,9 @@ class ConfluenceSyncService:
                                         )
                                 except Exception as img_err:
                                     logger.warning(
-                                        f"Failed to reprocess images for updated page {page.page_id}: {img_err}"
+                                        "Failed to reprocess images for updated page %s: %s",
+                                        page.page_id,
+                                        img_err,
                                     )
 
                             if self.worker:
@@ -2427,7 +2477,9 @@ class ConfluenceSyncService:
                                 )
                                 if old_image_count > 0:
                                     logger.info(
-                                        f"Cleaned up {old_image_count} old image segments for document {doc_id}"
+                                        "Cleaned up %s old image segments for document %s",
+                                        old_image_count,
+                                        doc_id,
                                     )
                                     # 同时清理旧的图片关联
                                     await self.db.delete_image_associations_by_document(doc_id)
@@ -2444,8 +2496,8 @@ class ConfluenceSyncService:
                                         1 for s in image_result.segments if s.vlm_description
                                     )
                                     logger.info(
-                                        f"Processed {image_result.processed_images} images for page {page_id} "
-                                        f"(vlm_descriptions={vlm_count})"
+                                        f"Processed {image_result.processed_images} images "
+                                        f"for page {page_id} (vlm_descriptions={vlm_count})"
                                     )
                                     # Store image segments in database
                                     for idx, segment in enumerate(image_result.segments):
@@ -2455,7 +2507,9 @@ class ConfluenceSyncService:
                                     image_count = image_result.processed_images
                                 if image_result.errors:
                                     logger.warning(
-                                        f"Image processing errors for page {page_id}: {image_result.errors}"
+                                        "Image processing errors for page %s: %s",
+                                        page_id,
+                                        image_result.errors,
                                     )
                             except Exception as e:
                                 logger.error(f"Failed to process images for page {page_id}: {e}")

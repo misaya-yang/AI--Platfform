@@ -285,10 +285,67 @@ async def test_prepare_run_resume_blocks_without_required_approval():
     assert blocked is not None
     assert blocked["status"] == "blocked"
     assert blocked["reason"] == "approval_required"
+    assert blocked.get("recoverable") is True
     assert cross_scope is None
     assert run is not None
-    assert run["status"] == "blocked"
-    assert run["checkpoint"]["phase"] == "resume_blocked"
+    assert run["status"] == "running"
+    assert run["checkpoint"]["phase"] == "approval_pending"
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_resume_recoverable_when_approval_still_pending():
+    gw = AssistantExecutionGateway(tool_invoker=_CountingInvoker(), database=None)
+    context = _context()
+    await gw.start_run(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        engine="agent_loop",
+        execution_profile="safe",
+        memory_mode="auto",
+        os_agent_enabled=False,
+        request_preview="redacted",
+    )
+    approval_id = await gw.request_tool_approval(
+        context=context,
+        tool_name="execute_python_code",
+        arguments={"code": "print('once')"},
+        reason="approval required",
+    )
+    await gw.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "tc1",
+            "tool_name": "execute_python_code",
+            "arguments": {"code": "print('once')"},
+        },
+        approval_id=approval_id,
+        status="blocked",
+    )
+
+    blocked = await gw.prepare_run_resume(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approval_id=approval_id,
+    )
+    run = await gw.get_run(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+    )
+
+    assert blocked is not None
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "approval_not_granted"
+    assert blocked.get("recoverable") is True
+    assert run is not None
+    assert run["status"] == "running"
 
 
 @pytest.mark.asyncio

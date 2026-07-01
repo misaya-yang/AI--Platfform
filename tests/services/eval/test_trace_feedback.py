@@ -33,6 +33,24 @@ def test_classifies_assistant_tool_error() -> None:
     assert pattern.severity == "high"
 
 
+def test_succeeded_trace_with_tool_error_event_is_not_classified_as_tool_failure() -> None:
+    pattern = classify_trace_failure(
+        {
+            "trace": {
+                "trace_id": "77777777-7777-7777-7777-777777777777",
+                "trace_family": "assistant",
+                "status": "succeeded",
+                "input_preview": "hello",
+                "output_preview": "done",
+            },
+            "events": [{"event_type": "tool_error", "payload": {"tool_name": "search"}}],
+            "spans": [],
+        }
+    )
+
+    assert pattern.failure_mode != FAILURE_MODE_TOOL_ERROR
+
+
 def test_classifies_rag_miss() -> None:
     pattern = classify_trace_failure(
         {

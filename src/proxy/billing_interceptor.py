@@ -610,6 +610,7 @@ class StreamProcessor:
                     await self.interceptor.realtime_metrics.record_request_start(
                         request_id=self.request_id,
                         user_id=self.user_id,
+                        tenant_id=self.tenant_id,
                     )
                 except Exception as e:
                     logger.debug(f"Failed to record request start: {e}")
@@ -1027,6 +1028,7 @@ class StreamProcessor:
                 await self.interceptor.realtime_metrics.record_request_end(
                     request_id=self.request_id,
                     user_id=self.user_id,
+                    tenant_id=self.tenant_id,
                 )
             except Exception as e:
                 logger.debug(f"Failed to record request end: {e}")

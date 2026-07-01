@@ -177,6 +177,8 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "memory_profile",
         "traceparent",
         "otel_trace_id",
+        "resume_run_id",
+        "resume_approval_id",
     }
 )
 
@@ -249,6 +251,8 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "context_detail",
         "skills_enabled",
         "memory_profile",
+        "resume_run_id",
+        "resume_approval_id",
     }
 )
 
@@ -267,6 +271,20 @@ def test_agent_loop_config_fields_are_frozen() -> None:
     assert not added, (
         f"AgentLoopConfig added {sorted(added)} — update this snapshot if intentional."
     )
+
+
+def test_agent_loop_config_to_dict_includes_resume_fields() -> None:
+    """Resume stream must round-trip resume_run_id/resume_approval_id via to_dict()."""
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+
+    cfg = AgentLoopConfig(
+        resume_run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        resume_approval_id="22222222-2222-4222-8222-222222222222",
+    )
+    payload = cfg.to_dict()
+
+    assert payload["resume_run_id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    assert payload["resume_approval_id"] == "22222222-2222-4222-8222-222222222222"
 
 
 # ---------------------------------------------------------------------------

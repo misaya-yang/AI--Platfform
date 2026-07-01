@@ -451,6 +451,7 @@ def test_as_chat_returns_gateway_schema_keys():
 
 
 RUN_REQUIRED_TOP_LEVEL = {"run"}
+RESUME_REQUIRED_TOP_LEVEL = {"resume"}
 APPROVAL_REQUIRED_TOP_LEVEL = {"approval"}
 
 
@@ -575,6 +576,59 @@ def test_approval_response_has_required_top_level_key(monkeypatch):
     assert set(body.keys()) >= APPROVAL_REQUIRED_TOP_LEVEL
     assert isinstance(body["approval"], dict)
     assert body["approval"]["status"] == "approved"
+
+
+def test_resume_response_has_required_top_level_key(monkeypatch):
+    """Proxied POST /runs/{id}/resume → AS returns {"resume": {...}}."""
+    fake_as_app = FastAPI()
+    from assistant_service.auth import GatewaySecretAuthMiddleware
+    from assistant_service.auth import get_user_context as as_get_user_context
+
+    gs = GatewaySecret(secret=GATEWAY_SECRET, replay_store=InMemoryReplayStore())
+    fake_as_app.add_middleware(
+        GatewaySecretAuthMiddleware, gateway_secret=gs, allow_anonymous=False,
+    )
+
+    @fake_as_app.post("/api/v1/assistant/runs/{run_id}/resume")
+    async def _h(run_id: str, request: Request, user=Depends(as_get_user_context)):
+        del request, user
+        return {
+            "resume": {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "approval_required",
+                "recoverable": True,
+            }
+        }
+
+    gw = _build_gateway_app(monkeypatch, fake_as_app)
+    import src.api.v1._assistant_proxy as ap
+    from src.core.auth.user_resolver import UserResolver, UserResolverConfig
+
+    resolver = UserResolver(
+        UserResolverConfig(jwt_enabled=True, jwt_secret=JWT_SECRET, jwt_algorithms=["HS256"])
+    )
+
+    @gw.post("/gw/runs/{run_id}/resume")
+    async def _gw_resume(run_id: str, request: Request):
+        u = await resolver.resolve(request)
+        body = await request.body()
+        return await ap.proxy_to_assistant_service(
+            request, u, path=f"runs/{run_id}/resume", body=body or b"{}"
+        )
+
+    with TestClient(gw) as c:
+        r = c.post(
+            "/gw/runs/r1/resume",
+            headers={"Authorization": f"Bearer {_token()}"},
+            json={},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) >= RESUME_REQUIRED_TOP_LEVEL
+    assert body["resume"]["run_id"] == "r1"
+    assert body["resume"]["recoverable"] is True
 
 
 def test_as_run_approval_routes_exist_and_delegate_to_assistant_service():

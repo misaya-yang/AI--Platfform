@@ -2,6 +2,9 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=""
+
 # Install workspace member package first (ai-gateway-core). Pip doesn't
 # understand uv workspaces so installing from path satisfies the
 # ``ai-gateway-core`` entry in the knowledge-service pyproject below.
@@ -9,13 +12,17 @@ WORKDIR /app
 # so packages/ sits next to apps/.
 COPY packages/ /build/packages/
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir /build/packages/ai-gateway-core
+    pip install --no-cache-dir /build/packages/ai-gateway-core \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 COPY apps/knowledge-service/pyproject.toml apps/knowledge-service/README.md ./
 COPY apps/knowledge-service/src ./src
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install .
+    pip install . \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 FROM python:3.12-slim
 

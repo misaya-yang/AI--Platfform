@@ -21,11 +21,13 @@ from dotenv import load_dotenv
 _env_file = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_file, override=False)
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from .api.deps import AuthContext, get_auth_context, require_gateway_capability
 from .adapters.registry import auto_register_builtin_adapters
+from .core.auth.permissions import Capability
 from .api.router import api_router
 from .config.settings import Settings
 from .container import Container, create_container, get_container
@@ -65,13 +67,43 @@ from .services.metrics.realtime_metrics import init_realtime_metrics
 logger = get_logger(__name__)
 
 OPENAPI_TAGS = [
-    {"name": "Health", "description": "Service health checks, readiness state, and provider connectivity."},
-    {"name": "Auth", "description": "User authentication — login, logout, password management, token validation."},
-    {"name": "Sessions", "description": "Conversation session management — CRUD, message history, per-user isolation."},
-    {"name": "LangGraph", "description": "LangGraph Platform proxy — assistants, threads, runs (streaming/sync), and key-value store."},
-    {"name": "Knowledge", "description": "Knowledge base proxy — dataset management, document upload, and RAG retrieval."},
-    {"name": "Quiz", "description": "AI quiz system — generation, submission, scoring, and exam management."},
-    {"name": "Dashboard", "description": "Real-time metrics, usage timeseries, and operational dashboard data."},
+    {
+        "name": "Health",
+        "description": "Service health checks, readiness state, and provider connectivity.",
+    },
+    {
+        "name": "Auth",
+        "description": (
+            "User authentication — login, logout, password management, token validation."
+        ),
+    },
+    {
+        "name": "Sessions",
+        "description": (
+            "Conversation session management — CRUD, message history, per-user isolation."
+        ),
+    },
+    {
+        "name": "LangGraph",
+        "description": (
+            "LangGraph Platform proxy — assistants, threads, runs (streaming/sync), "
+            "and key-value store."
+        ),
+    },
+    {
+        "name": "Knowledge",
+        "description": (
+            "Knowledge base proxy — dataset management, document upload, and RAG retrieval."
+        ),
+    },
+    {
+        "name": "Quiz",
+        "description": "AI quiz system — generation, submission, scoring, and exam management.",
+    },
+    {
+        "name": "Dashboard",
+        "description": "Real-time metrics, usage timeseries, and operational dashboard data.",
+    },
 ]
 
 
@@ -132,14 +164,16 @@ def create_app() -> FastAPI:
         title="AI Service Gateway",
         version="2.0.0",
         description=(
-            "Unified AI service gateway with multi-protocol adapters, rate limiting, circuit breaking, and session management.\n\n"
+            "Unified AI service gateway with multi-protocol adapters, rate limiting, "
+            "circuit breaking, and session management.\n\n"
             "**Core features:**\n"
             "- JWT authentication with RBAC and multi-tenant isolation\n"
             "- LangGraph Platform proxy with load balancing and streaming SSE\n"
             "- Knowledge base management with hybrid RAG retrieval\n"
             "- AI quiz/exam system with scoring and analytics\n"
             "- Real-time usage metrics and billing\n\n"
-            "**Auth:** All endpoints (except `/health` and `/api/v1/auth/login`) require `Authorization: Bearer <token>`."
+            "**Auth:** All endpoints (except `/health` and `/api/v1/auth/login`) "
+            "require `Authorization: Bearer <token>`."
         ),
         openapi_tags=OPENAPI_TAGS,
         contact={"name": "AI Gateway Maintainers", "email": "maintainers@example.com"},
@@ -184,7 +218,6 @@ def create_app() -> FastAPI:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
             "/docs",
             "/openapi.json",
             # Frontend metadata endpoints (high frequency, low cost)
@@ -221,7 +254,6 @@ def create_app() -> FastAPI:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
             "/docs",
             "/openapi.json",
         ],
@@ -427,8 +459,12 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/metrics", tags=["Observability"])
-    async def metrics():
+    async def metrics(
+        request: Request,
+        auth: AuthContext = Depends(get_auth_context),
+    ):
         """Prometheus 指标端点"""
+        require_gateway_capability(request, auth, Capability.GATEWAY_METRICS_READ)
         metrics_collector = get_metrics()
         return PlainTextResponse(
             content=metrics_collector.to_prometheus(),
@@ -560,8 +596,10 @@ def create_app() -> FastAPI:
             signing_key = getattr(getattr(settings, "confluence", None), "encryption_key", "") or ""
             image_storage_service = ImageStorageService(storage_config, signing_key=signing_key)
             app.state.image_storage_service = image_storage_service
+            url_signing = "enabled" if signing_key else "disabled"
             logger.info(
-                f"图片存储服务已初始化 (backend={storage_backend.value}, url_signing={'enabled' if signing_key else 'disabled'})"
+                f"图片存储服务已初始化 (backend={storage_backend.value}, "
+                f"url_signing={url_signing})"
             )
 
             # Initialize artifact storage service (for document/image generation, code execution)
@@ -606,7 +644,8 @@ def create_app() -> FastAPI:
         # until the follow-up converts those routes to proxy to
         # knowledge-service. See plans/k5c-migration-plan.md "Deferred".
         logger.info(
-            "Confluence integration runs in knowledge-service (Phase K5c); gateway no longer schedules polling."
+            "Confluence integration runs in knowledge-service (Phase K5c); "
+            "gateway no longer schedules polling."
         )
 
         # 启动文件清理服务
@@ -971,7 +1010,8 @@ async def _load_services_from_database(container: Container, settings: Settings)
                     if db_url and db_url != env_url:
                         new_cc = dict(cc, base_url=env_url, upstream_url=env_url)
                         await database.execute(
-                            "UPDATE services SET connector_config = $1::jsonb WHERE service_id = $2",
+                            "UPDATE services SET connector_config = $1::jsonb "
+                            "WHERE service_id = $2",
                             [__import__("json").dumps(new_cc), svc["service_id"]],
                         )
                         logger.info(

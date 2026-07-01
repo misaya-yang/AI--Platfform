@@ -545,9 +545,21 @@ async def preview_eval_trace_feedback(
     _require_supported_family(body.trace_family)
     _require_eval_run_access(request, auth)
     repo = _get_trace_repository(request)
+    if body.dataset_id:
+        dataset = await repo.get_dataset(
+            tenant_id=auth.tenant_id,
+            dataset_id=body.dataset_id,
+        )
+        if not dataset:
+            raise HTTPException(status_code=404, detail=f"Dataset not found: {body.dataset_id}")
+    proposed_by = body.proposed_by or f"eval-feedback:{auth.user_id or 'system'}"
     patterns = []
     dataset_cases = []
+    seen_trace_ids: set[str] = set()
     for trace_id in body.trace_ids:
+        if trace_id in seen_trace_ids:
+            continue
+        seen_trace_ids.add(trace_id)
         detail = await repo.get_trace_detail(
             tenant_id=auth.tenant_id,
             trace_id=trace_id,
@@ -591,7 +603,7 @@ async def preview_eval_trace_feedback(
         dataset_cases=dataset_cases,
         import_request=import_request,
         proposals=[
-            build_harness_profile_proposal(cluster, proposed_by=body.proposed_by)
+            build_harness_profile_proposal(cluster, proposed_by=proposed_by)
             for cluster in clusters
         ],
         redaction_policy=EXPORT_REDACTION_POLICY,

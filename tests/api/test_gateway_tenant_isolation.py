@@ -223,6 +223,7 @@ async def test_provider_and_model_lists_use_authenticated_tenant() -> None:
     provider_service = SimpleNamespace(list_providers=AsyncMock(return_value=[]))
     model_service = SimpleNamespace(list_models=AsyncMock(return_value=[]))
     user = _user(tenant_id="tenant-a")
+    user.roles = ["admin"]
 
     await list_providers(provider_service=provider_service, user=user)
     await list_models(model_service=model_service, user=user)

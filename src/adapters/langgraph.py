@@ -191,6 +191,8 @@ class LangGraphAdapter(ProtocolAdapter):
         return SimpleNamespace(
             user_id=request.user_id,
             tenant_id=request.tenant_id,
+            roles=["user"] if request.user_id else ["guest"],
+            is_authenticated=bool(request.user_id),
             tier="anonymous",
         )
 

@@ -60,6 +60,97 @@ ensure_tracking_table() {
     " >/dev/null
 }
 
+tracking_mode() {
+    if run_sql "
+        SELECT 'filename'
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'schema_migrations'
+          AND column_name = 'filename'
+        LIMIT 1;
+    " 2>/dev/null | grep -q "filename"; then
+        echo "filename"
+        return 0
+    fi
+
+    if run_sql "
+        SELECT 'version'
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'schema_migrations'
+          AND column_name = 'version'
+        LIMIT 1;
+    " 2>/dev/null | grep -q "version"; then
+        echo "version"
+        return 0
+    fi
+
+    log_error "schema_migrations exists but has neither filename nor version column"
+    return 1
+}
+
+legacy_tracking_has_dirty() {
+    run_sql "
+        SELECT 'dirty'
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'schema_migrations'
+          AND column_name = 'dirty'
+        LIMIT 1;
+    " 2>/dev/null | grep -q "dirty"
+}
+
+migration_version() {
+    local filename="$1"
+    local prefix="${filename%%_*}"
+    prefix="${prefix%%.*}"
+    if [[ ! "$prefix" =~ ^[0-9]+$ ]]; then
+        log_error "Cannot derive numeric migration version from: $filename"
+        return 1
+    fi
+    echo $((10#$prefix))
+}
+
+assert_unique_forward_migration_versions() {
+    local seen_entries=""
+    local migration_file filename version existing_line existing_file
+
+    for migration_file in database/migrations/*.sql; do
+        [ -f "$migration_file" ] || continue
+        filename=$(basename "$migration_file")
+        case "$filename" in
+            *_rollback.sql)
+                continue
+                ;;
+        esac
+
+        version=$(migration_version "$filename")
+        existing_line=$(printf "%s" "$seen_entries" | grep -E "^${version}:" || true)
+        if [ -n "$existing_line" ]; then
+            existing_file="${existing_line#*:}"
+            if legacy_tracking_has_dirty; then
+                applied_query="SELECT 1 FROM schema_migrations WHERE version = ${version} AND dirty = FALSE;"
+            else
+                applied_query="SELECT 1 FROM schema_migrations WHERE version = ${version};"
+            fi
+            if run_sql "$applied_query" 2>/dev/null | grep -q "1"; then
+                log_warn "Duplicate migration version prefix ${version} is already recorded in legacy tracking; treating as historical duplicate: ${existing_file} and ${filename}"
+                continue
+            fi
+            log_error "Duplicate migration version prefix ${version}: ${existing_file} and ${filename}"
+            log_error "This database uses legacy version tracking; reconcile schema_migrations before running shell migrations."
+            return 1
+        fi
+        seen_entries="${seen_entries}${version}:${filename}"$'\n'
+    done
+}
+
+guard_legacy_version_tracking() {
+    if [ "$(tracking_mode)" = "version" ]; then
+        assert_unique_forward_migration_versions
+    fi
+}
+
 base_schema_exists() {
     run_sql "
         SELECT CASE
@@ -106,7 +197,13 @@ is_applied() {
         return 1
     fi
     local result
-    result=$(run_sql "SELECT 1 FROM schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
+    if [ "$(tracking_mode)" = "version" ]; then
+        local version
+        version=$(migration_version "$filename")
+        result=$(run_sql "SELECT 1 FROM schema_migrations WHERE version = ${version};" 2>/dev/null | grep -c "1" || true)
+    else
+        result=$(run_sql "SELECT 1 FROM schema_migrations WHERE filename = '${filename}';" 2>/dev/null | grep -c "1" || true)
+    fi
     [ "$result" -gt 0 ]
 }
 
@@ -117,17 +214,40 @@ record_migration() {
         log_error "Invalid migration filename: $filename"
         return 1
     fi
-    run_sql "INSERT INTO schema_migrations (filename) VALUES ('${filename}') ON CONFLICT DO NOTHING;" >/dev/null
+    if [ "$(tracking_mode)" = "version" ]; then
+        local version
+        version=$(migration_version "$filename")
+        if legacy_tracking_has_dirty; then
+            run_sql "INSERT INTO schema_migrations (version, dirty) VALUES (${version}, FALSE) ON CONFLICT (version) DO UPDATE SET dirty = FALSE;" >/dev/null
+        else
+            run_sql "INSERT INTO schema_migrations (version) VALUES (${version}) ON CONFLICT (version) DO NOTHING;" >/dev/null
+        fi
+    else
+        run_sql "INSERT INTO schema_migrations (filename) VALUES ('${filename}') ON CONFLICT DO NOTHING;" >/dev/null
+    fi
 }
 
 # -- Show status -------------------------------------------------------------
 if [ "$STATUS" = true ]; then
     log_step "Migration status"
     ensure_tracking_table
+    guard_legacy_version_tracking
 
     echo ""
     echo "Applied migrations:"
-    run_sql "SELECT filename, applied_at FROM schema_migrations ORDER BY filename;" 2>/dev/null
+    if [ "$(tracking_mode)" = "version" ]; then
+        if legacy_tracking_has_dirty; then
+            run_sql "SELECT version, dirty FROM schema_migrations ORDER BY version;" 2>/dev/null
+        else
+            run_sql "SELECT version FROM schema_migrations ORDER BY version;" 2>/dev/null
+        fi
+    else
+        run_sql "SELECT filename, applied_at FROM schema_migrations WHERE filename NOT LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
+
+        echo ""
+        echo "Ignored rollback migration records:"
+        run_sql "SELECT filename, applied_at FROM schema_migrations WHERE filename LIKE '%_rollback.sql' ORDER BY filename;" 2>/dev/null
+    fi
 
     echo ""
     echo "Pending migrations:"
@@ -136,6 +256,11 @@ if [ "$STATUS" = true ]; then
         for f in database/migrations/*.sql; do
             [ -f "$f" ] || continue
             basename=$(basename "$f")
+            case "$basename" in
+                *_rollback.sql)
+                    continue
+                    ;;
+            esac
             if ! is_applied "$basename"; then
                 echo "  - $basename"
                 pending=$((pending + 1))
@@ -171,6 +296,7 @@ fi
 log_step "Running database migrations"
 ensure_base_schema
 ensure_tracking_table
+guard_legacy_version_tracking
 
 if [ ! -d "database/migrations" ]; then
     log_info "No migrations directory found"
@@ -184,6 +310,14 @@ for migration_file in database/migrations/*.sql; do
     [ -f "$migration_file" ] || continue
 
     filename=$(basename "$migration_file")
+
+    case "$filename" in
+        *_rollback.sql)
+            log_warn "Skipping rollback file: $filename"
+            skipped=$((skipped + 1))
+            continue
+            ;;
+    esac
 
     if is_applied "$filename"; then
         skipped=$((skipped + 1))

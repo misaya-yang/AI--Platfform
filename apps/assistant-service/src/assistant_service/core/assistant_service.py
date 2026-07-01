@@ -283,6 +283,10 @@ class AssistantConfig:
     traceparent: str | None = None
     otel_trace_id: str | None = None
 
+    # Approval resume continuation for a paused run.
+    resume_run_id: str | None = None
+    resume_approval_id: str | None = None
+
 
 @dataclass
 class AssistantStreamEvent:
@@ -1802,6 +1806,8 @@ Please use this web search context to inform your response when relevant."""
                 else "high" if "gemini-3" in (config.model_id or "").lower()
                 else None
             ),
+            resume_run_id=config.resume_run_id,
+            resume_approval_id=config.resume_approval_id,
         )
 
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")

@@ -165,6 +165,7 @@ class LangGraphLoadBalancer:
 
     async def select_instance(self, request_type: str = None) -> LangGraphInstance:
         """选择目标实例"""
+        del request_type
         healthy = [i for i in self.instances if i.is_healthy]
 
         if not healthy:
@@ -891,6 +892,7 @@ class LangGraphProxy:
                     assistant_id=assistant_id,
                     duration_ms=duration_ms,
                     status=run_status,
+                    tenant_id=user.tenant_id,
                 )
             except Exception:
                 pass
@@ -998,6 +1000,7 @@ class LangGraphProxy:
                     status=run_status,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    tenant_id=user.tenant_id,
                 )
             except Exception:
                 pass
@@ -1147,6 +1150,7 @@ class LangGraphProxy:
                     status=run_status,
                     input_tokens=token_tracker["input"],
                     output_tokens=token_tracker["output"],
+                    tenant_id=user.tenant_id,
                 )
             except Exception as metrics_err:
                 logger.debug(f"Failed to record run metrics: {metrics_err}")
@@ -1360,6 +1364,7 @@ class LangGraphProxy:
                     status=run_status,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    tenant_id=user.tenant_id,
                 )
             except Exception:
                 pass

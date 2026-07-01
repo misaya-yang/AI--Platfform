@@ -8,8 +8,8 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-
 from ai_gateway_core.exceptions import TaskNotFoundError
+
 from ...models.request import UnifiedRequest
 from ...models.response import UnifiedResponse
 from ...models.task import Task, TaskStatus
@@ -153,21 +153,8 @@ class TaskManager:
         so a hostile callback server can't redirect us into the private
         network mid-transaction.
         """
-        # Validate FIRST — fail fast on attacker-controlled callbacks.
-        from ai_gateway_core.security import SafeFetchError, validate_callback_url
+        from ai_gateway_core.security import SafeFetchError, safe_callback_post
 
-        try:
-            validate_callback_url(task.callback_url)
-        except SafeFetchError as exc:
-            logger.warning(
-                f"Refusing callback for task {task.task_id}: {exc}"
-            )
-            return
-
-        client = await self._get_callback_client()
-        if client.is_closed:
-            logger.warning(f"Cannot send callback for task {task.task_id}: client is closed")
-            return
         payload = {
             "task_id": task.task_id,
             "status": task.status.value,
@@ -178,11 +165,16 @@ class TaskManager:
         last_error = None
         for attempt in range(self.callback_retries):
             try:
-                response = await client.post(task.callback_url, json=payload)
+                response = await safe_callback_post(task.callback_url, json=payload)
                 response.raise_for_status()
                 logger.info(
                     f"Callback sent successfully for task {task.task_id} "
                     f"to {task.callback_url} (attempt {attempt + 1})"
+                )
+                return
+            except SafeFetchError as exc:
+                logger.warning(
+                    f"Refusing callback for task {task.task_id}: {exc}"
                 )
                 return
             except httpx.TimeoutException as e:

@@ -98,7 +98,7 @@ async def list_templates(
     user: UserContext = Depends(get_user_context),
 ):
     """List guided provider templates for admin onboarding."""
-    _ = user
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_READ)
     return [template.to_response() for template in list_provider_templates()]
 
 
@@ -109,6 +109,7 @@ async def list_providers(
     user: UserContext = Depends(get_user_context),
 ):
     """List all providers for the tenant."""
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_READ)
     # Only admin can see disabled providers
     if include_disabled and "admin" not in user.roles:
         include_disabled = False
@@ -250,6 +251,7 @@ async def get_provider(
     user: UserContext = Depends(get_user_context),
 ):
     """Get a specific provider."""
+    _require_user_gateway_capability(user, Capability.GATEWAY_PROVIDER_CONFIG_READ)
     provider = await provider_service.get_provider(
         tenant_id=user.tenant_id or "default",
         provider_id=provider_id,

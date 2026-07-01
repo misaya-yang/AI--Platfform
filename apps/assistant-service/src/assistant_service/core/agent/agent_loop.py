@@ -172,11 +172,23 @@ _TRACE_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         r"\1=[redacted]",
     ),
+    (
+        re.compile(r"\bsk-[A-Za-z0-9_*.\-]{6,}"),
+        "sk-[redacted]",
+    ),
+    (
+        re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}"),
+        "AIza[redacted]",
+    ),
 )
 
 
 def _redact_trace_text(value: Any) -> str:
-    text = str(value or "")
+    if isinstance(value, BaseException):
+        detail = str(value).strip() or repr(value)
+        text = f"{type(value).__name__}: {detail}" if detail else type(value).__name__
+    else:
+        text = str(value or "")
     for pattern, replacement in _TRACE_REDACTION_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
@@ -389,6 +401,10 @@ class AgentLoopConfig:
     skills_enabled: bool | None = None
     memory_profile: str | None = None  # off | basic | hybrid
 
+    # Approval resume: continue a paused run after the user approves a tool.
+    resume_run_id: str | None = None
+    resume_approval_id: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -411,6 +427,8 @@ class AgentLoopConfig:
             "context_detail": self.context_detail,
             "skills_enabled": self.skills_enabled,
             "memory_profile": self.memory_profile,
+            "resume_run_id": self.resume_run_id,
+            "resume_approval_id": self.resume_approval_id,
         }
 
 
@@ -430,6 +448,7 @@ class AgentLoopContext:
     config: AgentLoopConfig
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    approval_paused: bool = False
     task_id: str | None = None  # For cancellation tracking
     cancel_event: asyncio.Event | None = None  # For immediate cancellation
     routed_request: RoutedAssistantRequest | None = None
@@ -847,6 +866,321 @@ class AgentLoop:
             cancel_event=ctx.cancel_event,
         )
 
+    async def _execute_approval_resume(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContextLike,
+        history: list[dict[str, Any]] | None,
+        task_ctx: Any,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        """Execute an approved pending tool and synthesize the final answer."""
+        del task_ctx
+        phase = AgentLoopPhase.EXECUTION
+        approval_id = str(ctx.config.resume_approval_id or "")
+        gateway = self.execution_gateway
+        if not approval_id or not gateway or not gateway.enabled:
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": "approval_resume_unavailable",
+                },
+            )
+            return
+
+        resume_plan = await gateway.prepare_run_resume(
+            run_id=ctx.run_id,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            approval_id=approval_id,
+        )
+        if not resume_plan or resume_plan.get("status") != "ready":
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": str((resume_plan or {}).get("reason") or "resume_not_ready"),
+                },
+            )
+            return
+
+        approval = await gateway.get_tool_approval(
+            approval_id=approval_id,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+        )
+        checkpoint = resume_plan.get("checkpoint") or {}
+        pending_tool = checkpoint.get("pending_tool") or {}
+        tool_name = str(
+            (approval or {}).get("tool_name") or pending_tool.get("tool_name") or ""
+        )
+        tool_id = str(pending_tool.get("tool_id") or f"resume_{approval_id[:8]}")
+        if not tool_name:
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": "resume_tool_missing",
+                },
+            )
+            return
+
+        raw_arguments = (approval or {}).get("arguments") or {}
+        tool_args = dict(raw_arguments) if isinstance(raw_arguments, dict) else {}
+        tool_args["_approval_id"] = approval_id
+        persisted_tool_args = {
+            key: value
+            for key, value in tool_args.items()
+            if key not in {"_approval_id", "_steer_payload"}
+        }
+
+        _verdict = await self.middleware_chain.run_on_tool_call(
+            ctx, tool_name, tool_args
+        )
+        if not _verdict.is_allow:
+            if (
+                _verdict.kind is VerdictKind.CONFIRM
+                and self.execution_gateway
+                and self.execution_gateway.enabled
+            ):
+                try:
+                    approval_granted = await self.execution_gateway.is_approval_granted(
+                        approval_id=approval_id,
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        tool_name=tool_name,
+                        arguments=tool_args,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to validate resume approval %s", approval_id
+                    )
+                    approval_granted = False
+                if approval_granted:
+                    _verdict = ToolVerdict.allow(source="approval")
+            if not _verdict.is_allow:
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type=StreamEventType.RUN_ERROR.value,
+                    data={
+                        "run_id": ctx.run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "error": "resume_tool_denied",
+                        "reason": _verdict.reason,
+                    },
+                )
+                return
+
+        yield AgentLoopEvent(
+            phase=phase,
+            event_type=StreamEventType.TOOL_CALL_START.value,
+            data={
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
+            },
+        )
+
+        result = await self._invoke_tool(
+            ctx=ctx,
+            user=user,
+            tool_name=tool_name,
+            arguments=tool_args,
+        )
+        tool_success = bool(getattr(result, "success", False))
+        tool_error = getattr(result, "error", None)
+        tool_error_for_event = str(tool_error) if tool_error and not tool_success else None
+        tool_duration_ms = float(getattr(result, "duration_ms", 0) or 0)
+        tool_status = "completed" if tool_success else "error"
+        raw_tool_result = getattr(result, "result", None)
+        tool_result_text = (
+            str(raw_tool_result)
+            if raw_tool_result is not None
+            else str(tool_error or "Tool execution failed")
+        )
+        tool_result_preview = _redact_trace_text(tool_result_text[:2000])
+        ctx.generated_content = ""
+
+        yield AgentLoopEvent(
+            phase=phase,
+            event_type=StreamEventType.TOOL_CALL_RESULT.value,
+            data={
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "status": tool_status,
+                "result": tool_result_preview,
+                "result_preview": tool_result_preview,
+                "error": tool_error_for_event,
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
+            },
+        )
+        yield AgentLoopEvent(
+            phase=phase,
+            event_type=StreamEventType.TOOL_CALL_END.value,
+            data={
+                "tool_call_id": tool_id,
+                "name": tool_name,
+                "status": tool_status,
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
+            },
+        )
+        yield AgentLoopEvent(
+            phase=phase,
+            event_type="approval_result",
+            data={
+                "run_id": ctx.run_id,
+                "thread_id": ctx.session_id,
+                "session_id": ctx.session_id,
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "approval_id": approval_id,
+                "approved": True,
+                "success": tool_success,
+                "error": tool_error_for_event,
+            },
+        )
+
+        synthesis_messages: list[dict[str, Any]] = []
+        if ctx.config.system_prompt:
+            synthesis_messages.append(
+                {"role": "system", "content": ctx.config.system_prompt}
+            )
+        for item in history or []:
+            role = str(item.get("role") or "")
+            content = str(item.get("content") or "")
+            if role in {"user", "assistant"} and content:
+                synthesis_messages.append({"role": role, "content": content})
+        synthesis_messages.append({"role": "user", "content": ctx.message})
+        synthesis_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Approved tool `{tool_name}` completed.\n"
+                    f"Result:\n{tool_result_text[:4000]}\n\n"
+                    "Please give the user a direct, helpful answer using this result."
+                ),
+            }
+        )
+
+        provider_name = ""
+        try:
+            model_info = self.model_registry.get_model(ctx.config.model_id)
+            if model_info:
+                provider_name = str(getattr(model_info.provider, "value", model_info.provider))
+        except Exception:
+            provider_name = ""
+
+        try:
+            async for delta in self.model_registry.chat_stream(
+                model_id=ctx.config.model_id,
+                messages=synthesis_messages,
+                temperature=min(ctx.config.temperature, 0.3),
+                max_tokens=min(ctx.config.max_tokens or 2048, 2048),
+                tools=None,
+            ):
+                if delta.content:
+                    for text_chunk in _fmt_split_text_for_stream(delta.content):
+                        ctx.generated_content += text_chunk
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="text_delta",
+                            data=text_chunk,
+                        )
+                if delta.usage:
+                    for key, value in normalize_provider_cache_usage(
+                        delta.usage,
+                        provider_name,
+                    ).items():
+                        if isinstance(value, (int, float)):
+                            ctx.usage[key] = max(ctx.usage.get(key, 0), int(value))
+        except Exception:
+            logger.exception("Approval resume synthesis failed for run %s", ctx.run_id)
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": "resume_synthesis_failed",
+                },
+            )
+
+        if self.session_manager and ctx.generated_content:
+            try:
+                from datetime import datetime
+
+                usage_in = int((ctx.usage or {}).get("input_tokens", 0) or 0)
+                usage_out = int((ctx.usage or {}).get("output_tokens", 0) or 0)
+                usage_payload = {
+                    **(ctx.usage or {}),
+                    "prompt_tokens": usage_in,
+                    "completion_tokens": usage_out,
+                }
+                await self.session_manager.add_message(
+                    session_id=ctx.session_id,
+                    role="assistant",
+                    content=ctx.generated_content,
+                    metadata={
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "model_id": ctx.config.model_id,
+                        "usage": usage_payload,
+                        "engine": "agent_loop",
+                        "mode": "approval_resume",
+                        "approval_id": approval_id,
+                        "tool_calls": [
+                            {
+                                "id": tool_id,
+                                "name": tool_name,
+                                "arguments": persisted_tool_args,
+                            }
+                        ],
+                        "tool_results": [
+                            {
+                                "tool_call_id": tool_id,
+                                "name": tool_name,
+                                "status": tool_status,
+                                "success": tool_success,
+                                "result_preview": tool_result_preview,
+                                "error": tool_error_for_event,
+                                "duration_ms": tool_duration_ms,
+                            }
+                        ],
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to persist assistant message (approval resume)")
+
+        await self._save_checkpoint(
+            ctx,
+            phase="tool_call_completed",
+            status="running",
+            resume_payload={
+                "source": "approval_resume",
+                "tool_name": tool_name,
+                "tool_success": tool_success,
+                "tool_status": tool_status,
+                "duration_ms": tool_duration_ms,
+            },
+            error=tool_error_for_event,
+        )
+
     async def execute(
         self,
         session_id: str,
@@ -887,6 +1221,55 @@ class AgentLoop:
             traceparent=resolved_traceparent,
             otel_trace_id=resolved_otel_trace_id,
         )
+        resume_requested = bool(config.resume_run_id or config.resume_approval_id)
+        resume_mode = bool(config.resume_run_id and config.resume_approval_id)
+        if resume_requested and not resume_mode:
+            yield AgentLoopEvent(
+                phase=AgentLoopPhase.EXECUTION,
+                event_type=StreamEventType.RUN_ERROR.value,
+                data={
+                    "run_id": ctx.run_id,
+                    "thread_id": ctx.session_id,
+                    "session_id": ctx.session_id,
+                    "error": "resume_run_id_and_approval_id_required",
+                },
+            )
+            return
+        if resume_mode:
+            gateway = self.execution_gateway
+            requested_run_id = str(config.resume_run_id)
+            approval_id = str(config.resume_approval_id)
+            if not gateway or not gateway.enabled:
+                yield AgentLoopEvent(
+                    phase=AgentLoopPhase.EXECUTION,
+                    event_type=StreamEventType.RUN_ERROR.value,
+                    data={
+                        "run_id": requested_run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "error": "approval_resume_unavailable",
+                    },
+                )
+                return
+            resume_plan = await gateway.prepare_run_resume(
+                run_id=requested_run_id,
+                tenant_id=ctx.tenant_id,
+                user_id=ctx.user_id,
+                approval_id=approval_id,
+            )
+            if not resume_plan or resume_plan.get("status") != "ready":
+                yield AgentLoopEvent(
+                    phase=AgentLoopPhase.EXECUTION,
+                    event_type=StreamEventType.RUN_ERROR.value,
+                    data={
+                        "run_id": requested_run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "error": str((resume_plan or {}).get("reason") or "resume_not_ready"),
+                    },
+                )
+                return
+            ctx.run_id = requested_run_id
 
         # Initialize metrics builder for observability
         ctx.metrics_builder = ContextMetricsBuilder(
@@ -1046,12 +1429,21 @@ class AgentLoop:
                 )
                 had_fatal_error = False
                 fatal_error_message: str | None = None
-                async for event in self._execute_streaming_first(
-                    ctx=ctx,
-                    user=user,
-                    history=history,
-                    task_ctx=task_ctx,
-                ):
+                if resume_mode:
+                    stream_factory = self._execute_approval_resume(
+                        ctx=ctx,
+                        user=user,
+                        history=history,
+                        task_ctx=task_ctx,
+                    )
+                else:
+                    stream_factory = self._execute_streaming_first(
+                        ctx=ctx,
+                        user=user,
+                        history=history,
+                        task_ctx=task_ctx,
+                    )
+                async for event in stream_factory:
                     event = await self._capture_and_prepare_stream_event(ctx, event)
                     # If streaming-first hits an unexpected internal exception, it emits an "error" event.
                     # Track it so we can emit a matching run_error event for AG-UI lifecycle completeness.
@@ -1066,7 +1458,9 @@ class AgentLoop:
                     yield event
 
                 # Ensure lifecycle is complete: always end with run_finished or run_error.
-                if had_fatal_error:
+                if ctx.approval_paused:
+                    run_status = "blocked"
+                elif had_fatal_error:
                     run_status = "failed"
                     run_error = _redact_trace_text(
                         fatal_error_message or "AgentLoop streaming-first failed"
@@ -1088,7 +1482,7 @@ class AgentLoop:
                             run_error_event.event_type == StreamEventType.RUN_ERROR.value
                         )
                         yield run_error_event
-                else:
+                elif not ctx.approval_paused:
                     run_status = "succeeded"
                     run_finished_event = AgentLoopEvent(
                         phase=AgentLoopPhase.GENERATION_STORAGE,
@@ -1132,7 +1526,9 @@ class AgentLoop:
                 raise  # re-raise after recording status
             finally:
                 final_status = run_status
-                if final_status == "running":
+                if ctx.approval_paused:
+                    final_status = "blocked"
+                elif final_status == "running":
                     if task_ctx and task_ctx.cancelled:
                         final_status = "cancelled"
                         run_error = run_error or "Cancelled by user"
@@ -1146,20 +1542,25 @@ class AgentLoop:
                             status=final_status,
                             usage=ctx.usage,
                             error=run_error,
+                            tenant_id=ctx.tenant_id,
+                            user_id=ctx.user_id,
                         )
                     except Exception:
                         logger.exception("Failed to persist run completion")
-                    await self._save_checkpoint(
-                        ctx,
-                        phase=f"run_{final_status}",
-                        status=final_status,
-                        resume_payload={
-                            "mode": "streaming_first",
-                            "usage": ctx.usage or {},
-                            "generated_content_chars": len(ctx.generated_content or ""),
-                        },
-                        error=run_error,
-                    )
+                    if not ctx.approval_paused:
+                        await self._save_checkpoint(
+                            ctx,
+                            phase=f"run_{final_status}",
+                            status=final_status,
+                            resume_payload={
+                                "mode": "streaming_first",
+                                "usage": ctx.usage or {},
+                                "generated_content_chars": len(
+                                    ctx.generated_content or ""
+                                ),
+                            },
+                            error=run_error,
+                        )
                 terminal_event_type = None
                 if not terminal_event_recorded:
                     terminal_event_type = (
@@ -2579,6 +2980,7 @@ class AgentLoop:
                                 approval_granted = False
                             if approval_granted:
                                 middleware_approval_id_to_consume = existing_approval_id
+                                denied_tools.discard(tool_name)
                                 _verdict = ToolVerdict.allow(
                                     source=_verdict.source or "approval"
                                 )
@@ -2609,6 +3011,24 @@ class AgentLoop:
                                         "Failed to persist middleware approval for %s",
                                         tool_name,
                                     )
+                            if not pending_approval_id:
+                                logger.error(
+                                    "Middleware CONFIRM for %s could not persist approval",
+                                    tool_name,
+                                )
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_id,
+                                        "name": tool_name,
+                                        "content": (
+                                            "[tool call deny] approval persistence failed; "
+                                            "retry later or contact support."
+                                        ),
+                                    }
+                                )
+                                denied_tools.add(tool_name)
+                                continue
                             await self._save_checkpoint(
                                 ctx,
                                 phase="approval_pending",
@@ -2638,6 +3058,8 @@ class AgentLoop:
                                     "status": "pending",
                                 },
                             )
+                            ctx.approval_paused = True
+                            return
                         logger.info(
                             "[STREAMING-FIRST] Tool %s %s by %s: %s",
                             tool_name,
@@ -2886,25 +3308,23 @@ class AgentLoop:
                                             tool_id=tool_id,
                                         ),
                                     )
-                            try:
-                                result = await self._invoke_tool(
-                                    ctx=ctx,
-                                    user=user,
+                            result = await self._invoke_tool(
+                                ctx=ctx,
+                                user=user,
+                                tool_name=tool_name,
+                                arguments=tool_args,
+                            )
+                            if (
+                                middleware_approval_id_to_consume
+                                and self.execution_gateway
+                                and self.execution_gateway.enabled
+                            ):
+                                await self.execution_gateway.consume_tool_approval(
+                                    approval_id=middleware_approval_id_to_consume,
+                                    tenant_id=ctx.tenant_id,
+                                    user_id=ctx.user_id,
                                     tool_name=tool_name,
-                                    arguments=tool_args,
                                 )
-                            finally:
-                                if (
-                                    middleware_approval_id_to_consume
-                                    and self.execution_gateway
-                                    and self.execution_gateway.enabled
-                                ):
-                                    await self.execution_gateway.consume_tool_approval(
-                                        approval_id=middleware_approval_id_to_consume,
-                                        tenant_id=ctx.tenant_id,
-                                        user_id=ctx.user_id,
-                                        tool_name=tool_name,
-                                    )
                             # Thread result through on_tool_result middlewares
                             # (response cap, future sanitizers). Middlewares
                             # return None to pass through or a replacement
@@ -3050,6 +3470,8 @@ class AgentLoop:
                                         "status": "pending",
                                     },
                                 )
+                                ctx.approval_paused = True
+                                return
 
                             # Check if cancelled (via metadata or error message)
                             is_cancelled = (

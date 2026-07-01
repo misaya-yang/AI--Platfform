@@ -42,7 +42,7 @@ class RequestLogConfig:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
+
         ]
     )
     sensitive_headers: list[str] = field(

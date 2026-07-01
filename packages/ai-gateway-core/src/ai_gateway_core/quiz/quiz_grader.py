@@ -17,7 +17,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 SHORT_ANSWER_GRADING_PROMPT = """\
-You are grading a short-answer quiz question. Compare the student's answer against the correct answer.
+You are grading a short-answer quiz question. Compare the student's answer \
+against the correct answer.
 
 Question: {question_text}
 Correct answer: {correct_answer}
@@ -62,7 +63,11 @@ class QuizGrader:
                     "question_id": q_id,
                     "correct": False,
                     "user_answer": user_answer,
-                    "correct_answer": correct_raw[0] if isinstance(correct_raw, list) and correct_raw else str(correct_raw),
+                    "correct_answer": (
+                        correct_raw[0]
+                        if isinstance(correct_raw, list) and correct_raw
+                        else str(correct_raw)
+                    ),
                     "explanation": q.get("explanation", ""),
                     "needs_ai_grading": True,
                 })
@@ -146,15 +151,19 @@ class QuizGrader:
 
         if question_type == "mc_multi":
             user_labels = sorted(
-                l.strip().upper() for l in user_answer.split(",") if l.strip()
+                label.strip().upper()
+                for label in user_answer.split(",")
+                if label.strip()
             )
             correct_labels = sorted(str(a).upper().strip() for a in correct_raw)
             return user_labels == correct_labels
 
-        # mc_single: quiz_tool squashes correct_answer to exactly one label.
+        # mc_single: current quiz_tool emits one label, but legacy rows may
+        # contain multiple labels that the UI highlights as correct.
         if not correct_raw:
             return False
-        return user_answer.upper().strip() == str(correct_raw[0]).upper().strip()
+        user_label = user_answer.upper().strip()
+        return any(user_label == str(answer).upper().strip() for answer in correct_raw)
 
     async def _grade_short_answer(
         self,

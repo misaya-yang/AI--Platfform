@@ -11,6 +11,16 @@
 
 name: ai-gateway
 
+x-container-proxy-env: &container-proxy-env
+  HTTP_PROXY: "${CONTAINER_HTTP_PROXY:-}"
+  HTTPS_PROXY: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
+  ALL_PROXY: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
+  NO_PROXY: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service,mcp-docgen-server,mcp-docgen-server.internal}"
+  http_proxy: "${CONTAINER_HTTP_PROXY:-}"
+  https_proxy: "${CONTAINER_HTTPS_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
+  all_proxy: "${CONTAINER_ALL_PROXY:-${CONTAINER_HTTP_PROXY:-}}"
+  no_proxy: "${CONTAINER_NO_PROXY:-localhost,127.0.0.1,::1,postgres,redis,qdrant,gateway,frontend,knowledge-service,assistant-service,mcp-docgen-server,mcp-docgen-server.internal}"
+
 services:
   # ===========================================================================
   # Infrastructure Services
@@ -150,6 +160,23 @@ services:
   # Application Services
   # ===========================================================================
 
+  # One-shot volume permission initializer. Named volumes hide the permissions
+  # baked into the image, so this must run before the non-root gateway process.
+  gateway-init:
+    image: postgres:16-alpine
+    container_name: ai-gateway-init
+    user: "0:0"
+    command: >
+      sh -ec
+      "mkdir -p /app/data/images /app/logs &&
+       chown -R 1000:1000 /app/data /app/logs"
+    volumes:
+      - gateway-logs:/app/logs
+      - gateway-data:/app/data
+    networks:
+      - ai-gateway-net
+    restart: "no"
+
   # AI Gateway Backend
   gateway:
     build:
@@ -158,6 +185,7 @@ services:
     image: ai-gateway:${TAG:-latest}
     container_name: ai-gateway-backend
     environment:
+      <<: *container-proxy-env
       # Server
       GATEWAY_HOST: "0.0.0.0"
       GATEWAY_PORT: "8080"
@@ -263,7 +291,7 @@ services:
       # Object Storage (S3/OSS)
       GATEWAY_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-local}"
       GATEWAY_STORAGE__LOCAL_BASE_PATH: "${GATEWAY_STORAGE__LOCAL_BASE_PATH:-/app/data/images}"
-      GATEWAY_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-}"
+      GATEWAY_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-${S3_BUCKET:-}}"
       GATEWAY_STORAGE__S3__REGION: "${GATEWAY_STORAGE__S3__REGION:-us-east-1}"
       GATEWAY_STORAGE__S3__ACCESS_KEY: "${GATEWAY_STORAGE__S3__ACCESS_KEY:-}"
       GATEWAY_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
@@ -281,6 +309,8 @@ services:
     networks:
       - ai-gateway-net
     depends_on:
+      gateway-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -348,6 +378,7 @@ services:
     image: knowledge-service:${TAG:-latest}
     container_name: ai-gateway-knowledge-service
     environment:
+      <<: *container-proxy-env
       KNOWLEDGE_CORS__ALLOW_ORIGINS: '${KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       KNOWLEDGE_APP__HOST: "0.0.0.0"
       KNOWLEDGE_APP__PORT: "8092"
@@ -366,7 +397,7 @@ services:
       # Storage (S3)
       KNOWLEDGE_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-local}"
       KNOWLEDGE_STORAGE__LOCAL_BASE_PATH: "${KNOWLEDGE_STORAGE__LOCAL_BASE_PATH:-/app/data/files}"
-      KNOWLEDGE_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-}"
+      KNOWLEDGE_STORAGE__S3__BUCKET: "${KNOWLEDGE_STORAGE__S3__BUCKET:-${GATEWAY_STORAGE__S3__BUCKET:-${S3_BUCKET:-}}}"
       KNOWLEDGE_STORAGE__S3__REGION: "${GATEWAY_STORAGE__S3__REGION:-ap-southeast-2}"
       KNOWLEDGE_STORAGE__S3__ACCESS_KEY: "${GATEWAY_STORAGE__S3__ACCESS_KEY:-}"
       KNOWLEDGE_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
@@ -427,6 +458,7 @@ services:
     expose:
       - "8093"
     environment:
+      <<: *container-proxy-env
       ASSISTANT_CORS__ALLOW_ORIGINS: '${ASSISTANT_CORS_ALLOW_ORIGINS_JSON:-["http://localhost:80","http://localhost:3000","http://localhost:8081"]}'
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
       REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
@@ -502,6 +534,7 @@ services:
     container_name: ai-gateway-mcp-docgen-server
     image: mcp-docgen-server:${TAG:-latest}
     environment:
+      <<: *container-proxy-env
       MCP_TRANSPORT: http
       PORT: "8765"
       LOG_LEVEL: INFO

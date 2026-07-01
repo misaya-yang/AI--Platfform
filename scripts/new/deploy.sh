@@ -82,10 +82,52 @@ fi
 COMPOSE_CMD=$(get_compose_cmd)
 cd "$PROJECT_ROOT"
 
+INFRA_SERVICES="postgres redis qdrant"
+FULL_APP_SERVICES="gateway frontend knowledge-service assistant-service mcp-docgen-server"
+
+assert_compose_owner() {
+    local expected_owner="$PROJECT_ROOT"
+    local inspected_names=(
+        ai-gateway-pg
+        ai-gateway-redis
+        ai-gateway-qdrant
+        ai-gateway-backend
+        ai-gateway-frontend
+        ai-gateway-assistant-service
+        ai-gateway-knowledge-service
+        ai-gateway-mcp-docgen-server
+        assistant-service
+        ai-gateway-knowledge
+        mcp-docgen-server
+        islamic-content-service
+    )
+    local container owner project service mismatch=false
+
+    for container in "${inspected_names[@]}"; do
+        if ! docker inspect "$container" >/dev/null 2>&1; then
+            continue
+        fi
+        owner=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container" 2>/dev/null || true)
+        project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$container" 2>/dev/null || true)
+        service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container" 2>/dev/null || true)
+        if [ "$project" = "ai-gateway" ] && [ -n "$owner" ] && [ "$owner" != "$expected_owner" ]; then
+            log_error "Container '$container' (service=${service:-unknown}) belongs to a different checkout: $owner"
+            mismatch=true
+        fi
+    done
+
+    if [ "$mismatch" = true ]; then
+        log_error "Refusing to mutate Docker project 'ai-gateway' from $PROJECT_ROOT until wrong-checkout containers are stopped or removed explicitly."
+        exit 1
+    fi
+}
+
+assert_compose_owner
+
 # -- Determine services to deploy --------------------------------------------
 SERVICES=""
 if [ "$INFRA_ONLY" = true ]; then
-    SERVICES="postgres redis qdrant"
+    SERVICES="$INFRA_SERVICES"
 elif [ "$APP_ONLY" = true ]; then
     SERVICES="gateway frontend knowledge-service assistant-service mcp-docgen-server"
 fi
@@ -109,10 +151,35 @@ if [ "$BUILD" = true ]; then
     $COMPOSE_CMD --env-file "$ENV_FILE" build $BUILD_ARGS $SERVICES
 fi
 
+# The shell migration runner is the schema owner. Stop app services first so a
+# previous run cannot race migrations during startup.
+if [ "$INFRA_ONLY" != true ]; then
+    log_step "Stopping application services before migrations"
+    if [ "$APP_ONLY" = true ]; then
+        # shellcheck disable=SC2086
+        $COMPOSE_CMD --env-file "$ENV_FILE" stop $SERVICES >/dev/null || true
+    else
+        # shellcheck disable=SC2086
+        $COMPOSE_CMD --env-file "$ENV_FILE" stop $FULL_APP_SERVICES >/dev/null || true
+    fi
+fi
+
 # -- Start services ----------------------------------------------------------
+if [ "$INFRA_ONLY" = true ]; then
+    START_SERVICES="$INFRA_SERVICES"
+elif [ "$APP_ONLY" = true ]; then
+    START_SERVICES=""
+else
+    START_SERVICES="$INFRA_SERVICES"
+fi
+
 log_step "Starting services"
-# shellcheck disable=SC2086
-$COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $SERVICES
+if [ -n "$START_SERVICES" ]; then
+    # shellcheck disable=SC2086
+    $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $START_SERVICES
+else
+    log_info "Application services will start after migrations"
+fi
 
 # -- Wait for infrastructure to be healthy -----------------------------------
 log_step "Health checks"
@@ -130,6 +197,17 @@ fi
 if [ "$SHOULD_MIGRATE" = true ]; then
     log_step "Running database migrations"
     ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh" --auto
+fi
+
+if [ "$INFRA_ONLY" != true ]; then
+    log_step "Starting application services"
+    if [ "$APP_ONLY" = true ]; then
+        # shellcheck disable=SC2086
+        $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $SERVICES
+    else
+        # shellcheck disable=SC2086
+        $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $FULL_APP_SERVICES
+    fi
 fi
 
 # -- Wait for application health ---------------------------------------------

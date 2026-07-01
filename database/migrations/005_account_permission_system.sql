@@ -257,8 +257,13 @@ ON CONFLICT (role_name, permission_code) DO NOTHING;
 
 -- ============================================================
 -- 9. Create local bootstrap admin user
--- Local initial password: ChangeMe-Admin-2026! (bcrypt hash with cost factor 12)
--- Rotate it immediately for shared or non-local deployments.
+-- Security note:
+--   Do not commit or reapply a known bootstrap password here. Operators may
+--   optionally pass a bcrypt hash through a PostgreSQL custom setting, for
+--   example:
+--     PGOPTIONS='-c gateway.bootstrap_admin_password_hash=<bcrypt-hash>'
+--   If unset, the admin account is created without a login password and must be
+--   initialized through the password reset/user-management flow.
 -- ============================================================
 INSERT INTO users (
     user_id,
@@ -284,14 +289,17 @@ INSERT INTO users (
     ARRAY['admin']::VARCHAR(50)[],
     ARRAY['admin:*']::VARCHAR(100)[],
     'active',
-    '$2b$12$3UfCsRE9RsU68qKAX/bgzObJODrSOFdvKi7RLO6.8Xnli25qoU/N2',
-    FALSE,
+    NULLIF(current_setting('gateway.bootstrap_admin_password_hash', TRUE), ''),
+    TRUE,
     TRUE,
     'system'
 ) ON CONFLICT (user_id) DO UPDATE SET
-    password_hash = EXCLUDED.password_hash,
-    force_password_change = EXCLUDED.force_password_change,
     email = EXCLUDED.email,
+    display_name = EXCLUDED.display_name,
+    tier = EXCLUDED.tier,
+    roles = EXCLUDED.roles,
+    permissions = EXCLUDED.permissions,
+    email_verified = EXCLUDED.email_verified,
     updated_at = NOW();
 
 -- Insert user_roles mapping for admin

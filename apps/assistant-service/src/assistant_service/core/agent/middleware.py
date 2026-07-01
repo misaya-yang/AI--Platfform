@@ -48,7 +48,7 @@ class VerdictKind(str, Enum):
 
     ALLOW = "allow"
     DENY = "deny"
-    CONFIRM = "confirm"  # awaiting user approval — treat as deny-for-now
+    CONFIRM = "confirm"  # awaiting user approval — emits approval_required SSE
 
 
 @dataclass

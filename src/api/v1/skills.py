@@ -14,23 +14,22 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio as _asyncio
+import contextlib
 import logging
-import uuid
-from typing import Any
-
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
-from pydantic import BaseModel, Field
 
 from ai_gateway_core.skills import (
     SkillBuilder,
-    SkillManifest,
     SkillRegistry,
     SkillSource,
     parse_skill_md,
 )
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel, Field
 
+from ...core.auth.permissions import Capability
 from ...core.auth.user_resolver import UserContext
-from ..deps import get_user_context
+from ..deps import AuthContext, get_auth_context, get_user_context, require_gateway_capability
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
@@ -39,8 +38,6 @@ router = APIRouter(prefix="/skills", tags=["skills"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-import asyncio as _asyncio
 
 _registry_lock = _asyncio.Lock()
 _db_loaded: set[str] = set()  # Track which tenant+user combos have been loaded
@@ -105,8 +102,10 @@ async def upload_skill(
     request: Request,
     file: UploadFile = File(...),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Upload a SKILL.md file to create/update a skill."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     if not file.filename or not file.filename.endswith(".md"):
         raise HTTPException(400, "File must be a .md file (SKILL.md format)")
 
@@ -160,8 +159,10 @@ async def list_skills(
     request: Request,
     enabled_only: bool = Query(True),
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """List all skills for the current user/tenant."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_READ)
     registry = _get_skill_registry(request)
 
     await _ensure_db_loaded(registry, user)
@@ -178,8 +179,10 @@ async def get_skill(
     name: str,
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get skill detail by name."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_READ)
     registry = _get_skill_registry(request)
     await _ensure_db_loaded(registry, user)
 
@@ -195,8 +198,10 @@ async def update_skill(
     body: SkillUpdateRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update skill fields."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     registry = _get_skill_registry(request)
     await _ensure_db_loaded(registry, user)
 
@@ -217,6 +222,7 @@ async def update_skill(
 
     registry.register(skill)
 
+    db = getattr(request.app.state, "database", None)
     if db:
         try:
             await registry.save_manifest(user.tenant_id, user.user_id, skill)
@@ -231,8 +237,10 @@ async def delete_skill(
     name: str,
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Delete a skill."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     registry = _get_skill_registry(request)
     removed = registry.unregister(name)
     if not removed:
@@ -241,13 +249,12 @@ async def delete_skill(
     # Also remove from DB
     db = getattr(request.app.state, "database", None)
     if db:
-        try:
+        with contextlib.suppress(Exception):
             await db.execute(
                 "UPDATE assistant_skills SET status = 'deleted' WHERE tenant_id = $1 AND name = $2",
-                user.tenant_id, name,
+                user.tenant_id,
+                name,
             )
-        except Exception:
-            pass
 
     return {"deleted": True, "name": name}
 
@@ -258,8 +265,10 @@ async def test_skill(
     body: SkillTestRequest,
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Test execute a skill with sample input."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     registry = _get_skill_registry(request)
     await _ensure_db_loaded(registry, user)
 
@@ -274,7 +283,13 @@ async def test_skill(
 
 
 @router.post("/{name}/enable")
-async def enable_skill(name: str, request: Request, user: UserContext = Depends(get_user_context)):
+async def enable_skill(
+    name: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     registry = _get_skill_registry(request)
     skill = registry.get(name)
     if not skill:
@@ -285,7 +300,13 @@ async def enable_skill(name: str, request: Request, user: UserContext = Depends(
 
 
 @router.post("/{name}/disable")
-async def disable_skill(name: str, request: Request, user: UserContext = Depends(get_user_context)):
+async def disable_skill(
+    name: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    require_gateway_capability(request, auth, Capability.GATEWAY_SKILL_WRITE)
     registry = _get_skill_registry(request)
     skill = registry.get(name)
     if not skill:

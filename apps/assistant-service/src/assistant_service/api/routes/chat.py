@@ -57,6 +57,8 @@ class ChatRequest(BaseModel):
     context_detail: bool = False
     skills_enabled: bool | None = None
     memory_profile: str | None = None
+    resume_run_id: str | None = None
+    resume_approval_id: str | None = None
     stream: bool = False
 
 
@@ -184,6 +186,8 @@ def _build_config(
         memory_profile=body.memory_profile,
         traceparent=traceparent,
         otel_trace_id=otel_trace_id or _otel_trace_id_from_traceparent(traceparent),
+        resume_run_id=body.resume_run_id,
+        resume_approval_id=body.resume_approval_id,
     )
 
 

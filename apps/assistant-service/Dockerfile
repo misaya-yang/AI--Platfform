@@ -11,6 +11,9 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /build
 
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=""
+
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && \
     rm -rf /var/lib/apt/lists/*
 
@@ -22,13 +25,18 @@ ENV PATH="/opt/venv/bin:$PATH"
 # ``ai-gateway-core`` entry in apps/assistant-service/pyproject.toml.
 COPY packages/ ./packages/
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir ./packages/ai-gateway-core
+    pip install --no-cache-dir ./packages/ai-gateway-core \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 # Install assistant-service deps. No more pyproject.toml/src/ from the
 # gateway repo — the AS pyproject's ai-gateway-core dependency is
 # satisfied above, and main.py imports nothing from gateway src.
 COPY apps/assistant-service/pyproject.toml apps/assistant-service/README.md /build/assistant-service/
-RUN cd /build/assistant-service && pip install --no-cache-dir "." 2>/dev/null; true
+RUN cd /build/assistant-service && \
+    pip install --no-cache-dir "." \
+    --index-url ${PIP_INDEX_URL} \
+    ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
 # --- Runtime ---
 FROM python:3.12-slim

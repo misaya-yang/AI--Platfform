@@ -30,6 +30,12 @@ interface ActivityPanelProps {
   message: ChatMessageType | null;
   /** Drawer width in px. 380 matches the design. */
   width?: number;
+  onToolApproval?: (
+    messageId: string,
+    toolId: string,
+    approvalId: string,
+    approved: boolean,
+  ) => void | Promise<void>;
 }
 
 function formatTotal(ms: number): string {
@@ -47,6 +53,7 @@ export function ActivityPanel({
   onClose,
   message,
   width = 380,
+  onToolApproval,
 }: ActivityPanelProps) {
   const { t } = useTranslation();
   ensureActivityStyles();
@@ -59,6 +66,10 @@ export function ActivityPanel({
   const running = !!message?.isStreaming;
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
+  const pendingApprovals =
+    message?.processSummary?.tools.filter(
+      (tool) => tool.status === "approval_required" && tool.approvalId,
+    ) ?? [];
 
   const statusWord = running
     ? t("playground.activity.running", { defaultValue: "running" })
@@ -183,6 +194,84 @@ export function ActivityPanel({
               {t("playground.activity.empty", {
                 defaultValue: "No activity recorded.",
               })}
+            </div>
+          )}
+
+          {message && pendingApprovals.length > 0 && onToolApproval && (
+            <div
+              style={{
+                marginTop: 16,
+                paddingTop: 12,
+                borderTop: `1px solid ${T.borderSoft}`,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              {pendingApprovals.map((tool) => (
+                <div
+                  key={tool.id}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    fontSize: 12,
+                    color: T.text,
+                  }}
+                >
+                  <div>
+                    {t("assistant.activity.approvalRequired", {
+                      defaultValue: "Approval required",
+                    })}
+                    {": "}
+                    <span style={{ fontFamily: ui.mono }}>{tool.name}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      className="act-btn act-hover"
+                      onClick={() =>
+                        void onToolApproval(
+                          message.id,
+                          tool.id,
+                          tool.approvalId as string,
+                          true,
+                        )
+                      }
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 6,
+                        border: `1px solid ${T.border}`,
+                        background: T.bg,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("assistant.activity.approve", { defaultValue: "Approve" })}
+                    </button>
+                    <button
+                      type="button"
+                      className="act-btn act-hover"
+                      onClick={() =>
+                        void onToolApproval(
+                          message.id,
+                          tool.id,
+                          tool.approvalId as string,
+                          false,
+                        )
+                      }
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 6,
+                        border: `1px solid ${T.border}`,
+                        background: T.bg,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("assistant.activity.reject", { defaultValue: "Reject" })}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

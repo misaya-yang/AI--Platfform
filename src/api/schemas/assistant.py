@@ -197,6 +197,14 @@ class AssistantChatRequest(BaseModel):
         default=None,
         description="Memory profile override: off, basic, hybrid",
     )
+    resume_run_id: str | None = Field(
+        default=None,
+        description="Resume a paused assistant run after tool approval",
+    )
+    resume_approval_id: str | None = Field(
+        default=None,
+        description="Approved tool approval_id binding for resume execution",
+    )
 
 
 class AssistantChatResponse(BaseModel):

@@ -267,8 +267,8 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=23" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.20" },
-    { name = "fastapi" },
-    { name = "httpx" },
+    { name = "fastapi", specifier = ">=0.124.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opentelemetry-api", specifier = ">=1.27" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.27" },
@@ -280,7 +280,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0" },
-    { name = "starlette" },
+    { name = "starlette", specifier = ">=0.50.0" },
 ]
 provides-extras = ["dev"]
 

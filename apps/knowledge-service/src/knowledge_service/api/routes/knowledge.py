@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -10,17 +11,13 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, 
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from ...core.crypto import get_unsigned_url, verify_signed_url
-from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
-
-logger = logging.getLogger(__name__)
-import contextlib
-
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
+from ...core.crypto import get_unsigned_url, verify_signed_url
 from ...core.exceptions import PermissionDeniedError, ValidationFailedError
 from ...services.knowledge.knowledge_service import KnowledgeService
 from ...services.knowledge.worker import KnowledgeWorker
+from ..deps import get_knowledge_service, get_knowledge_worker, get_settings, get_user_context
 from ..schemas.knowledge import (
     BatchDeleteSchema,
     BatchReindexSchema,
@@ -44,6 +41,8 @@ from ..schemas.knowledge import (
     SegmentEnableDisableSchema,
     SegmentUpdateSchema,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -297,8 +296,9 @@ async def upload_document(
         PDF_SPLIT_PAGES = int(os.getenv("KB_PDF_SPLIT_PAGES_PER_PART", "500"))
 
         if ext == ".pdf" and size_bytes > PDF_SPLIT_THRESHOLD:
-            import fitz
             import math
+
+            import fitz
 
             doc_fitz = fitz.open(stream=content, filetype="pdf")
             total_pages = len(doc_fitz)
@@ -431,7 +431,10 @@ async def batch_upload_documents(
                 errors.append(
                     {
                         "filename": filename,
-                        "error": f"Unsupported file type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
+                        "error": (
+                            f"Unsupported file type: {ext}. "
+                            f"Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+                        ),
                     }
                 )
                 continue
@@ -1082,22 +1085,8 @@ async def hit_test(
     except ValidationFailedError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        # Catch any unexpected errors and return a meaningful response
-        import traceback
-
-        error_detail = str(exc)
-        traceback_str = traceback.format_exc()
-        return {
-            "results": [],
-            "metadata": {
-                "error": error_detail,
-                "traceback": traceback_str
-                if "DEBUG" in str(svc.settings.log_level).upper()
-                else None,
-                "mode": payload.mode,
-                "top_k": payload.top_k,
-            },
-        }
+        logger.warning("Knowledge hit-test failed; refusing fallback response", exc_info=True)
+        raise HTTPException(status_code=500, detail="Knowledge hit-test failed") from exc
 
 
 # ============================================================
@@ -1799,8 +1788,11 @@ async def update_dataset_config(
             if segment_count > 0:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Cannot change embedding dimension when {segment_count} segments exist. "
-                    "Please create a new dataset or delete all existing documents first.",
+                    detail=(
+                        f"Cannot change embedding dimension when {segment_count} "
+                        "segments exist. Please create a new dataset or delete all "
+                        "existing documents first."
+                    ),
                 )
 
         if embedding_provider is not None:
@@ -2036,7 +2028,7 @@ async def dedupe_segments(
 
         # Find duplicates (keep oldest, delete rest)
         duplicates_to_delete = []
-        for content_hash, segs in hash_to_segments.items():
+        for _content_hash, segs in hash_to_segments.items():
             if len(segs) > 1:
                 # Sort by created_at, keep oldest
                 segs.sort(key=lambda x: x.get("created_at") or "")

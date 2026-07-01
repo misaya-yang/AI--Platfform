@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
+from knowledge_service.api.routes import knowledge as knowledge_routes
 from knowledge_service.api.routes.knowledge import require_admin_user
+from knowledge_service.api.schemas.knowledge import RetrieveRequestSchema
 from knowledge_service.auth.user_context import UserContext
 from knowledge_service.persistence import database as database_module
 
@@ -112,3 +117,23 @@ async def test_require_admin_user_allows_admin_role() -> None:
     user = UserContext(user_id="u1", tenant_id="t1", roles=["admin"], user_tier="normal")
 
     assert await require_admin_user(user) is user
+
+
+@pytest.mark.asyncio
+async def test_hit_test_fails_closed_on_unexpected_retrieval_error() -> None:
+    user = UserContext(user_id="u1", tenant_id="tenant-a")
+    svc = SimpleNamespace(
+        retrieve=AsyncMock(side_effect=RuntimeError("vector backend unavailable")),
+        settings=SimpleNamespace(log_level="DEBUG"),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await knowledge_routes.hit_test(
+            "dataset-a",
+            RetrieveRequestSchema(query="q"),
+            svc=svc,
+            user=user,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "vector backend unavailable" not in str(exc_info.value.detail)

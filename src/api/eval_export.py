@@ -37,7 +37,7 @@ _EXPORT_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|"
-            r"password|secret|cookie)\b\s*[:=]\s*[^,\s;&]+"
+            r"token|password|secret|cookie)\b\s*[:=]\s*[^,\s;&]+"
         ),
         r"\1=[redacted]",
     ),

@@ -240,6 +240,18 @@ class RunStatusResponse(BaseModel):
     run: dict
 
 
+class ResumeRequest(BaseModel):
+    """Optional approval binding for resume preparation."""
+
+    approval_id: str | None = None
+
+
+class ResumeResponse(BaseModel):
+    """Non-executing resume plan from the latest safe checkpoint."""
+
+    resume: dict
+
+
 @router.get("/tools", response_model=ToolsListResponse)
 async def list_tools(
     request: Request,
@@ -286,6 +298,29 @@ async def get_run_status(
     from ._assistant_proxy import proxy_to_assistant_service
     return await proxy_to_assistant_service(
         request, user, path=f"runs/{run_id}"
+    )
+
+
+@router.post("/runs/{run_id}/resume", response_model=ResumeResponse)
+async def prepare_run_resume(
+    run_id: str,
+    request: Request,
+    body: ResumeRequest | None = None,
+    user: UserContext = Depends(get_user_context),
+) -> ResumeResponse:
+    """Thin proxy — validate checkpoint/approval state without executing tools."""
+    from ..deps import enforce_rate_limit
+    from ._assistant_proxy import proxy_to_assistant_service
+
+    await enforce_rate_limit(request, user, operation="assistant_resume")
+    body_bytes = await request.body()
+    if not body_bytes:
+        body_bytes = b"{}"
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path=f"runs/{run_id}/resume",
+        body=body_bytes,
     )
 
 

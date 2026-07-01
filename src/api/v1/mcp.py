@@ -6,8 +6,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from ...core.auth.permissions import Capability
 from ...core.auth.user_resolver import UserContext
-from ..deps import get_user_context
+from ..deps import AuthContext, get_auth_context, get_user_context, require_gateway_capability
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/assistant/mcp", tags=["mcp"])
@@ -24,8 +25,10 @@ def _get_mcp_manager(request: Request):
 async def list_mcp_servers(
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """List configured MCP servers and their connection status."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_MCP_READ)
     mgr = _get_mcp_manager(request)
     return {"servers": mgr.get_servers_status()}
 
@@ -34,8 +37,10 @@ async def list_mcp_servers(
 async def list_mcp_tools(
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """List all tools registered from MCP servers."""
+    require_gateway_capability(request, auth, Capability.GATEWAY_MCP_READ)
     from ai_gateway_core.enums import ToolCategory
     registry = getattr(request.app.state, "tool_registry", None)
     if registry is None:
@@ -53,10 +58,11 @@ async def refresh_mcp_server(
     server_name: str,
     request: Request,
     user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
 ):
-    """Re-discover tools from an MCP server (hot-reload). Admin only."""
-    if "admin" not in (user.roles or []):
-        raise HTTPException(403, "Admin role required to refresh MCP servers")
+    """Re-discover tools from an MCP server (hot-reload)."""
+    _ = user
+    require_gateway_capability(request, auth, Capability.GATEWAY_MCP_WRITE)
     mgr = _get_mcp_manager(request)
     results = await mgr.refresh_tools(server_name)
     count = results.get(server_name, -1)

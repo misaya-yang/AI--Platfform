@@ -18,9 +18,9 @@ authors = [{ name = "AI Gateway Maintainers" }]
 # the assistant-service container is self-sufficient. Trap #3 in
 # reference_server_deployment.md describes this class of regression.
 dependencies = [
-    "httpx",
-    "fastapi",
-    "starlette",
+    "httpx>=0.28.0",
+    "fastapi>=0.124.0",
+    "starlette>=0.50.0",
     "PyYAML>=6.0",          # ai_gateway_core.skills.parser
     "asyncpg>=0.29",        # ai_gateway_core.persistence.database
     "aioboto3>=12",         # ai_gateway_core.storage.image/artifact/file (S3)

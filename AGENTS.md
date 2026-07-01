@@ -24,6 +24,11 @@
 
 ## Docker and Local Runtime
 
+- This repository's local runtime owner is `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`. Do not use `/Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway` for this project's Docker, E2E, health-check, account-seeding, or deployment work unless the user explicitly names that checkout.
+- Before any Docker, live-runtime, or E2E action, verify compose ownership with container labels, especially `com.docker.compose.project.working_dir`. The expected value for this repo's containers, including `ai-gateway-backend`, `ai-gateway-frontend`, `ai-gateway-assistant-service`, and `ai-gateway-knowledge-service`, is `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`.
+- If running `ai-gateway-*` containers are labeled with the other SaaS checkout, treat them as the wrong runtime for this repo. Legacy container names such as `assistant-service` or `ai-gateway-knowledge` usually indicate the other checkout, not this repository. Stop/remove that compose project before starting this repo's services, and then re-check labels before testing.
+- All one-click startup, hot-update, E2E, and account-prep scripts added for this project must live in this repository and must operate from this repository root.
+- Deployment/startup scripts must self-check compose ownership before Docker `stop`, `up`, or `build` actions. If an existing container with this project's expected names has a different `com.docker.compose.project.working_dir`, abort with a clear error instead of mutating the wrong runtime.
 - Before Docker or live-runtime validation, inspect the current state first: `docker ps`, `docker compose ps`, and the relevant health endpoints.
 - Do not assume the gateway or assistant service is running just because Docker Desktop is running.
 - Do not run `docker compose up --build`, `docker compose build`, or heavy image rebuilds by default for verification. Prefer existing containers/images and `docker compose up -d`.

@@ -57,6 +57,7 @@ import logging
 import os
 import socket
 import ssl
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -413,3 +414,42 @@ def validate_callback_url(
             status_code=400,
         )
     return url
+
+
+async def safe_callback_post(
+    url: str,
+    *,
+    json: dict[str, Any],
+    timeout: float = 10.0,
+    allowed_hosts: tuple[str, ...] | None = None,
+) -> httpx.Response:
+    """POST JSON to a user-controlled callback URL with DNS-pinned transport.
+
+    Closes the validate-then-post DNS rebinding race: the hostname is resolved
+    and checked once, then the HTTP client connects to that validated IP while
+    preserving the original Host header.
+    """
+    scheme, host, port, _ = _split_url(url)
+
+    effective = _build_allowlist(allowed_hosts)
+    if effective and _host_matches(host, effective):
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+        ) as client:
+            return await client.post(url, json=json)
+
+    ok, pinned_ip = is_safe_destination(host, port)
+    if not ok:
+        raise SafeFetchError(
+            f"callback destination rejected: {pinned_ip}",
+            status_code=400,
+        )
+
+    transport = _DNSPinnedTransport(host, pinned_ip)
+    async with httpx.AsyncClient(
+        transport=transport,
+        timeout=timeout,
+        follow_redirects=False,
+    ) as client:
+        return await client.post(url, json=json)

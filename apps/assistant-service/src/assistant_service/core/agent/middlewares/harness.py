@@ -81,7 +81,10 @@ class TimeBudgetMiddleware:
         self, ctx: Any, tool_name: str, arguments: dict[str, Any]
     ) -> ToolVerdict:
         del tool_name, arguments
-        started_at = float(getattr(ctx, "trace_started_at", 0.0) or time.time())
+        trace_started_at = getattr(ctx, "trace_started_at", None)
+        started_at = (
+            float(trace_started_at) if trace_started_at is not None else time.time()
+        )
         if time.time() - started_at > self.max_seconds:
             return ToolVerdict.deny(
                 f"time budget exceeded ({self.max_seconds:.2f}s)",

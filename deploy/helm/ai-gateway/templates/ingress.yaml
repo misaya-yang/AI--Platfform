@@ -51,13 +51,6 @@ spec:
                 name: {{ include "ai-gateway.fullname" . }}-gateway
                 port:
                   number: 8080
-          - path: /metrics
-            pathType: Exact
-            backend:
-              service:
-                name: {{ include "ai-gateway.fullname" . }}-gateway
-                port:
-                  number: 8080
           # Everything else -> frontend
           - path: /
             pathType: Prefix

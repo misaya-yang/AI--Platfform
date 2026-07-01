@@ -16,11 +16,11 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.logging import get_logger
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
-from ai_gateway_core.logging import get_logger
 from ..client_ip import get_client_ip_from_request
 
 logger = get_logger(__name__)
@@ -54,7 +54,7 @@ class RateLimitConfig:
             "/health",
             "/health/live",
             "/health/ready",
-            "/metrics",
+
         ]
     )
 

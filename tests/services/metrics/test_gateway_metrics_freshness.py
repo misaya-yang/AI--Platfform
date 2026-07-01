@@ -120,7 +120,27 @@ async def test_redis_metrics_report_fresh_ingestion_timestamp():
 
 
 @pytest.mark.asyncio
-async def test_metrics_endpoint_requires_metrics_read(test_app, async_client, monkeypatch):
+async def test_token_metrics_use_tenant_scoped_user_keys():
+    recorder = _recorder_with_fake_redis()
+    today = recorder._get_date_str()
+
+    await recorder.record_tokens(
+        user_id="same-user",
+        service_id="assistant",
+        input_tokens=7,
+        output_tokens=11,
+        tenant_id="tenant-a",
+    )
+
+    values = recorder.redis._client.values
+    assert values[f"metrics:tokens:tenant:tenant-a:user:same-user:input:{today}"] == "7"
+    assert values[f"metrics:tokens:tenant:tenant-a:user:same-user:output:{today}"] == "11"
+    assert f"metrics:tokens:user:same-user:input:{today}" not in values
+    assert f"metrics:tokens:user:same-user:output:{today}" not in values
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_requires_metrics_read(test_app, async_client):
     from src.api import deps
 
     async def _user_auth_context():
@@ -132,9 +152,12 @@ async def test_metrics_endpoint_requires_metrics_read(test_app, async_client, mo
             is_authenticated=True,
         )
 
-    monkeypatch.setattr(deps, "get_auth_context", _user_auth_context)
+    test_app.dependency_overrides[deps.get_auth_context] = _user_auth_context
 
-    response = await async_client.get("/api/v1/metrics/summary")
+    try:
+        response = await async_client.get("/api/v1/metrics/summary")
+    finally:
+        test_app.dependency_overrides.pop(deps.get_auth_context, None)
 
     assert response.status_code == 403
     assert "GatewayMetricsRead" in response.text

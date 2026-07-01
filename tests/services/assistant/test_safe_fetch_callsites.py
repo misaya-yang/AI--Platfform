@@ -6,15 +6,17 @@ or replaces it with raw httpx silently reopens SSRF — these tests catch that.
 
 We don't re-test ``safe_fetch`` semantics (those are in ``test_safe_fetch.py``);
 we just confirm each wrapper:
-  1. Imports ``safe_fetch`` / ``validate_callback_url`` from the canonical module
+  1. Imports ``safe_fetch`` / ``safe_callback_post`` from the canonical module
   2. Invokes it on the user-controlled URL
   3. Surfaces ``SafeFetchError`` as the wrapper's clean error contract
 """
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from ai_gateway_core.security import SafeFetchError
@@ -79,38 +81,30 @@ async def test_as_image_route_uses_safe_fetch():
 
 
 # ---------------------------------------------------------------------------
-# 4. image callback — validate_callback_url
+# 4. image callback — safe_callback_post
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_image_callback_validates_before_post():
-    """The image-task callback must call validate_callback_url BEFORE POST.
-    A localhost / metadata callback URL has to fail fast, not after the POST
-    has already left the box."""
+    """The image-task callback must use DNS-pinned safe_callback_post.
+
+    A localhost / metadata callback URL has to fail inside the SSRF primitive,
+    not through a raw httpx POST.
+    """
     from ai_gateway_core.image import callback as mod
 
-    # Simulate a hostile callback URL that validate_callback_url rejects.
-    # Patch the imported helper to throw; the callback function must not
-    # invoke httpx at all.
-    fake_post = AsyncMock()
-    fake_client = MagicMock()
-    fake_client.post = fake_post
-
     with patch(
-        "ai_gateway_core.image.callback._get_client",
-        new=AsyncMock(return_value=fake_client),
-    ), patch(
-        "ai_gateway_core.security.validate_callback_url",
+        "ai_gateway_core.security.safe_callback_post",
         side_effect=SafeFetchError("destination rejected: 127.0.0.1"),
-    ):
+    ) as safe_post:
         result = await mod.send_image_callback(
             "http://127.0.0.1/cb",
             {"task_id": "t1", "status": "completed", "images": []},
         )
 
     assert result is False, "must refuse to post to disallowed URL"
-    fake_post.assert_not_awaited(), "must NOT call httpx.post on rejected URL"
+    safe_post.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +118,76 @@ async def test_task_manager_callback_validates_before_post():
     from src.services.task import task_manager as mod
 
     src_text = Path(mod.__file__).read_text() if mod.__file__ else ""
-    assert "validate_callback_url" in src_text, (
-        "task_manager._send_callback must validate callback URLs against "
-        "private-IP allowlist before POST."
+    assert "safe_callback_post" in src_text, (
+        "task_manager._send_callback must use safe_callback_post so callback "
+        "POSTs are DNS-pinned after validation."
     )
-    assert "follow_redirects=False" in src_text, (
-        "The shared callback client must run with follow_redirects=False so "
-        "a 302 from an attacker-controlled host can't escape into the "
-        "private network."
+    assert ".post(task.callback_url" not in src_text, (
+        "task_manager._send_callback must not POST user-controlled callback "
+        "URLs through a raw httpx client."
     )
+
+
+@pytest.mark.asyncio
+async def test_safe_callback_post_rejects_metadata_destination_before_post():
+    from ai_gateway_core.security.safe_fetch import safe_callback_post
+
+    with pytest.raises(SafeFetchError):
+        await safe_callback_post(
+            "http://169.254.169.254/latest/meta-data",
+            json={"task_id": "t1"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_safe_callback_post_uses_dns_pinned_transport_without_redirects(monkeypatch):
+    mod = importlib.import_module("ai_gateway_core.security.safe_fetch")
+
+    captured: dict[str, object] = {}
+
+    class FakeTransport:
+        def __init__(self, host: str, pinned_ip: str):
+            captured["transport_host"] = host
+            captured["transport_ip"] = pinned_ip
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, json: dict):
+            captured["post_url"] = url
+            captured["post_json"] = json
+            return SimpleNamespace(status_code=204)
+
+    monkeypatch.setattr(
+        mod,
+        "is_safe_destination",
+        lambda _host, _port: (True, "93.184.216.34"),
+    )
+    monkeypatch.setattr(mod, "_DNSPinnedTransport", FakeTransport)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = await mod.safe_callback_post(
+        "https://callback.example.test/hook",
+        json={"task_id": "t1"},
+        timeout=3.0,
+    )
+
+    assert response.status_code == 204
+    assert captured["transport_host"] == "callback.example.test"
+    assert captured["transport_ip"] == "93.184.216.34"
+    assert captured["post_url"] == "https://callback.example.test/hook"
+    assert captured["post_json"] == {"task_id": "t1"}
+    client_kwargs = captured["client_kwargs"]
+    assert client_kwargs["transport"].__class__ is FakeTransport
+    assert client_kwargs["timeout"] == 3.0
+    assert client_kwargs["follow_redirects"] is False
 
 
 # ---------------------------------------------------------------------------

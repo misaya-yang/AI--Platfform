@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-
+from typing import Any
 
 EXEC_GW_PATH = (
     Path(__file__).resolve().parents[2]
@@ -53,7 +53,6 @@ def test_require_db_env_blocks_in_memory_only_construction(monkeypatch):
     flag; dev/test do not.
     """
     import pytest
-
     from assistant_service.core.gateway.execution_gateway import (
         AssistantExecutionGateway,
     )
@@ -77,6 +76,53 @@ def test_require_db_env_unset_allows_in_memory_construction(monkeypatch):
     # Should not raise.
     gw = AssistantExecutionGateway(tool_invoker=object(), database=None)
     assert gw.database is None
+
+
+async def test_start_run_does_not_update_memory_when_db_owner_gate_rejects(
+    monkeypatch,
+):
+    """DB path must reject cross-owner upserts before changing the fallback mirror."""
+    import pytest
+    from assistant_service.core.gateway.execution_gateway import (
+        AssistantExecutionGateway,
+        RunRecord,
+    )
+
+    class RejectingDatabase:
+        async def fetchrow(self, _query: str, *_args: Any) -> None:
+            return None
+
+    monkeypatch.delenv("ASSISTANT_REQUIRE_DB", raising=False)
+    gw = AssistantExecutionGateway(tool_invoker=object(), database=RejectingDatabase())
+    gw._runs["run-1"] = RunRecord(
+        run_id="run-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        status="running",
+        engine="gemini",
+        execution_profile="standard",
+        memory_mode="auto",
+        os_agent_enabled=False,
+        request_preview="original",
+    )
+
+    with pytest.raises(PermissionError, match="different owner"):
+        await gw.start_run(
+            run_id="run-1",
+            tenant_id="tenant-b",
+            user_id="user-b",
+            session_id="session-b",
+            engine="gemini",
+            execution_profile="standard",
+            memory_mode="auto",
+            os_agent_enabled=False,
+            request_preview="new",
+        )
+
+    assert gw._runs["run-1"].tenant_id == "tenant-a"
+    assert gw._runs["run-1"].user_id == "user-a"
+    assert gw._runs["run-1"].request_preview == "original"
 
 
 def test_audit_ok_justifications_are_from_the_allowed_set():

@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from assistant_service.core.agent.agent_loop import _redact_trace_text
 
 
 @dataclass
@@ -138,6 +139,24 @@ class FakeToolInvoker:
             metadata=payload.get("metadata", {}) or {},
             output_files=payload.get("output_files", []) or [],
         )
+
+
+def test_streaming_error_redaction_keeps_exception_type_and_redacts_provider_keys() -> None:
+    class EmptyConnectError(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    assert "EmptyConnectError" in _redact_trace_text(EmptyConnectError())
+    redacted = _redact_trace_text(
+        "Incorrect API key provided: sk-fb4d4***********************f34c "
+        "and google key AIzaSyA123456789012345678901234567890"
+    )
+
+    assert "sk-fb4d4" not in redacted
+    assert "f34c" not in redacted
+    assert "AIzaSyA" not in redacted
+    assert "sk-[redacted]" in redacted
+    assert "AIza[redacted]" in redacted
 
 
 class FakeArtifact:
@@ -551,6 +570,7 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
         PermissionMiddleware,
         policy_from_sets,
     )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 
     tool_calls = [
         {
@@ -558,10 +578,13 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
             "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
         }
     ]
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
     model = FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]])
     loop = AgentLoop(
         model_registry=model,
-        tool_invoker=FakeToolInvoker(results_by_name={"generate_image": {"success": True}}),
+        tool_invoker=invoker,
+        execution_gateway=gateway,
     )
     loop.middleware_chain.add(
         PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
@@ -587,6 +610,58 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
     assert approval_payload["tool_name"] == "generate_image"
     assert approval_payload["status"] == "pending"
     assert "super-secret-value" not in json.dumps(approval_payload, default=str)
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_confirm_pause_blocks_run_without_deny_tool_message() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    tool_calls = [
+        {
+            "id": "tc_approval",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    model = FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]])
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=invoker,
+        execution_gateway=gateway,
+    )
+    loop.middleware_chain.add(
+        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
+    )
+    user = MockUserContext(user_id="u1")
+
+    events = []
+    async for ev in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=1),
+        history=[],
+    ):
+        events.append(ev)
+
+    run_id = next(ev.data["run_id"] for ev in events if ev.event_type == "run_started")
+    assert any(ev.event_type == "approval_required" for ev in events)
+    assert not any(ev.event_type == "run_finished" for ev in events)
+    assert invoker.invocation_count == 0
+
+    run = await gateway.get_run(
+        run_id=run_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+    )
+    assert run is not None
+    assert run["status"] == "blocked"
 
 
 @pytest.mark.asyncio

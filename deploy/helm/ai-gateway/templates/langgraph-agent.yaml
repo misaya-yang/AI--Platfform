@@ -49,9 +49,16 @@ spec:
           env:
             # Shared LangGraph env
             {{- range $key, $value := $.Values.langgraph.sharedEnv }}
+            {{- if ne $key "LANGGRAPH_CLOUD_LICENSE_KEY" }}
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- end }}
+            - name: LANGGRAPH_CLOUD_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ai-gateway.fullname" $ }}-secret
+                  key: LANGGRAPH_CLOUD_LICENSE_KEY
             # Database (agent-specific database for isolation)
             - name: POSTGRES_USER
               valueFrom:

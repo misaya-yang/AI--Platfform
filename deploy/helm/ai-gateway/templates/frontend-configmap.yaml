@@ -103,12 +103,6 @@ data:
                 proxy_read_timeout 86400s;
             }
 
-            location = /metrics {
-                proxy_pass http://backend;
-                proxy_http_version 1.1;
-                proxy_set_header Host $host;
-            }
-
             location = /api/health {
                 proxy_pass http://backend/health;
                 proxy_http_version 1.1;

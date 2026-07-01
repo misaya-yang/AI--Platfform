@@ -58,7 +58,7 @@ class TestAuthConfig:
         assert "/health" in config.whitelist_paths
         assert "/health/live" in config.whitelist_paths
         assert "/health/ready" in config.whitelist_paths
-        assert "/metrics" in config.whitelist_paths
+        assert "/metrics" not in config.whitelist_paths
         assert "/docs" in config.whitelist_paths
 
     def test_custom_config(self):
@@ -323,7 +323,7 @@ class TestAuthMiddleware:
 
         # 白名单路径不需要认证
         assert middleware._is_whitelisted("/health") is True
-        assert middleware._is_whitelisted("/metrics") is True
+        assert middleware._is_whitelisted("/metrics") is False
         assert middleware._is_whitelisted("/docs") is True
 
     @pytest.mark.asyncio

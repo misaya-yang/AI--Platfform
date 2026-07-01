@@ -167,6 +167,7 @@ class MetricsRecorder:
         input_tokens: int,
         output_tokens: int,
         model: str = "default",
+        tenant_id: str = "",
     ) -> None:
         """
         Record token usage
@@ -212,10 +213,19 @@ class MetricsRecorder:
             pipe.incrby(cost_key, cost_cents)
             pipe.expire(cost_key, TTL_7D)
 
-            # Per-user token usage
+            # Per-user token usage. Tenant-scoped writes avoid collisions when
+            # two tenants use the same user identifier.
             if user_id:
-                user_input_key = f"metrics:tokens:user:{user_id}:input:{today}"
-                user_output_key = f"metrics:tokens:user:{user_id}:output:{today}"
+                if tenant_id:
+                    user_input_key = (
+                        f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:input:{today}"
+                    )
+                    user_output_key = (
+                        f"metrics:tokens:tenant:{tenant_id}:user:{user_id}:output:{today}"
+                    )
+                else:
+                    user_input_key = f"metrics:tokens:user:{user_id}:input:{today}"
+                    user_output_key = f"metrics:tokens:user:{user_id}:output:{today}"
                 pipe.incrby(user_input_key, input_tokens)
                 pipe.expire(user_input_key, TTL_7D)
                 pipe.incrby(user_output_key, output_tokens)
@@ -243,6 +253,7 @@ class MetricsRecorder:
         status: str = "success",
         input_tokens: int = 0,
         output_tokens: int = 0,
+        tenant_id: str = "",
     ) -> None:
         """
         Record a LangGraph run execution
@@ -254,6 +265,7 @@ class MetricsRecorder:
             status: Run status (success, error, cancelled)
             input_tokens: Input tokens used
             output_tokens: Output tokens used
+            tenant_id: Tenant ID for tenant-scoped per-user counters
         """
         if not self.redis or not self.redis._client:
             return
@@ -301,6 +313,7 @@ class MetricsRecorder:
                     service_id=assistant_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    tenant_id=tenant_id,
                 )
 
         except Exception as e:

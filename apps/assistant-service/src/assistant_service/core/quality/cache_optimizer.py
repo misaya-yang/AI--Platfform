@@ -244,13 +244,6 @@ def normalize_provider_cache_usage(
         if parsed is not None:
             result[target_key] = max(result.get(target_key, 0), parsed)
 
-    for source_key, value in response_usage.items():
-        if source_key in aliases or isinstance(value, (dict, list)):
-            continue
-        parsed = _safe_int(value)
-        if parsed is not None:
-            result[str(source_key)] = max(result.get(str(source_key), 0), parsed)
-
     for detail_key in ("prompt_tokens_details", "input_tokens_details"):
         details = response_usage.get(detail_key)
         if not isinstance(details, dict):
