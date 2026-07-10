@@ -15,6 +15,7 @@ class FakeEvalRepository:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.examples: list[dict[str, Any]] = []
+        self.created_label_override: str | None = None
         self.evaluator = {
             "evaluator_id": "eval-1",
             "name": "latency",
@@ -76,6 +77,7 @@ class FakeEvalRepository:
         return {
             "score_id": "score-1",
             "numeric_value": kwargs["payload"]["numeric_value"],
+            "label": self.created_label_override or kwargs["payload"].get("label"),
         }
 
 
@@ -670,6 +672,99 @@ async def test_ragas_evaluator_requires_configured_client() -> None:
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     assert score_calls[0][1]["payload"]["label"] == "review"
     assert "not configured" in score_calls[0][1]["payload"]["explanation"]
+
+
+def _configure_ragas_trace(repo: FakeEvalRepository) -> None:
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.trace_detail["trace"]["trace_family"] = "rag"
+    repo.trace_detail["spans"] = [
+        {
+            "span_kind": "retriever",
+            "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
+        }
+    ]
+
+
+@pytest.mark.parametrize("invalid_score", [float("nan"), float("inf"), -0.1, 1.1])
+@pytest.mark.asyncio
+async def test_ragas_evaluator_rejects_non_finite_and_out_of_range_scores(
+    invalid_score: float,
+) -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": invalid_score,
+                "explanation": "invalid",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-invalid", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "review"
+    assert score_calls[0][1]["payload"]["numeric_value"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_pass_count_uses_created_score_label() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.created_label_override = "fail"
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.95,
+                "explanation": "requested pass but persisted fail",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-created-label", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.metrics["pass_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_summary_excludes_created_review_scores_from_valid_aggregate() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.created_label_override = "review"
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.95,
+                "explanation": "persisted for review",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-review-summary", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.scores_written == 1
+    assert result.score_summary["average_score"] == 0.0
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["review_count"] == 1
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -177,27 +178,30 @@ def _run_eval_golden(group: dict[str, Any], repo_root: Path) -> dict[str, Any]:
                 "stderr_tail": proc_v.stderr.strip()[-500:],
             }
         # Step 2: gate
-        output_json = "reports/eval-regression/latest.json"
-        output_md = "reports/eval-regression/latest.md"
-        gate_cmd = [
-            "uv",
-            "run",
-            "python",
-            "scripts/eval_golden.py",
-            "gate",
-            golden_path,
-            "--output",
-            output_json,
-            "--markdown",
-            output_md,
-        ]
-        proc_g = subprocess.run(
-            gate_cmd,
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        with TemporaryDirectory(prefix="assistant-eval-golden-") as report_dir:
+            output_json = str(Path(report_dir) / "latest.json")
+            output_md = str(Path(report_dir) / "latest.md")
+            gate_cmd = [
+                "uv",
+                "run",
+                "python",
+                "scripts/eval_golden.py",
+                "gate",
+                golden_path,
+                "--observations",
+                "tests/fixtures/eval/observations/assistant_regression_v1.jsonl",
+                "--output",
+                output_json,
+                "--markdown",
+                output_md,
+            ]
+            proc_g = subprocess.run(
+                gate_cmd,
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         elapsed = round(time.monotonic() - started, 2)
         passed = proc_g.returncode == 0
         # Try to parse the gate result for richer data
@@ -348,7 +352,6 @@ def write_reports(gate_result: dict[str, Any], json_path: Path, md_path: Path) -
         "1. The user explicitly waives the specific group.",
         "2. The failure root cause is documented in this report.",
         "3. Remaining evidence still proves the affected feature-oracle item.",
-        "",
     ])
     md_path.write_text("\n".join(lines) + "\n")
 
@@ -375,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="reports/assistant-runtime-regression/latest.md",
         help="Markdown report output path.",
     )
+    gate.add_argument(
+        "--no-write",
+        action="store_true",
+        help="Print the gate result without writing JSON or Markdown reports.",
+    )
     gate.set_defaults(func=cmd_gate)
 
     summary = sub.add_parser("summary", help="Print gate configuration summary.")
@@ -386,7 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
 def cmd_gate(args: argparse.Namespace) -> int:
     repo_root = Path.cwd()
     gate_result = run_gate(repo_root)
-    write_reports(gate_result, Path(args.output), Path(args.markdown))
+    if not args.no_write:
+        write_reports(gate_result, Path(args.output), Path(args.markdown))
     print(json.dumps(gate_result, indent=2, sort_keys=True))
     return 0 if gate_result["status"] == "pass" else 1
 

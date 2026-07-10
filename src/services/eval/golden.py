@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
+
+from ai_gateway_core.security import redact_trace_text
 
 DEFAULT_GATE_THRESHOLDS = {
     "overall_score": 0.85,
@@ -12,11 +13,13 @@ DEFAULT_GATE_THRESHOLDS = {
     "baseline_tolerance": 0.02,
 }
 
-SENSITIVE_PATTERNS = [
-    re.compile(r"authorization\s*[:=]\s*bearer\s+[a-z0-9._\-]+", re.IGNORECASE),
-    re.compile(r"\bcookie\s*[:=]\s*[^,\s]+", re.IGNORECASE),
-    re.compile(r"\b(api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*[^,\s]+", re.IGNORECASE),
-]
+SUPPORTED_ASSERTIONS = {
+    "output_contains",
+    "required_span_kind",
+    "no_sensitive_output",
+    "latency_ms_lt",
+    "failure_mode_absent",
+}
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -35,6 +38,54 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_observations(path: str | Path) -> dict[str, dict[str, Any]]:
+    observations: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(load_jsonl(path), start=1):
+        case_id = row.get("case_id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError(f"Observation at line {index} must have a non-empty case_id")
+        if case_id in observations:
+            raise ValueError(f"Duplicate observation case_id {case_id!r}")
+        replay = row.get("replay")
+        if not isinstance(replay, dict) or not replay:
+            raise ValueError(f"Observation {case_id!r} must have a non-empty replay object")
+        observations[case_id] = replay
+    return observations
+
+
+def validate_observations(
+    cases: list[dict[str, Any]],
+    observations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    case_ids = {
+        str(case.get("case_id"))
+        for case in cases
+        if isinstance(case.get("case_id"), str) and case.get("case_id")
+    }
+    observation_ids = set(observations)
+    errors: list[dict[str, Any]] = []
+    for case_id in sorted(case_ids - observation_ids):
+        errors.append({"case_id": case_id, "errors": ["missing replay observation"]})
+    for case_id in sorted(observation_ids - case_ids):
+        errors.append({"case_id": case_id, "errors": ["observation has no expectation"]})
+    for case_id in sorted(case_ids & observation_ids):
+        replay = observations.get(case_id)
+        replay_errors: list[str] = []
+        if not isinstance(replay, dict) or not replay:
+            replay_errors.append("replay observation must be a non-empty object")
+        elif not isinstance(replay.get("status"), str) or not replay.get("status"):
+            replay_errors.append("replay observation must have a non-empty status")
+        if replay_errors:
+            errors.append({"case_id": case_id, "errors": replay_errors})
+    return {
+        "valid": not errors,
+        "case_count": len(case_ids),
+        "observation_count": len(observation_ids),
+        "joined_count": len(case_ids & observation_ids),
+        "errors": errors,
+    }
+
+
 def validate_case(case: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     for key in ("case_id", "input", "expected_output", "expected_trajectory", "assertions", "metadata"):
@@ -45,8 +96,23 @@ def validate_case(case: dict[str, Any]) -> list[str]:
     for key in ("input", "expected_output", "expected_trajectory", "metadata"):
         if key in case and not isinstance(case.get(key), dict):
             errors.append(f"{key} must be an object")
+    expected_trajectory = case.get("expected_trajectory")
+    if (
+        isinstance(expected_trajectory, dict)
+        and "runtime" in expected_trajectory
+        and not isinstance(expected_trajectory.get("runtime"), dict)
+    ):
+        errors.append("expected_trajectory.runtime must be an object")
     if "assertions" in case and not isinstance(case.get("assertions"), list):
         errors.append("assertions must be a list")
+    elif isinstance(case.get("assertions"), list):
+        for index, assertion in enumerate(case["assertions"], start=1):
+            if not isinstance(assertion, dict):
+                errors.append(f"assertions[{index}] must be an object")
+                continue
+            assertion_type = assertion.get("type")
+            if assertion_type not in SUPPORTED_ASSERTIONS:
+                errors.append(f"assertions[{index}] has unsupported type {assertion_type!r}")
     split = case.get("split", "regression")
     if not isinstance(split, str) or not split:
         errors.append("split must be a non-empty string")
@@ -97,7 +163,7 @@ def summarize_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _contains_sensitive(value: Any) -> bool:
     text = json.dumps(value, ensure_ascii=False, sort_keys=True) if not isinstance(value, str) else value
-    return any(pattern.search(text) for pattern in SENSITIVE_PATTERNS)
+    return redact_trace_text(text) != text
 
 
 def _case_replay(case: dict[str, Any]) -> dict[str, Any]:
@@ -106,11 +172,109 @@ def _case_replay(case: dict[str, Any]) -> dict[str, Any]:
     return replay
 
 
-def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
-    replay = _case_replay(case)
+def _failed_case_result(case: dict[str, Any], failure: str) -> dict[str, Any]:
+    metadata = case.get("metadata") if isinstance(case.get("metadata"), dict) else {}
+    return {
+        "case_id": case.get("case_id"),
+        "score": 0.0,
+        "passed": False,
+        "critical": metadata.get("critical") is True,
+        "trajectory_pass": False,
+        "failures": [failure],
+    }
+
+
+def _evaluate_assertions(assertions: list[Any], replay: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
     output = str(replay.get("output_preview") or "")
     spans = replay.get("span_kinds") if isinstance(replay.get("span_kinds"), list) else []
-    status = str(replay.get("status") or "succeeded")
+    for assertion in assertions:
+        if not isinstance(assertion, dict):
+            failures.append("invalid assertion")
+            continue
+        assertion_type = str(assertion.get("type") or "")
+        value = assertion.get("value")
+        if assertion_type == "output_contains":
+            needle = str(value or "").strip()
+            if not needle or needle.lower() not in output.lower():
+                failures.append(f"output_contains missing {needle!r}")
+        elif assertion_type == "required_span_kind":
+            span_kind = str(value or "").strip()
+            if not span_kind or span_kind not in spans:
+                failures.append(f"required_span_kind missing {span_kind!r}")
+        elif assertion_type == "no_sensitive_output":
+            if _contains_sensitive(replay):
+                failures.append("no_sensitive_output detected sensitive replay payload")
+        elif assertion_type == "latency_ms_lt":
+            try:
+                limit = int(value)
+                actual = int(replay.get("total_latency_ms"))
+            except (TypeError, ValueError):
+                failures.append("latency_ms_lt requires numeric evidence")
+            else:
+                if actual >= limit:
+                    failures.append(f"latency_ms_lt {actual} >= {limit}")
+        elif assertion_type == "failure_mode_absent":
+            expected_absent = str(value or "").strip()
+            observed_modes: list[Any] = []
+            evidence_present = False
+            plural_modes = replay.get("failure_modes")
+            if isinstance(plural_modes, list):
+                observed_modes.extend(plural_modes)
+                evidence_present = True
+            scalar_mode = replay.get("failure_mode")
+            if isinstance(scalar_mode, str) and scalar_mode.strip():
+                observed_modes.append(scalar_mode)
+                evidence_present = True
+            if not evidence_present:
+                failures.append("failure_mode_absent missing evidence")
+            elif expected_absent and expected_absent in observed_modes:
+                failures.append(f"failure_mode_absent observed {expected_absent!r}")
+        else:
+            failures.append(f"unsupported assertion type {assertion_type!r}")
+    return failures
+
+
+def _evaluate_runtime_expectations(case: dict[str, Any], replay: dict[str, Any]) -> list[str]:
+    expected_trajectory = (
+        case.get("expected_trajectory") if isinstance(case.get("expected_trajectory"), dict) else {}
+    )
+    runtime = (
+        expected_trajectory.get("runtime")
+        if isinstance(expected_trajectory.get("runtime"), dict)
+        else {}
+    )
+    failures: list[str] = []
+    for key, expected in runtime.items():
+        if key == "expected_exit_reason":
+            actual = replay.get("exit_reason")
+            if actual != expected:
+                failures.append(f"expected_exit_reason expected {expected!r}, got {actual!r}")
+        elif key == "requires_gateway_decision":
+            if expected is True and not replay.get("gateway_decision"):
+                failures.append("requires_gateway_decision missing gateway_decision")
+        elif key == "requires_arguments_hash":
+            if expected is True and replay.get("arguments_hash_present") is not True:
+                failures.append("requires_arguments_hash missing arguments_hash_present")
+        elif key == "requires_sandbox_profile":
+            actual = replay.get("sandbox_profile")
+            if actual != expected:
+                failures.append(f"requires_sandbox_profile expected {expected!r}, got {actual!r}")
+        elif replay.get(key) != expected:
+            failures.append(f"{key} expected {expected!r}, got {replay.get(key)!r}")
+    return failures
+
+
+def evaluate_case(
+    case: dict[str, Any],
+    observation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    replay = observation if isinstance(observation, dict) else _case_replay(case)
+    if not replay:
+        return _failed_case_result(case, "missing replay observation")
+    output = str(replay.get("output_preview") or "")
+    spans = replay.get("span_kinds") if isinstance(replay.get("span_kinds"), list) else []
+    status = str(replay.get("status") or "")
     expected_output = case.get("expected_output") if isinstance(case.get("expected_output"), dict) else {}
     expected_trajectory = (
         case.get("expected_trajectory") if isinstance(case.get("expected_trajectory"), dict) else {}
@@ -123,8 +287,13 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
         if isinstance(item, str) and item
     ]
 
-    failures: list[str] = []
-    if status != "succeeded":
+    assertions = case.get("assertions") if isinstance(case.get("assertions"), list) else []
+    failures = _evaluate_assertions(assertions, replay)
+    runtime_failures = _evaluate_runtime_expectations(case, replay)
+    failures.extend(runtime_failures)
+    if not status:
+        failures.append("missing replay status")
+    elif status != "succeeded":
         failures.append(f"status={status}")
     if required_text and required_text.lower() not in output.lower():
         failures.append(f"missing expected text {required_text!r}")
@@ -134,14 +303,8 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     if _contains_sensitive(replay):
         failures.append("sensitive replay payload")
 
-    trajectory_pass = not missing_spans
-    score_components = [
-        1.0 if status == "succeeded" else 0.0,
-        1.0 if not required_text or required_text.lower() in output.lower() else 0.0,
-        1.0 if trajectory_pass else 0.0,
-        0.0 if _contains_sensitive(replay) else 1.0,
-    ]
-    score = sum(score_components) / len(score_components)
+    trajectory_pass = not missing_spans and not runtime_failures
+    score = 1.0 if not failures else 0.0
     return {
         "case_id": case.get("case_id"),
         "score": round(score, 4),
@@ -152,8 +315,16 @@ def evaluate_case(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    case_results = [evaluate_case(case) for case in cases]
+def evaluate_cases(
+    cases: list[dict[str, Any]],
+    observations: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    case_results = [
+        evaluate_case(case, observations.get(str(case.get("case_id")), {}))
+        if observations is not None
+        else evaluate_case(case)
+        for case in cases
+    ]
     total = len(case_results)
     if total == 0:
         return {
@@ -187,9 +358,15 @@ def apply_gate(
 ) -> dict[str, Any]:
     gate_thresholds = {**DEFAULT_GATE_THRESHOLDS, **(thresholds or {})}
     failures: list[str] = []
-    overall_score = float(metrics.get("overall_score") or metrics.get("average_score") or 0.0)
+    overall_score_value = metrics.get("overall_score")
+    if overall_score_value is None:
+        overall_score_value = metrics.get("average_score")
+    overall_score = float(overall_score_value or 0.0)
     trajectory_pass_rate = float(metrics.get("trajectory_pass_rate") or 0.0)
-    critical_pass_rate = float(metrics.get("critical_pass_rate") or metrics.get("pass_rate") or 0.0)
+    critical_pass_rate_value = metrics.get("critical_pass_rate")
+    if critical_pass_rate_value is None:
+        critical_pass_rate_value = metrics.get("pass_rate")
+    critical_pass_rate = float(critical_pass_rate_value or 0.0)
 
     if overall_score < gate_thresholds["overall_score"]:
         failures.append(f"overall_score {overall_score:.4f} < {gate_thresholds['overall_score']:.4f}")
@@ -202,9 +379,10 @@ def apply_gate(
             f"critical_pass_rate {critical_pass_rate:.4f} < {gate_thresholds['critical_pass_rate']:.4f}"
         )
     if baseline_metrics:
-        baseline_score = float(
-            baseline_metrics.get("overall_score") or baseline_metrics.get("average_score") or 0.0
-        )
+        baseline_score_value = baseline_metrics.get("overall_score")
+        if baseline_score_value is None:
+            baseline_score_value = baseline_metrics.get("average_score")
+        baseline_score = float(baseline_score_value or 0.0)
         allowed = baseline_score - gate_thresholds["baseline_tolerance"]
         if overall_score < allowed:
             failures.append(f"candidate score {overall_score:.4f} < baseline tolerance {allowed:.4f}")
@@ -228,6 +406,8 @@ def write_gate_report(result: dict[str, Any], json_path: str | Path, markdown_pa
         "# Eval Regression Gate",
         "",
         f"Status: `{result.get('gate', {}).get('status', 'unknown')}`",
+        f"Evidence scope: `{result.get('evidence_scope', 'unknown')}`",
+        f"Joined observations: `{result.get('observations', {}).get('joined_count', 0)}`",
         f"Cases: `{result.get('summary', {}).get('case_count', 0)}`",
         f"Overall score: `{result.get('metrics', {}).get('overall_score', 0)}`",
         f"Trajectory pass rate: `{result.get('metrics', {}).get('trajectory_pass_rate', 0)}`",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -480,6 +481,7 @@ class EvaluatorExecutor:
             )
 
         scores: list[float] = []
+        created_labels: list[str] = []
         written = 0
         for target in targets:
             llm_context = LlmCompleteContext(
@@ -505,14 +507,23 @@ class EvaluatorExecutor:
                 )
                 if created:
                     written += 1
+                    created_label = str(created.get("label") or "")
+                    created_labels.append(created_label)
                     numeric = created.get("numeric_value")
-                    if isinstance(numeric, int | float):
-                        scores.append(float(numeric))
+                    if (
+                        created_label in {"pass", "fail"}
+                        and isinstance(numeric, int | float)
+                        and not isinstance(numeric, bool)
+                    ):
+                        numeric_score = float(numeric)
+                        if math.isfinite(numeric_score) and 0.0 <= numeric_score <= 1.0:
+                            scores.append(numeric_score)
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
         summary = {
             "average_score": round(avg_score, 4),
-            "scored_count": written,
+            "scored_count": len(scores),
+            "review_count": sum(1 for label in created_labels if label == "review"),
             "target_count": len(targets),
             "evaluator_type": evaluator_type,
             "evaluator_name": evaluator.get("name"),
@@ -520,7 +531,7 @@ class EvaluatorExecutor:
         metrics = {
             "targets": len(targets),
             "scores_written": written,
-            "pass_count": sum(1 for value in scores if value >= 0.8),
+            "pass_count": sum(1 for label in created_labels if label == "pass"),
         }
         await self.repository.update_experiment_run(
             tenant_id=tenant_id,
@@ -868,7 +879,20 @@ class EvaluatorExecutor:
             if not isinstance(item, dict):
                 continue
             metric = str(item.get("metric") or "context_relevancy")
-            score = max(0.0, min(1.0, float(item.get("score") or 0.0)))
+            try:
+                score = float(item.get("score"))
+                if not math.isfinite(score) or score < 0.0 or score > 1.0:
+                    raise ValueError("score must be finite and between 0 and 1")
+            except (TypeError, ValueError) as exc:
+                payloads.append(
+                    self._heuristic_kb_ragas_score(
+                        evaluator,
+                        target,
+                        metric=metric,
+                        explanation=f"KB RAGAS metric payload is invalid: {exc}",
+                    )
+                )
+                continue
             service_label = str(item.get("label") or "")
             if service_label == "review":
                 label = "review"

@@ -11,8 +11,10 @@ from src.services.eval.golden import (
     apply_gate,
     evaluate_cases,
     load_jsonl,
+    load_observations,
     summarize_cases,
     validate_cases,
+    validate_observations,
     write_gate_report,
 )
 
@@ -49,15 +51,53 @@ def cmd_gate(args: argparse.Namespace) -> int:
     cases = _load_valid_cases(args.path)
     if cases is None:
         return 1
-    metrics = evaluate_cases(cases)
-    gate = apply_gate(metrics)
+    observations = None
+    observation_summary: dict[str, Any] = {
+        "source": None,
+        "case_count": len(cases),
+        "observation_count": 0,
+        "joined_count": 0,
+        "errors": [],
+    }
+    evidence_scope = "legacy_inline_replay"
+    if args.observations:
+        observations = load_observations(args.observations)
+        validation = validate_observations(cases, observations)
+        observation_summary = {"source": str(Path(args.observations)), **validation}
+        if not validation["valid"]:
+            _print_json(observation_summary)
+            return 1
+        evidence_scope = "recorded_offline_observation"
+
+    baseline_metrics = None
+    baseline = None
+    if args.baseline_report:
+        baseline_payload = json.loads(Path(args.baseline_report).read_text(encoding="utf-8"))
+        if not isinstance(baseline_payload, dict):
+            raise ValueError("Baseline report must be a JSON object")
+        baseline_metrics = baseline_payload.get("metrics")
+        if not isinstance(baseline_metrics, dict):
+            baseline_gate = baseline_payload.get("gate")
+            baseline_metrics = (
+                baseline_gate.get("metrics") if isinstance(baseline_gate, dict) else None
+            )
+        if not isinstance(baseline_metrics, dict):
+            raise ValueError("Baseline report must contain metrics")
+        baseline = {"source": str(Path(args.baseline_report)), "metrics": baseline_metrics}
+
+    metrics = evaluate_cases(cases, observations)
+    gate = apply_gate(metrics, baseline_metrics=baseline_metrics)
     result = {
         "schema_version": "eval-regression-gate-v1",
         "source": str(Path(args.path)),
+        "evidence_scope": evidence_scope,
+        "observations": observation_summary,
         "summary": summarize_cases(cases),
         "metrics": metrics,
         "gate": gate,
     }
+    if baseline is not None:
+        result["baseline"] = baseline
     write_gate_report(result, args.output, args.markdown)
     _print_json(result)
     return 0 if gate["status"] == "pass" else 1
@@ -104,6 +144,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate = sub.add_parser("gate")
     gate.add_argument("path")
+    gate.add_argument("--observations")
+    gate.add_argument("--baseline-report")
     gate.add_argument("--output", default="reports/eval-regression/latest.json")
     gate.add_argument("--markdown", default="reports/eval-regression/latest.md")
     gate.set_defaults(func=cmd_gate)

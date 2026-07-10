@@ -149,6 +149,14 @@ def test_builds_redacted_dataset_case_from_trace() -> None:
     assert case["metadata"]["tenant_id"] is None
     assert case["expected_trajectory"]["replay"]["trace_family"] == "assistant"
     assert case["expected_trajectory"]["evaluator"]["candidate_gate"] == "evaluate_harness_candidate_gate"
+    assert case["expected_trajectory"]["evaluator"]["required_assertions"] == [
+        "no_sensitive_output",
+        "failure_mode_absent",
+    ]
+    assert case["assertions"] == [
+        {"type": "no_sensitive_output"},
+        {"type": "failure_mode_absent", "value": FAILURE_MODE_APPROVAL_BLOCKED},
+    ]
     runtime = case["expected_trajectory"]["runtime"]
     assert runtime["schema_version"] == "assistant-runtime-trajectory/v1"
     assert runtime["observed_exit_reason"] == "approval_required"

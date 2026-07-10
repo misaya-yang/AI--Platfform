@@ -221,12 +221,12 @@ def build_redacted_dataset_case(
             },
             "evaluator": {
                 "candidate_gate": "evaluate_harness_candidate_gate",
-                "required_assertions": ["no_secret_leak", "failure_mode_regression"],
+                "required_assertions": ["no_sensitive_output", "failure_mode_absent"],
             },
         },
         "assertions": [
-            {"type": "no_secret_leak"},
-            {"type": "failure_mode_regression", "value": resolved.failure_mode},
+            {"type": "no_sensitive_output"},
+            {"type": "failure_mode_absent", "value": resolved.failure_mode},
         ],
         "metadata": {
             **metadata,

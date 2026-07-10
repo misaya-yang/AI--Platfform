@@ -4,9 +4,17 @@ import importlib.util
 import json
 from pathlib import Path
 
-from src.services.eval.golden import apply_gate, evaluate_cases, load_jsonl, validate_cases
+from src.services.eval import golden as golden_module
+from src.services.eval.golden import (
+    apply_gate,
+    evaluate_case,
+    evaluate_cases,
+    load_jsonl,
+    validate_cases,
+)
 
 GOLDEN = Path("tests/fixtures/eval/golden/assistant_regression_v1.jsonl")
+OBSERVATIONS = Path("tests/fixtures/eval/observations/assistant_regression_v1.jsonl")
 
 
 def _load_eval_golden_main():
@@ -20,6 +28,34 @@ def _load_eval_golden_main():
 
 
 eval_golden_main = _load_eval_golden_main()
+
+
+def golden_case(
+    *,
+    assertions: list[dict[str, object]] | None = None,
+    runtime: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "case_id": "assistant.runtime.test",
+        "split": "regression",
+        "input": {"input_preview": "test"},
+        "expected_output": {"contains": "ok"},
+        "expected_trajectory": {
+            "required_span_kinds": [],
+            "runtime": runtime or {},
+        },
+        "assertions": assertions or [{"type": "output_contains", "value": "ok"}],
+        "metadata": {"critical": True},
+    }
+
+
+def replay_observation(**evidence: object) -> dict[str, object]:
+    return {
+        "status": "succeeded",
+        "output_preview": "ok",
+        "span_kinds": [],
+        **evidence,
+    }
 
 
 def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
@@ -43,7 +79,28 @@ def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
     }.issubset(case_ids)
 
 
-def test_offline_gate_passes_seed_fixture_without_model_calls(tmp_path: Path) -> None:
+def test_expectations_do_not_embed_replay_observations() -> None:
+    cases = load_jsonl(GOLDEN)
+
+    assert all("replay" not in case["metadata"] for case in cases)
+
+
+def test_observation_fixture_loads_and_joins_every_expectation() -> None:
+    load_observations = getattr(golden_module, "load_observations", None)
+    validate_observations = getattr(golden_module, "validate_observations", None)
+    assert callable(load_observations)
+    assert callable(validate_observations)
+
+    cases = load_jsonl(GOLDEN)
+    observations = load_observations(OBSERVATIONS)
+    result = validate_observations(cases, observations)
+
+    assert result["valid"] is True
+    assert result["joined_count"] == 16
+    assert len(observations) == 16
+
+
+def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path: Path) -> None:
     output = tmp_path / "latest.json"
     markdown = tmp_path / "latest.md"
 
@@ -51,6 +108,8 @@ def test_offline_gate_passes_seed_fixture_without_model_calls(tmp_path: Path) ->
         [
             "gate",
             str(GOLDEN),
+            "--observations",
+            str(OBSERVATIONS),
             "--output",
             str(output),
             "--markdown",
@@ -62,7 +121,36 @@ def test_offline_gate_passes_seed_fixture_without_model_calls(tmp_path: Path) ->
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["gate"]["status"] == "pass"
     assert payload["metrics"]["overall_score"] >= 0.85
+    assert payload["evidence_scope"] == "recorded_offline_observation"
+    assert payload["observations"]["joined_count"] == 16
     assert "Eval Regression Gate" in markdown.read_text(encoding="utf-8")
+
+
+def test_cli_applies_baseline_report_to_recorded_observations(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.json"
+    output = tmp_path / "latest.json"
+    markdown = tmp_path / "latest.md"
+    baseline.write_text(json.dumps({"metrics": {"overall_score": 1.03}}), encoding="utf-8")
+
+    exit_code = eval_golden_main(
+        [
+            "gate",
+            str(GOLDEN),
+            "--observations",
+            str(OBSERVATIONS),
+            "--baseline-report",
+            str(baseline),
+            "--output",
+            str(output),
+            "--markdown",
+            str(markdown),
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["baseline"]["source"] == str(baseline)
+    assert any("baseline tolerance" in failure for failure in payload["gate"]["failures"])
 
 
 def test_gate_fails_low_quality_metrics() -> None:
@@ -102,3 +190,113 @@ def test_golden_redaction_regression_is_a_failure() -> None:
     assert metrics["critical_pass_rate"] == 0.0
     assert metrics["cases"][0]["passed"] is False
     assert "sensitive replay payload" in metrics["cases"][0]["failures"]
+
+
+def test_runtime_and_latency_mismatches_fail() -> None:
+    case = golden_case(
+        assertions=[{"type": "latency_ms_lt", "value": 100}],
+        runtime={"expected_exit_reason": "approval_denied", "memory_sync": "skipped"},
+    )
+    observation = replay_observation(
+        total_latency_ms=101,
+        exit_reason="succeeded",
+        memory_sync="written",
+    )
+    result = evaluate_case(case, observation)
+
+    assert result["passed"] is False
+    assert result["trajectory_pass"] is False
+    assert "latency_ms_lt" in " ".join(result["failures"])
+    assert "expected_exit_reason" in " ".join(result["failures"])
+    metrics = evaluate_cases([case], {str(case["case_id"]): observation})
+    assert metrics["trajectory_pass_rate"] == 0.0
+
+
+def test_unknown_assertion_and_missing_observation_fail_closed() -> None:
+    case = golden_case(assertions=[{"type": "unknown_rule"}])
+    assert validate_cases([case])["valid"] is False
+    result = evaluate_case(golden_case(), None)
+    assert result["passed"] is False
+    assert "missing replay observation" in result["failures"]
+
+
+def test_zero_critical_rate_is_not_replaced_by_pass_rate() -> None:
+    gate = apply_gate(
+        {
+            "overall_score": 1.0,
+            "pass_rate": 1.0,
+            "trajectory_pass_rate": 1.0,
+            "critical_pass_rate": 0.0,
+        }
+    )
+
+    assert gate["status"] == "fail"
+
+
+def test_failure_mode_absent_requires_explicit_evidence() -> None:
+    case = golden_case(assertions=[{"type": "failure_mode_absent", "value": "tool_error"}])
+
+    missing = evaluate_case(case, replay_observation())
+    empty_scalar = evaluate_case(case, replay_observation(failure_mode=""))
+
+    assert missing["passed"] is False
+    assert empty_scalar["passed"] is False
+    assert "failure_mode_absent missing evidence" in missing["failures"]
+    assert "failure_mode_absent missing evidence" in empty_scalar["failures"]
+
+
+def test_failure_mode_absent_accepts_explicit_empty_or_non_matching_evidence() -> None:
+    case = golden_case(assertions=[{"type": "failure_mode_absent", "value": "tool_error"}])
+
+    explicit_empty = evaluate_case(case, replay_observation(failure_modes=[]))
+    non_matching_list = evaluate_case(
+        case,
+        replay_observation(failure_modes=["latency_regression"]),
+    )
+    non_matching_scalar = evaluate_case(
+        case,
+        replay_observation(failure_mode="latency_regression"),
+    )
+
+    assert explicit_empty["passed"] is True
+    assert non_matching_list["passed"] is True
+    assert non_matching_scalar["passed"] is True
+
+
+def test_validate_case_rejects_non_object_runtime_expectations() -> None:
+    case = golden_case()
+    case["expected_trajectory"]["runtime"] = "not-an-object"  # type: ignore[index]
+
+    validation = validate_cases([case])
+
+    assert validation["valid"] is False
+    assert "expected_trajectory.runtime must be an object" in validation["errors"][0]["errors"]
+
+
+def test_explicit_zero_baseline_score_is_not_replaced_by_average_score() -> None:
+    gate = apply_gate(
+        {
+            "overall_score": 0.97,
+            "trajectory_pass_rate": 1.0,
+            "critical_pass_rate": 1.0,
+        },
+        baseline_metrics={"overall_score": 0.0, "average_score": 1.0},
+    )
+
+    assert gate["status"] == "pass"
+    assert not any("baseline tolerance" in failure for failure in gate["failures"])
+
+
+def test_external_observation_wins_over_conflicting_inline_replay() -> None:
+    case = golden_case()
+    case["metadata"]["replay"] = replay_observation()  # type: ignore[index]
+    external = {
+        "status": "failed",
+        "output_preview": "not ok",
+        "span_kinds": [],
+    }
+
+    result = evaluate_case(case, external)
+
+    assert result["passed"] is False
+    assert "status=failed" in result["failures"]

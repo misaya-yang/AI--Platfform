@@ -935,7 +935,7 @@ class AgentTraceRepository(BaseRepository):
             FROM eval_experiment_runs
             WHERE tenant_id = $1
               AND evaluator_id = $2::uuid
-              AND status IN ('queued', 'running', 'succeeded')
+              AND status IN ('queued', 'running')
               AND target_snapshot->>'trace_id' = $3
             LIMIT 1
             """,
@@ -1645,14 +1645,14 @@ class AgentTraceRepository(BaseRepository):
             SELECT
                 COUNT(DISTINCT t.trace_id)::int AS rag_traces,
                 COUNT(DISTINCT CASE
-                    WHEN s.score_source = 'kb_ragas' AND COALESCE(s.label, '') <> 'review'
+                    WHEN s.score_source = 'kb_ragas' AND s.label IN ('pass', 'fail')
                     THEN t.trace_id
                 END)::int AS ragas_scored_traces
             FROM agent_traces t
             LEFT JOIN agent_trace_scores s
-                ON s.trace_id = t.trace_id
+               ON s.trace_id = t.trace_id
                AND s.score_source = 'kb_ragas'
-               AND COALESCE(s.label, '') <> 'review'
+               AND s.label IN ('pass', 'fail')
             WHERE {trace_where}
             """,
             *params,
@@ -1662,8 +1662,11 @@ class AgentTraceRepository(BaseRepository):
             f"""
             SELECT
                 s.score_name AS metric,
-                COALESCE(AVG(s.numeric_value), 0)::float AS average_score,
-                COUNT(*)::int AS scored_count,
+                COALESCE(
+                    AVG(s.numeric_value) FILTER (WHERE s.label IN ('pass', 'fail')),
+                    0
+                )::float AS average_score,
+                COUNT(*) FILTER (WHERE s.label IN ('pass', 'fail'))::int AS scored_count,
                 COUNT(*) FILTER (WHERE s.label = 'pass')::int AS pass_count,
                 COUNT(*) FILTER (WHERE s.label = 'fail')::int AS fail_count,
                 COUNT(*) FILTER (WHERE s.label = 'review')::int AS review_count
@@ -1712,7 +1715,7 @@ class AgentTraceRepository(BaseRepository):
             "s.trace_id = $2::uuid",
             "t.tenant_id = $1",
             "s.score_source = 'kb_ragas'",
-            "COALESCE(s.label, '') <> 'review'",
+            "s.label IN ('pass', 'fail')",
         ]
         if evaluator_id:
             params.append(evaluator_id)
