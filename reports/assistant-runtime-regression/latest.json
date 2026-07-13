@@ -1,43 +1,43 @@
 {
   "groups": [
     {
-      "elapsed_seconds": 1.01,
+      "elapsed_seconds": 1.19,
       "exit_code": 0,
       "id": "ahr-01-turn-contract",
       "label": "Entry Session And Turn Contract",
       "passed": true,
       "phase": "AHR-01",
-      "summary_line": "======================== 21 passed, 1 warning in 0.40s ========================="
+      "summary_line": "======================== 26 passed, 1 warning in 0.43s ========================="
     },
     {
-      "elapsed_seconds": 0.97,
+      "elapsed_seconds": 0.94,
       "exit_code": 0,
       "id": "ahr-02-memory-lifecycle",
       "label": "Memory Context And Compaction Lineage",
       "passed": true,
       "phase": "AHR-02",
-      "summary_line": "======================== 77 passed, 1 warning in 0.42s ========================="
+      "summary_line": "======================== 77 passed, 1 warning in 0.39s ========================="
     },
     {
-      "elapsed_seconds": 0.92,
+      "elapsed_seconds": 0.89,
       "exit_code": 0,
       "id": "ahr-03-tool-safety",
       "label": "Tool Permission And Runtime Safety",
       "passed": true,
       "phase": "AHR-03",
-      "summary_line": "========================= 7 passed, 1 warning in 0.37s ========================="
+      "summary_line": "========================= 7 passed, 1 warning in 0.35s ========================="
     },
     {
-      "elapsed_seconds": 2.94,
+      "elapsed_seconds": 2.9,
       "exit_code": 0,
       "id": "ahr-04-trace-eval",
       "label": "Observability Eval And Regression Cockpit",
       "passed": true,
       "phase": "AHR-04",
-      "summary_line": "======================= 58 passed, 13 warnings in 2.17s ========================"
+      "summary_line": "======================= 81 passed, 13 warnings in 2.14s ========================"
     },
     {
-      "elapsed_seconds": 0.63,
+      "elapsed_seconds": 0.59,
       "exit_code": 0,
       "id": "ahr-04-golden-gate",
       "label": "Eval Golden Regression Gate",
@@ -66,8 +66,8 @@
   "summary": {
     "failed": 0,
     "passed": 5,
-    "total_elapsed_seconds": 6.47,
+    "total_elapsed_seconds": 6.51,
     "total_groups": 5
   },
-  "timestamp": "2026-07-01T06:58:28.162297+00:00"
+  "timestamp": "2026-07-13T08:57:11.960902+00:00"
 }

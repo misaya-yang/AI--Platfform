@@ -1,8 +1,8 @@
 # Assistant Runtime Regression Gate — PASS
 
 **Status:** pass
-**Timestamp:** 2026-07-01T06:58:28.162297+00:00
-**Total elapsed:** 6.47s
+**Timestamp:** 2026-07-13T08:57:11.960902+00:00
+**Total elapsed:** 6.51s
 **Groups:** 5/5 passed
 
 ## Phase Summary
@@ -18,11 +18,11 @@
 
 | Group | Phase | Passed | Elapsed | Summary |
 | --- | --- | --- | --- | --- |
-| ahr-01-turn-contract | AHR-01 | pass | 1.01s | ======================== 21 passed, 1 warning in 0.40s ========================= |
-| ahr-02-memory-lifecycle | AHR-02 | pass | 0.97s | ======================== 77 passed, 1 warning in 0.42s ========================= |
-| ahr-03-tool-safety | AHR-03 | pass | 0.92s | ========================= 7 passed, 1 warning in 0.37s ========================= |
-| ahr-04-trace-eval | AHR-04 | pass | 2.94s | ======================= 58 passed, 13 warnings in 2.17s ======================== |
-| ahr-04-golden-gate | AHR-04 | pass | 0.63s | status=pass, pass_rate=1.0, critical_pass_rate=1.0, trajectory_pass_rate=1.0 |
+| ahr-01-turn-contract | AHR-01 | pass | 1.19s | ======================== 26 passed, 1 warning in 0.43s ========================= |
+| ahr-02-memory-lifecycle | AHR-02 | pass | 0.94s | ======================== 77 passed, 1 warning in 0.39s ========================= |
+| ahr-03-tool-safety | AHR-03 | pass | 0.89s | ========================= 7 passed, 1 warning in 0.35s ========================= |
+| ahr-04-trace-eval | AHR-04 | pass | 2.9s | ======================= 81 passed, 13 warnings in 2.14s ======================== |
+| ahr-04-golden-gate | AHR-04 | pass | 0.59s | status=pass, pass_rate=1.0, critical_pass_rate=1.0, trajectory_pass_rate=1.0 |
 
 ## No-Go Thresholds
 
