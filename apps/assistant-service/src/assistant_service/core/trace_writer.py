@@ -398,7 +398,10 @@ class AssistantTraceWriter:
         self.database = database
         self.max_pending = max_pending
         self.write_timeout_s = write_timeout_s
-        self._pending: set[asyncio.Task[None]] = set()
+        self._pending: set[asyncio.Task[str]] = set()
+        self._submission_generation = 0
+        self._pending_submissions: dict[asyncio.Task[str], tuple[int, str]] = {}
+        self._failed_outcomes: dict[str, tuple[int, str]] = {}
         self.dropped_writes = 0
         self.failed_writes = 0
         self.timed_out_writes = 0
@@ -416,7 +419,7 @@ class AssistantTraceWriter:
         }
 
     def start_trace(self, ctx: AssistantTraceContext) -> bool:
-        return self._submit(self._start_trace(ctx))
+        return self._submit(self._start_trace(ctx), trace_id=ctx.trace_id)
 
     def record_event(
         self,
@@ -436,7 +439,8 @@ class AssistantTraceWriter:
                 payload=payload,
                 phase=phase,
                 occurred_at=occurred_at,
-            )
+            ),
+            trace_id=ctx.trace_id,
         )
 
     def record_span(
@@ -469,7 +473,8 @@ class AssistantTraceWriter:
                 output_preview=output_preview,
                 attributes=attributes or {},
                 error_message=error_message,
-            )
+            ),
+            trace_id=ctx.trace_id,
         )
 
     def finish_trace(
@@ -496,53 +501,165 @@ class AssistantTraceWriter:
                 terminal_event_type=terminal_event_type,
                 terminal_sequence_no=terminal_sequence_no,
                 terminal_envelope=terminal_envelope,
-            )
+            ),
+            trace_id=ctx.trace_id,
         )
 
-    async def drain(self, *, timeout_s: float = 1.0) -> None:
-        if not self._pending:
+    async def drain(
+        self,
+        *,
+        timeout_s: float = 1.0,
+        strict: bool = False,
+        trace_id: str | None = None,
+    ) -> None:
+        barrier_generation = self._submission_generation
+        pending_snapshot = tuple(
+            task
+            for task, (generation, pending_trace_id) in self._pending_submissions.items()
+            if generation <= barrier_generation
+            and (trace_id is None or pending_trace_id == trace_id)
+        )
+        done: set[asyncio.Task[str]] = set()
+        pending: set[asyncio.Task[str]] = set()
+        if pending_snapshot:
+            done, pending = await asyncio.wait(pending_snapshot, timeout=timeout_s)
+            for task in done:
+                self._finalize_task_outcome(task)
+        if not strict:
             return
-        await asyncio.wait(tuple(self._pending), timeout=timeout_s)
+        if pending:
+            raise TimeoutError("assistant trace persistence barrier timed out")
+        barrier_outcomes = [
+            outcome
+            for outcome_trace_id, (generation, outcome) in self._failed_outcomes.items()
+            if generation <= barrier_generation
+            and (trace_id is None or outcome_trace_id == trace_id)
+        ]
+        if "timed_out" in barrier_outcomes:
+            raise TimeoutError("assistant trace persistence barrier timed out")
+        if barrier_outcomes:
+            raise RuntimeError("assistant trace persistence barrier failed")
 
-    def _submit(self, coro: Coroutine[Any, Any, None]) -> bool:
-        if not self.database or not hasattr(self.database, "execute"):
+    async def resume_sequence(self, ctx: AssistantTraceContext) -> int:
+        if self.database is None:
+            return 0
+        await self.drain(
+            timeout_s=self.write_timeout_s,
+            strict=True,
+            trace_id=ctx.trace_id,
+        )
+        if not hasattr(self.database, "fetchrow"):
+            raise RuntimeError("trace resume sequence lookup is unavailable")
+        row = await self.database.fetchrow(
+            """
+            SELECT COALESCE(MAX(sequence_no), 0)::int AS max_sequence_no
+            FROM (
+                SELECT sequence_no
+                FROM agent_trace_events
+                WHERE trace_id = $1
+                UNION ALL
+                SELECT sequence_no
+                FROM agent_trace_spans
+                WHERE trace_id = $1
+            ) persisted_sequences;
+            """,
+            ctx.trace_id,
+        )
+        if not row:
+            return 0
+        try:
+            return max(0, int(row.get("max_sequence_no") or 0))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError("trace resume sequence lookup returned invalid data") from exc
+
+    def _submit(self, coro: Coroutine[Any, Any, None], *, trace_id: str) -> bool:
+        self._submission_generation += 1
+        generation = self._submission_generation
+        if self.database is None:
+            self._close_coro(coro)
+            return False
+        if not hasattr(self.database, "execute"):
+            self._record_failed_outcome(
+                trace_id=trace_id,
+                generation=generation,
+                outcome="rejected",
+            )
             self._close_coro(coro)
             return False
         if self.max_pending <= 0 or len(self._pending) >= self.max_pending:
             self.dropped_writes += 1
+            self._record_failed_outcome(
+                trace_id=trace_id,
+                generation=generation,
+                outcome="dropped",
+            )
             self._close_coro(coro)
             return False
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             self.dropped_writes += 1
+            self._record_failed_outcome(
+                trace_id=trace_id,
+                generation=generation,
+                outcome="dropped",
+            )
             self._close_coro(coro)
             return False
 
         task = loop.create_task(self._run(coro))
         self._pending.add(task)
+        self._pending_submissions[task] = (generation, trace_id)
 
-        def _done(done_task: asyncio.Task[None]) -> None:
-            self._pending.discard(done_task)
-            if done_task.cancelled():
-                return
-            with contextlib.suppress(Exception):
-                exc = done_task.exception()
-                if exc is not None:
-                    logger.warning("Assistant trace write task failed: %s", exc)
+        def _done(done_task: asyncio.Task[str]) -> None:
+            self._finalize_task_outcome(done_task)
 
         task.add_done_callback(_done)
         return True
 
-    async def _run(self, coro: Coroutine[Any, Any, None]) -> None:
+    def _finalize_task_outcome(self, task: asyncio.Task[str]) -> None:
+        submission = self._pending_submissions.pop(task, None)
+        self._pending.discard(task)
+        if submission is None:
+            return
+        generation, trace_id = submission
+        if task.cancelled():
+            outcome = "cancelled"
+        else:
+            try:
+                outcome = task.result()
+            except Exception:  # noqa: BLE001 - persist only a generic failed outcome.
+                outcome = "failed"
+        if outcome != "succeeded":
+            self._record_failed_outcome(
+                trace_id=trace_id,
+                generation=generation,
+                outcome=outcome,
+            )
+
+    def _record_failed_outcome(
+        self,
+        *,
+        trace_id: str,
+        generation: int,
+        outcome: str,
+    ) -> None:
+        previous = self._failed_outcomes.get(trace_id)
+        if previous is None or generation < previous[0]:
+            self._failed_outcomes[trace_id] = (generation, outcome)
+
+    async def _run(self, coro: Coroutine[Any, Any, None]) -> str:
         try:
             await asyncio.wait_for(coro, timeout=self.write_timeout_s)
+            return "succeeded"
         except TimeoutError:
             self.timed_out_writes += 1
             logger.warning("Assistant trace write timed out after %.2fs", self.write_timeout_s)
+            return "timed_out"
         except Exception as exc:  # noqa: BLE001 - trace writes are best-effort.
             self.failed_writes += 1
             logger.warning("Assistant trace write failed: %s", _redact_trace_text(exc))
+            return "failed"
 
     def _close_coro(self, coro: Coroutine[Any, Any, None]) -> None:
         with contextlib.suppress(Exception):
@@ -1065,11 +1182,23 @@ class AssistantTraceWriter:
                 parent_span_id=self._lifecycle_parent_id(ctx.trace_id),
             )
             return span_id
-        if event_type in {"tool_call_started", "tool_call_completed", "tool_call_cancelled"}:
+        if event_type in {
+            "tool_call_start",
+            "tool_call_started",
+            "tool_call_result",
+            "tool_call_end",
+            "tool_call_completed",
+            "tool_call_cancelled",
+        }:
             tool_id = str(data.get("tool_id") or data.get("tool_call_id") or "unknown")
             status = "running"
-            if event_type == "tool_call_completed":
-                status = "failed" if data.get("error") else "succeeded"
+            if event_type in {"tool_call_result", "tool_call_end", "tool_call_completed"}:
+                event_status = str(data.get("status") or "").lower()
+                status = (
+                    "failed"
+                    if data.get("error") or event_status in {"error", "failed"}
+                    else "succeeded"
+                )
             elif event_type == "tool_call_cancelled":
                 status = "cancelled"
             span_id = _span_uuid(ctx.trace_id, f"tool:{tool_id}")

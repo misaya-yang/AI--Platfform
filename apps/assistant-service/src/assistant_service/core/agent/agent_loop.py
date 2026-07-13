@@ -1382,6 +1382,26 @@ class AgentLoop:
                 )
                 return
             ctx.run_id = requested_run_id
+            try:
+                if self.trace_writer is not None:
+                    if not hasattr(self.trace_writer, "resume_sequence"):
+                        raise RuntimeError("trace resume sequence lookup is unavailable")
+                    ctx.trace_sequence_no = await self.trace_writer.resume_sequence(
+                        self._trace_context(ctx)
+                    )
+            except Exception as exc:
+                yield AgentLoopEvent(
+                    phase=AgentLoopPhase.EXECUTION,
+                    event_type=StreamEventType.RUN_ERROR.value,
+                    data={
+                        "run_id": requested_run_id,
+                        "thread_id": ctx.session_id,
+                        "session_id": ctx.session_id,
+                        "error": "trace_resume_sequence_failed",
+                        "reason": _redact_trace_text(exc),
+                    },
+                )
+                return
 
         # Initialize metrics builder for observability
         ctx.metrics_builder = ContextMetricsBuilder(
@@ -1738,19 +1758,27 @@ class AgentLoop:
                         ctx.terminal_envelope = self._terminal_envelope(
                             ctx, status=final_status, error=run_error
                         )
-                terminal_event_type = None
-                if not terminal_event_recorded:
-                    terminal_event_type = (
-                        StreamEventType.RUN_FINISHED.value
-                        if final_status == "succeeded"
-                        else StreamEventType.RUN_ERROR.value
+                if ctx.approval_paused:
+                    if self.trace_writer:
+                        await self.trace_writer.drain(
+                            timeout_s=self.trace_writer.write_timeout_s,
+                            strict=True,
+                            trace_id=self._trace_context(ctx).trace_id,
+                        )
+                else:
+                    terminal_event_type = None
+                    if not terminal_event_recorded:
+                        terminal_event_type = (
+                            StreamEventType.RUN_FINISHED.value
+                            if final_status == "succeeded"
+                            else StreamEventType.RUN_ERROR.value
+                        )
+                    self._finish_trace(
+                        ctx=ctx,
+                        status=final_status,
+                        error=run_error,
+                        terminal_event_type=terminal_event_type,
                     )
-                self._finish_trace(
-                    ctx=ctx,
-                    status=final_status,
-                    error=run_error,
-                    terminal_event_type=terminal_event_type,
-                )
 
                 # Persist Working Memory to session memory
                 if ctx.working_memory and self.memory_service:
