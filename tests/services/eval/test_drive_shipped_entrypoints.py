@@ -106,6 +106,7 @@ class _DriveEvalRepo:
         return {
             "score_id": "score-drive",
             "numeric_value": kwargs["payload"]["numeric_value"],
+            "label": kwargs["payload"].get("label"),
         }
 
 

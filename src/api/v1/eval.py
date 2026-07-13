@@ -760,6 +760,13 @@ async def run_eval_experiment(
     experiment = await repo.get_experiment(tenant_id=auth.tenant_id, experiment_id=experiment_id)
     if not experiment:
         raise HTTPException(status_code=404, detail="Experiment not found")
+    dataset_id = body.dataset_id or experiment.get("dataset_id")
+    trace_id = body.target_snapshot.get("trace_id")
+    if dataset_id and trace_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Dataset and trace targets are mutually exclusive",
+        )
     jobs = []
     for evaluator_id in body.evaluator_ids:
         job = await repo.enqueue_evaluator_run(
@@ -768,8 +775,8 @@ async def run_eval_experiment(
             created_by=auth.user_id,
             payload={
                 "experiment_id": experiment_id,
-                "dataset_id": body.dataset_id or experiment.get("dataset_id"),
-                "trace_id": body.target_snapshot.get("trace_id"),
+                "dataset_id": dataset_id,
+                "trace_id": trace_id,
                 "target_snapshot": {
                     **body.target_snapshot,
                     "candidate_label": body.candidate_label,

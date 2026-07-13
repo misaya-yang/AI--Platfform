@@ -125,6 +125,41 @@ async def test_start_run_does_not_update_memory_when_db_owner_gate_rejects(
     assert gw._runs["run-1"].request_preview == "original"
 
 
+async def test_start_run_clears_finished_at_for_same_owned_run(monkeypatch):
+    from assistant_service.core.gateway.execution_gateway import (
+        AssistantExecutionGateway,
+    )
+
+    class CapturingDatabase:
+        def __init__(self) -> None:
+            self.query = ""
+
+        async def fetchrow(self, query: str, *_args: Any) -> dict[str, str]:
+            self.query = query
+            return {"run_id": "run-1"}
+
+    monkeypatch.delenv("ASSISTANT_REQUIRE_DB", raising=False)
+    database = CapturingDatabase()
+    gateway = AssistantExecutionGateway(tool_invoker=object(), database=database)
+
+    await gateway.start_run(
+        run_id="run-1",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        engine="agent_loop",
+        execution_profile="standard",
+        memory_mode="auto",
+        os_agent_enabled=False,
+        request_preview="resume",
+    )
+
+    normalized_query = " ".join(database.query.split())
+    assert "finished_at = NULL" in normalized_query
+    assert "WHERE assistant_runs.tenant_id = EXCLUDED.tenant_id" in normalized_query
+    assert "AND assistant_runs.user_id = EXCLUDED.user_id" in normalized_query
+
+
 def test_audit_ok_justifications_are_from_the_allowed_set():
     """AUDIT-OK comments must use one of the approved reasons — not
     ad-hoc "this is fine" hand-waves.

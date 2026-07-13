@@ -324,6 +324,7 @@ class AssistantExecutionGateway:
                 memory_mode = EXCLUDED.memory_mode,
                 os_agent_enabled = EXCLUDED.os_agent_enabled,
                 request_preview = EXCLUDED.request_preview,
+                finished_at = NULL,
                 updated_at = NOW()
             WHERE assistant_runs.tenant_id = EXCLUDED.tenant_id
               AND assistant_runs.user_id = EXCLUDED.user_id

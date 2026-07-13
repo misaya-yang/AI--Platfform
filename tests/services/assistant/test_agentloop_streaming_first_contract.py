@@ -141,6 +141,126 @@ class FakeToolInvoker:
         )
 
 
+class RecordingTraceWriter:
+    write_timeout_s = 0.5
+
+    def __init__(
+        self,
+        *,
+        resume_sequence: int = 0,
+        resume_error: Exception | None = None,
+        strict_drain_error: Exception | None = None,
+    ):
+        self.persisted_resume_sequence = resume_sequence
+        self.resume_error = resume_error
+        self.strict_drain_error = strict_drain_error
+        self.operations: list[str] = []
+        self.started: list[Any] = []
+        self.events: list[dict[str, Any]] = []
+        self.finished: list[dict[str, Any]] = []
+        self.drain_timeouts: list[float] = []
+        self.drain_strict: list[bool] = []
+        self.drain_trace_ids: list[str | None] = []
+
+    def start_trace(self, ctx: Any) -> bool:
+        self.operations.append("start_trace")
+        self.started.append(ctx)
+        return True
+
+    def record_event(self, **kwargs: Any) -> bool:
+        self.operations.append("record_event")
+        self.events.append(kwargs)
+        return True
+
+    def finish_trace(self, **kwargs: Any) -> bool:
+        self.operations.append("finish_trace")
+        self.finished.append(kwargs)
+        return True
+
+    async def drain(
+        self,
+        *,
+        timeout_s: float = 1.0,
+        strict: bool = False,
+        trace_id: str | None = None,
+    ) -> None:
+        self.operations.append("drain")
+        self.drain_timeouts.append(timeout_s)
+        self.drain_strict.append(strict)
+        self.drain_trace_ids.append(trace_id)
+        if strict and self.strict_drain_error is not None:
+            raise self.strict_drain_error
+
+    async def resume_sequence(self, ctx: Any) -> int:
+        del ctx
+        self.operations.append("resume_sequence")
+        if self.resume_error is not None:
+            raise self.resume_error
+        return self.persisted_resume_sequence
+
+
+def _confirmation_loop(
+    *,
+    model: FakeModelRegistry,
+    invoker: FakeToolInvoker,
+    gateway: Any,
+    trace_writer: RecordingTraceWriter | None,
+) -> Any:
+    from assistant_service.core.agent.agent_loop import AgentLoop
+    from assistant_service.core.agent.middlewares.permission import (
+        PermissionMiddleware,
+        policy_from_sets,
+    )
+
+    loop = AgentLoop(
+        model_registry=model,
+        tool_invoker=invoker,
+        execution_gateway=gateway,
+        trace_writer=trace_writer,  # type: ignore[arg-type]
+    )
+    loop.middleware_chain.add(
+        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
+    )
+    return loop
+
+
+async def _create_pending_approval(
+    *,
+    invoker: FakeToolInvoker,
+    gateway: Any,
+    trace_writer: RecordingTraceWriter,
+    user: MockUserContext,
+) -> tuple[str, str]:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+
+    tool_calls = [
+        {
+            "id": "tc_approval",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=trace_writer,
+    )
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Generate",
+        config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+        history=[],
+    ):
+        events.append(event)
+    run_id = next(event.data["run_id"] for event in events if event.event_type == "run_started")
+    approval_id = next(
+        event.data["approval_id"] for event in events if event.event_type == "approval_required"
+    )
+    return run_id, approval_id
+
+
 def test_streaming_error_redaction_keeps_exception_type_and_redacts_provider_keys() -> None:
     class EmptyConnectError(Exception):
         def __str__(self) -> str:
@@ -701,6 +821,252 @@ async def test_streaming_first_confirm_pause_blocks_run_without_deny_tool_messag
     )
     assert run is not None
     assert run["status"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_approval_pause_keeps_trace_non_terminal_and_drains_pending_writes() -> None:
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+
+    run_id, _approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+
+    run = await gateway.get_run(
+        run_id=run_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+    )
+    assert run is not None
+    assert run["status"] == "blocked"
+    assert writer.finished == []
+    assert writer.drain_timeouts == [writer.write_timeout_s]
+    assert writer.drain_strict == [True]
+    assert writer.drain_trace_ids == [writer.started[0].trace_id]
+    recorded_event_types = [event["event_type"] for event in writer.events]
+    assert "approval_required" in recorded_event_types
+    assert "run_finished" not in recorded_event_types
+    assert "run_error" not in recorded_event_types
+
+
+@pytest.mark.asyncio
+async def test_approval_pause_strict_barrier_failure_is_fail_closed() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    tool_calls = [
+        {
+            "id": "tc_approval",
+            "function": {"name": "generate_image", "arguments": '{"prompt":"cat"}'},
+        }
+    ]
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter(
+        strict_drain_error=RuntimeError("assistant trace persistence barrier failed")
+    )
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+    )
+    events = []
+
+    with pytest.raises(RuntimeError, match="trace persistence barrier failed"):
+        async for event in loop.execute(
+            session_id="s1",
+            user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+            message="Generate",
+            config=AgentLoopConfig(model_id="test", max_tool_iterations=2),
+            history=[],
+        ):
+            events.append(event)
+
+    assert "approval_required" in [event.event_type for event in events]
+    assert writer.drain_strict == [True]
+    assert writer.drain_trace_ids == [writer.started[0].trace_id]
+    assert writer.finished == []
+    assert invoker.invocation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_continues_after_persisted_trace_sequence() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter(resume_sequence=41)
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+
+    writer.operations.clear()
+    writer.started.clear()
+    writer.events.clear()
+    writer.finished.clear()
+    writer.drain_timeouts.clear()
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"content": "done"}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+    )
+    public_event_types = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Continue",
+        config=AgentLoopConfig(
+            model_id="test",
+            max_tool_iterations=2,
+            resume_run_id=run_id,
+            resume_approval_id=approval_id,
+        ),
+        history=[],
+    ):
+        public_event_types.append(event.event_type)
+
+    assert writer.operations[:2] == ["resume_sequence", "start_trace"]
+    assert writer.events[0]["sequence_no"] == 42
+    assert all(event["sequence_no"] != 1 for event in writer.events)
+    assert invoker.invocation_count == 1
+    assert {"tool_call_start", "tool_call_result", "tool_call_end"}.issubset(
+        public_event_types
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter()
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    approved = await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+    assert approved is not None
+
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"content": "done"}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=None,
+    )
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Continue",
+        config=AgentLoopConfig(
+            model_id="test",
+            max_tool_iterations=2,
+            resume_run_id=run_id,
+            resume_approval_id=approval_id,
+        ),
+        history=[],
+    ):
+        events.append(event)
+
+    event_types = [event.event_type for event in events]
+    assert not any(
+        isinstance(event.data, dict)
+        and event.data.get("error") == "trace_resume_sequence_failed"
+        for event in events
+    )
+    assert "run_finished" in event_types
+    assert invoker.invocation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_cursor_failure_stops_before_trace_and_tool() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoopConfig
+    from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
+
+    invoker = FakeToolInvoker(results_by_name={"generate_image": {"success": True}})
+    gateway = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    writer = RecordingTraceWriter(
+        resume_error=RuntimeError("cursor database password=super-secret unavailable")
+    )
+    user = MockUserContext(user_id="u1")
+    run_id, approval_id = await _create_pending_approval(
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+        user=user,
+    )
+    await gateway.approve(
+        approval_id=approval_id,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        approved=True,
+        approver_user_id=user.user_id,
+    )
+
+    writer.operations.clear()
+    writer.started.clear()
+    writer.events.clear()
+    writer.finished.clear()
+    loop = _confirmation_loop(
+        model=FakeModelRegistry(scripted=[[{"content": "must not run"}]]),
+        invoker=invoker,
+        gateway=gateway,
+        trace_writer=writer,
+    )
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="Continue",
+        config=AgentLoopConfig(
+            model_id="test",
+            max_tool_iterations=2,
+            resume_run_id=run_id,
+            resume_approval_id=approval_id,
+        ),
+        history=[],
+    ):
+        events.append(event)
+
+    assert [event.event_type for event in events] == ["run_error"]
+    assert events[0].data["run_id"] == run_id
+    assert "super-secret" not in json.dumps(events[0].data, default=str)
+    assert writer.operations == ["resume_sequence"]
+    assert writer.started == []
+    assert invoker.invocation_count == 0
 
 
 @pytest.mark.asyncio

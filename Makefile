@@ -165,9 +165,7 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 .PHONY: verify-eval-dev eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
 
 verify-assistant-runtime-dev: ## 运行 Assistant Runtime 离线回归门禁 (AHR-01~AHR-04)
-	@uv run python scripts/assistant_runtime_regression.py gate \
-		--output reports/assistant-runtime-regression/latest.json \
-		--markdown reports/assistant-runtime-regression/latest.md
+	@uv run python scripts/assistant_runtime_regression.py gate --no-write
 
 verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 	@uv run ruff check \
@@ -208,6 +206,7 @@ verify-eval-dev:            ## 运行 Agent Trace/Eval dev 分支验证门禁
 eval-regression-gate:       ## 运行离线 Assistant Eval golden regression gate
 	@uv run python scripts/eval_golden.py validate tests/fixtures/eval/golden/assistant_regression_v1.jsonl
 	@uv run python scripts/eval_golden.py gate tests/fixtures/eval/golden/assistant_regression_v1.jsonl \
+		--observations tests/fixtures/eval/observations/assistant_regression_v1.jsonl \
 		--output reports/eval-regression/latest.json \
 		--markdown reports/eval-regression/latest.md
 

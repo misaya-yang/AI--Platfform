@@ -1289,6 +1289,28 @@ async def test_eval_example_import_skips_duplicate_case_ids(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_eval_experiment_rejects_effective_dataset_and_trace_targets(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+    auth = _auth(permissions=["console:eval:view", "console:eval:run"])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await run_eval_experiment(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalExperimentRunCreate(
+                evaluator_ids=[repo.evaluator["evaluator_id"]],
+                target_snapshot={"trace_id": "11111111-1111-4111-8111-111111111111"},
+            ),
+            request=_request(),
+            auth=auth,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "mutually exclusive" in str(exc_info.value.detail).lower()
+    assert not any(call[0] == "evaluator_run" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_eval_experiment_batch_compare_and_gate(monkeypatch) -> None:
     repo = FakeTraceRepository()
     monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)

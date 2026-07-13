@@ -48,9 +48,30 @@ class RecordingDB:
                     "parent_span_id": args[2],
                     "span_kind": args[3],
                     "name": args[4],
+                    "status": args[5],
+                    "sequence_no": args[6],
                 }
             )
         return rows
+
+
+class ResumeCursorDB(RecordingDB):
+    def __init__(self, max_sequence_no: int | None) -> None:
+        super().__init__()
+        self.max_sequence_no = max_sequence_no
+        self.operations: list[str] = []
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def execute(self, query: str, *args: Any) -> str:
+        self.operations.append("execute")
+        return await super().execute(query, *args)
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        self.operations.append("fetchrow")
+        self.fetchrow_calls.append((query, args))
+        if self.max_sequence_no is None:
+            return None
+        return {"max_sequence_no": self.max_sequence_no}
 
 
 class BlockingDB(RecordingDB):
@@ -66,9 +87,42 @@ class BlockingDB(RecordingDB):
         return "OK"
 
 
+class BlockingCursorDB(BlockingDB):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, int]:
+        self.fetchrow_calls.append((query, args))
+        return {"max_sequence_no": 41}
+
+
+class TraceBlockingCursorDB(ResumeCursorDB):
+    def __init__(self, block_trace_id: str) -> None:
+        super().__init__(41)
+        self.block_trace_id = block_trace_id
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, query: str, *args: Any) -> str:
+        if self.block_trace_id in args:
+            self.started.set()
+            await self.release.wait()
+        return await super().execute(query, *args)
+
+
 class FailingDB:
     async def execute(self, _query: str, *_args: Any) -> str:
         raise RuntimeError("database password=super-secret unavailable")
+
+
+class FailingCursorDB(FailingDB):
+    def __init__(self) -> None:
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, int]:
+        self.fetchrow_calls.append((query, args))
+        return {"max_sequence_no": 41}
 
 
 class FakeModelInfo:
@@ -153,10 +207,14 @@ class FakeKnowledgeService:
         )
 
 
-def _trace_ctx() -> AssistantTraceContext:
+def _trace_ctx(
+    *,
+    run_id: str = "11111111-1111-4111-8111-111111111111",
+    request_id: str = "request-a",
+) -> AssistantTraceContext:
     return AssistantTraceContext.from_chat_request(
-        run_id="11111111-1111-4111-8111-111111111111",
-        request_id="request-a",
+        run_id=run_id,
+        request_id=request_id,
         tenant_id="tenant-a",
         user_id="user-a",
         session_id="session-a",
@@ -230,6 +288,252 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
     assert runtime["trace_writer_health"]["redacted_writes"] == 1
     assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
     assert writer.telemetry_snapshot()["pending_writes"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_sequence_no", "expected"),
+    [(41, 41), (None, 0), (-3, 0)],
+)
+async def test_resume_sequence_drains_pending_writes_and_reads_persisted_maximum(
+    max_sequence_no: int | None,
+    expected: int,
+) -> None:
+    db = ResumeCursorDB(max_sequence_no)
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    writer.record_event(
+        ctx=ctx,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-1"},
+        phase="execution",
+    )
+
+    sequence_no = await writer.resume_sequence(ctx)
+
+    assert sequence_no == expected
+    assert db.operations[-1] == "fetchrow"
+    assert writer.pending_count == 0
+    query, args = db.fetchrow_calls[0]
+    assert "agent_trace_events" in query
+    assert "agent_trace_spans" in query
+    assert "$1" in query
+    assert args == (ctx.trace_id,)
+
+
+@pytest.mark.asyncio
+async def test_resume_sequence_without_trace_database_returns_zero() -> None:
+    writer = AssistantTraceWriter(None, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    assert writer.record_event(
+        ctx=ctx,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-1"},
+        phase="execution",
+    ) is False
+
+    assert await writer.resume_sequence(ctx) == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_sequence_timeout_never_queries_persisted_cursor() -> None:
+    db = BlockingCursorDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=0.02)
+    ctx = _trace_ctx()
+    writer.record_event(
+        ctx=ctx,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-1"},
+        phase="execution",
+    )
+    await asyncio.wait_for(db.started.wait(), timeout=1.0)
+
+    try:
+        with pytest.raises(TimeoutError, match="trace persistence barrier timed out"):
+            await writer.resume_sequence(ctx)
+    finally:
+        db.release.set()
+        await writer.drain(timeout_s=0.1)
+
+    assert db.fetchrow_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_sequence_failed_write_never_queries_persisted_cursor() -> None:
+    db = FailingCursorDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx_a = _trace_ctx()
+    ctx_b = _trace_ctx(
+        run_id="22222222-2222-4222-8222-222222222222",
+        request_id="request-b",
+    )
+    writer.record_event(
+        ctx=ctx_a,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-1", "password": "super-secret"},
+        phase="execution",
+    )
+    await writer.drain(timeout_s=1.0)
+    assert writer.pending_count == 0
+    assert writer.failed_writes == 1
+
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="trace persistence barrier failed") as exc_info:
+            await writer.resume_sequence(ctx_a)
+
+        assert "super-secret" not in str(exc_info.value)
+    assert db.fetchrow_calls == []
+
+    assert await writer.resume_sequence(ctx_b) == 41
+    assert db.fetchrow_calls[0][1] == (ctx_b.trace_id,)
+
+
+@pytest.mark.asyncio
+async def test_resume_sequence_only_waits_for_pending_writes_in_same_trace() -> None:
+    ctx_a = _trace_ctx()
+    ctx_b = _trace_ctx(
+        run_id="22222222-2222-4222-8222-222222222222",
+        request_id="request-b",
+    )
+    db = TraceBlockingCursorDB(ctx_a.trace_id)
+    writer = AssistantTraceWriter(db, write_timeout_s=0.02)
+    writer.record_event(
+        ctx=ctx_a,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-a"},
+        phase="execution",
+    )
+    await asyncio.wait_for(db.started.wait(), timeout=1.0)
+
+    try:
+        assert await writer.resume_sequence(ctx_b) == 41
+    finally:
+        db.release.set()
+        await writer.drain(timeout_s=1.0)
+
+    assert db.fetchrow_calls[0][1] == (ctx_b.trace_id,)
+
+
+@pytest.mark.asyncio
+async def test_repeated_trace_failures_keep_sticky_state_bounded() -> None:
+    db = FailingCursorDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    for sequence_no in range(1, 6):
+        writer.record_event(
+            ctx=ctx,
+            event_type="approval_required",
+            sequence_no=sequence_no,
+            payload={"approval_id": f"approval-{sequence_no}"},
+            phase="execution",
+        )
+    await writer.drain(timeout_s=1.0)
+
+    assert writer.failed_writes == 5
+    assert len(writer._failed_outcomes) == 1
+    with pytest.raises(RuntimeError, match="trace persistence barrier failed"):
+        await writer.resume_sequence(ctx)
+    assert db.fetchrow_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_sequence_dropped_write_never_queries_persisted_cursor() -> None:
+    db = ResumeCursorDB(41)
+    writer = AssistantTraceWriter(db, max_pending=0, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    accepted = writer.record_event(
+        ctx=ctx,
+        event_type="approval_required",
+        sequence_no=1,
+        payload={"approval_id": "approval-1"},
+        phase="execution",
+    )
+
+    assert accepted is False
+    assert writer.pending_count == 0
+    assert writer.dropped_writes == 1
+    for _attempt in range(2):
+        with pytest.raises(RuntimeError, match="trace persistence barrier failed"):
+            await writer.resume_sequence(ctx)
+    assert db.fetchrow_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("events", "expected_status"),
+    [
+        (
+            [
+                ("tool_call_start", {"tool_call_id": "tool-1", "name": "generate_image"}),
+                (
+                    "tool_call_result",
+                    {
+                        "tool_call_id": "tool-1",
+                        "name": "generate_image",
+                        "status": "completed",
+                        "result": "ok",
+                    },
+                ),
+                (
+                    "tool_call_end",
+                    {"tool_call_id": "tool-1", "name": "generate_image", "status": "completed"},
+                ),
+            ],
+            "succeeded",
+        ),
+        (
+            [
+                ("tool_call_started", {"tool_id": "tool-1", "tool_name": "generate_image"}),
+                (
+                    "tool_call_result",
+                    {
+                        "tool_call_id": "tool-1",
+                        "name": "generate_image",
+                        "status": "error",
+                        "error": "tool failed",
+                    },
+                ),
+                (
+                    "tool_call_end",
+                    {"tool_call_id": "tool-1", "name": "generate_image", "status": "error"},
+                ),
+            ],
+            "failed",
+        ),
+    ],
+    ids=["middleware_resume_success", "gateway_resume_failure"],
+)
+async def test_resume_tool_event_aliases_converge_on_one_stable_span(
+    events: list[tuple[str, dict[str, Any]]],
+    expected_status: str,
+) -> None:
+    db = RecordingDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    ctx = _trace_ctx()
+
+    for sequence_no, (event_type, payload) in enumerate(events, start=1):
+        writer.record_event(
+            ctx=ctx,
+            event_type=event_type,
+            sequence_no=sequence_no,
+            payload=payload,
+            phase="execution",
+        )
+    await writer.drain(timeout_s=1.0)
+
+    tool_spans = [row for row in db.span_rows() if row["span_kind"] == "tool_execution"]
+    assert tool_spans
+    assert len({row["span_id"] for row in tool_spans}) == 1
+    assert tool_spans[-1]["status"] == expected_status
 
 
 @pytest.mark.asyncio

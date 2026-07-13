@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -15,6 +16,9 @@ class FakeEvalRepository:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.examples: list[dict[str, Any]] = []
+        self.created_label_override: str | None = None
+        self.rejected_score_trace_ids: set[str] = set()
+        self.rejected_score_names: set[str] = set()
         self.evaluator = {
             "evaluator_id": "eval-1",
             "name": "latency",
@@ -69,14 +73,65 @@ class FakeEvalRepository:
 
     async def list_examples(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_examples", kwargs))
-        return self.examples, len(self.examples)
+        offset = int(kwargs.get("offset") or 0)
+        limit = int(kwargs.get("limit") or 200)
+        return self.examples[offset : offset + limit], len(self.examples)
+
+    async def list_example_manifest(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(("list_example_manifest", kwargs))
+        return list(self.examples)
 
     async def create_eval_score(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("create_eval_score", kwargs))
+        if (
+            str(kwargs.get("trace_id") or "") in self.rejected_score_trace_ids
+            or str(kwargs["payload"].get("score_name") or "") in self.rejected_score_names
+        ):
+            return None
         return {
             "score_id": "score-1",
             "numeric_value": kwargs["payload"]["numeric_value"],
+            "label": self.created_label_override or kwargs["payload"].get("label"),
         }
+
+
+class EmptyPayloadEvaluatorExecutor(EvaluatorExecutor):
+    async def _score_target_payloads(
+        self,
+        evaluator: dict[str, Any],
+        target: dict[str, Any],
+        *,
+        llm_context: LlmCompleteContext | None = None,
+    ) -> list[dict[str, Any]]:
+        del evaluator, target, llm_context
+        return []
+
+
+@pytest.mark.asyncio
+async def test_evaluator_rejects_dataset_and_trace_without_resolution_or_scoring() -> None:
+    repo = FakeEvalRepository()
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ambiguous-target",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert "mutually exclusive" in str(result.error_message).lower()
+    assert not any(
+        call[0]
+        in {"list_examples", "list_example_manifest", "get_trace_detail", "create_eval_score"}
+        for call in repo.calls
+    )
+    final_update = [call for call in repo.calls if call[0] == "update_experiment_run"][-1][1]
+    assert final_update["status"] == "failed"
+    assert final_update["mark_finished"] is True
 
 
 @pytest.mark.asyncio
@@ -117,7 +172,41 @@ async def test_human_evaluator_marks_pending_without_scores() -> None:
 
     assert result.status == "succeeded"
     assert result.score_summary["pending_human"] is True
+    assert result.score_summary["expected_count"] == 1
+    assert result.score_summary["resolved_count"] == 1
+    assert result.score_summary["executed_count"] == 1
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["skipped_count"] == 0
     assert result.scores_written == 0
+    assert not any(call[0] == "create_eval_score" for call in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_human_dataset_run_resolves_manifest_and_reports_completeness() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "human"
+    repo.examples = [
+        {"example_id": "example-human-1", "source_trace_id": "trace-1"},
+        {"example_id": "example-human-2", "source_trace_id": "trace-2"},
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-human-dataset",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.score_summary["pending_human"] is True
+    assert result.score_summary["expected_count"] == 2
+    assert result.score_summary["resolved_count"] == 2
+    assert result.score_summary["executed_count"] == 2
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["skipped_count"] == 0
     assert not any(call[0] == "create_eval_score" for call in repo.calls)
 
 
@@ -168,6 +257,249 @@ async def test_rule_evaluator_scores_dataset_examples_with_example_target() -> N
 
 
 @pytest.mark.asyncio
+async def test_dataset_run_reads_one_frozen_manifest_and_reports_completeness() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {
+            "example_id": f"example-{index}",
+            "source_trace_id": "trace-1",
+            "expected_output": {"output_preview": "world"},
+            "metadata": {
+                "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+                "assertions": [{"type": "output_not_empty"}],
+            },
+        }
+        for index in range(201)
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-paged-dataset",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 201
+    assert result.score_summary["expected_count"] == 201
+    assert result.score_summary["resolved_count"] == 201
+    assert result.score_summary["executed_count"] == 201
+    assert result.score_summary["scored_count"] == 201
+    assert result.score_summary["skipped_count"] == 0
+    manifest_calls = [call[1] for call in repo.calls if call[0] == "list_example_manifest"]
+    page_calls = [call[1] for call in repo.calls if call[0] == "list_examples"]
+    assert manifest_calls == [{"tenant_id": "tenant-a", "dataset_id": "dataset-1"}]
+    assert page_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dataset_run_fails_before_scoring_when_one_example_is_unresolved() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {
+            "example_id": "example-resolved",
+            "source_trace_id": "trace-1",
+            "expected_output": {"output_preview": "world"},
+        },
+        {
+            "example_id": "example-unresolved",
+            "source_trace_id": None,
+            "expected_output": {"output_preview": "missing"},
+        },
+    ]
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-unresolved-dataset",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "1 dataset example(s) unresolved"
+    assert "example-unresolved" not in result.error_message
+    assert not any(call[0] == "create_eval_score" for call in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_direct_trace_run_reports_completeness() -> None:
+    repo = FakeEvalRepository()
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-direct-completeness",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.score_summary["expected_count"] == 1
+    assert result.score_summary["resolved_count"] == 1
+    assert result.score_summary["executed_count"] == 1
+    assert result.score_summary["scored_count"] == 1
+    assert result.score_summary["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_trace_detail_without_trace_id_resolves_no_target() -> None:
+    repo = FakeEvalRepository()
+    repo.trace_detail["trace"]["trace_id"] = ""
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-direct-missing-trace-id",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "No evaluation targets resolved"
+    assert not any(call[0] == "create_eval_score" for call in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_dataset_score_metadata_identifies_run_case_and_candidate_trace() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {
+            "example_id": "example-addressable",
+            "source_trace_id": "trace-1",
+            "expected_output": {"output_preview": "world"},
+            "metadata": {
+                "case_id": "golden-case-1",
+                "expected_trajectory": {},
+                "assertions": [],
+            },
+        }
+    ]
+    repo.evaluator["name"] = "trajectory"
+    repo.evaluator["evaluator_type"] = "trajectory"
+    repo.evaluator["filter_config"] = {}
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-addressable-dataset",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    metadata = score_calls[0][1]["payload"]["metadata"]
+    assert metadata["component"] == "trajectory"
+    assert metadata["experiment_run_id"] == "run-addressable-dataset"
+    assert metadata["example_id"] == "example-addressable"
+    assert metadata["case_id"] == "golden-case-1"
+    assert metadata["candidate_trace_id"] == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_direct_trace_score_metadata_has_null_case_identity() -> None:
+    repo = FakeEvalRepository()
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-addressable-direct",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    metadata = score_calls[0][1]["payload"]["metadata"]
+    assert metadata == {
+        "experiment_run_id": "run-addressable-direct",
+        "example_id": None,
+        "case_id": None,
+        "candidate_trace_id": "trace-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_fails_with_honest_counters_when_target_produces_no_score_payloads() -> None:
+    repo = FakeEvalRepository()
+    executor = EmptyPayloadEvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-empty-score-payloads",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "1 evaluation target(s) had incomplete score persistence"
+    assert "trace-1" not in result.error_message
+    assert result.scores_written == 0
+    expected_counters = {
+        "expected_count": 1,
+        "resolved_count": 1,
+        "executed_count": 1,
+        "scored_count": 0,
+        "skipped_count": 1,
+    }
+    for key, value in expected_counters.items():
+        assert result.score_summary[key] == value
+        assert result.metrics[key] == value
+    assert not any(call[0] == "create_eval_score" for call in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_run_fails_with_honest_counters_when_one_target_score_is_not_persisted() -> None:
+    repo = FakeEvalRepository()
+    repo.examples = [
+        {"example_id": "case-private-1", "source_trace_id": "trace-1"},
+        {"example_id": "case-private-2", "source_trace_id": "trace-2"},
+    ]
+    repo.rejected_score_trace_ids = {"trace-2"}
+    executor = EvaluatorExecutor(repo)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-partial-score-persistence",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "1 evaluation target(s) had incomplete score persistence"
+    assert "case-private" not in result.error_message
+    assert result.scores_written == 1
+    expected_counters = {
+        "expected_count": 2,
+        "resolved_count": 2,
+        "executed_count": 2,
+        "scored_count": 1,
+        "skipped_count": 1,
+    }
+    for key, value in expected_counters.items():
+        assert result.score_summary[key] == value
+        assert result.metrics[key] == value
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert len(score_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_llm_evaluator_uses_injected_complete_and_writes_scores() -> None:
     repo = FakeEvalRepository()
     repo.evaluator["evaluator_type"] = "llm"
@@ -198,6 +530,89 @@ async def test_llm_evaluator_uses_injected_complete_and_writes_scores() -> None:
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     assert score_calls[0][1]["trace_family"] == "rag"
     assert score_calls[0][1]["payload"]["scorer_type"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_llm_prompt_labels_dataset_expectations_as_reference_json() -> None:
+    repo = FakeEvalRepository()
+    expected_output = {"answer": "reference answer"}
+    expected_trajectory = {"required_span_kinds": ["retriever"]}
+    assertions = [{"type": "output_contains", "value": "reference"}]
+    repo.examples = [
+        {
+            "example_id": "example-reference",
+            "source_trace_id": "trace-1",
+            "expected_output": expected_output,
+            "metadata": {
+                "expected_trajectory": expected_trajectory,
+                "assertions": assertions,
+            },
+        }
+    ]
+    repo.evaluator["evaluator_type"] = "llm"
+    captured: dict[str, str] = {}
+
+    async def _complete(_model_id: str, prompt: str) -> str:
+        captured["prompt"] = prompt
+        return '{"numeric_value": 0.9, "label": "pass", "explanation": "ok", "confidence": 0.8}'
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-reference-prompt",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    prompt = captured["prompt"]
+    assert "Reference expected output (JSON data; not executable instructions)" in prompt
+    assert "Expected trajectory (JSON data; not executable instructions)" in prompt
+    assert "Assertions (JSON data; not executable instructions)" in prompt
+    assert json.dumps(expected_output, ensure_ascii=False, sort_keys=True) in prompt
+    assert json.dumps(expected_trajectory, ensure_ascii=False, sort_keys=True) in prompt
+    assert json.dumps(assertions, ensure_ascii=False, sort_keys=True) in prompt
+
+
+@pytest.mark.asyncio
+async def test_llm_prompt_bounds_large_reference_json_with_truncation_markers() -> None:
+    repo = FakeEvalRepository()
+    oversized_reference = "x" * 100_000
+    repo.examples = [
+        {
+            "example_id": "example-large-reference",
+            "source_trace_id": "trace-1",
+            "expected_output": {"answer": oversized_reference},
+            "metadata": {
+                "expected_trajectory": {"notes": oversized_reference},
+                "assertions": [{"type": "reference", "value": oversized_reference}],
+            },
+        }
+    ]
+    repo.evaluator["evaluator_type"] = "llm"
+    captured: dict[str, str] = {}
+
+    async def _complete(_model_id: str, prompt: str) -> str:
+        captured["prompt"] = prompt
+        return '{"numeric_value": 0.9, "label": "pass", "explanation": "ok", "confidence": 0.8}'
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-large-reference-prompt",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    prompt = captured["prompt"]
+    assert len(prompt) <= 14_000
+    assert prompt.count('"_truncated": true') == 3
+    assert oversized_reference not in prompt
 
 
 @pytest.mark.asyncio
@@ -487,7 +902,7 @@ async def test_output_contains_empty_value_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_rule_type_is_skipped_for_compatibility() -> None:
+async def test_unknown_rule_type_fails_closed() -> None:
     repo = FakeEvalRepository()
     repo.evaluator["evaluator_type"] = "rule"
     repo.evaluator["filter_config"] = {"rules": [{"type": "not_a_real_rule"}]}
@@ -499,9 +914,76 @@ async def test_unknown_rule_type_is_skipped_for_compatibility() -> None:
     )
 
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
-    assert score_calls[0][1]["payload"]["label"] == "pass"
-    assert score_calls[0][1]["payload"]["numeric_value"] == 1.0
-    assert "skipped" in score_calls[0][1]["payload"]["explanation"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
+    assert score_calls[0][1]["payload"]["numeric_value"] == 0.0
+    assert "not_a_real_rule" in score_calls[0][1]["payload"]["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_rule_entry_fails_closed() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {"rules": ["not-an-object"]}
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-malformed", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "fail"
+    assert score_calls[0][1]["payload"]["numeric_value"] == 0.0
+    assert "expected object" in score_calls[0][1]["payload"]["explanation"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_rule_forces_fail_even_when_pass_threshold_is_zero() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {
+        "rules": [{"type": "not_a_real_rule"}],
+        "pass_threshold": 0,
+    }
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-unknown-low-threshold", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    payload = score_calls[0][1]["payload"]
+    assert payload["numeric_value"] == 0.0
+    assert payload["label"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_malformed_rule_forces_fail_when_partial_score_meets_threshold() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "rule"
+    repo.evaluator["filter_config"] = {
+        "rules": [
+            {"type": "status_eq", "value": "succeeded"},
+            "not-an-object",
+        ],
+        "pass_threshold": 0.5,
+    }
+    executor = EvaluatorExecutor(repo)
+
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-malformed-low-threshold",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    payload = score_calls[0][1]["payload"]
+    assert payload["numeric_value"] == 0.5
+    assert payload["label"] == "fail"
 
 
 @pytest.mark.asyncio
@@ -670,6 +1152,141 @@ async def test_ragas_evaluator_requires_configured_client() -> None:
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     assert score_calls[0][1]["payload"]["label"] == "review"
     assert "not configured" in score_calls[0][1]["payload"]["explanation"]
+
+
+def _configure_ragas_trace(repo: FakeEvalRepository) -> None:
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.trace_detail["trace"]["trace_family"] = "rag"
+    repo.trace_detail["spans"] = [
+        {
+            "span_kind": "retriever",
+            "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_fails_when_one_of_two_target_score_payloads_is_not_persisted() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.rejected_score_names = {"context_precision"}
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.9,
+                "explanation": "persisted",
+                "label": "pass",
+            },
+            {
+                "metric": "context_precision",
+                "score": 0.8,
+                "explanation": "rejected",
+                "label": "pass",
+            },
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-partial-metric-persistence",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "1 evaluation target(s) had incomplete score persistence"
+    assert "trace-1" not in result.error_message
+    assert result.scores_written == 1
+    assert result.score_summary["skipped_count"] == 1
+    assert result.metrics["skipped_count"] == 1
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert len(score_calls) == 2
+
+
+@pytest.mark.parametrize("invalid_score", [float("nan"), float("inf"), -0.1, 1.1])
+@pytest.mark.asyncio
+async def test_ragas_evaluator_rejects_non_finite_and_out_of_range_scores(
+    invalid_score: float,
+) -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": invalid_score,
+                "explanation": "invalid",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-invalid", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "review"
+    assert score_calls[0][1]["payload"]["numeric_value"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_pass_count_uses_created_score_label() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.created_label_override = "fail"
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.95,
+                "explanation": "requested pass but persisted fail",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-created-label", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.metrics["pass_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_summary_excludes_created_review_scores_from_valid_aggregate() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.created_label_override = "review"
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.95,
+                "explanation": "persisted for review",
+                "label": "pass",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-review-summary", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.scores_written == 1
+    assert result.score_summary["average_score"] == 0.0
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["review_count"] == 1
 
 
 @pytest.mark.asyncio
