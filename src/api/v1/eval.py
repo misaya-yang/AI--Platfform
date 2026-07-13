@@ -54,6 +54,7 @@ from ..schemas.eval import (
     EvalExperimentRunBatchResponse,
     EvalExperimentRunComparisonResponse,
     EvalExperimentRunCreate,
+    EvalExperimentRunResultsResponse,
     EvalGateDryRunRequest,
     EvalGateDryRunResponse,
     EvalTraceExportResponse,
@@ -728,6 +729,37 @@ async def get_eval_experiment_run(
     if not run:
         raise HTTPException(status_code=404, detail="Experiment run not found")
     return EvalExperimentRun(**run)
+
+
+@router.get(
+    "/experiment-runs/{run_id}/results",
+    response_model=EvalExperimentRunResultsResponse,
+)
+async def get_eval_experiment_run_results(
+    run_id: str,
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalExperimentRunResultsResponse:
+    _require_eval_trace_access(request, auth)
+    repo = _get_trace_repository(request)
+    run = await repo.get_experiment_run(tenant_id=auth.tenant_id, run_id=run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    cases, total = await repo.list_experiment_run_case_results(
+        tenant_id=auth.tenant_id,
+        run_id=run_id,
+        limit=limit,
+        offset=offset,
+    )
+    return EvalExperimentRunResultsResponse(
+        run=EvalExperimentRun(**run),
+        cases=cases,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/experiment-runs:compare", response_model=EvalExperimentRunComparisonResponse)

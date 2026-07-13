@@ -75,6 +75,68 @@ class RecordingAgentTraceRepository(AgentTraceRepository):
         return self.fetch_results.pop(0) if self.fetch_results else []
 
 
+class RevisionContractRepository(AgentTraceRepository):
+    def __init__(self, score_revisions: list[dict[str, Any]]) -> None:
+        self.score_revisions = score_revisions
+
+    def _query_scores(self, query: str) -> list[dict[str, Any]]:
+        if "ROW_NUMBER() OVER" not in query or "score_revision = 1" not in query:
+            return list(self.score_revisions)
+        latest: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in self.score_revisions:
+            key = (
+                str(row["trace_id"]),
+                str(row["evaluator_id"]),
+                str(row.get("evaluator_version") or ""),
+                str(row["score_name"]),
+            )
+            if key not in latest or (row["created_at"], row["score_id"]) > (
+                latest[key]["created_at"],
+                latest[key]["score_id"],
+            ):
+                latest[key] = row
+        return list(latest.values())
+
+    async def fetchrow(self, query: str, *_args: Any) -> dict[str, Any] | None:
+        scores = self._query_scores(query)
+        if "ragas_scored_traces" in query:
+            return {
+                "rag_traces": len({row["trace_id"] for row in self.score_revisions}),
+                "ragas_scored_traces": len(
+                    {row["trace_id"] for row in scores if row["label"] in {"pass", "fail"}}
+                ),
+            }
+        judge_rows = [row for row in scores if row.get("judge_model")]
+        latest_judge = max(
+            judge_rows,
+            key=lambda row: (row["created_at"], row["score_id"]),
+            default=None,
+        )
+        return {"judge_model": latest_judge["judge_model"]} if latest_judge else None
+
+    async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
+        scores = self._query_scores(query)
+        metrics: list[dict[str, Any]] = []
+        for metric in sorted({str(row["score_name"]) for row in scores}):
+            rows = [row for row in scores if row["score_name"] == metric]
+            valid = [row for row in rows if row["label"] in {"pass", "fail"}]
+            metrics.append(
+                {
+                    "metric": metric,
+                    "average_score": (
+                        sum(float(row["numeric_value"]) for row in valid) / len(valid)
+                        if valid
+                        else 0.0
+                    ),
+                    "scored_count": len(valid),
+                    "pass_count": sum(1 for row in rows if row["label"] == "pass"),
+                    "fail_count": sum(1 for row in rows if row["label"] == "fail"),
+                    "review_count": sum(1 for row in rows if row["label"] == "review"),
+                }
+            )
+        return metrics
+
+
 @pytest.mark.asyncio
 async def test_batch_score_kb_ragas_queues_unscored_traces() -> None:
     repo = FakeKbRagasRepository()
@@ -194,6 +256,114 @@ async def test_kb_ragas_summary_uses_only_pass_fail_rows_for_valid_scores() -> N
     assert "FILTER (WHERE s.label IN ('pass', 'fail'))" in metric_query
     assert summary["metrics"][0]["average_score"] == 0.8
     assert summary["metrics"][0]["scored_count"] == 2
+    assert summary["metrics"][0]["review_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_summary_queries_share_latest_revision_rule() -> None:
+    repo = RecordingAgentTraceRepository(
+        fetchrow_results=[
+            {"rag_traces": 1, "ragas_scored_traces": 1},
+            {"judge_model": "qwen-test"},
+        ],
+        fetch_results=[[]],
+    )
+
+    await repo.get_kb_ragas_summary(tenant_id="tenant-a")
+
+    normalized_queries = [" ".join(query.split()) for _kind, query in repo.queries]
+    partition = (
+        "PARTITION BY s.trace_id, s.evaluator_id, "
+        "COALESCE(s.evaluator_version, ''), s.score_name"
+    )
+    for query in normalized_queries:
+        assert "latest_scores AS" in query
+        assert "INNER JOIN in_window_traces t ON t.trace_id = s.trace_id" in query
+        assert partition in query
+        assert "ORDER BY s.created_at DESC, s.score_id DESC" in query
+        assert "score_revision = 1" in query
+        assert "FROM latest_scores s" in query
+
+
+@pytest.mark.asyncio
+async def test_latest_numeric_revision_replaces_older_score_in_summary() -> None:
+    repo = RevisionContractRepository(
+        [
+            {
+                "trace_id": "trace-1",
+                "evaluator_id": "eval-1",
+                "evaluator_version": "v1",
+                "score_name": "context_relevancy",
+                "numeric_value": 0.2,
+                "label": "fail",
+                "judge_model": "qwen-old",
+                "created_at": 1,
+                "score_id": "score-1",
+            },
+            {
+                "trace_id": "trace-1",
+                "evaluator_id": "eval-1",
+                "evaluator_version": "v1",
+                "score_name": "context_relevancy",
+                "numeric_value": 0.8,
+                "label": "pass",
+                "judge_model": "qwen-new",
+                "created_at": 2,
+                "score_id": "score-2",
+            },
+        ]
+    )
+
+    summary = await repo.get_kb_ragas_summary(tenant_id="tenant-a")
+
+    assert summary["ragas_scored_traces"] == 1
+    assert summary["metrics"] == [
+        {
+            "metric": "context_relevancy",
+            "average_score": 0.8,
+            "scored_count": 1,
+            "pass_count": 1,
+            "fail_count": 0,
+            "review_count": 0,
+        }
+    ]
+    assert summary["latest_judge_model"] == "qwen-new"
+
+
+@pytest.mark.asyncio
+async def test_latest_review_revision_replaces_older_pass_in_summary() -> None:
+    repo = RevisionContractRepository(
+        [
+            {
+                "trace_id": "trace-1",
+                "evaluator_id": "eval-1",
+                "evaluator_version": "v1",
+                "score_name": "context_precision",
+                "numeric_value": 0.8,
+                "label": "pass",
+                "judge_model": "qwen-old",
+                "created_at": 1,
+                "score_id": "score-1",
+            },
+            {
+                "trace_id": "trace-1",
+                "evaluator_id": "eval-1",
+                "evaluator_version": "v1",
+                "score_name": "context_precision",
+                "numeric_value": 0.0,
+                "label": "review",
+                "judge_model": "qwen-new",
+                "created_at": 2,
+                "score_id": "score-2",
+            },
+        ]
+    )
+
+    summary = await repo.get_kb_ragas_summary(tenant_id="tenant-a")
+
+    assert summary["ragas_scored_traces"] == 0
+    assert summary["metrics"][0]["average_score"] == 0.0
+    assert summary["metrics"][0]["scored_count"] == 0
     assert summary["metrics"][0]["review_count"] == 1
 
 

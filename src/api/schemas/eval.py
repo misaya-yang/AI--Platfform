@@ -344,6 +344,14 @@ class EvalExperimentRun(BaseModel):
     updated_at: datetime | None = None
 
 
+class EvalExperimentRunResultsResponse(BaseModel):
+    run: EvalExperimentRun
+    cases: list[dict[str, Any]] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 50
+    offset: int = 0
+
+
 class EvalExperiment(BaseModel):
     experiment_id: str
     tenant_id: str

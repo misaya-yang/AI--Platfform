@@ -38,6 +38,7 @@ interface TraceExplorerShellProps {
   setFilters: Dispatch<SetStateAction<AssistantTraceFilters>>;
   traceListCopy: TraceListCopy;
   selectedTraceId?: string;
+  runFocusRevision?: number;
   onSelectTrace: (traceId: string | undefined) => void;
   onRefresh: () => void;
   tracesLoading: boolean;
@@ -57,6 +58,7 @@ interface TraceExplorerShellProps {
   onAddToReview: () => void;
   onCreateFailureCase: () => void;
   dashboard?: EvalDashboardResponse;
+  readOnly?: boolean;
 }
 
 function percentile(values: number[], ratio: number) {
@@ -77,6 +79,7 @@ export function TraceExplorerShell({
   setFilters,
   traceListCopy,
   selectedTraceId,
+  runFocusRevision = 0,
   onSelectTrace,
   onRefresh,
   tracesLoading,
@@ -96,12 +99,16 @@ export function TraceExplorerShell({
   onAddToReview,
   onCreateFailureCase,
   dashboard,
+  readOnly = false,
 }: TraceExplorerShellProps) {
   const { t } = useTranslation();
   const [workspaceView, setWorkspaceView] = useState<TraceWorkspaceView>("explorer");
   useEffect(() => {
     setWorkspaceView("explorer");
   }, [activeTraceFamily]);
+  useEffect(() => {
+    if (runFocusRevision > 0) setWorkspaceView("run");
+  }, [runFocusRevision]);
   const selectedTrace = detail?.trace || traces.find((trace) => trace.trace_id === selectedTraceId) || null;
   const selectedThreadId = traceThreadId(selectedTrace);
   const threadFallbackTraces = useMemo(
@@ -157,6 +164,7 @@ export function TraceExplorerShell({
       onPromoteToGolden={onPromoteToGolden}
       onAddToReview={onAddToReview}
       onCreateFailureCase={onCreateFailureCase}
+      readOnly={readOnly}
     />
   );
 
@@ -179,7 +187,7 @@ export function TraceExplorerShell({
           <Button icon={<Download size={15} />} onClick={onExport} loading={exportLoading} disabled={!selectedTraceId}>
             {t("eval.workbench.exportOpenInference")}
           </Button>
-          <Button icon={<Database size={15} />} disabled={!selectedTraceId || !activeDatasetName} onClick={onPromoteToGolden}>
+          <Button icon={<Database size={15} />} disabled={readOnly || !selectedTraceId || !activeDatasetName} onClick={onPromoteToGolden}>
             {t("eval.workbench.promoteToGolden")}
           </Button>
         </Space>

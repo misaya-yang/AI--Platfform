@@ -19,6 +19,7 @@ const MAX_FILE_BYTES = 8 * 1024 * 1024;
 interface GoldenJsonlImportProps {
   datasetId: string | null;
   onImported?: () => void | Promise<void>;
+  readOnly?: boolean;
 }
 
 function formatValidationErrors(errors: GoldenCaseValidationError[], limit = 6): string {
@@ -28,7 +29,7 @@ function formatValidationErrors(errors: GoldenCaseValidationError[], limit = 6):
     .join("\n");
 }
 
-export function GoldenJsonlImport({ datasetId, onImported }: GoldenJsonlImportProps) {
+export function GoldenJsonlImport({ datasetId, onImported, readOnly = false }: GoldenJsonlImportProps) {
   const { t } = useTranslation();
   const { message } = AntApp.useApp();
   const [fileName, setFileName] = useState<string | null>(null);
@@ -127,7 +128,7 @@ export function GoldenJsonlImport({ datasetId, onImported }: GoldenJsonlImportPr
         accept={ACCEPTED_EXTENSIONS.join(",")}
         multiple={false}
         showUploadList={false}
-        disabled={importing}
+        disabled={readOnly || importing}
         beforeUpload={(file) => {
           void readGoldenFile(file);
           return false;
@@ -199,7 +200,7 @@ export function GoldenJsonlImport({ datasetId, onImported }: GoldenJsonlImportPr
           <Switch
             checked={skipDuplicates}
             onChange={setSkipDuplicates}
-            disabled={importing}
+            disabled={readOnly || importing}
             aria-label={t("eval.goldenImport.skipDuplicatesAria")}
           />
           <span>{t("eval.goldenImport.skipDuplicates")}</span>
@@ -213,7 +214,7 @@ export function GoldenJsonlImport({ datasetId, onImported }: GoldenJsonlImportPr
           icon={<UploadCloud size={15} />}
           onClick={() => void handleImport()}
           loading={importing}
-          disabled={!datasetId || !validation.valid || cases.length === 0}
+          disabled={readOnly || !datasetId || !validation.valid || cases.length === 0}
           data-testid="golden-jsonl-import-submit"
         >
           {t("eval.goldenImport.importButton")}

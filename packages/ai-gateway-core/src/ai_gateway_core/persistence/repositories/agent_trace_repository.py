@@ -1288,6 +1288,194 @@ class AgentTraceRepository(BaseRepository):
         )
         return self._decode_eval_row(row) if row else None
 
+    async def list_experiment_run_case_results(
+        self,
+        *,
+        tenant_id: str,
+        run_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        case_key_sql = """
+            COALESCE(
+                NULLIF(s.metadata->>'example_id', ''),
+                NULLIF(s.metadata->>'case_id', ''),
+                s.trace_id::text
+            )
+        """
+        target_key_sql = """
+            COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)
+        """
+        count_row = await self.fetchrow(
+            f"""
+            SELECT COUNT(DISTINCT {case_key_sql})::int AS total
+            FROM agent_trace_scores s
+            INNER JOIN agent_traces t
+                ON t.trace_id = s.trace_id AND t.tenant_id = $1
+            WHERE s.metadata->>'experiment_run_id' = $2
+            """,
+            tenant_id,
+            run_id,
+        )
+        total = int((count_row or {}).get("total") or 0)
+        if total == 0:
+            return [], 0
+
+        rows = await self.fetch(
+            f"""
+            WITH ranked_scores AS (
+                SELECT
+                    s.*,
+                    {case_key_sql} AS case_key,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY {case_key_sql}, s.score_name,
+                            s.target_type, {target_key_sql}
+                        ORDER BY s.created_at DESC, s.score_id DESC
+                    ) AS score_revision
+                FROM agent_trace_scores s
+                INNER JOIN agent_traces t
+                    ON t.trace_id = s.trace_id AND t.tenant_id = $1
+                WHERE s.metadata->>'experiment_run_id' = $2
+            ),
+            paged_cases AS (
+                SELECT case_key, MAX(created_at) AS latest_created_at
+                FROM ranked_scores
+                WHERE score_revision = 1
+                GROUP BY case_key
+                ORDER BY latest_created_at DESC, case_key
+                LIMIT $3 OFFSET $4
+            )
+            SELECT
+                s.case_key,
+                s.score_id,
+                s.trace_id AS candidate_trace_id,
+                s.score_name,
+                s.target_type,
+                s.target_id,
+                s.span_id,
+                s.numeric_value,
+                s.label AS score_label,
+                s.explanation AS score_explanation,
+                s.score_source,
+                s.metadata AS score_metadata,
+                e.example_id,
+                e.source_trace_id,
+                e.input,
+                e.expected_output,
+                e.metadata AS example_metadata,
+                t.trace_family,
+                t.status AS trace_status,
+                t.model_id,
+                t.provider,
+                t.total_latency_ms,
+                t.total_tokens,
+                t.output_preview
+            FROM ranked_scores s
+            INNER JOIN paged_cases p ON p.case_key = s.case_key
+            INNER JOIN agent_traces t
+                ON t.trace_id = s.trace_id AND t.tenant_id = $1
+            LEFT JOIN eval_examples e
+                ON e.tenant_id = $1
+               AND e.example_id::text = NULLIF(s.metadata->>'example_id', '')
+            WHERE s.score_revision = 1
+            ORDER BY p.latest_created_at DESC, s.case_key, s.score_name
+            """,
+            tenant_id,
+            run_id,
+            max(1, limit),
+            max(0, offset),
+        )
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for raw_row in rows:
+            row = dict(raw_row)
+            score_metadata = self._decode_json(row.get("score_metadata"), default={})
+            example_metadata = self._decode_json(row.get("example_metadata"), default={})
+            case_key = str(row.get("case_key") or row.get("candidate_trace_id") or "")
+            case = grouped.setdefault(
+                case_key,
+                {
+                    "example_id": str(row.get("example_id") or score_metadata.get("example_id") or "")
+                    or None,
+                    "case_id": str(
+                        score_metadata.get("case_id")
+                        or example_metadata.get("case_id")
+                        or row.get("example_id")
+                        or case_key
+                    ),
+                    "candidate_trace_id": str(row.get("candidate_trace_id") or ""),
+                    "source_trace_id": str(row.get("source_trace_id") or "") or None,
+                    "status": "unscored",
+                    "aggregate_score": None,
+                    "failure_reason": None,
+                    "input": self._decode_json(row.get("input"), default={}),
+                    "expected_output": self._decode_json(
+                        row.get("expected_output"), default={}
+                    ),
+                    "trace": {
+                        "trace_family": row.get("trace_family"),
+                        "status": row.get("trace_status"),
+                        "model_id": row.get("model_id"),
+                        "provider": row.get("provider"),
+                        "total_latency_ms": int(row.get("total_latency_ms") or 0),
+                        "total_tokens": int(row.get("total_tokens") or 0),
+                        "output_preview": row.get("output_preview") or "",
+                    },
+                    "scores": [],
+                },
+            )
+            case["scores"].append(
+                {
+                    "score_name": row.get("score_name"),
+                    "target_type": row.get("target_type"),
+                    "target_id": row.get("target_id"),
+                    "span_id": str(row.get("span_id") or "") or None,
+                    "numeric_value": row.get("numeric_value"),
+                    "label": row.get("score_label"),
+                    "explanation": row.get("score_explanation") or "",
+                    "score_source": row.get("score_source"),
+                    "failure_kind": score_metadata.get("failure_kind"),
+                }
+            )
+
+        cases = list(grouped.values())
+        for case in cases:
+            scores = case["scores"]
+            numeric_scores = [
+                float(score["numeric_value"])
+                for score in scores
+                if score.get("label") in {"pass", "fail"}
+                and isinstance(score.get("numeric_value"), int | float)
+                and not isinstance(score.get("numeric_value"), bool)
+            ]
+            case["aggregate_score"] = (
+                round(sum(numeric_scores) / len(numeric_scores), 4)
+                if numeric_scores
+                else None
+            )
+            failed = next(
+                (
+                    score
+                    for score in scores
+                    if score.get("label") == "fail"
+                    or score.get("failure_kind") == "infrastructure"
+                ),
+                None,
+            )
+            review = next(
+                (score for score in scores if score.get("label") == "review"),
+                None,
+            )
+            if failed:
+                case["status"] = "failed"
+                case["failure_reason"] = failed.get("explanation") or "Evaluation failed"
+            elif review:
+                case["status"] = "review"
+                case["failure_reason"] = review.get("explanation") or "Manual review required"
+            elif any(score.get("label") == "pass" for score in scores):
+                case["status"] = "passed"
+        return cases, total
+
     async def compare_experiment_runs(
         self,
         *,
@@ -1720,27 +1908,49 @@ class AgentTraceRepository(BaseRepository):
             params.append(dataset_id)
             trace_filters.append(f"t.metadata->>'dataset_id' = ${len(params)}")
         trace_where = " AND ".join(trace_filters)
+        latest_scores_ctes = f"""
+            in_window_traces AS (
+                SELECT t.trace_id
+                FROM agent_traces t
+                WHERE {trace_where}
+            ),
+            latest_scores AS (
+                SELECT ranked_scores.*
+                FROM (
+                    SELECT
+                        s.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY s.trace_id, s.evaluator_id,
+                                COALESCE(s.evaluator_version, ''), s.score_name
+                            ORDER BY s.created_at DESC, s.score_id DESC
+                        ) AS score_revision
+                    FROM agent_trace_scores s
+                    INNER JOIN in_window_traces t ON t.trace_id = s.trace_id
+                    WHERE s.score_source = 'kb_ragas'
+                ) ranked_scores
+                WHERE ranked_scores.score_revision = 1
+            )
+        """
 
         trace_row = await self.fetchrow(
             f"""
+            WITH {latest_scores_ctes}
             SELECT
-                COUNT(DISTINCT t.trace_id)::int AS rag_traces,
+                (
+                    SELECT COUNT(DISTINCT t.trace_id)
+                    FROM in_window_traces t
+                )::int AS rag_traces,
                 COUNT(DISTINCT CASE
-                    WHEN s.score_source = 'kb_ragas' AND s.label IN ('pass', 'fail')
-                    THEN t.trace_id
+                    WHEN s.label IN ('pass', 'fail') THEN s.trace_id
                 END)::int AS ragas_scored_traces
-            FROM agent_traces t
-            LEFT JOIN agent_trace_scores s
-               ON s.trace_id = t.trace_id
-               AND s.score_source = 'kb_ragas'
-               AND s.label IN ('pass', 'fail')
-            WHERE {trace_where}
+            FROM latest_scores s
             """,
             *params,
         )
 
         metric_rows = await self.fetch(
             f"""
+            WITH {latest_scores_ctes}
             SELECT
                 s.score_name AS metric,
                 COALESCE(
@@ -1751,10 +1961,7 @@ class AgentTraceRepository(BaseRepository):
                 COUNT(*) FILTER (WHERE s.label = 'pass')::int AS pass_count,
                 COUNT(*) FILTER (WHERE s.label = 'fail')::int AS fail_count,
                 COUNT(*) FILTER (WHERE s.label = 'review')::int AS review_count
-            FROM agent_trace_scores s
-            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
-            WHERE {trace_where}
-              AND s.score_source = 'kb_ragas'
+            FROM latest_scores s
             GROUP BY s.score_name
             ORDER BY s.score_name
             """,
@@ -1763,13 +1970,11 @@ class AgentTraceRepository(BaseRepository):
 
         judge_row = await self.fetchrow(
             f"""
+            WITH {latest_scores_ctes}
             SELECT s.metadata->>'judge_model' AS judge_model
-            FROM agent_trace_scores s
-            INNER JOIN agent_traces t ON t.trace_id = s.trace_id
-            WHERE {trace_where}
-              AND s.score_source = 'kb_ragas'
-              AND COALESCE(s.metadata->>'judge_model', '') <> ''
-            ORDER BY s.created_at DESC
+            FROM latest_scores s
+            WHERE COALESCE(s.metadata->>'judge_model', '') <> ''
+            ORDER BY s.created_at DESC, s.score_id DESC
             LIMIT 1
             """,
             *params,

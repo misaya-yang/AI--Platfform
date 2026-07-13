@@ -38,6 +38,7 @@ interface KbRagasPanelProps {
   onCreateRagasEvaluator: () => void;
   createLoading: boolean;
   initialDatasetId?: string;
+  canRunEvaluations: boolean;
 }
 
 function MetricCard({
@@ -92,6 +93,7 @@ export function KbRagasPanel({
   onCreateRagasEvaluator,
   createLoading,
   initialDatasetId,
+  canRunEvaluations,
 }: KbRagasPanelProps) {
   const { t } = useTranslation();
   const { message } = AntApp.useApp();
@@ -179,13 +181,17 @@ export function KbRagasPanel({
             <MetricCard
               key={metric.metric}
               metric={metric.metric}
-              score={metric.average_score}
+              score={metric.scored_count > 0 ? metric.average_score : null}
               explanation={t("eval.ragas.aggregateMetricCopy", {
                 scored: metric.scored_count,
                 pass: metric.pass_count,
                 fail: metric.fail_count,
               })}
-              label={metric.pass_count >= metric.fail_count ? "pass" : "fail"}
+              label={
+                metric.scored_count > 0
+                  ? metric.pass_count >= metric.fail_count ? "pass" : "fail"
+                  : metric.review_count > 0 ? "review" : null
+              }
             />
           ))}
         </div>
@@ -217,7 +223,7 @@ export function KbRagasPanel({
               icon={<Play size={15} />}
               onClick={onQueueEvaluator}
               loading={queueLoading}
-              disabled={!selectedEvaluatorId || !selectedTraceId}
+              disabled={!canRunEvaluations || !selectedEvaluatorId || !selectedTraceId}
             >
               {t("eval.ragas.queueSelectedTrace")}
             </Button>
@@ -225,7 +231,7 @@ export function KbRagasPanel({
               icon={<Layers size={15} />}
               onClick={() => batchMutation.mutate()}
               loading={batchMutation.isPending}
-              disabled={!selectedEvaluatorId}
+              disabled={!canRunEvaluations || !selectedEvaluatorId}
             >
               {t("eval.ragas.batchScoreDataset")}
             </Button>
@@ -233,6 +239,7 @@ export function KbRagasPanel({
               icon={<Sparkles size={15} />}
               onClick={onCreateRagasEvaluator}
               loading={createLoading}
+              disabled={!canRunEvaluations}
             >
               {t("eval.ragas.createEvaluator")}
             </Button>

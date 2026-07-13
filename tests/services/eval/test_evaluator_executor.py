@@ -19,6 +19,7 @@ class FakeEvalRepository:
         self.created_label_override: str | None = None
         self.rejected_score_trace_ids: set[str] = set()
         self.rejected_score_names: set[str] = set()
+        self.final_scores: dict[tuple[str, ...], dict[str, Any]] = {}
         self.evaluator = {
             "evaluator_id": "eval-1",
             "name": "latency",
@@ -88,10 +89,23 @@ class FakeEvalRepository:
             or str(kwargs["payload"].get("score_name") or "") in self.rejected_score_names
         ):
             return None
+        payload = kwargs["payload"]
+        persisted_label = self.created_label_override or payload.get("label")
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        score_key = (
+            str(kwargs.get("trace_id") or ""),
+            str(payload.get("evaluator_id") or ""),
+            str(payload.get("evaluator_version") or ""),
+            str(payload.get("score_name") or ""),
+            str(payload.get("target_type") or ""),
+            str(payload.get("target_id") or ""),
+            str(metadata.get("experiment_run_id") or ""),
+        )
+        self.final_scores[score_key] = {**payload, "label": persisted_label}
         return {
             "score_id": "score-1",
-            "numeric_value": kwargs["payload"]["numeric_value"],
-            "label": self.created_label_override or kwargs["payload"].get("label"),
+            "numeric_value": payload["numeric_value"],
+            "label": persisted_label,
         }
 
 
@@ -1144,13 +1158,18 @@ async def test_ragas_evaluator_requires_configured_client() -> None:
     ]
     executor = EvaluatorExecutor(repo)
 
-    await executor.run_job(
+    result = await executor.run_job(
         tenant_id="tenant-a",
         job_payload={"run_id": "run-ragas-missing", "evaluator_id": "eval-1", "trace_id": "trace-1"},
     )
 
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert result.status == "failed"
+    assert result.error_message == "KB RAGAS infrastructure failure requires retry"
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["review_count"] == 1
     assert score_calls[0][1]["payload"]["label"] == "review"
+    assert score_calls[0][1]["payload"]["metadata"]["failure_kind"] == "infrastructure"
     assert "not configured" in score_calls[0][1]["payload"]["explanation"]
 
 
@@ -1166,9 +1185,445 @@ def _configure_ragas_trace(repo: FakeEvalRepository) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ragas_missing_trace_sample_is_semantic_review() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "ragas"
+    repo.trace_detail["trace"]["trace_family"] = "rag"
+    repo.trace_detail["spans"] = []
+
+    result = await EvaluatorExecutor(repo).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-no-sample", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_call = next(call for call in repo.calls if call[0] == "create_eval_score")
+    assert result.status == "succeeded"
+    assert result.score_summary["review_count"] == 1
+    assert score_call[1]["payload"]["metadata"]["failure_kind"] == "semantic_review"
+
+
+@pytest.mark.asyncio
+async def test_ragas_missing_required_span_is_semantic_review() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {"required_span_kinds": ["document_fetch"]}
+
+    result = await EvaluatorExecutor(repo).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-missing-span", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_call = next(call for call in repo.calls if call[0] == "create_eval_score")
+    assert result.status == "succeeded"
+    assert score_call[1]["payload"]["metadata"]["failure_kind"] == "semantic_review"
+
+
+@pytest.mark.asyncio
+async def test_ragas_client_exception_persists_infrastructure_review_and_fails_run() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("judge unavailable")
+
+    result = await EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-exception", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_call = next(call for call in repo.calls if call[0] == "create_eval_score")
+    assert result.status == "failed"
+    assert result.error_message == "KB RAGAS infrastructure failure requires retry"
+    assert score_call[1]["payload"]["label"] == "review"
+    assert score_call[1]["payload"]["metadata"]["failure_kind"] == "infrastructure"
+
+
+@pytest.mark.asyncio
+async def test_ragas_retry_overwrites_precision_only_infrastructure_marker() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {"metrics": ["context_precision"]}
+
+    async def _failing_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("judge unavailable")
+
+    first = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_failing_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-retry",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    async def _successful_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.9,
+                "explanation": "recovered",
+                "label": "pass",
+            }
+        ]
+
+    second = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_successful_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-retry",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert first.status == "failed"
+    assert second.status == "succeeded"
+    assert len(repo.final_scores) == 1
+    final_score = next(iter(repo.final_scores.values()))
+    assert final_score["score_name"] == "context_precision"
+    assert final_score["label"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_ragas_dataset_retry_overwrites_example_scoped_marker() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {"metrics": ["context_precision"]}
+    repo.examples = [
+        {
+            "example_id": "example-ragas-1",
+            "source_trace_id": "trace-1",
+            "metadata": {"case_id": "ragas.case.one"},
+        }
+    ]
+
+    async def _failing_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("judge unavailable")
+
+    first = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_failing_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-dataset-retry",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    async def _successful_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.9,
+                "explanation": "recovered",
+                "label": "pass",
+            }
+        ]
+
+    second = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_successful_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-dataset-retry",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert first.status == "failed"
+    assert second.status == "succeeded"
+    assert len(repo.final_scores) == 1
+    final_score = next(iter(repo.final_scores.values()))
+    assert final_score["target_type"] == "example"
+    assert final_score["target_id"] == "example-ragas-1"
+    assert final_score["label"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_ragas_missing_configured_metric_is_infrastructure_failure() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {
+        "metrics": ["context_relevancy", "context_precision"]
+    }
+
+    async def _partial_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.9,
+                "explanation": "partial response",
+                "label": "pass",
+            }
+        ]
+
+    result = await EvaluatorExecutor(
+        repo,
+        kb_ragas_evaluate=_partial_evaluate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-ragas-partial-response",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    assert result.status == "failed"
+    assert result.scores_written == 2
+    assert {score["score_name"] for score in repo.final_scores.values()} == {
+        "context_relevancy",
+        "context_precision",
+    }
+    assert all(
+        score["metadata"]["failure_kind"] == "infrastructure"
+        for score in repo.final_scores.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_results",
+    [
+        pytest.param([], id="empty-results"),
+        pytest.param(["not-an-object"], id="malformed-item"),
+        pytest.param(
+            [
+                {
+                    "metric": "context_precision",
+                    "score": 0.8,
+                    "explanation": "valid",
+                    "label": "pass",
+                },
+                "not-an-object",
+            ],
+            id="mixed-valid-and-malformed",
+        ),
+        pytest.param(["bad", "also-bad"], id="multiple-malformed"),
+        pytest.param(
+            [
+                {
+                    "metric": "context_relevancy",
+                    "score": 0.8,
+                    "explanation": "first",
+                    "label": "pass",
+                },
+                {
+                    "metric": "context_relevancy",
+                    "score": 0.9,
+                    "explanation": "duplicate",
+                    "label": "pass",
+                },
+            ],
+            id="duplicate-metric",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": " ",
+                    "score": 0.8,
+                    "explanation": "blank metric",
+                    "label": "pass",
+                }
+            ],
+            id="blank-metric",
+        ),
+        pytest.param(
+            {
+                "metric": "context_relevancy",
+                "score": 0.8,
+                "explanation": "not a collection",
+                "label": "pass",
+            },
+            id="non-list-results",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "context_precision",
+                    "score": 0.8,
+                    "explanation": "valid",
+                    "label": "pass",
+                },
+                {
+                    "metric": "context_relevancy",
+                    "score": "not-a-number",
+                    "explanation": "invalid score",
+                    "label": "pass",
+                },
+            ],
+            id="mixed-valid-and-invalid-score",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "context_precision",
+                    "score": 0.8,
+                    "explanation": "valid",
+                    "label": "pass",
+                },
+                {
+                    "metric": "context_relevancy",
+                    "score": 0.8,
+                    "explanation": "invalid label",
+                    "label": "unknown",
+                },
+            ],
+            id="mixed-valid-and-invalid-label",
+        ),
+        pytest.param(
+            [
+                {
+                    "metric": "context_relevancy",
+                    "score": 0.8,
+                    "explanation": "valid",
+                    "label": "pass",
+                },
+                {
+                    "metric": "context_precision",
+                    "score": 0.0,
+                    "explanation": "invalid failure kind",
+                    "label": "review",
+                    "failure_kind": "unknown",
+                },
+            ],
+            id="mixed-valid-and-invalid-failure-kind",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_ragas_invalid_service_results_are_infrastructure_failures(
+    raw_results: Any,
+) -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> Any:
+        return raw_results
+
+    result = await EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-invalid-result", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert result.status == "failed"
+    assert result.error_message == "KB RAGAS infrastructure failure requires retry"
+    assert result.scores_written == 1
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["review_count"] == 1
+    assert len(score_calls) == 1
+    assert len(repo.final_scores) == 1
+    assert result.scores_written == len(repo.final_scores)
+    assert score_calls[0][1]["payload"]["metadata"]["failure_kind"] == "infrastructure"
+
+
+@pytest.mark.asyncio
+async def test_ragas_valid_distinct_metrics_can_mix_pass_and_infrastructure_review() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {
+        "metrics": ["context_relevancy", "context_precision"]
+    }
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.8,
+                "explanation": "valid",
+                "label": "pass",
+            },
+            {
+                "metric": "context_precision",
+                "score": 0.0,
+                "explanation": "judge unavailable",
+                "label": "review",
+                "failure_kind": "infrastructure",
+            },
+        ]
+
+    result = await EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-mixed-valid", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.status == "failed"
+    assert result.scores_written == 2
+    assert result.score_summary["scored_count"] == 1
+    assert result.score_summary["review_count"] == 1
+    assert len(repo.final_scores) == 2
+
+
+@pytest.mark.asyncio
+async def test_service_infrastructure_review_fails_without_parsing_explanation() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.0,
+                "explanation": "ground truth is missing",
+                "label": "review",
+                "failure_kind": "infrastructure",
+            }
+        ]
+
+    result = await EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-infrastructure", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    assert result.status == "failed"
+    assert result.error_message == "KB RAGAS infrastructure failure requires retry"
+
+
+@pytest.mark.asyncio
+async def test_service_semantic_review_succeeds_without_parsing_explanation() -> None:
+    repo = FakeEvalRepository()
+    _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {"metrics": ["context_precision"]}
+
+    async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.0,
+                "explanation": "judge provider unavailable",
+                "label": "review",
+                "failure_kind": "semantic_review",
+            }
+        ]
+
+    result = await EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate).run_job(
+        tenant_id="tenant-a",
+        job_payload={"run_id": "run-ragas-semantic", "evaluator_id": "eval-1", "trace_id": "trace-1"},
+    )
+
+    score_call = next(call for call in repo.calls if call[0] == "create_eval_score")
+    assert result.status == "succeeded"
+    assert result.score_summary["scored_count"] == 0
+    assert result.score_summary["review_count"] == 1
+    assert score_call[1]["payload"]["metadata"]["failure_kind"] == "semantic_review"
+
+
+@pytest.mark.asyncio
 async def test_run_fails_when_one_of_two_target_score_payloads_is_not_persisted() -> None:
     repo = FakeEvalRepository()
     _configure_ragas_trace(repo)
+    repo.evaluator["filter_config"] = {
+        "metrics": ["context_relevancy", "context_precision"]
+    }
     repo.rejected_score_names = {"context_precision"}
 
     async def _kb_ragas_evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
@@ -1226,14 +1681,17 @@ async def test_ragas_evaluator_rejects_non_finite_and_out_of_range_scores(
         ]
 
     executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_kb_ragas_evaluate)
-    await executor.run_job(
+    result = await executor.run_job(
         tenant_id="tenant-a",
         job_payload={"run_id": "run-ragas-invalid", "evaluator_id": "eval-1", "trace_id": "trace-1"},
     )
 
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert result.status == "failed"
+    assert result.error_message == "KB RAGAS infrastructure failure requires retry"
     assert score_calls[0][1]["payload"]["label"] == "review"
     assert score_calls[0][1]["payload"]["numeric_value"] == 0.0
+    assert score_calls[0][1]["payload"]["metadata"]["failure_kind"] == "infrastructure"
 
 
 @pytest.mark.asyncio

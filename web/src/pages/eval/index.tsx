@@ -29,7 +29,9 @@ import {
   exportEvalExamples,
   getAgentTraceDetail,
   getEvalDashboard,
+  getEvalExperiment,
   getEvalExperimentRun,
+  getEvalExperimentRunResults,
   getEvalSummary,
   importEvalExamples,
   listAgentTraces,
@@ -43,6 +45,7 @@ import {
   type EvalDataset,
   type EvalEvaluator,
   type EvalExperiment,
+  type EvalExperimentCaseResult,
   type EvalExperimentRun,
   type EvalExperimentRunComparisonResponse,
   type EvalGateDryRunResponse,
@@ -55,11 +58,13 @@ import {
   type TraceFamily,
   type TraceStatus,
 } from "@/api/eval";
+import { usePermission } from "@/store/useAuthStore";
 
 import {
   type AssistantTraceFilters,
 } from "./components/AssistantTraceList";
 import { GoldenJsonlImport } from "./components/GoldenJsonlImport";
+import { ExperimentRunResults } from "./components/ExperimentRunResults";
 import { KbRagasPanel } from "./components/KbRagasPanel";
 import { TraceExplorerShell } from "./components/TraceExplorerShell";
 
@@ -305,12 +310,14 @@ export function EvalPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { message } = AntApp.useApp();
+  const canRunEvaluations = usePermission("console:eval:run");
   const [filters, setFilters] = useState<AssistantTraceFilters>({
     status: "all",
     score_status: "all",
   });
   const [activeTraceFamily, setActiveTraceFamily] = useState<TraceFamily>("assistant");
   const [selectedTraceId, setSelectedTraceId] = useState<string | undefined>();
+  const [pinnedTraceId, setPinnedTraceId] = useState<string | undefined>();
   const [scoreError, setScoreError] = useState<Error | null>(null);
   const [createdDataset, setCreatedDataset] = useState<EvalDataset | null>(null);
   const [createdEvaluator, setCreatedEvaluator] = useState<EvalEvaluator | null>(null);
@@ -358,9 +365,13 @@ export function EvalPage() {
   const [gateResult, setGateResult] = useState<EvalGateDryRunResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
   const [latestRun, setLatestRun] = useState<EvalExperimentRun | null>(null);
-  const [searchParams] = useSearchParams();
+  const [runPollRevision, setRunPollRevision] = useState(0);
+  const [runPollingError, setRunPollingError] = useState<Error | null>(null);
+  const [traceRunFocusRevision, setTraceRunFocusRevision] = useState(0);
+  const [searchParams, setSearchParams] = useSearchParams();
   const kbDatasetFilter = searchParams.get("dataset_id") || "";
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState("overview");
+  const [activeRunTab, setActiveRunTab] = useState("experiment_runs");
   const serverFilters = useMemo(
     () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter),
     [activeTraceFamily, filters, kbDatasetFilter]
@@ -369,13 +380,6 @@ export function EvalPage() {
     activeTraceFamily === "assistant"
     || activeTraceFamily === "langgraph_proxy"
     || activeTraceFamily === "rag";
-
-  useEffect(() => {
-    if (activeWorkbenchTab === "kb_ragas" && activeTraceFamily !== "rag") {
-      setActiveTraceFamily("rag");
-      setFilters({ status: "all", score_status: "all" });
-    }
-  }, [activeTraceFamily, activeWorkbenchTab]);
 
   const summaryQuery = useQuery({
     queryKey: ["eval", "summary"],
@@ -403,6 +407,7 @@ export function EvalPage() {
   }, [filters, traceFamilyEnabled, tracesQuery.data?.traces]);
 
   useEffect(() => {
+    if (pinnedTraceId) return;
     if (visibleTraces.length === 0) {
       setSelectedTraceId(undefined);
       return;
@@ -410,7 +415,7 @@ export function EvalPage() {
     if (!selectedTraceId || !visibleTraces.some((trace) => trace.trace_id === selectedTraceId)) {
       setSelectedTraceId(visibleTraces[0].trace_id);
     }
-  }, [selectedTraceId, visibleTraces]);
+  }, [pinnedTraceId, selectedTraceId, visibleTraces]);
 
   const datasetsQuery = useQuery({
     queryKey: ["eval", "datasets"],
@@ -428,6 +433,12 @@ export function EvalPage() {
     queryKey: ["eval", "experiments"],
     queryFn: () => listEvalExperiments(),
     staleTime: 30_000,
+  });
+  const experimentDetailQuery = useQuery({
+    queryKey: ["eval", "experiment", selectedExperimentId],
+    queryFn: () => getEvalExperiment(selectedExperimentId || ""),
+    enabled: Boolean(selectedExperimentId),
+    staleTime: 10_000,
   });
   const datasets = useMemo(() => datasetsQuery.data?.datasets || [], [datasetsQuery.data?.datasets]);
   const evaluators = useMemo(() => evaluatorsQuery.data?.evaluators || [], [evaluatorsQuery.data?.evaluators]);
@@ -472,11 +483,27 @@ export function EvalPage() {
   }, [createdEvaluator, ragasEvaluators, selectedEvaluatorId]);
   const activeExperiment = useMemo(() => {
     if (selectedExperimentId) {
-      return experiments.find((experiment) => experiment.experiment_id === selectedExperimentId)
+      return experimentDetailQuery.data
+        || experiments.find((experiment) => experiment.experiment_id === selectedExperimentId)
         || (createdExperiment?.experiment_id === selectedExperimentId ? createdExperiment : null);
     }
     return createdExperiment;
-  }, [createdExperiment, experiments, selectedExperimentId]);
+  }, [createdExperiment, experimentDetailQuery.data, experiments, selectedExperimentId]);
+
+  useEffect(() => {
+    if (!selectedExperimentId && experiments[0]?.experiment_id) {
+      setSelectedExperimentId(experiments[0].experiment_id);
+    }
+  }, [experiments, selectedExperimentId]);
+
+  useEffect(() => {
+    const runId = searchParams.get("run_id");
+    if (runId && runId !== queuedRunId) {
+      setQueuedRunId(runId);
+      setLatestRun(null);
+      setRunPollingError(null);
+    }
+  }, [queuedRunId, searchParams]);
 
   const examplesQuery = useQuery({
     queryKey: ["eval", "examples", activeDataset?.dataset_id],
@@ -671,7 +698,11 @@ export function EvalPage() {
       });
     },
     onSuccess: (job) => {
-      if (job.run_id) setQueuedRunId(job.run_id);
+      if (job.run_id) {
+        setQueuedRunId(job.run_id);
+        setLatestRun(null);
+        setRunPollingError(null);
+      }
       message.success(t("eval.workbench.evaluatorQueued"));
     },
     onError: (error) => message.error(toError(error).message),
@@ -693,7 +724,11 @@ export function EvalPage() {
       });
     },
     onSuccess: (job) => {
-      if (job.run_id) setQueuedRunId(job.run_id);
+      if (job.run_id) {
+        setQueuedRunId(job.run_id);
+        setLatestRun(null);
+        setRunPollingError(null);
+      }
       message.success(t("eval.workbench.evaluatorQueued"));
     },
     onError: (error) => message.error(toError(error).message),
@@ -703,22 +738,30 @@ export function EvalPage() {
     mutationFn: async () => {
       if (!activeExperiment) throw new Error(t("eval.workbench.createExperimentFirst", "Create an experiment first"));
       if (!activeEvaluator) throw new Error(t("eval.workbench.createEvaluatorFirst"));
+      const datasetId = activeDataset?.dataset_id || activeExperiment.dataset_id || null;
       return runEvalExperiment(activeExperiment.experiment_id, {
-        dataset_id: activeDataset?.dataset_id || null,
+        dataset_id: datasetId,
         evaluator_ids: [activeEvaluator.evaluator_id],
         candidate_label: "candidate",
         baseline_label: "baseline",
         target_snapshot: {
           trace_family: activeTraceFamily,
-          dataset_id: activeDataset?.dataset_id || null,
-          trace_id: selectedTraceId || null,
+          dataset_id: datasetId,
+          trace_id: datasetId ? null : selectedTraceId || null,
         },
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
       });
     },
     onSuccess: (batch) => {
       const firstRunId = batch.jobs[0]?.run_id;
-      if (firstRunId) setQueuedRunId(firstRunId);
+      if (firstRunId) {
+        setQueuedRunId(firstRunId);
+        setLatestRun(null);
+        setRunPollingError(null);
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.set("run_id", firstRunId);
+        setSearchParams(nextParams, { replace: true });
+      }
       message.success(t("eval.workbench.evaluatorQueued"));
     },
     onError: (error) => message.error(toError(error).message),
@@ -776,6 +819,34 @@ export function EvalPage() {
   const comparableRuns = activeExperiment?.runs || [];
   const canCompareRuns = comparableRuns.length >= 2;
   const latestScoreSummary = latestRun?.score_summary || {};
+  const canDryRunGate = Boolean(
+    latestRun?.status === "succeeded"
+    && typeof (latestScoreSummary.overall_score ?? latestScoreSummary.average_score) === "number"
+    && typeof latestScoreSummary.trajectory_pass_rate === "number"
+    && typeof latestScoreSummary.critical_pass_rate === "number"
+  );
+  const effectiveRunDatasetId = activeDataset?.dataset_id || activeExperiment?.dataset_id || null;
+  const canRunExperiment = Boolean(
+    canRunEvaluations
+    && activeExperiment
+    && activeEvaluator
+    && (effectiveRunDatasetId || selectedTraceId)
+  );
+  const missingRunInputs = [
+    !activeExperiment ? "experiment" : null,
+    !activeEvaluator ? "evaluator" : null,
+    !effectiveRunDatasetId && !selectedTraceId ? "test set or trace" : null,
+  ].filter(Boolean);
+
+  const selectRun = (runId: string) => {
+    setQueuedRunId(runId);
+    const selectedRun = comparableRuns.find((run) => run.run_id === runId) || null;
+    setLatestRun(selectedRun?.run_id === runId ? selectedRun : null);
+    setRunPollingError(null);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("run_id", runId);
+    setSearchParams(nextParams, { replace: true });
+  };
 
   const compareMutation = useMutation({
     mutationFn: async () => {
@@ -808,23 +879,48 @@ export function EvalPage() {
   useEffect(() => {
     if (!queuedRunId) return;
     let cancelled = false;
+    let timer: number | undefined;
     const poll = async () => {
       try {
         const run = await getEvalExperimentRun(queuedRunId);
         if (cancelled) return;
+        setRunPollingError(null);
         setLatestRun(run);
         if (run.status === "queued" || run.status === "running") {
-          window.setTimeout(poll, 2000);
+          timer = window.setTimeout(poll, 2000);
+        } else {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] }),
+            queryClient.invalidateQueries({ queryKey: ["eval", "run-results", queuedRunId] }),
+            queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] }),
+          ]);
         }
-      } catch {
-        if (!cancelled) setLatestRun(null);
+      } catch (error) {
+        if (!cancelled) {
+          setRunPollingError(toError(error));
+          timer = window.setTimeout(poll, 2000);
+        }
       }
     };
     void poll();
     return () => {
       cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [queuedRunId]);
+  }, [queryClient, queuedRunId, runPollRevision, selectedExperimentId]);
+
+  const runResultsQuery = useQuery({
+    queryKey: ["eval", "run-results", queuedRunId],
+    queryFn: () => getEvalExperimentRunResults(queuedRunId || ""),
+    enabled: Boolean(
+      queuedRunId
+      && latestRun
+      && latestRun.run_id === queuedRunId
+      && latestRun.status !== "queued"
+      && latestRun.status !== "running"
+    ),
+    staleTime: 10_000,
+  });
 
   const traceListCopy = useMemo(() => {
     if (activeTraceFamily === "rag") {
@@ -858,6 +954,7 @@ export function EvalPage() {
 
   const handleTraceFamilyChange = (key: string) => {
     const nextFamily = key as TraceFamily;
+    setPinnedTraceId(undefined);
     setActiveTraceFamily(nextFamily);
     setFilters({ status: "all", score_status: "all" });
     setSelectedTraceId(undefined);
@@ -866,14 +963,16 @@ export function EvalPage() {
   };
 
   const handleWorkbenchTabChange = (key: string) => {
-    const previousTab = activeWorkbenchTab;
     setActiveWorkbenchTab(key);
-    if (key === "kb_ragas" && activeTraceFamily !== "rag") {
-      handleTraceFamilyChange("rag");
-    }
-    if (key === "traces" && previousTab === "kb_ragas") {
-      handleTraceFamilyChange("assistant");
-    }
+  };
+
+  const openRunResultTrace = (item: EvalExperimentCaseResult) => {
+    const family = item.trace.trace_family || activeTraceFamily;
+    if (family !== activeTraceFamily) handleTraceFamilyChange(family);
+    setPinnedTraceId(item.candidate_trace_id);
+    setSelectedTraceId(item.candidate_trace_id);
+    setTraceRunFocusRevision((revision) => revision + 1);
+    setActiveWorkbenchTab("traces");
   };
 
   const dashboardMetrics = dashboardQuery.data?.metrics || {};
@@ -947,7 +1046,11 @@ export function EvalPage() {
       setFilters={setFilters}
       traceListCopy={traceListCopy}
       selectedTraceId={selectedTraceId}
-      onSelectTrace={setSelectedTraceId}
+      runFocusRevision={traceRunFocusRevision}
+      onSelectTrace={(traceId) => {
+        setPinnedTraceId(undefined);
+        setSelectedTraceId(traceId);
+      }}
       onRefresh={() => tracesQuery.refetch()}
       tracesLoading={tracesQuery.isLoading || tracesQuery.isFetching}
       tracesError={tracesQuery.error ? toError(tracesQuery.error) : null}
@@ -968,6 +1071,7 @@ export function EvalPage() {
       onAddToReview={addSelectedTraceToReview}
       onCreateFailureCase={createSelectedFailureCase}
       dashboard={dashboardQuery.data}
+      readOnly={!canRunEvaluations}
     />
   );
 
@@ -1032,6 +1136,7 @@ export function EvalPage() {
           icon={<Database size={15} />}
           onClick={() => datasetMutation.mutate()}
           loading={datasetMutation.isPending}
+          disabled={!canRunEvaluations}
         >
           {t("eval.workbench.createDataset")}
         </Button>
@@ -1039,7 +1144,7 @@ export function EvalPage() {
           icon={<SearchCheck size={15} />}
           onClick={promoteSelectedTraceToGolden}
           loading={exampleMutation.isPending}
-          disabled={!activeDataset || !selectedTraceId}
+          disabled={!canRunEvaluations || !activeDataset || !selectedTraceId}
         >
           {t("eval.workbench.addTraceToDataset")}
         </Button>
@@ -1055,7 +1160,7 @@ export function EvalPage() {
           icon={<Database size={15} />}
           onClick={() => examplesImportMutation.mutate()}
           loading={examplesImportMutation.isPending}
-          disabled={!activeDataset}
+          disabled={!canRunEvaluations || !activeDataset}
         >
           {t("eval.workbench.importSeed", "Import seed case")}
         </Button>
@@ -1076,6 +1181,7 @@ export function EvalPage() {
       />
       <GoldenJsonlImport
         datasetId={activeDataset?.dataset_id ?? null}
+        readOnly={!canRunEvaluations}
         onImported={async () => {
           await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
           await queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] });
@@ -1086,13 +1192,15 @@ export function EvalPage() {
 
   const experimentsTab = (
     <WorkbenchPanel
-      title={t("eval.workbench.experiments")}
-      description={t("eval.workbench.experimentsDescription")}
+      title={t("eval.workbench.runAndResults", "Run & Results")}
+      description={t("eval.workbench.runAndResultsDescription", "Select a test set and evaluator, run it, then inspect scores and failed traces in one place.")}
       icon={<Beaker size={22} />}
     >
+      {!canRunEvaluations ? (
+        <Alert type="info" showIcon message={t("eval.workbench.readOnly", "Read-only mode: you can inspect results but cannot start or edit evaluations.")} />
+      ) : null}
       <div className="eval-workbench-form-grid">
         <Select
-          className="eval-workbench-wide"
           allowClear
           aria-label={t("eval.workbench.selectExperiment", "Select experiment")}
           placeholder={t("eval.workbench.selectExperiment", "Select experiment")}
@@ -1101,50 +1209,52 @@ export function EvalPage() {
             label: experiment.name,
             value: experiment.experiment_id,
           }))}
-          onChange={(value) => setSelectedExperimentId(value)}
+          onChange={(value) => {
+            setSelectedExperimentId(value);
+            setQueuedRunId(undefined);
+            setLatestRun(null);
+            setRunPollingError(null);
+            const nextParams = new URLSearchParams(searchParams);
+            nextParams.delete("run_id");
+            setSearchParams(nextParams, { replace: true });
+          }}
         />
-        <Input
-          aria-label={t("eval.workbench.experimentName", "Experiment name")}
-          value={experimentDraft.name}
-          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, name: event.target.value }))}
+        <Select
+          allowClear
+          aria-label={t("eval.workbench.selectDataset", "Select test set")}
+          placeholder={t("eval.workbench.selectDataset", "Select test set")}
+          value={selectedDatasetId}
+          options={datasets.map((dataset) => ({ label: `${dataset.name} (${dataset.version})`, value: dataset.dataset_id }))}
+          onChange={(value) => setSelectedDatasetId(value)}
         />
-        <Input
-          aria-label={t("eval.workbench.experimentDescription", "Experiment description")}
-          value={experimentDraft.description}
-          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, description: event.target.value }))}
-        />
-        <Input.TextArea
-          className="eval-workbench-textarea eval-workbench-wide"
-          aria-label={t("eval.workbench.targetConfig", "Target config JSON")}
-          value={experimentDraft.targetConfigText}
-          autoSize={{ minRows: 3, maxRows: 6 }}
-          onChange={(event) => setExperimentDraft((draft) => ({ ...draft, targetConfigText: event.target.value }))}
+        <Select
+          allowClear
+          aria-label={t("eval.workbench.selectEvaluator", "Select evaluator")}
+          placeholder={t("eval.workbench.selectEvaluator", "Select evaluator")}
+          value={selectedEvaluatorId}
+          options={evaluators.map((evaluator) => ({
+            label: `${evaluator.name} · ${evaluator.evaluator_type}`,
+            value: evaluator.evaluator_id,
+          }))}
+          onChange={(value) => setSelectedEvaluatorId(value)}
         />
       </div>
+      {missingRunInputs.length ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={t("eval.workbench.missingRunInputs", "Select {{items}} before running.", { items: missingRunInputs.join(", ") })}
+        />
+      ) : null}
       <Space size={10} wrap>
         <Button
           type="primary"
-          icon={<Beaker size={15} />}
-          onClick={() => experimentMutation.mutate()}
-          loading={experimentMutation.isPending}
-        >
-          {t("eval.workbench.createExperiment")}
-        </Button>
-        <Button
           icon={<Play size={15} />}
-          onClick={() => evaluatorRunMutation.mutate()}
-          loading={evaluatorRunMutation.isPending}
-          disabled={!activeEvaluator}
-        >
-          {t("eval.workbench.queueEvaluator")}
-        </Button>
-        <Button
-          icon={<Beaker size={15} />}
           onClick={() => experimentBatchMutation.mutate()}
           loading={experimentBatchMutation.isPending}
-          disabled={!activeEvaluator || !activeExperiment}
+          disabled={!canRunExperiment}
         >
-          {t("eval.workbench.runExperiment", "Run experiment")}
+          {t("eval.workbench.runExperiment", "Run test set")}
         </Button>
         <Button
           icon={<GitCompare size={15} />}
@@ -1154,21 +1264,69 @@ export function EvalPage() {
         >
           {t("eval.workbench.compareRuns", "Compare runs")}
         </Button>
+        <Select
+          className="eval-run-history-select"
+          allowClear
+          aria-label={t("eval.workbench.selectRun", "Select previous run")}
+          placeholder={t("eval.workbench.selectRun", "Select previous run")}
+          value={queuedRunId}
+          options={comparableRuns.map((run) => ({
+            label: `${run.status} · ${(run.created_at || run.run_id).slice(0, 19)}`,
+            value: run.run_id,
+          }))}
+          onChange={(value) => value && selectRun(value)}
+        />
       </Space>
-      <Descriptions
-        className="eval-workbench-descriptions"
-        size="small"
-        bordered
-        column={1}
-        items={[
-          { key: "experiment", label: t("eval.workbench.currentExperiment"), children: activeExperiment?.name || "-" },
-          { key: "dataset", label: t("eval.workbench.currentDataset"), children: activeDataset?.name || "-" },
-          { key: "target", label: t("eval.workbench.target"), children: `${activeTraceFamily}:${serverFilters.model_id || "current"}` },
-          { key: "listed", label: t("eval.workbench.listedExperiments", "Listed experiments"), children: String(experimentsQuery.data?.total ?? 0) },
-          { key: "run", label: t("eval.workbench.latestRun", "Latest run"), children: latestRun?.status || "-" },
-          { key: "comparison", label: t("eval.workbench.comparison", "Comparison delta"), children: String(runComparison?.deltas?.overall_score ?? "-") },
-        ]}
+      {runComparison ? (
+        <Alert
+          type="info"
+          showIcon
+          message={t("eval.workbench.comparison", "Comparison delta")}
+          description={String(runComparison.deltas.overall_score ?? "—")}
+        />
+      ) : null}
+      <ExperimentRunResults
+        run={latestRun?.run_id === queuedRunId ? latestRun : null}
+        results={latestRun?.run_id === queuedRunId ? runResultsQuery.data || null : null}
+        loading={runResultsQuery.isFetching}
+        error={runPollingError || (runResultsQuery.error ? toError(runResultsQuery.error) : null)}
+        onRetry={() => {
+          setRunPollingError(null);
+          setRunPollRevision((revision) => revision + 1);
+          void runResultsQuery.refetch();
+        }}
+        onOpenTrace={openRunResultTrace}
       />
+      <details className="eval-run-advanced">
+        <summary>{t("eval.workbench.createOrConfigure", "Create or configure an experiment")}</summary>
+        <div className="eval-workbench-form-grid">
+          <Input
+            aria-label={t("eval.workbench.experimentName", "Experiment name")}
+            value={experimentDraft.name}
+            onChange={(event) => setExperimentDraft((draft) => ({ ...draft, name: event.target.value }))}
+          />
+          <Input
+            aria-label={t("eval.workbench.experimentDescription", "Experiment description")}
+            value={experimentDraft.description}
+            onChange={(event) => setExperimentDraft((draft) => ({ ...draft, description: event.target.value }))}
+          />
+          <Input.TextArea
+            className="eval-workbench-textarea eval-workbench-wide"
+            aria-label={t("eval.workbench.targetConfig", "Target config JSON")}
+            value={experimentDraft.targetConfigText}
+            autoSize={{ minRows: 3, maxRows: 6 }}
+            onChange={(event) => setExperimentDraft((draft) => ({ ...draft, targetConfigText: event.target.value }))}
+          />
+          <Button
+            icon={<Beaker size={15} />}
+            onClick={() => experimentMutation.mutate()}
+            loading={experimentMutation.isPending}
+            disabled={!canRunEvaluations}
+          >
+            {t("eval.workbench.createExperiment")}
+          </Button>
+        </div>
+      </details>
     </WorkbenchPanel>
   );
 
@@ -1244,6 +1402,7 @@ export function EvalPage() {
           icon={<Sparkles size={15} />}
           onClick={() => evaluatorMutation.mutate()}
           loading={evaluatorMutation.isPending}
+          disabled={!canRunEvaluations}
         >
           {t("eval.workbench.createEvaluator")}
         </Button>
@@ -1251,7 +1410,7 @@ export function EvalPage() {
           icon={<Play size={15} />}
           onClick={() => evaluatorRunMutation.mutate()}
           loading={evaluatorRunMutation.isPending}
-          disabled={!activeEvaluator}
+          disabled={!canRunEvaluations || !activeEvaluator}
         >
           {t("eval.workbench.queueEvaluator")}
         </Button>
@@ -1287,7 +1446,7 @@ export function EvalPage() {
           icon={<CheckCircle2 size={15} />}
           onClick={addSelectedTraceToReview}
           loading={exampleMutation.isPending}
-          disabled={!activeDataset || !selectedTraceId}
+          disabled={!canRunEvaluations || !activeDataset || !selectedTraceId}
         >
           {t("eval.workbench.addToReview", "Add to Review")}
         </Button>
@@ -1300,10 +1459,10 @@ export function EvalPage() {
               <span>{String(example.metadata?.review_status || "pending")} · {example.split}</span>
             </div>
             <Space size={8}>
-              <Button size="small" onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "approved" })}>
+              <Button size="small" disabled={!canRunEvaluations} onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "approved" })}>
                 {t("common.approve", "Approve")}
               </Button>
-              <Button size="small" onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "needs_fix" })}>
+              <Button size="small" disabled={!canRunEvaluations} onClick={() => reviewMutation.mutate({ exampleId: example.example_id, status: "needs_fix" })}>
                 {t("common.review", "Needs fix")}
               </Button>
             </Space>
@@ -1330,6 +1489,7 @@ export function EvalPage() {
       onCreateRagasEvaluator={() => createRagasEvaluatorMutation.mutate()}
       createLoading={createRagasEvaluatorMutation.isPending}
       initialDatasetId={kbDatasetFilter}
+      canRunEvaluations={canRunEvaluations}
     />
   );
 
@@ -1345,10 +1505,18 @@ export function EvalPage() {
           icon={<ShieldCheck size={15} />}
           onClick={() => gateMutation.mutate()}
           loading={gateMutation.isPending}
+          disabled={!canRunEvaluations || !canDryRunGate}
         >
           {t("eval.workbench.dryRunGate", "Dry-run gate")}
         </Button>
       </Space>
+      {!canDryRunGate ? (
+        <Alert
+          type="info"
+          showIcon
+          message={t("eval.workbench.gateNeedsRun", "Select a successful run with complete gate metrics before running the gate.")}
+        />
+      ) : null}
       <Descriptions
         className="eval-workbench-descriptions"
         size="small"
@@ -1363,6 +1531,43 @@ export function EvalPage() {
         ]}
       />
     </WorkbenchPanel>
+  );
+
+  const runAndResultsTab = (
+    <Tabs
+      className="eval-subtabs"
+      activeKey={activeRunTab}
+      onChange={(key) => {
+        setActiveRunTab(key);
+        if (key === "rag_quality" && activeTraceFamily !== "rag") {
+          handleTraceFamilyChange("rag");
+        }
+      }}
+      items={[
+        {
+          key: "experiment_runs",
+          label: t("eval.workbench.testRuns", "Test runs"),
+          children: experimentsTab,
+        },
+        {
+          key: "rag_quality",
+          label: t("eval.ragas.tab", "RAG quality"),
+          children: kbRagasTab,
+        },
+      ]}
+    />
+  );
+
+  const assetsTab = (
+    <Tabs
+      className="eval-subtabs"
+      defaultActiveKey="golden_sets"
+      items={[
+        { key: "golden_sets", label: t("eval.workbench.goldenSets", "Golden Sets"), children: goldenSetsTab },
+        { key: "evaluators", label: t("eval.workbench.evaluators"), children: evaluatorsTab },
+        { key: "review_queue", label: t("eval.workbench.reviewQueue", "Review Queue"), children: reviewQueueTab },
+      ]}
+    />
   );
 
   return (
@@ -1393,39 +1598,24 @@ export function EvalPage() {
             children: overviewTab,
           },
           {
+            key: "runs",
+            label: t("eval.workbench.runAndResults", "Run & Results"),
+            children: runAndResultsTab,
+          },
+          {
             key: "traces",
             label: t("eval.workbench.traces", "Traces"),
             children: traceExplorerTab,
           },
           {
-            key: "golden_sets",
-            label: t("eval.workbench.goldenSets", "Golden Sets"),
-            children: goldenSetsTab,
-          },
-          {
-            key: "evaluators",
-            label: t("eval.workbench.evaluators"),
-            children: evaluatorsTab,
-          },
-          {
-            key: "experiments",
-            label: t("eval.workbench.experiments"),
-            children: experimentsTab,
-          },
-          {
-            key: "review_queue",
-            label: t("eval.workbench.reviewQueue", "Review Queue"),
-            children: reviewQueueTab,
+            key: "assets",
+            label: t("eval.workbench.assets", "Assets"),
+            children: assetsTab,
           },
           {
             key: "gates",
             label: t("eval.workbench.gates", "Gates"),
             children: gatesTab,
-          },
-          {
-            key: "kb_ragas",
-            label: t("eval.ragas.tab"),
-            children: kbRagasTab,
           },
         ]}
       />

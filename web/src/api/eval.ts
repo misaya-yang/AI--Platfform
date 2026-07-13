@@ -370,6 +370,48 @@ export interface EvalExperimentRunBatchResponse {
   jobs: EvalAsyncJobResponse[];
 }
 
+export interface EvalExperimentCaseScore {
+  score_name: string;
+  target_type?: string | null;
+  target_id?: string | null;
+  span_id?: string | null;
+  numeric_value?: number | null;
+  label?: string | null;
+  explanation?: string | null;
+  score_source?: string | null;
+  failure_kind?: "semantic_review" | "infrastructure" | null;
+}
+
+export interface EvalExperimentCaseResult {
+  example_id?: string | null;
+  case_id: string;
+  candidate_trace_id: string;
+  source_trace_id?: string | null;
+  status: "passed" | "failed" | "review" | "unscored";
+  aggregate_score?: number | null;
+  failure_reason?: string | null;
+  input: Record<string, unknown>;
+  expected_output: Record<string, unknown>;
+  trace: {
+    trace_family?: TraceFamily | null;
+    status?: TraceStatus | null;
+    model_id?: string | null;
+    provider?: string | null;
+    total_latency_ms?: number;
+    total_tokens?: number;
+    output_preview?: string;
+  };
+  scores: EvalExperimentCaseScore[];
+}
+
+export interface EvalExperimentRunResultsResponse {
+  run: EvalExperimentRun;
+  cases: EvalExperimentCaseResult[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface EvalExperimentRunComparisonResponse {
   baseline_run_id: string;
   candidate_run_id: string;
@@ -605,6 +647,33 @@ export async function getEvalExperiment(experimentId: string): Promise<EvalExper
 export async function getEvalExperimentRun(runId: string): Promise<EvalExperimentRun> {
   const response = await api.get<EvalExperimentRun>(`/api/v1/eval/experiment-runs/${encodeURIComponent(runId)}`);
   return response.data;
+}
+
+export async function getEvalExperimentRunResults(
+  runId: string,
+  params: { limit?: number; offset?: number } = {}
+): Promise<EvalExperimentRunResultsResponse> {
+  const pageLimit = params.limit ?? 200;
+  const first = await api.get<EvalExperimentRunResultsResponse>(
+    `/api/v1/eval/experiment-runs/${encodeURIComponent(runId)}/results`,
+    { params: compactParams({ limit: pageLimit, offset: 0, ...params }) }
+  );
+  if (params.limit !== undefined || first.data.cases.length >= first.data.total) {
+    return first.data;
+  }
+
+  const cases = [...first.data.cases];
+  let offset = first.data.offset + first.data.cases.length;
+  while (offset < first.data.total) {
+    const next = await api.get<EvalExperimentRunResultsResponse>(
+      `/api/v1/eval/experiment-runs/${encodeURIComponent(runId)}/results`,
+      { params: { limit: pageLimit, offset } }
+    );
+    if (next.data.cases.length === 0) break;
+    cases.push(...next.data.cases);
+    offset += next.data.cases.length;
+  }
+  return { ...first.data, cases, limit: cases.length };
 }
 
 export async function createEvalExperiment(payload: {

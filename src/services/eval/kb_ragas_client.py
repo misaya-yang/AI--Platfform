@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from ai_gateway_core.knowledge import KB_SERVICE_URL
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
+
+_INVALID_RESULTS_ERROR = "knowledge-service RAGAS eval returned invalid results"
 
 _gateway_secret_signer: GatewaySecret | None = None
 _signer_lock = threading.Lock()
@@ -47,6 +50,7 @@ class KbRagasMetricResult:
     explanation: str
     label: str
     judge_model: str | None = None
+    failure_kind: str | None = None
 
 
 class KbRagasClient:
@@ -99,18 +103,57 @@ class KbRagasClient:
                 f"knowledge-service RAGAS eval failed with HTTP {exc.status_code}"
             ) from exc
 
+        if not isinstance(body, dict):
+            raise ValueError(_INVALID_RESULTS_ERROR)
+        raw_results = body.get("results")
+        if not isinstance(raw_results, list) or not raw_results:
+            raise ValueError(_INVALID_RESULTS_ERROR)
+
         judge_model = str(body.get("judge_model") or "")
         results: list[KbRagasMetricResult] = []
-        for item in body.get("results") or []:
+        seen_metrics: set[str] = set()
+        for item in raw_results:
             if not isinstance(item, dict):
-                continue
+                raise ValueError(_INVALID_RESULTS_ERROR)
+            metric_value = item.get("metric")
+            metric = metric_value.strip() if isinstance(metric_value, str) else ""
+            score_value = item.get("score")
+            if (
+                not metric
+                or metric in seen_metrics
+                or isinstance(score_value, bool)
+                or not isinstance(score_value, int | float)
+            ):
+                raise ValueError(_INVALID_RESULTS_ERROR)
+            score = float(score_value)
+            if not math.isfinite(score) or score < 0.0 or score > 1.0:
+                raise ValueError(_INVALID_RESULTS_ERROR)
+
+            label_value = item.get("label")
+            label = label_value.strip() if isinstance(label_value, str) else ""
+            failure_kind_value = item.get("failure_kind")
+            failure_kind = (
+                failure_kind_value.strip()
+                if isinstance(failure_kind_value, str)
+                else failure_kind_value
+            )
+            if label not in {"pass", "fail", "review"}:
+                raise ValueError(_INVALID_RESULTS_ERROR)
+            if label == "review":
+                if failure_kind not in {"semantic_review", "infrastructure"}:
+                    raise ValueError(_INVALID_RESULTS_ERROR)
+            elif failure_kind is not None:
+                raise ValueError(_INVALID_RESULTS_ERROR)
+
+            seen_metrics.add(metric)
             results.append(
                 KbRagasMetricResult(
-                    metric=str(item.get("metric") or ""),
-                    score=float(item.get("score") or 0.0),
+                    metric=metric,
+                    score=score,
                     explanation=str(item.get("explanation") or ""),
-                    label=str(item.get("label") or "review"),
+                    label=label,
                     judge_model=judge_model or None,
+                    failure_kind=failure_kind,
                 )
             )
         return results
