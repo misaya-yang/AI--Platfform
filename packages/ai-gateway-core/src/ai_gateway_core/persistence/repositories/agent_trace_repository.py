@@ -34,6 +34,44 @@ def _import_example_metadata(example: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _experiment_score_id(
+    *,
+    tenant_id: str,
+    trace_id: str,
+    trace_family: str,
+    payload: dict[str, Any],
+) -> str | None:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    experiment_run_id = str(metadata.get("experiment_run_id") or "").strip()
+    if not experiment_run_id:
+        return None
+
+    span_id = payload.get("span_id")
+    target_type = payload.get("target_type") or ("span" if span_id else "trace")
+    target_id = payload.get("target_id") or span_id or trace_id
+    identity = {
+        "evaluator_id": str(payload.get("evaluator_id") or ""),
+        "evaluator_name": str(payload.get("evaluator_name") or ""),
+        "evaluator_version": str(payload.get("evaluator_version") or ""),
+        "experiment_run_id": experiment_run_id,
+        "score_name": str(payload.get("score_name") or ""),
+        "score_source": str(
+            payload.get("score_source") or payload.get("scorer_type") or "human"
+        ),
+        "scorer_type": str(payload.get("scorer_type") or "human"),
+        "span_id": str(span_id or ""),
+        "target_id": str(target_id),
+        "target_type": str(target_type),
+        "tenant_id": tenant_id,
+        "trace_family": trace_family,
+        "trace_id": trace_id,
+    }
+    identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ai-gateway/eval-score/{identity_json}"))
+
+
 def _coerce_timestamptz(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -333,23 +371,49 @@ class AgentTraceRepository(BaseRepository):
         if not trace:
             return None
 
+        score_id = _experiment_score_id(
+            tenant_id=tenant_id,
+            trace_id=trace_id,
+            trace_family=trace_family,
+            payload=payload,
+        )
         row = await self.fetchrow(
             """
             INSERT INTO agent_trace_scores (
-                trace_id, span_id, score_name, score_type, numeric_value,
+                score_id, trace_id, span_id, score_name, score_type, numeric_value,
                 boolean_value, categorical_value, text_value, label, explanation,
                 scorer_type, evaluator_version, target_type, target_id,
                 evaluator_id, evaluator_name, score_source, confidence,
                 created_by, metadata
             ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, $8, $9, $10,
-                $11, $12, $13, $14,
-                $15::uuid, $16, $17, $18,
-                $19, $20::jsonb
+                COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11,
+                $12, $13, $14, $15,
+                $16::uuid, $17, $18, $19,
+                $20, $21::jsonb
             )
+            ON CONFLICT (score_id)
+            DO UPDATE SET
+                score_type = EXCLUDED.score_type,
+                numeric_value = EXCLUDED.numeric_value,
+                boolean_value = EXCLUDED.boolean_value,
+                categorical_value = EXCLUDED.categorical_value,
+                text_value = EXCLUDED.text_value,
+                label = EXCLUDED.label,
+                explanation = EXCLUDED.explanation,
+                scorer_type = EXCLUDED.scorer_type,
+                evaluator_version = EXCLUDED.evaluator_version,
+                target_type = EXCLUDED.target_type,
+                target_id = EXCLUDED.target_id,
+                evaluator_id = EXCLUDED.evaluator_id,
+                evaluator_name = EXCLUDED.evaluator_name,
+                score_source = EXCLUDED.score_source,
+                confidence = EXCLUDED.confidence,
+                created_by = EXCLUDED.created_by,
+                metadata = EXCLUDED.metadata
             RETURNING *
             """,
+            score_id,
             trace_id,
             payload.get("span_id"),
             payload["score_name"],
@@ -1500,6 +1564,23 @@ class AgentTraceRepository(BaseRepository):
             *page_params,
         )
         return [self._decode_eval_row(row) for row in rows], total
+
+    async def list_example_manifest(
+        self,
+        *,
+        tenant_id: str,
+        dataset_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            """
+            SELECT * FROM eval_examples
+            WHERE tenant_id = $1 AND dataset_id = $2::uuid
+            ORDER BY created_at DESC, example_id DESC
+            """,
+            tenant_id,
+            dataset_id,
+        )
+        return [self._decode_eval_row(row) for row in rows]
 
     async def list_evaluators(
         self,
