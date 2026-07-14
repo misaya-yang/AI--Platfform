@@ -27,6 +27,7 @@ async def _kb_ragas_evaluate(**kwargs: Any) -> list[dict[str, Any]]:
             "explanation": item.explanation,
             "label": item.label,
             "judge_model": item.judge_model,
+            "failure_kind": item.failure_kind,
         }
         for item in results
     ]

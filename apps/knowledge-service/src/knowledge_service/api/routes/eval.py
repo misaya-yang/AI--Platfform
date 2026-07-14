@@ -26,6 +26,7 @@ class RagasMetricResponse(BaseModel):
     score: float
     explanation: str
     label: str
+    failure_kind: str | None = None
 
 
 class RagasEvalResponse(BaseModel):
@@ -39,6 +40,7 @@ def _to_response(result: MetricResult) -> RagasMetricResponse:
         score=result.score,
         explanation=result.explanation,
         label=result.label,
+        failure_kind=result.failure_kind,
     )
 
 

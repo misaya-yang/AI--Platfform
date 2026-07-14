@@ -3,9 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from ai_gateway_core.eval.evaluator_executor import EvaluatorRunResult
+from ai_gateway_core.eval.evaluator_executor import EvaluatorExecutor, EvaluatorRunResult
 from ai_gateway_core.eval.outbox_worker import EvalOutboxWorker
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
+
+from src.services.eval import eval_outbox_worker as eval_outbox_worker_module
+from src.services.eval.kb_ragas_client import KbRagasMetricResult
 
 
 class FakeEvalRepository:
@@ -35,6 +38,46 @@ class FakeEvalRepository:
         self.failed.append((job_id, error))
 
 
+class FakeRagasOutboxRepository(FakeEvalRepository):
+    metrics = ("context_relevancy",)
+
+    async def update_experiment_run(self, **_kwargs: Any) -> None:
+        return None
+
+    async def get_evaluator(self, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "evaluator_id": "eval-1",
+            "evaluator_type": "ragas",
+            "name": "kb-ragas",
+            "filter_config": {"metrics": list(self.metrics)},
+        }
+
+    async def get_trace_detail(self, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "trace": {
+                "trace_id": "trace-1",
+                "trace_family": "rag",
+                "input_preview": "question",
+                "status": "succeeded",
+            },
+            "spans": [
+                {
+                    "span_kind": "retriever",
+                    "attributes": {"retrieval": {"documents": [{"content_eval": "chunk"}]}},
+                }
+            ],
+            "events": [],
+        }
+
+    async def create_eval_score(self, **kwargs: Any) -> dict[str, Any]:
+        payload = kwargs["payload"]
+        return {
+            "score_id": "score-1",
+            "numeric_value": payload["numeric_value"],
+            "label": payload["label"],
+        }
+
+
 class FakeEvaluatorExecutor:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -42,6 +85,32 @@ class FakeEvaluatorExecutor:
     async def run_job(self, *, tenant_id: str, job_payload: dict[str, Any]) -> EvaluatorRunResult:
         self.calls.append({"tenant_id": tenant_id, "job_payload": job_payload})
         return EvaluatorRunResult(run_id=str(job_payload.get("run_id")), status="succeeded")
+
+
+@pytest.mark.asyncio
+async def test_kb_ragas_worker_mapping_preserves_failure_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client:
+        async def evaluate_retrieval(self, **_kwargs: Any) -> list[KbRagasMetricResult]:
+            return [
+                KbRagasMetricResult(
+                    metric="context_relevancy",
+                    score=0.0,
+                    explanation="judge unavailable",
+                    label="review",
+                    failure_kind="infrastructure",
+                )
+            ]
+
+    monkeypatch.setattr(eval_outbox_worker_module, "_kb_ragas_client", _Client())
+
+    results = await eval_outbox_worker_module._kb_ragas_evaluate(
+        query="q",
+        contexts=["c"],
+    )
+
+    assert results[0]["failure_kind"] == "infrastructure"
 
 
 @pytest.mark.asyncio
@@ -128,6 +197,81 @@ async def test_outbox_worker_marks_failed_job_for_retry() -> None:
     )
 
     assert repo.failed == [("job-2", "judge unavailable")]
+
+
+@pytest.mark.asyncio
+async def test_outbox_worker_retries_infrastructure_review_run() -> None:
+    repo = FakeRagasOutboxRepository()
+
+    async def _evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_relevancy",
+                "score": 0.0,
+                "explanation": "judge unavailable",
+                "label": "review",
+                "failure_kind": "infrastructure",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_evaluate)  # type: ignore[arg-type]
+    worker = EvalOutboxWorker(repo, executor, poll_interval_s=0.01, batch_size=1)
+    await worker._handle_job(
+        {
+            "job_id": "job-infrastructure",
+            "tenant_id": "tenant-a",
+            "job_type": "eval.evaluator.run",
+            "payload": {
+                "run_id": "run-infrastructure",
+                "evaluator_id": "eval-1",
+                "trace_id": "trace-1",
+                "target_snapshot": {"trace_family": "rag"},
+            },
+            "attempts": 1,
+        }
+    )
+
+    assert repo.failed == [
+        ("job-infrastructure", "KB RAGAS infrastructure failure requires retry")
+    ]
+    assert repo.succeeded == []
+
+
+@pytest.mark.asyncio
+async def test_outbox_worker_succeeds_semantic_review_run() -> None:
+    repo = FakeRagasOutboxRepository()
+    repo.metrics = ("context_precision",)
+
+    async def _evaluate(**_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "metric": "context_precision",
+                "score": 0.0,
+                "explanation": "ground truth missing",
+                "label": "review",
+                "failure_kind": "semantic_review",
+            }
+        ]
+
+    executor = EvaluatorExecutor(repo, kb_ragas_evaluate=_evaluate)  # type: ignore[arg-type]
+    worker = EvalOutboxWorker(repo, executor, poll_interval_s=0.01, batch_size=1)
+    await worker._handle_job(
+        {
+            "job_id": "job-semantic",
+            "tenant_id": "tenant-a",
+            "job_type": "eval.evaluator.run",
+            "payload": {
+                "run_id": "run-semantic",
+                "evaluator_id": "eval-1",
+                "trace_id": "trace-1",
+                "target_snapshot": {"trace_family": "rag"},
+            },
+            "attempts": 1,
+        }
+    )
+
+    assert repo.succeeded == ["job-semantic"]
+    assert repo.failed == []
 
 
 class FakeTransaction:

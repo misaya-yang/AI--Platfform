@@ -41,6 +41,7 @@ interface TraceScorePanelProps {
   onPromoteToGolden?: () => void;
   onAddToReview?: () => void;
   onCreateFailureCase?: () => void;
+  readOnly?: boolean;
 }
 
 interface ScoreFormValues {
@@ -82,6 +83,7 @@ export function TraceScorePanel({
   onPromoteToGolden,
   onAddToReview,
   onCreateFailureCase,
+  readOnly = false,
 }: TraceScorePanelProps) {
   const { t, i18n } = useTranslation();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -126,7 +128,7 @@ export function TraceScorePanel({
           <strong>{t("eval.score.records", { count: scores.length })}</strong>
           <span>{traceId ? t("eval.score.traceSelected") : t("eval.score.noTrace")}</span>
         </div>
-        <Button type="primary" size="small" disabled={!traceId} onClick={() => setDrawerOpen(true)}>
+        <Button type="primary" size="small" disabled={readOnly || !traceId} onClick={() => setDrawerOpen(true)}>
           {t("eval.workbench.inspector.addScore")}
         </Button>
       </div>
@@ -270,7 +272,7 @@ export function TraceScorePanel({
           icon={<Database size={15} />}
           onClick={onPromoteToGolden}
           loading={datasetActionLoading}
-          disabled={!traceId || !activeDatasetName}
+          disabled={readOnly || !traceId || !activeDatasetName}
           block
         >
           {t("eval.workbench.promoteToGolden")}
@@ -279,7 +281,7 @@ export function TraceScorePanel({
           icon={<Send size={15} />}
           onClick={onAddToReview}
           loading={datasetActionLoading}
-          disabled={!traceId || !activeDatasetName}
+          disabled={readOnly || !traceId || !activeDatasetName}
           block
         >
           {t("eval.workbench.addToReview")}
@@ -288,7 +290,7 @@ export function TraceScorePanel({
           icon={<ShieldCheck size={15} />}
           onClick={onCreateFailureCase}
           loading={datasetActionLoading}
-          disabled={!traceId || !activeDatasetName}
+          disabled={readOnly || !traceId || !activeDatasetName}
           block
         >
           {t("eval.workbench.createFailureCase")}
@@ -331,7 +333,7 @@ export function TraceScorePanel({
           layout="vertical"
           initialValues={defaultValues}
           onFinish={submit}
-          disabled={!traceId || submitting}
+          disabled={readOnly || !traceId || submitting}
         >
           <div className="eval-score-form-grid">
             <Form.Item
@@ -391,7 +393,7 @@ export function TraceScorePanel({
             htmlType="submit"
             icon={<Send size={15} />}
             loading={submitting}
-            disabled={!traceId}
+            disabled={readOnly || !traceId}
             block
           >
             {t("eval.score.form.submit")}

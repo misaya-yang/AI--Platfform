@@ -45,6 +45,7 @@ from src.api.v1.eval import (
     get_eval_evaluator,
     get_eval_experiment,
     get_eval_experiment_run,
+    get_eval_experiment_run_results,
     get_eval_summary,
     get_eval_trace_detail,
     get_eval_trace_thread,
@@ -490,6 +491,42 @@ class FakeTraceRepository:
             "updated_at": datetime.now(timezone.utc),
         }
 
+    async def list_experiment_run_case_results(
+        self, **kwargs: Any
+    ) -> tuple[list[dict[str, Any]], int]:
+        self.calls.append(("run_results", kwargs))
+        return (
+            [
+                {
+                    "example_id": self.example["example_id"],
+                    "case_id": "assistant.case.one",
+                    "candidate_trace_id": "11111111-1111-4111-8111-111111111111",
+                    "source_trace_id": self.example["source_trace_id"],
+                    "status": "failed",
+                    "aggregate_score": 0.4,
+                    "failure_reason": "answer was not grounded",
+                    "input": self.example["input"],
+                    "expected_output": self.example["expected_output"],
+                    "trace": {
+                        "status": "succeeded",
+                        "model_id": "qwen3.7-plus",
+                        "total_latency_ms": 980,
+                        "output_preview": "candidate answer",
+                    },
+                    "scores": [
+                        {
+                            "score_name": "quality",
+                            "numeric_value": 0.4,
+                            "label": "fail",
+                            "explanation": "answer was not grounded",
+                            "failure_kind": None,
+                        }
+                    ],
+                }
+            ],
+            1,
+        )
+
     async def compare_experiment_runs(self, **kwargs: Any) -> dict[str, Any] | None:
         self.calls.append(("compare_runs", kwargs))
         return {
@@ -539,6 +576,79 @@ class ExampleFromTraceRepository(AgentTraceRepository):
             "created_by": args[8],
             "created_at": datetime.now(timezone.utc),
         }
+
+
+class RunResultsRepository(AgentTraceRepository):
+    def __init__(self) -> None:
+        super().__init__(SimpleNamespace(_pool=None, enabled=False))
+        self.queries: list[str] = []
+
+    async def fetchrow(self, query: str, *_args: Any) -> dict[str, Any] | None:
+        self.queries.append(" ".join(query.split()))
+        return {"total": 1}
+
+    async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
+        self.queries.append(" ".join(query.split()))
+        common = {
+            "case_key": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "candidate_trace_id": "11111111-1111-4111-8111-111111111111",
+            "example_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "source_trace_id": "99999999-9999-4999-8999-999999999999",
+            "score_metadata": {
+                "example_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "case_id": "assistant.case.one",
+            },
+            "example_metadata": {"case_id": "assistant.case.one"},
+            "input": {"input_preview": "hello"},
+            "expected_output": {"output_preview": "hi"},
+            "trace_family": "assistant",
+            "trace_status": "succeeded",
+            "model_id": "qwen3.7-plus",
+            "provider": "dashscope",
+            "total_latency_ms": 980,
+            "total_tokens": 30,
+            "output_preview": "candidate",
+            "score_source": "rule",
+        }
+        return [
+            {
+                **common,
+                "score_id": "22222222-2222-4222-8222-222222222222",
+                "score_name": "quality",
+                "numeric_value": 0.4,
+                "score_label": "fail",
+                "score_explanation": "not grounded",
+            },
+            {
+                **common,
+                "score_id": "33333333-3333-4333-8333-333333333333",
+                "score_name": "safety",
+                "numeric_value": 1.0,
+                "score_label": "pass",
+                "score_explanation": "safe",
+            },
+        ]
+
+
+@pytest.mark.asyncio
+async def test_repository_groups_experiment_scores_into_case_results() -> None:
+    repo = RunResultsRepository()
+
+    cases, total = await repo.list_experiment_run_case_results(
+        tenant_id="tenant-a",
+        run_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+        limit=50,
+        offset=0,
+    )
+
+    assert total == 1
+    assert cases[0]["case_id"] == "assistant.case.one"
+    assert cases[0]["status"] == "failed"
+    assert cases[0]["aggregate_score"] == 0.7
+    assert len(cases[0]["scores"]) == 2
+    assert all("experiment_run_id" in query for query in repo.queries)
+    assert "ROW_NUMBER() OVER" in repo.queries[1]
+    assert "COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)" in repo.queries[1]
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1255,34 @@ async def test_eval_list_get_endpoints_use_trace_read_capability(monkeypatch) ->
     assert evaluator.evaluator_id == evaluators.evaluators[0].evaluator_id
     assert experiment.experiment_id == experiments.experiments[0].experiment_id
     assert run.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_eval_experiment_run_results_return_case_scores(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    result = await get_eval_experiment_run_results(
+        run_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+        request=_request(),
+        limit=25,
+        offset=0,
+        auth=_auth(permissions=["console:eval:view"]),
+    )
+
+    assert result.run.status == "succeeded"
+    assert result.total == 1
+    assert result.cases[0]["status"] == "failed"
+    assert result.cases[0]["scores"][0]["numeric_value"] == 0.4
+    assert repo.calls[-1] == (
+        "run_results",
+        {
+            "tenant_id": "tenant-a",
+            "run_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "limit": 25,
+            "offset": 0,
+        },
+    )
 
 
 @pytest.mark.asyncio

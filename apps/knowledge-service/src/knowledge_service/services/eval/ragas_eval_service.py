@@ -25,6 +25,7 @@ class MetricResult:
     score: float
     explanation: str
     label: str
+    failure_kind: str | None = None
 
 
 def _finite_unit_score(value: Any) -> float:
@@ -134,6 +135,7 @@ class KBRagasEvalService:
                         score=0.0,
                         explanation="context_precision requires ground_truth; metric skipped",
                         label="review",
+                        failure_kind="semantic_review",
                     )
                 )
                 continue
@@ -220,4 +222,5 @@ class KBRagasEvalService:
                 score=0.0,
                 explanation=f"KB RAGAS evaluation failed: {exc}",
                 label="review",
+                failure_kind="infrastructure",
             )

@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from knowledge_service.api.routes.eval import _to_response
 from knowledge_service.services.eval import ragas_eval_service as ragas_module
-from knowledge_service.services.eval.ragas_eval_service import KBRagasEvalService
+from knowledge_service.services.eval.ragas_eval_service import KBRagasEvalService, MetricResult
 
 
 class _FakeLLMClient:
@@ -18,6 +19,11 @@ class _FakeLLMClient:
 
     async def close(self) -> None:
         return None
+
+
+class _RaisingLLMClient(_FakeLLMClient):
+    async def chat_completion(self, **_kwargs: Any) -> tuple[str, int]:
+        raise RuntimeError("judge unavailable")
 
 
 def service_with_response(
@@ -50,6 +56,7 @@ async def test_kb_ragas_eval_service_scores_context_relevancy(monkeypatch: pytes
     assert results[0].metric == "context_relevancy"
     assert results[0].score == 0.82
     assert results[0].label == "pass"
+    assert results[0].failure_kind is None
 
 
 @pytest.mark.asyncio
@@ -69,7 +76,48 @@ async def test_kb_ragas_eval_service_skips_precision_without_ground_truth(monkey
 
     assert results[0].metric == "context_precision"
     assert results[0].label == "review"
+    assert results[0].failure_kind == "semantic_review"
     assert "ground_truth" in results[0].explanation
+
+
+@pytest.mark.asyncio
+async def test_judge_exception_is_infrastructure_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "knowledge_service.services.eval.ragas_eval_service.LLMClient",
+        lambda _config: _RaisingLLMClient(),
+    )
+    service = KBRagasEvalService()
+
+    result = await service.evaluate_retrieval(query="q", contexts=["c"])
+
+    assert result[0].label == "review"
+    assert result[0].failure_kind == "infrastructure"
+
+
+@pytest.mark.asyncio
+async def test_malformed_judge_payload_is_infrastructure_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _client = service_with_response(monkeypatch, "not-json")
+
+    result = await service.evaluate_retrieval(query="q", contexts=["c"])
+
+    assert result[0].label == "review"
+    assert result[0].failure_kind == "infrastructure"
+
+
+def test_route_response_preserves_failure_kind() -> None:
+    response = _to_response(
+        MetricResult(
+            metric="context_relevancy",
+            score=0.0,
+            explanation="judge unavailable",
+            label="review",
+            failure_kind="infrastructure",
+        )
+    )
+
+    assert response.failure_kind == "infrastructure"
 
 
 @pytest.mark.asyncio
