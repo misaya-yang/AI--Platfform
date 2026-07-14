@@ -16,6 +16,7 @@ class FakeEvalRepository:
         self.jobs = list(jobs or [])
         self.succeeded: list[str] = []
         self.failed: list[tuple[str, str]] = []
+        self.run_updates: list[dict[str, Any]] = []
 
     async def claim_outbox_jobs(self, **_kwargs: Any) -> list[dict[str, Any]]:
         if not self.jobs:
@@ -36,6 +37,9 @@ class FakeEvalRepository:
         max_attempts: int,  # noqa: ARG002
     ) -> None:
         self.failed.append((job_id, error))
+
+    async def update_experiment_run(self, **kwargs: Any) -> None:
+        self.run_updates.append(kwargs)
 
 
 class FakeRagasOutboxRepository(FakeEvalRepository):
@@ -197,6 +201,7 @@ async def test_outbox_worker_marks_failed_job_for_retry() -> None:
     )
 
     assert repo.failed == [("job-2", "judge unavailable")]
+    assert repo.run_updates[-1]["status"] == "queued"
 
 
 @pytest.mark.asyncio

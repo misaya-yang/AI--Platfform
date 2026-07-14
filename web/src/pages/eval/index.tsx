@@ -1,4 +1,4 @@
-import { Alert, App as AntApp, Button, Descriptions, Input, Progress, Select, Space, Tabs } from "antd";
+import { Alert, App as AntApp, Button, Descriptions, Input, InputNumber, Progress, Select, Space, Tabs } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -39,6 +39,7 @@ import {
   listEvalEvaluators,
   listEvalExamples,
   listEvalExperiments,
+  promoteEvalExperimentBaseline,
   runEvalExperiment,
   runEvalEvaluatorAsync,
   updateEvalExample,
@@ -46,7 +47,7 @@ import {
   type EvalEvaluator,
   type EvalExperiment,
   type EvalExperimentCaseResult,
-  type EvalExperimentRun,
+  type EvalExperimentRunMode,
   type EvalExperimentRunComparisonResponse,
   type EvalGateDryRunResponse,
   type EvalExamplesExportResponse,
@@ -64,6 +65,8 @@ import {
   type AssistantTraceFilters,
 } from "./components/AssistantTraceList";
 import { GoldenJsonlImport } from "./components/GoldenJsonlImport";
+import { BehaviorContractEditor } from "./components/BehaviorContractEditor";
+import { ExperimentRunComparison } from "./components/ExperimentRunComparison";
 import { ExperimentRunResults } from "./components/ExperimentRunResults";
 import { KbRagasPanel } from "./components/KbRagasPanel";
 import { TraceExplorerShell } from "./components/TraceExplorerShell";
@@ -295,6 +298,12 @@ function asNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
 function pct(value: unknown) {
   return `${Math.round(asNumber(value) * 100)}%`;
 }
@@ -309,7 +318,7 @@ type ExampleActionOptions = {
 export function EvalPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const canRunEvaluations = usePermission("console:eval:run");
   const [filters, setFilters] = useState<AssistantTraceFilters>({
     status: "all",
@@ -357,21 +366,25 @@ export function EvalPage() {
   const [experimentDraft, setExperimentDraft] = useState({
     name: "assistant-baseline",
     description: "",
-    targetConfigText: JSON.stringify({ trace_family: "assistant", model_id: "current" }, null, 2),
+    targetConfigText: JSON.stringify({ trace_family: "assistant", model_id: "qwen3.7-plus" }, null, 2),
   });
   const [exportPreview, setExportPreview] = useState<EvalTraceExportResponse | null>(null);
   const [examplesExport, setExamplesExport] = useState<EvalExamplesExportResponse | null>(null);
   const [runComparison, setRunComparison] = useState<EvalExperimentRunComparisonResponse | null>(null);
   const [gateResult, setGateResult] = useState<EvalGateDryRunResponse | null>(null);
   const [queuedRunId, setQueuedRunId] = useState<string | undefined>();
-  const [latestRun, setLatestRun] = useState<EvalExperimentRun | null>(null);
-  const [runPollRevision, setRunPollRevision] = useState(0);
-  const [runPollingError, setRunPollingError] = useState<Error | null>(null);
+  const [runMode, setRunMode] = useState<EvalExperimentRunMode>("live_candidate");
+  const [repetitions, setRepetitions] = useState(3);
+  const [systemPromptOverride, setSystemPromptOverride] = useState("");
+  const [baselineRunId, setBaselineRunId] = useState<string>();
+  const [candidateRunId, setCandidateRunId] = useState<string>();
   const [traceRunFocusRevision, setTraceRunFocusRevision] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
   const kbDatasetFilter = searchParams.get("dataset_id") || "";
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState("overview");
   const [activeRunTab, setActiveRunTab] = useState("experiment_runs");
+  const [activeAssetsTab, setActiveAssetsTab] = useState("golden_sets");
+  const [contractPrefillRevision, setContractPrefillRevision] = useState(0);
   const serverFilters = useMemo(
     () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter),
     [activeTraceFamily, filters, kbDatasetFilter]
@@ -489,19 +502,67 @@ export function EvalPage() {
     }
     return createdExperiment;
   }, [createdExperiment, experimentDetailQuery.data, experiments, selectedExperimentId]);
+  const comparableRuns = useMemo(() => activeExperiment?.runs || [], [activeExperiment?.runs]);
+  const selectedRunSummary = useMemo(
+    () => comparableRuns.find((run) => run.run_id === queuedRunId) || null,
+    [comparableRuns, queuedRunId],
+  );
+  const selectedRunQuery = useQuery({
+    queryKey: ["eval", "run", queuedRunId],
+    queryFn: () => getEvalExperimentRun(queuedRunId || ""),
+    enabled: Boolean(queuedRunId),
+    initialData: selectedRunSummary || undefined,
+    refetchInterval: (query) => {
+      const run = query.state.data;
+      return run?.status === "queued" || run?.status === "running" ? 2_000 : false;
+    },
+    retry: 2,
+  });
+  const latestRun = selectedRunQuery.data || selectedRunSummary;
+  const terminalRunId = latestRun && latestRun.status !== "queued" && latestRun.status !== "running"
+    ? latestRun.run_id
+    : undefined;
 
   useEffect(() => {
     if (!selectedExperimentId && experiments[0]?.experiment_id) {
       setSelectedExperimentId(experiments[0].experiment_id);
+      setSelectedDatasetId(experiments[0].dataset_id || undefined);
     }
   }, [experiments, selectedExperimentId]);
+
+  useEffect(() => {
+    setRunComparison(null);
+    setGateResult(null);
+    setQueuedRunId(undefined);
+    setCandidateRunId(undefined);
+    setBaselineRunId(undefined);
+  }, [selectedExperimentId]);
+
+  useEffect(() => {
+    const officialBaseline = activeExperiment?.baseline_run_id || undefined;
+    const successful = comparableRuns.filter((run) => run.status === "succeeded");
+    setBaselineRunId((current) => current && comparableRuns.some((run) => run.run_id === current)
+      ? current
+      : officialBaseline || successful[1]?.run_id);
+    setCandidateRunId((current) => current && comparableRuns.some((run) => run.run_id === current)
+      ? current
+      : successful.find((run) => run.run_id !== officialBaseline)?.run_id || comparableRuns[0]?.run_id);
+  }, [activeExperiment?.baseline_run_id, comparableRuns]);
+
+  useEffect(() => {
+    if (!terminalRunId) return;
+    void Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] }),
+      queryClient.invalidateQueries({ queryKey: ["eval", "run-results", terminalRunId] }),
+      queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] }),
+    ]);
+  }, [queryClient, selectedExperimentId, terminalRunId]);
 
   useEffect(() => {
     const runId = searchParams.get("run_id");
     if (runId && runId !== queuedRunId) {
       setQueuedRunId(runId);
-      setLatestRun(null);
-      setRunPollingError(null);
+      setCandidateRunId(runId);
     }
   }, [queuedRunId, searchParams]);
 
@@ -594,18 +655,18 @@ export function EvalPage() {
     onError: (error) => message.error(toError(error).message),
   });
 
-  const promoteSelectedTraceToGolden = () =>
-    exampleMutation.mutate({ reviewStatus: "approved", metadata: { tags: ["golden"] } });
+  const prefillSelectedTraceContract = () => {
+    setActiveAssetsTab("golden_sets");
+    setContractPrefillRevision((revision) => revision + 1);
+    setActiveWorkbenchTab("assets");
+  };
+
+  const promoteSelectedTraceToGolden = prefillSelectedTraceContract;
 
   const addSelectedTraceToReview = () =>
     exampleMutation.mutate({ reviewStatus: "pending", metadata: { tags: ["review"] } });
 
-  const createSelectedFailureCase = () =>
-    exampleMutation.mutate({
-      reviewStatus: "needs_fix",
-      split: "regression",
-      metadata: { tags: ["failure"], critical: true },
-    });
+  const createSelectedFailureCase = prefillSelectedTraceContract;
 
   const createRagasEvaluatorMutation = useMutation({
     mutationFn: () => {
@@ -666,7 +727,7 @@ export function EvalPage() {
         target_config: {
           ...parseJsonObjectDraft(experimentDraft.targetConfigText, {}),
           trace_family: activeTraceFamily,
-          model_id: serverFilters.model_id || "current",
+          model_id: serverFilters.model_id || "qwen3.7-plus",
         },
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
       }),
@@ -700,8 +761,7 @@ export function EvalPage() {
     onSuccess: (job) => {
       if (job.run_id) {
         setQueuedRunId(job.run_id);
-        setLatestRun(null);
-        setRunPollingError(null);
+        setCandidateRunId(job.run_id);
       }
       message.success(t("eval.workbench.evaluatorQueued"));
     },
@@ -726,8 +786,7 @@ export function EvalPage() {
     onSuccess: (job) => {
       if (job.run_id) {
         setQueuedRunId(job.run_id);
-        setLatestRun(null);
-        setRunPollingError(null);
+        setCandidateRunId(job.run_id);
       }
       message.success(t("eval.workbench.evaluatorQueued"));
     },
@@ -742,12 +801,19 @@ export function EvalPage() {
       return runEvalExperiment(activeExperiment.experiment_id, {
         dataset_id: datasetId,
         evaluator_ids: [activeEvaluator.evaluator_id],
+        run_mode: runMode,
+        repetitions: runMode === "live_candidate" ? repetitions : 1,
+        baseline_run_id: baselineRunId || activeExperiment.baseline_run_id || null,
+        candidate_config: systemPromptOverride.trim()
+          ? { system_prompt_override: systemPromptOverride.trim() }
+          : undefined,
         candidate_label: "candidate",
         baseline_label: "baseline",
         target_snapshot: {
           trace_family: activeTraceFamily,
           dataset_id: datasetId,
           trace_id: datasetId ? null : selectedTraceId || null,
+          run_mode: runMode,
         },
         metadata: { source: "eval_console", trace_family: activeTraceFamily },
       });
@@ -756,8 +822,9 @@ export function EvalPage() {
       const firstRunId = batch.jobs[0]?.run_id;
       if (firstRunId) {
         setQueuedRunId(firstRunId);
-        setLatestRun(null);
-        setRunPollingError(null);
+        setCandidateRunId(firstRunId);
+        setRunComparison(null);
+        setGateResult(null);
         const nextParams = new URLSearchParams(searchParams);
         nextParams.set("run_id", firstRunId);
         setSearchParams(nextParams, { replace: true });
@@ -782,15 +849,21 @@ export function EvalPage() {
   const examplesImportMutation = useMutation({
     mutationFn: async () => {
       if (!activeDataset) throw new Error(t("eval.workbench.createDatasetFirst"));
+      const messageText = String(detailQuery.data?.trace.input_preview || "").trim();
+      if (!selectedTraceId || !messageText) throw new Error(t("eval.workbench.selectTrace"));
       return importEvalExamples(activeDataset.dataset_id, [
         {
           case_id: `console.${Date.now()}`,
           split: exampleDraft.split.trim() || "regression",
-          input: { source: "eval_console_seed", trace_id: selectedTraceId || null },
+          input: { message: messageText, source: "eval_console_seed", trace_id: selectedTraceId },
           expected_output: parseJsonObjectDraft(exampleDraft.expectedOutputText, {}),
           expected_trajectory: { required_span_kinds: ["lifecycle", "model_invocation"] },
-          assertions: [{ type: "output_not_empty" }],
-          metadata: { review_status: "pending", tags: ["console-import"] },
+          assertions: [{ type: "no_sensitive_output" }],
+          metadata: {
+            review_status: "pending",
+            behavior_confirmed: false,
+            tags: ["console-import"],
+          },
         },
       ]);
     },
@@ -816,8 +889,15 @@ export function EvalPage() {
     onError: (error) => message.error(toError(error).message),
   });
 
-  const comparableRuns = activeExperiment?.runs || [];
-  const canCompareRuns = comparableRuns.length >= 2;
+  const baselineRun = comparableRuns.find((run) => run.run_id === baselineRunId) || null;
+  const candidateRun = comparableRuns.find((run) => run.run_id === candidateRunId) || null;
+  const canCompareRuns = Boolean(
+    baselineRunId
+    && candidateRunId
+    && baselineRunId !== candidateRunId
+    && baselineRun?.status === "succeeded"
+    && candidateRun?.status === "succeeded"
+  );
   const latestScoreSummary = latestRun?.score_summary || {};
   const canDryRunGate = Boolean(
     latestRun?.status === "succeeded"
@@ -830,19 +910,20 @@ export function EvalPage() {
     canRunEvaluations
     && activeExperiment
     && activeEvaluator
-    && (effectiveRunDatasetId || selectedTraceId)
+    && (runMode === "live_candidate"
+      ? effectiveRunDatasetId
+      : effectiveRunDatasetId || selectedTraceId)
   );
   const missingRunInputs = [
     !activeExperiment ? "experiment" : null,
     !activeEvaluator ? "evaluator" : null,
-    !effectiveRunDatasetId && !selectedTraceId ? "test set or trace" : null,
+    runMode === "live_candidate"
+      ? !effectiveRunDatasetId ? "test set" : null
+      : !effectiveRunDatasetId && !selectedTraceId ? "test set or trace" : null,
   ].filter(Boolean);
 
   const selectRun = (runId: string) => {
     setQueuedRunId(runId);
-    const selectedRun = comparableRuns.find((run) => run.run_id === runId) || null;
-    setLatestRun(selectedRun?.run_id === runId ? selectedRun : null);
-    setRunPollingError(null);
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set("run_id", runId);
     setSearchParams(nextParams, { replace: true });
@@ -850,14 +931,34 @@ export function EvalPage() {
 
   const compareMutation = useMutation({
     mutationFn: async () => {
-      const candidate = comparableRuns[0]?.run_id;
-      const baseline = comparableRuns[1]?.run_id;
+      const candidate = candidateRunId;
+      const baseline = baselineRunId;
       if (!baseline || !candidate) {
         throw new Error(t("eval.workbench.needTwoRuns", "Need two runs to compare"));
       }
       return compareEvalExperimentRuns(baseline, candidate);
     },
+    onMutate: () => setRunComparison(null),
     onSuccess: (result) => setRunComparison(result),
+    onError: (error) => message.error(toError(error).message),
+  });
+
+  const promoteBaselineMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeExperiment || !candidateRunId) {
+        throw new Error(t("eval.workbench.selectCandidateFirst", "Select a candidate run first"));
+      }
+      return promoteEvalExperimentBaseline(activeExperiment.experiment_id, candidateRunId);
+    },
+    onSuccess: async (promotion) => {
+      setBaselineRunId(promotion.baseline_run_id);
+      setRunComparison(null);
+      message.success(t("eval.workbench.baselinePromoted", "Baseline promoted"));
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["eval", "experiments"] }),
+        queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] }),
+      ]);
+    },
     onError: (error) => message.error(toError(error).message),
   });
 
@@ -875,39 +976,6 @@ export function EvalPage() {
     onSuccess: (result) => setGateResult(result),
     onError: (error) => message.error(toError(error).message),
   });
-
-  useEffect(() => {
-    if (!queuedRunId) return;
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      try {
-        const run = await getEvalExperimentRun(queuedRunId);
-        if (cancelled) return;
-        setRunPollingError(null);
-        setLatestRun(run);
-        if (run.status === "queued" || run.status === "running") {
-          timer = window.setTimeout(poll, 2000);
-        } else {
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["eval", "experiment", selectedExperimentId] }),
-            queryClient.invalidateQueries({ queryKey: ["eval", "run-results", queuedRunId] }),
-            queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] }),
-          ]);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setRunPollingError(toError(error));
-          timer = window.setTimeout(poll, 2000);
-        }
-      }
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [queryClient, queuedRunId, runPollRevision, selectedExperimentId]);
 
   const runResultsQuery = useQuery({
     queryKey: ["eval", "run-results", queuedRunId],
@@ -975,10 +1043,27 @@ export function EvalPage() {
     setActiveWorkbenchTab("traces");
   };
 
+  const openComparedTrace = (traceId: string) => {
+    setPinnedTraceId(traceId);
+    setSelectedTraceId(traceId);
+    setTraceRunFocusRevision((revision) => revision + 1);
+    setActiveWorkbenchTab("traces");
+  };
+
   const dashboardMetrics = dashboardQuery.data?.metrics || {};
   const runtimeHealth = dashboardQuery.data?.runtime_health || {};
   const overviewTab = (
-    <div className="eval-platform-grid">
+    <>
+      {summaryQuery.error || dashboardQuery.error ? (
+        <Alert
+          type="error"
+          showIcon
+          title={t("eval.workbench.overviewLoadFailed", "Could not load evaluation overview")}
+          description={toError(summaryQuery.error || dashboardQuery.error).message}
+          action={<Button onClick={() => void Promise.all([summaryQuery.refetch(), dashboardQuery.refetch()])}>{t("common.retry", "Retry")}</Button>}
+        />
+      ) : null}
+      <div className="eval-platform-grid">
       {[
         { key: "rag", label: t("eval.summary.ragTraces"), value: summaryQuery.data?.rag_traces ?? "—" },
         { key: "captured", label: t("eval.summary.totalTraces"), value: summaryQuery.data?.total_traces ?? "—" },
@@ -1031,7 +1116,8 @@ export function EvalPage() {
           ]}
         />
       </section>
-    </div>
+      </div>
+    </>
   );
 
   const traceExplorerTab = (
@@ -1081,6 +1167,15 @@ export function EvalPage() {
       description={t("eval.workbench.goldenSetsDescription", "Versioned regression cases backed by repo JSONL and DB review state.")}
       icon={<Database size={22} />}
     >
+      {datasetsQuery.error || examplesQuery.error ? (
+        <Alert
+          type="error"
+          showIcon
+          title={t("eval.workbench.assetsLoadFailed", "Could not load evaluation assets")}
+          description={toError(datasetsQuery.error || examplesQuery.error).message}
+          action={<Button onClick={() => void Promise.all([datasetsQuery.refetch(), examplesQuery.refetch()])}>{t("common.retry", "Retry")}</Button>}
+        />
+      ) : null}
       <div className="eval-workbench-form-grid">
         <Select
           className="eval-workbench-wide"
@@ -1160,7 +1255,7 @@ export function EvalPage() {
           icon={<Database size={15} />}
           onClick={() => examplesImportMutation.mutate()}
           loading={examplesImportMutation.isPending}
-          disabled={!canRunEvaluations || !activeDataset}
+          disabled={!canRunEvaluations || !activeDataset || !selectedTraceId || !detailQuery.data?.trace.input_preview}
         >
           {t("eval.workbench.importSeed", "Import seed case")}
         </Button>
@@ -1178,6 +1273,17 @@ export function EvalPage() {
           { key: "cases", label: t("eval.workbench.goldenCases", "Golden cases"), children: String(examplesQuery.data?.total ?? 0) },
           { key: "exported", label: t("eval.workbench.exportedCases", "Exported cases"), children: String(examplesExport?.examples.length ?? 0) },
         ]}
+      />
+      <BehaviorContractEditor
+        datasetId={activeDataset?.dataset_id ?? null}
+        examples={examplesQuery.data?.examples || []}
+        selectedTrace={detailQuery.data}
+        prefillRevision={contractPrefillRevision}
+        readOnly={!canRunEvaluations}
+        onSaved={async () => {
+          await queryClient.invalidateQueries({ queryKey: ["eval", "examples"] });
+          await queryClient.invalidateQueries({ queryKey: ["eval", "dashboard"] });
+        }}
       />
       <GoldenJsonlImport
         datasetId={activeDataset?.dataset_id ?? null}
@@ -1197,53 +1303,75 @@ export function EvalPage() {
       icon={<Beaker size={22} />}
     >
       {!canRunEvaluations ? (
-        <Alert type="info" showIcon message={t("eval.workbench.readOnly", "Read-only mode: you can inspect results but cannot start or edit evaluations.")} />
+        <Alert type="info" showIcon title={t("eval.workbench.readOnly", "Read-only mode: you can inspect results but cannot start or edit evaluations.")} />
+      ) : null}
+      {experimentsQuery.error || experimentDetailQuery.error || datasetsQuery.error || evaluatorsQuery.error ? (
+        <Alert
+          type="error"
+          showIcon
+          title={t("eval.workbench.runConfigLoadFailed", "Could not load run configuration")}
+          description={toError(experimentsQuery.error || experimentDetailQuery.error || datasetsQuery.error || evaluatorsQuery.error).message}
+          action={<Button onClick={() => void Promise.all([experimentsQuery.refetch(), experimentDetailQuery.refetch(), datasetsQuery.refetch(), evaluatorsQuery.refetch()])}>{t("common.retry", "Retry")}</Button>}
+        />
       ) : null}
       <div className="eval-workbench-form-grid">
-        <Select
-          allowClear
-          aria-label={t("eval.workbench.selectExperiment", "Select experiment")}
-          placeholder={t("eval.workbench.selectExperiment", "Select experiment")}
-          value={selectedExperimentId}
-          options={experiments.map((experiment) => ({
-            label: experiment.name,
-            value: experiment.experiment_id,
-          }))}
-          onChange={(value) => {
-            setSelectedExperimentId(value);
-            setQueuedRunId(undefined);
-            setLatestRun(null);
-            setRunPollingError(null);
-            const nextParams = new URLSearchParams(searchParams);
-            nextParams.delete("run_id");
-            setSearchParams(nextParams, { replace: true });
-          }}
-        />
-        <Select
-          allowClear
-          aria-label={t("eval.workbench.selectDataset", "Select test set")}
-          placeholder={t("eval.workbench.selectDataset", "Select test set")}
-          value={selectedDatasetId}
-          options={datasets.map((dataset) => ({ label: `${dataset.name} (${dataset.version})`, value: dataset.dataset_id }))}
-          onChange={(value) => setSelectedDatasetId(value)}
-        />
-        <Select
-          allowClear
-          aria-label={t("eval.workbench.selectEvaluator", "Select evaluator")}
-          placeholder={t("eval.workbench.selectEvaluator", "Select evaluator")}
-          value={selectedEvaluatorId}
-          options={evaluators.map((evaluator) => ({
-            label: `${evaluator.name} · ${evaluator.evaluator_type}`,
-            value: evaluator.evaluator_id,
-          }))}
-          onChange={(value) => setSelectedEvaluatorId(value)}
-        />
+        <label className="eval-field">
+          <span>{t("eval.workbench.selectExperiment", "Select experiment")}</span>
+          <Select
+            allowClear
+            value={selectedExperimentId}
+            options={experiments.map((experiment) => ({ label: experiment.name, value: experiment.experiment_id }))}
+            onChange={(value) => {
+              setSelectedExperimentId(value);
+              setSelectedDatasetId(
+                experiments.find((experiment) => experiment.experiment_id === value)?.dataset_id
+                || undefined,
+              );
+              const nextParams = new URLSearchParams(searchParams);
+              nextParams.delete("run_id");
+              setSearchParams(nextParams, { replace: true });
+            }}
+          />
+        </label>
+        <label className="eval-field">
+          <span>{t("eval.workbench.selectDataset", "Select test set")}</span>
+          <Select allowClear value={selectedDatasetId} options={datasets.map((dataset) => ({ label: `${dataset.name} (${dataset.version})`, value: dataset.dataset_id }))} onChange={setSelectedDatasetId} />
+        </label>
+        <label className="eval-field">
+          <span>{t("eval.workbench.selectEvaluator", "Select evaluator")}</span>
+          <Select allowClear value={selectedEvaluatorId} options={evaluators.map((evaluator) => ({ label: `${evaluator.name} · ${evaluator.evaluator_type}`, value: evaluator.evaluator_id }))} onChange={setSelectedEvaluatorId} />
+        </label>
+        <label className="eval-field">
+          <span>{t("eval.workbench.runMode", "Run mode")}</span>
+          <Select<EvalExperimentRunMode>
+            value={runMode}
+            options={[
+              { label: t("eval.workbench.liveCandidate", "Run current Agent"), value: "live_candidate" },
+              { label: t("eval.workbench.rescoreTrace", "Re-score stored traces"), value: "rescore_trace" },
+            ]}
+            onChange={(value) => setRunMode(value)}
+          />
+        </label>
+        <label className="eval-field">
+          <span>{t("eval.workbench.repetitions", "Repetitions")}</span>
+          <InputNumber min={1} max={10} value={runMode === "live_candidate" ? repetitions : 1} disabled={runMode !== "live_candidate"} onChange={(value) => setRepetitions(value ?? 3)} />
+        </label>
+        <label className="eval-field eval-field-wide">
+          <span>{t("eval.workbench.promptOverride", "System prompt override (optional)")}</span>
+          <Input.TextArea
+            value={systemPromptOverride}
+            disabled={runMode !== "live_candidate"}
+            placeholder={t("eval.workbench.promptOverrideHint", "Leave empty to evaluate the deployed prompt")}
+            autoSize={{ minRows: 2, maxRows: 6 }}
+            onChange={(event) => setSystemPromptOverride(event.target.value)}
+          />
+        </label>
       </div>
       {missingRunInputs.length ? (
         <Alert
           type="warning"
           showIcon
-          message={t("eval.workbench.missingRunInputs", "Select {{items}} before running.", { items: missingRunInputs.join(", ") })}
+          title={t("eval.workbench.missingRunInputs", "Select {{items}} before running.", { items: missingRunInputs.join(", ") })}
         />
       ) : null}
       <Space size={10} wrap>
@@ -1254,8 +1382,47 @@ export function EvalPage() {
           loading={experimentBatchMutation.isPending}
           disabled={!canRunExperiment}
         >
-          {t("eval.workbench.runExperiment", "Run test set")}
+          {runMode === "live_candidate" ? t("eval.workbench.runCurrentAgent", "Run current Agent") : t("eval.workbench.rescoreStored", "Re-score stored traces")}
         </Button>
+      </Space>
+      <Descriptions
+        className="eval-workbench-descriptions"
+        size="small"
+        bordered
+        column={{ xs: 1, sm: 2, lg: 4 }}
+        items={[
+          { key: "mode", label: t("eval.workbench.runMode", "Run mode"), children: runMode },
+          { key: "calls", label: t("eval.workbench.estimatedCalls", "Estimated calls"), children: effectiveRunDatasetId ? String((examplesQuery.data?.total || 0) * (runMode === "live_candidate" ? repetitions : 1)) : "1" },
+          { key: "baseline", label: t("eval.workbench.currentBaseline", "Current baseline"), children: activeExperiment?.baseline_run_id || t("eval.workbench.noBaseline", "Not set") },
+          { key: "fingerprint", label: t("eval.workbench.candidateFingerprint", "Candidate fingerprint"), children: String(asRecord(latestRun?.metrics?.actual_fingerprint).system_prompt_hash || latestRun?.candidate_fingerprint?.prompt_override_hash || latestRun?.runtime_fingerprint?.prompt_hash || activeExperiment?.target_config?.prompt_hash || "—") },
+        ]}
+      />
+      <div className="eval-comparison-controls">
+        <label className="eval-field">
+          <span>{t("eval.workbench.baselineRun", "Baseline run")}</span>
+          <Select
+            allowClear
+            value={baselineRunId}
+            placeholder={t("eval.workbench.selectBaseline", "Select baseline")}
+            options={comparableRuns.map((run) => ({ label: `${run.status} · ${(run.created_at || run.run_id).slice(0, 19)}`, value: run.run_id, disabled: run.status !== "succeeded" }))}
+            onChange={(value) => { setBaselineRunId(value); setRunComparison(null); setGateResult(null); }}
+          />
+        </label>
+        <label className="eval-field">
+          <span>{t("eval.workbench.candidateRun", "Candidate run")}</span>
+          <Select
+            allowClear
+            value={candidateRunId}
+            placeholder={t("eval.workbench.selectCandidate", "Select candidate")}
+            options={comparableRuns.map((run) => ({ label: `${run.status} · ${(run.created_at || run.run_id).slice(0, 19)}`, value: run.run_id, disabled: run.status !== "succeeded" }))}
+            onChange={(value) => {
+              setCandidateRunId(value);
+              setRunComparison(null);
+              setGateResult(null);
+              if (value) selectRun(value);
+            }}
+          />
+        </label>
         <Button
           icon={<GitCompare size={15} />}
           onClick={() => compareMutation.mutate()}
@@ -1264,35 +1431,46 @@ export function EvalPage() {
         >
           {t("eval.workbench.compareRuns", "Compare runs")}
         </Button>
-        <Select
-          className="eval-run-history-select"
-          allowClear
-          aria-label={t("eval.workbench.selectRun", "Select previous run")}
-          placeholder={t("eval.workbench.selectRun", "Select previous run")}
-          value={queuedRunId}
-          options={comparableRuns.map((run) => ({
-            label: `${run.status} · ${(run.created_at || run.run_id).slice(0, 19)}`,
-            value: run.run_id,
-          }))}
-          onChange={(value) => value && selectRun(value)}
-        />
-      </Space>
-      {runComparison ? (
+        <Button
+          onClick={() => modal.confirm({
+            title: t("eval.workbench.promoteBaseline", "Set candidate as baseline?"),
+            content: t("eval.workbench.promoteBaselineHint", "Only a successful compatible live run that passes critical gates can be promoted."),
+            okText: t("eval.workbench.confirmPromote", "Promote baseline"),
+            onOk: () => promoteBaselineMutation.mutateAsync(),
+          })}
+          loading={promoteBaselineMutation.isPending}
+          disabled={
+            !canRunEvaluations
+            || !candidateRun
+            || candidateRun.status !== "succeeded"
+            || (candidateRun.run_mode || candidateRun.target_snapshot?.run_mode) !== "live_candidate"
+            || candidateRunId === activeExperiment?.baseline_run_id
+          }
+        >
+          {t("eval.workbench.setBaseline", "Set as baseline")}
+        </Button>
+      </div>
+      {compareMutation.error ? (
         <Alert
-          type="info"
+          type="error"
           showIcon
-          message={t("eval.workbench.comparison", "Comparison delta")}
-          description={String(runComparison.deltas.overall_score ?? "—")}
+          title={t("eval.workbench.compareFailed", "Could not compare these runs")}
+          description={toError(compareMutation.error).message}
         />
       ) : null}
+      <ExperimentRunComparison
+        comparison={runComparison}
+        runs={comparableRuns}
+        baselineRunId={activeExperiment?.baseline_run_id || baselineRunId}
+        onOpenTrace={openComparedTrace}
+      />
       <ExperimentRunResults
         run={latestRun?.run_id === queuedRunId ? latestRun : null}
         results={latestRun?.run_id === queuedRunId ? runResultsQuery.data || null : null}
-        loading={runResultsQuery.isFetching}
-        error={runPollingError || (runResultsQuery.error ? toError(runResultsQuery.error) : null)}
+        loading={selectedRunQuery.isFetching || runResultsQuery.isFetching}
+        error={selectedRunQuery.error ? toError(selectedRunQuery.error) : runResultsQuery.error ? toError(runResultsQuery.error) : null}
         onRetry={() => {
-          setRunPollingError(null);
-          setRunPollRevision((revision) => revision + 1);
+          void selectedRunQuery.refetch();
           void runResultsQuery.refetch();
         }}
         onOpenTrace={openRunResultTrace}
@@ -1514,7 +1692,7 @@ export function EvalPage() {
         <Alert
           type="info"
           showIcon
-          message={t("eval.workbench.gateNeedsRun", "Select a successful run with complete gate metrics before running the gate.")}
+          title={t("eval.workbench.gateNeedsRun", "Select a successful run with complete gate metrics before running the gate.")}
         />
       ) : null}
       <Descriptions
@@ -1561,7 +1739,8 @@ export function EvalPage() {
   const assetsTab = (
     <Tabs
       className="eval-subtabs"
-      defaultActiveKey="golden_sets"
+      activeKey={activeAssetsTab}
+      onChange={setActiveAssetsTab}
       items={[
         { key: "golden_sets", label: t("eval.workbench.goldenSets", "Golden Sets"), children: goldenSetsTab },
         { key: "evaluators", label: t("eval.workbench.evaluators"), children: evaluatorsTab },

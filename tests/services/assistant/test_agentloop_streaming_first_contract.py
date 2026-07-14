@@ -436,14 +436,80 @@ async def test_streaming_first_emits_context_budget_without_prompt_text() -> Non
     assert budget_payload["tool_count"] >= 0
     assert budget_payload["system_prompt_chars"] > 0
     assert len(budget_payload["prompt_prefix_hash"]) == 16
+    assert len(budget_payload["system_prompt_hash"]) == 16
     assert budget_payload["prompt_prefix_message_count"] == 1
     assert budget_payload["prompt_prefix_chars"] == budget_payload["system_prompt_chars"]
     assert len(budget_payload["tool_schema_order_hash"]) == 16
     assert len(budget_payload["tool_schema_names_hash"]) == 16
+    assert len(budget_payload["tool_schema_hash"]) == 16
+    assert len(budget_payload["available_tool_schema_hash"]) == 16
+    assert len(budget_payload["candidate_system_prompt_hash"]) == 16
+    assert (
+        budget_payload["context_snapshot"]["tools"]["available_tool_schema_hash"]
+        == budget_payload["available_tool_schema_hash"]
+    )
+    assert len(budget_payload["runtime_revision"]) == 64
+    assert budget_payload["context_snapshot"]["bootstrap"]["temperature"] == 0.5
+    assert budget_payload["context_snapshot"]["policy"]["rag_config_hash"]
+    assert budget_payload["context_snapshot"]["policy"]["rag_revision_hash"]
     assert budget_payload["context_estimated_input_tokens"] > 0
     assert budget_payload["context_window_tokens"] == 128000
     assert 0 <= budget_payload["context_utilization"] <= 1
     assert "super-secret-value" not in json.dumps(budget_payload, default=str)
+
+
+@pytest.mark.asyncio
+async def test_streaming_rag_revision_hash_changes_with_dataset_catalog() -> None:
+    from assistant_service.core.agent.agent_loop import (
+        AgentLoop,
+        AgentLoopConfig,
+        AgentLoopContext,
+    )
+
+    class FakeKnowledgeService:
+        rows = [
+            {
+                "dataset_id": "kb-a",
+                "name": "Policies",
+                "updated_at": "2026-07-14T00:00:00Z",
+                "embedding_model": "text-embedding-v4",
+                "statistics": {"document_count": 2, "segment_count": 10},
+            }
+        ]
+
+        async def list_datasets(self, _user: Any) -> list[dict[str, Any]]:
+            return self.rows
+
+    knowledge = FakeKnowledgeService()
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(scripted=[]),
+        kb_service=knowledge,  # type: ignore[arg-type]
+    )
+    user = MockUserContext(user_id="u1")
+    context = AgentLoopContext(
+        session_id="s1",
+        user_id="u1",
+        tenant_id="default",
+        message="policy",
+        config=AgentLoopConfig(model_id="test", kb_dataset_ids=["kb-a"]),
+        user=user,  # type: ignore[arg-type]
+    )
+
+    names, first_hash = await loop._get_streaming_dataset_context(  # noqa: SLF001
+        context, user  # type: ignore[arg-type]
+    )
+    knowledge.rows = [
+        {
+            **knowledge.rows[0],
+            "updated_at": "2026-07-14T01:00:00Z",
+        }
+    ]
+    _, second_hash = await loop._get_streaming_dataset_context(  # noqa: SLF001
+        context, user  # type: ignore[arg-type]
+    )
+
+    assert names == {"kb-a": "Policies"}
+    assert first_hash != second_hash
 
 
 @pytest.mark.asyncio
@@ -530,6 +596,35 @@ async def test_streaming_first_system_prompt_keeps_client_prompt_out_of_system()
     user_content = str(model.last_messages[-1].get("content") or "")
     assert "User Custom Instructions" in user_content
     assert "STYLE_ONLY_PROMPT" in user_content
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_uses_trusted_eval_prompt_as_system_message() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    model = FakeModelRegistry(scripted=[[{"content": "ok"}]])
+    loop = AgentLoop(model_registry=model)
+    cfg = AgentLoopConfig(
+        model_id="test",
+        system_prompt="STYLE_ONLY_PROMPT",
+        eval_system_prompt_override="TRUSTED_EVAL_PROMPT",
+        max_tool_iterations=1,
+    )
+
+    async for _ in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="eval-candidate"),  # type: ignore[arg-type]
+        message="Hi",
+        config=cfg,
+        history=[],
+    ):
+        pass
+
+    assert model.last_messages[0] == {
+        "role": "system",
+        "content": "TRUSTED_EVAL_PROMPT",
+    }
+    assert "STYLE_ONLY_PROMPT" in str(model.last_messages[-1].get("content") or "")
 
 
 @pytest.mark.asyncio

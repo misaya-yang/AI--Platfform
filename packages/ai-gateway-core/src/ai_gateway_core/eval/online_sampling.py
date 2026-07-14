@@ -106,6 +106,27 @@ async def schedule_online_eval_for_trace(
     if not trace_id:
         return {"scheduled": 0, "reason": "missing_trace_id"}
 
+    trace_detail = await repository.get_trace_detail(
+        tenant_id=tenant_id,
+        trace_id=trace_id,
+        trace_family=str(payload.get("trace_family") or "assistant"),
+    )
+    trace = (trace_detail or {}).get("trace") or {}
+    trace_metadata = trace.get("metadata") if isinstance(trace.get("metadata"), dict) else {}
+    eval_origin = str(
+        payload.get("eval_origin")
+        or trace_metadata.get("eval_origin")
+        or trace.get("user_id")
+        or ""
+    ).strip()
+    if eval_origin in {"candidate", "judge", "eval-candidate", "eval-worker"}:
+        return {
+            "scheduled": 0,
+            "matched": 0,
+            "trace_id": trace_id,
+            "reason": "internal_eval_trace",
+        }
+
     pending_online_runs = await repository.count_pending_online_eval_runs(tenant_id=tenant_id)
     if pending_online_runs >= max_pending_online_runs:
         logger.warning(
@@ -128,11 +149,19 @@ async def schedule_online_eval_for_trace(
         trace_family = "assistant"
     status = str(payload.get("status") or "succeeded").strip().lower()
 
-    evaluators, _total = await repository.list_evaluators(
-        tenant_id=tenant_id,
-        limit=evaluator_limit,
-        offset=0,
-    )
+    evaluators: list[dict[str, Any]] = []
+    offset = 0
+    page_size = max(1, evaluator_limit)
+    while True:
+        page, total = await repository.list_evaluators(
+            tenant_id=tenant_id,
+            limit=page_size,
+            offset=offset,
+        )
+        evaluators.extend(page)
+        offset += len(page)
+        if not page or offset >= total:
+            break
     scheduled = 0
     matched = 0
     for evaluator in evaluators:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.services.eval import golden as golden_module
@@ -192,6 +193,15 @@ def test_golden_redaction_regression_is_a_failure() -> None:
     assert "sensitive replay payload" in metrics["cases"][0]["failures"]
 
 
+def test_sensitive_output_check_accepts_persisted_trace_timestamps() -> None:
+    case = golden_case(assertions=[{"type": "no_sensitive_output"}])
+    observation = replay_observation(
+        spans=[{"span_kind": "model_invocation", "started_at": datetime.now(timezone.utc)}]
+    )
+
+    assert evaluate_case(case, observation)["passed"] is True
+
+
 def test_runtime_and_latency_mismatches_fail() -> None:
     case = golden_case(
         assertions=[{"type": "latency_ms_lt", "value": 100}],
@@ -300,3 +310,156 @@ def test_external_observation_wins_over_conflicting_inline_replay() -> None:
 
     assert result["passed"] is False
     assert "status=failed" in result["failures"]
+
+
+def test_behavior_contract_validates_and_evaluates_output_tools_and_limits() -> None:
+    case = golden_case(
+        assertions=[
+            {"type": "output_not_contains", "value": "invented"},
+            {"type": "tool_called", "value": "get_account_status"},
+            {"type": "tool_not_called", "value": "delete_account"},
+            {"type": "latency_ms_lt", "value": 3000},
+            {"type": "total_tokens_lt", "value": 2000},
+            {"type": "cost_cents_lt", "value": 5},
+        ]
+    )
+    case["expected_output"] = {
+        "reference": "Explain that the tool is unavailable",
+        "rubric": "Must not invent account status",
+        "contains": ["ok", "fallback"],
+        "not_contains": ["invented"],
+    }
+    case["expected_trajectory"]["tools"] = [  # type: ignore[index]
+        {
+            "name": "get_account_status",
+            "required": True,
+            "arguments_subset": {"account": {"id": "known"}},
+            "order": 1,
+            "max_calls": 1,
+            "status": "succeeded",
+        },
+        {"name": "delete_account", "forbidden": True},
+    ]
+    observation = replay_observation(
+        output_preview="ok: use the fallback",
+        total_latency_ms=250,
+        total_tokens=100,
+        total_cost_cents=4,
+        tool_calls=[
+            {
+                "name": "get_account_status",
+                "arguments": {"account": {"id": "known", "region": "au"}},
+                "status": "succeeded",
+            }
+        ],
+    )
+
+    assert validate_cases([case])["valid"] is True
+    result = evaluate_case(case, observation)
+    assert result["passed"] is True
+    assert result["trajectory_pass"] is True
+
+
+def test_behavior_contract_reports_output_tool_and_performance_regressions() -> None:
+    case = golden_case(
+        assertions=[
+            {"type": "output_not_contains", "value": "invented"},
+            {"type": "total_tokens_lt", "value": 100},
+            {"type": "cost_cents_lt", "value": 5},
+        ]
+    )
+    case["expected_output"] = {"contains": ["ok"], "not_contains": ["invented"]}
+    case["expected_trajectory"]["tools"] = [  # type: ignore[index]
+        {
+            "name": "search",
+            "arguments_subset": {"query": "expected"},
+            "order": 1,
+            "max_calls": 1,
+            "status": "succeeded",
+        },
+        {"name": "delete_account", "forbidden": True},
+    ]
+    observation = replay_observation(
+        output_preview="ok but invented",
+        total_tokens=100,
+        total_cost_cents=5,
+        tool_calls=[
+            {"name": "search", "arguments": {"query": "wrong"}, "status": "failed"},
+            {"name": "search", "arguments": {"query": "expected"}, "status": "succeeded"},
+            {"name": "delete_account", "arguments": {}, "status": "succeeded"},
+        ],
+    )
+
+    result = evaluate_case(case, observation)
+    failures = " ".join(result["failures"])
+
+    assert result["passed"] is False
+    assert result["trajectory_pass"] is False
+    assert "output_not_contains" in failures
+    assert "found forbidden text" in failures
+    assert "total_tokens_lt" in failures
+    assert "cost_cents_lt" in failures
+    assert "called 2 > 1" in failures
+    assert "did not match expected order, status, or arguments" in failures
+    assert "forbidden tool called" in failures
+
+
+def test_behavior_contract_reuses_tool_execution_spans() -> None:
+    case = golden_case(assertions=[{"type": "tool_called", "value": "search"}])
+    case["expected_trajectory"]["tools"] = [  # type: ignore[index]
+        {
+            "name": "search",
+            "arguments_subset": {"query": "refund"},
+            "status": "succeeded",
+        }
+    ]
+    observation = replay_observation(
+        spans=[
+            {
+                "span_kind": "tool_execution",
+                "name": "tool:search",
+                "input_preview": '{"query": "refund", "limit": 3}',
+                "status": "succeeded",
+            }
+        ]
+    )
+
+    assert evaluate_case(case, observation)["passed"] is True
+
+
+def test_behavior_contract_missing_evidence_and_malformed_rules_fail_closed() -> None:
+    missing_evidence = golden_case(
+        assertions=[
+            {"type": "tool_not_called", "value": "delete_account"},
+            {"type": "total_tokens_lt", "value": 100},
+        ]
+    )
+    missing_result = evaluate_case(missing_evidence, replay_observation())
+    assert missing_result["passed"] is False
+    assert "requires valid tool_calls or spans evidence" in " ".join(missing_result["failures"])
+    assert "total_tokens_lt requires numeric evidence" in missing_result["failures"]
+
+    invalid_evidence = evaluate_case(
+        golden_case(assertions=[{"type": "total_tokens_lt", "value": 100}]),
+        replay_observation(total_tokens=-1),
+    )
+    assert "total_tokens_lt requires numeric evidence" in invalid_evidence["failures"]
+
+    malformed = golden_case(assertions=[{"type": "cost_cents_lt", "value": 0}])
+    malformed["expected_output"] = {"contains": ["ok", 1]}
+    malformed["expected_trajectory"]["tools"] = [  # type: ignore[index]
+        {"name": "search", "future_constraint": True}
+    ]
+    validation = validate_cases([malformed])
+    assert validation["valid"] is False
+    errors = " ".join(validation["errors"][0]["errors"])
+    assert "expected_output.contains" in errors
+    assert "unsupported fields future_constraint" in errors
+    assert "value must be a positive number" in errors
+
+    non_finite = golden_case(assertions=[{"type": "cost_cents_lt", "value": float("nan")}])
+    assert validate_cases([non_finite])["valid"] is False
+
+    direct_result = evaluate_case(malformed, replay_observation())
+    assert direct_result["passed"] is False
+    assert direct_result["failures"][0].startswith("invalid behavior contract:")

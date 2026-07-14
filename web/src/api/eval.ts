@@ -211,11 +211,14 @@ export interface EvalDatasetCreate {
 
 export interface EvalExample {
   example_id: string;
+  case_id?: string;
   dataset_id: string;
   tenant_id: string;
   split: string;
   input: Record<string, unknown>;
   expected_output: Record<string, unknown>;
+  expected_trajectory?: Record<string, unknown>;
+  assertions?: Array<Record<string, unknown>>;
   metadata: Record<string, unknown>;
   source_trace_id?: string | null;
   source_span_id?: string | null;
@@ -288,7 +291,22 @@ export interface EvalExperiment {
   created_by: string;
   created_at?: string | null;
   updated_at?: string | null;
+  baseline_run_id?: string | null;
   runs: EvalExperimentRun[];
+}
+
+export type EvalExperimentRunMode = "rescore_trace" | "live_candidate";
+
+export interface EvalExperimentRunProgress {
+  completed?: number;
+  failed?: number;
+  total?: number;
+  completed_cases?: number;
+  failed_cases?: number;
+  total_cases?: number;
+  completed_trials?: number;
+  failed_trials?: number;
+  total_trials?: number;
 }
 
 export interface EvalAsyncJobResponse {
@@ -355,9 +373,19 @@ export interface EvalExperimentRun {
   evaluator_id?: string | null;
   dataset_id?: string | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  run_mode?: EvalExperimentRunMode;
+  repetitions?: number;
+  baseline_run_id?: string | null;
+  dataset_manifest_hash?: string | null;
+  evaluator_suite_hash?: string | null;
+  candidate_fingerprint?: Record<string, unknown>;
   target_snapshot?: Record<string, unknown>;
   score_summary: Record<string, unknown>;
   metrics: Record<string, unknown>;
+  progress?: EvalExperimentRunProgress;
+  runtime_fingerprint?: Record<string, unknown>;
+  gate_status?: string | null;
+  attribution_status?: string | null;
   error_message?: string | null;
   created_by: string;
   started_at?: string | null;
@@ -386,9 +414,18 @@ export interface EvalExperimentCaseResult {
   example_id?: string | null;
   case_id: string;
   candidate_trace_id: string;
+  baseline_trace_id?: string | null;
   source_trace_id?: string | null;
   status: "passed" | "failed" | "review" | "unscored";
   aggregate_score?: number | null;
+  baseline_score?: number | null;
+  score_delta?: number | null;
+  trial_count?: number;
+  score_stddev?: number | null;
+  flaky?: boolean;
+  observed_metrics?: Record<string, unknown>;
+  tool_diffs?: Array<Record<string, unknown>>;
+  rag_diffs?: Array<Record<string, unknown>>;
   failure_reason?: string | null;
   input: Record<string, unknown>;
   expected_output: Record<string, unknown>;
@@ -420,6 +457,22 @@ export interface EvalExperimentRunComparisonResponse {
   deltas: Record<string, unknown>;
   regression_summary: Record<string, unknown>;
   case_diffs: Array<Record<string, unknown>>;
+  compatibility?: string | boolean | Record<string, unknown>;
+  attribution?: string;
+  attribution_status?: string;
+  changed_dimensions?: string[];
+  metric_diffs?: Record<string, unknown>;
+  statistics?: Record<string, unknown>;
+  gate?: Record<string, unknown>;
+  gate_status?: string;
+}
+
+export interface EvalBaselinePromotionResponse {
+  experiment_id: string;
+  baseline_run_id: string;
+  previous_baseline_run_id?: string | null;
+  promoted_by: string;
+  promoted_at?: string | null;
 }
 
 export interface EvalGateDryRunResponse {
@@ -692,6 +745,13 @@ export async function runEvalExperiment(
   payload: {
     dataset_id?: string | null;
     evaluator_ids: string[];
+    run_mode?: EvalExperimentRunMode;
+    repetitions?: number;
+    baseline_run_id?: string | null;
+    candidate_config?: {
+      system_prompt_override?: string;
+      [key: string]: unknown;
+    };
     target_snapshot?: Record<string, unknown>;
     candidate_label?: string;
     baseline_label?: string | null;
@@ -701,6 +761,17 @@ export async function runEvalExperiment(
   const response = await api.post<EvalExperimentRunBatchResponse>(
     `/api/v1/eval/experiments/${encodeURIComponent(experimentId)}:run`,
     payload
+  );
+  return response.data;
+}
+
+export async function promoteEvalExperimentBaseline(
+  experimentId: string,
+  runId: string,
+): Promise<EvalBaselinePromotionResponse> {
+  const response = await api.post<EvalBaselinePromotionResponse>(
+    `/api/v1/eval/experiments/${encodeURIComponent(experimentId)}:promote-baseline`,
+    { run_id: runId },
   );
   return response.data;
 }

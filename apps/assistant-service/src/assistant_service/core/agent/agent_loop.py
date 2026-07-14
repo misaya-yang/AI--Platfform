@@ -70,6 +70,7 @@ from ..memory.compressor import (
 from ..quality.cache_optimizer import (
     build_cache_context_metrics,
     normalize_provider_cache_usage,
+    stable_cache_hash,
 )
 from ..rag.context_engine import (
     ContextBudgetManager,
@@ -489,6 +490,7 @@ class AgentLoopConfig:
 
     # System prompt (optional override, otherwise uses default from prompts)
     system_prompt: str | None = None
+    eval_system_prompt_override: str | None = None
 
     # Gateway/policy profile
     execution_profile: str = "safe"
@@ -749,6 +751,7 @@ class AgentLoop:
         bootstrap: dict[str, Any] | None = None,
         workspace: dict[str, Any] | None = None,
         surface: dict[str, Any] | None = None,
+        rag_revision_hash: str | None = None,
     ) -> dict[str, Any]:
         trace_ctx = self._trace_context(ctx)
         ctx.context_snapshot = build_context_snapshot(
@@ -769,6 +772,14 @@ class AgentLoop:
                 "queue_mode": ctx.config.queue_mode,
                 "context_detail": ctx.config.context_detail,
                 "kb_mode": ctx.config.kb_mode,
+                "rag_config_hash": stable_cache_hash(
+                    {
+                        "dataset_ids": sorted(ctx.config.kb_dataset_ids or []),
+                        "mode": ctx.config.kb_mode,
+                        "top_k": ctx.config.kb_top_k,
+                    }
+                ),
+                "rag_revision_hash": rag_revision_hash,
                 "web_search_enabled": ctx.config.web_search_enabled,
             },
             memory={
@@ -2352,9 +2363,9 @@ class AgentLoop:
         self,
         ctx: AgentLoopContext,
         user: UserContextLike,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    ) -> tuple[list[dict[str, Any]], list[str], str]:
         if not self.tool_invoker:
-            return [], []
+            return [], [], stable_cache_hash([])
 
         invocation_context = self._build_invocation_context(ctx, user=user)
         tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
@@ -2389,13 +2400,19 @@ class AgentLoop:
                 "Connector-registry tool merge failed; continuing without connectors"
             )
 
+        def _tool_schema(tool: Any) -> dict[str, Any]:
+            try:
+                return tool.to_openai_schema(compact=True)
+            except TypeError:
+                return tool.to_openai_schema()
+
+        available_tool_schema_hash = stable_cache_hash(
+            [_tool_schema(tool) for tool in sorted(tool_defs, key=lambda item: item.name)]
+        )
         selected = select_tools(tool_defs, ctx.message)
         tools: list[dict[str, Any]] = []
         for tool in selected:
-            try:
-                tools.append(tool.to_openai_schema(compact=True))
-            except TypeError:
-                tools.append(tool.to_openai_schema())
+            tools.append(_tool_schema(tool))
         names = [tool.name for tool in selected]
         logger.info(
             "[STREAMING-FIRST] All tools available: %s "
@@ -2404,28 +2421,64 @@ class AgentLoop:
             ctx.config.web_search_enabled,
             ctx.config.kb_dataset_ids,
         )
-        return tools, names
+        return tools, names, available_tool_schema_hash
 
-    async def _get_streaming_dataset_name_map(
+    async def _get_streaming_dataset_context(
         self,
         ctx: AgentLoopContext,
         user: UserContextLike,
-    ) -> dict[str, str] | None:
+    ) -> tuple[dict[str, str] | None, str]:
+        dataset_ids = sorted(str(item) for item in (ctx.config.kb_dataset_ids or []))
         if not self.kb_service or not ctx.config.kb_dataset_ids:
-            return None
+            return None, stable_cache_hash(
+                {"dataset_ids": dataset_ids, "catalog": "unavailable" if dataset_ids else "empty"}
+            )
         try:
             rows = await asyncio.wait_for(self.kb_service.list_datasets(user), timeout=0.3)
             if not isinstance(rows, list):
-                return None
+                rows = []
             names = {
                 str(row["dataset_id"]): str(row["name"])
                 for row in rows
                 if row and row.get("dataset_id") and row.get("name")
             }
-            return names or None
+            configured = set(dataset_ids)
+            revision_rows = []
+            for row in rows:
+                if not isinstance(row, dict) or str(row.get("dataset_id") or "") not in configured:
+                    continue
+                statistics = row.get("statistics") if isinstance(row.get("statistics"), dict) else {}
+                revision_rows.append(
+                    {
+                        "dataset_id": str(row.get("dataset_id") or ""),
+                        "updated_at": row.get("updated_at"),
+                        "embedding_provider": row.get("embedding_provider"),
+                        "embedding_model": row.get("embedding_model"),
+                        "embedding_dimension": row.get("embedding_dimension"),
+                        "needs_reindex": row.get("needs_reindex"),
+                        "collection_name": row.get("collection_name"),
+                        "document_count": statistics.get(
+                            "document_count", row.get("document_count")
+                        ),
+                        "segment_count": statistics.get(
+                            "segment_count", row.get("segment_count", row.get("chunk_count"))
+                        ),
+                    }
+                )
+            revision_rows.sort(key=lambda item: item["dataset_id"])
+            return names or None, stable_cache_hash(
+                {
+                    "dataset_ids": dataset_ids,
+                    "catalog_complete": {item["dataset_id"] for item in revision_rows}
+                    == configured,
+                    "datasets": revision_rows,
+                }
+            )
         except Exception:
             logger.debug("Failed to load dataset name map", exc_info=True)
-            return None
+            return None, stable_cache_hash(
+                {"dataset_ids": dataset_ids, "catalog": "unavailable"}
+            )
 
     async def _stream_model_turn(
         self,
@@ -2953,8 +3006,12 @@ class AgentLoop:
                     )
                     processed_files = None
 
-            tools, available_tool_names = await self._get_streaming_tools(ctx, user)
-            dataset_name_map = await self._get_streaming_dataset_name_map(ctx, user)
+            tools, available_tool_names, available_tool_schema_hash = (
+                await self._get_streaming_tools(ctx, user)
+            )
+            dataset_name_map, rag_revision_hash = await self._get_streaming_dataset_context(
+                ctx, user
+            )
 
             # runtime skill metadata: load dynamically and inject only compact metadata.
             if self.assistant_runtime:
@@ -3057,7 +3114,17 @@ class AgentLoop:
                 if extra_prompt_raw
                 else ""
             )
-            system_prompt = base_prompt
+            trusted_eval_prompt = (ctx.config.eval_system_prompt_override or "").strip()
+            system_prompt = trusted_eval_prompt or base_prompt
+            candidate_system_prompt = trusted_eval_prompt or get_streaming_first_prompt(
+                available_datasets=ctx.config.kb_dataset_ids,
+                kb_mode=ctx.config.kb_mode,
+                web_search_enabled=ctx.config.web_search_enabled,
+                available_tools=None,
+                dataset_name_map=dataset_name_map,
+                os_agent_enabled=ctx.config.os_agent_enabled,
+            )
+            candidate_system_prompt_hash = stable_cache_hash(candidate_system_prompt)
             messages.append({"role": "system", "content": system_prompt})
 
             # Middleware chain populates ctx.runtime_memory_snippets and friends
@@ -3248,6 +3315,7 @@ class AgentLoop:
                     "tool_schema_names_hash": cache_context_metrics.get(
                         "tool_schema_names_hash"
                     ),
+                    "available_tool_schema_hash": available_tool_schema_hash,
                 },
                 bootstrap={
                     "message_count": len(messages),
@@ -3256,8 +3324,11 @@ class AgentLoop:
                     "dynamic_context_chars": len(dynamic_context_block),
                     "context_estimated_input_tokens": context_estimated_input_tokens,
                     "context_window_tokens": model_context_window,
+                    "temperature": ctx.config.temperature,
+                    "max_tokens": ctx.config.max_tokens,
                 },
                 workspace={"file_count": len(processed_file_metadata)},
+                rag_revision_hash=rag_revision_hash,
             )
             yield AgentLoopEvent(
                 phase=phase,
@@ -3271,6 +3342,8 @@ class AgentLoop:
                     "history_message_count": len(trimmed_history),
                     "tool_count": len(available_tool_names),
                     "selected_tool_names": available_tool_names,
+                    "available_tool_schema_hash": available_tool_schema_hash,
+                    "candidate_system_prompt_hash": candidate_system_prompt_hash,
                     "system_prompt_chars": len(system_prompt),
                     "dynamic_context_chars": len(dynamic_context_block),
                     "file_count": len(processed_file_metadata),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated
+import hashlib
+from typing import Annotated, Any
 
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ...api.deps import AuthContext, get_auth_context, require_gateway_capability
 from ...core.auth.permissions import Capability, build_permission_denied_detail
 from ...persistence.database import DatabaseStorage
-from ...services.eval.golden import apply_gate
+from ...services.eval.golden import apply_gate, validate_case
 from ...services.eval.kb_ragas_service import (
     batch_score_kb_ragas_traces,
     get_kb_ragas_knowledge_summary,
@@ -32,6 +33,8 @@ from ..schemas.eval import (
     AgentTraceScoreCreate,
     AgentTraceSummary,
     EvalAsyncJobResponse,
+    EvalBaselinePromotionRequest,
+    EvalBaselinePromotionResponse,
     EvalDashboardResponse,
     EvalDataset,
     EvalDatasetCreate,
@@ -134,6 +137,44 @@ def _require_supported_family(trace_family: str) -> None:
             status_code=400,
             detail="Unsupported trace_family.",
         )
+
+
+def _golden_case_from_example(example: dict[str, Any]) -> dict[str, Any]:
+    metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
+    return {
+        "case_id": metadata.get("case_id") or example.get("example_id"),
+        "split": example.get("split") or "regression",
+        "input": example.get("input") or {},
+        "expected_output": example.get("expected_output") or {},
+        "expected_trajectory": metadata.get("expected_trajectory") or {},
+        "assertions": metadata.get("assertions") or [],
+        "metadata": {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"case_id", "expected_trajectory", "assertions"}
+        },
+    }
+
+
+async def _hydrate_live_run(
+    repository: AgentTraceRepository,
+    *,
+    tenant_id: str,
+    run: dict[str, Any],
+) -> dict[str, Any]:
+    if run.get("run_mode") != "live_candidate":
+        return run
+    progress_loader = getattr(repository, "get_experiment_run_progress", None)
+    if callable(progress_loader):
+        run["progress"] = await progress_loader(
+            tenant_id=tenant_id,
+            run_id=str(run.get("run_id") or ""),
+        )
+    metrics = run.get("metrics") if isinstance(run.get("metrics"), dict) else {}
+    run["runtime_fingerprint"] = metrics.get("actual_fingerprint") or {}
+    gate = metrics.get("gate") if isinstance(metrics.get("gate"), dict) else {}
+    run["gate_status"] = gate.get("status")
+    return run
 
 
 @router.get("/summary", response_model=EvalTraceMonitoringSummary)
@@ -418,11 +459,28 @@ async def update_eval_example(
     auth: AuthContext = Depends(get_auth_context),
 ) -> EvalExample:
     _require_eval_run_access(request, auth)
+    patch = body.model_dump(exclude_unset=True)
+    patch_metadata = dict(patch.get("metadata") or {})
+    for key in ("tags", "difficulty", "owner", "review_status"):
+        if key in patch:
+            patch_metadata[key] = patch[key]
+    validation_case = {
+        "case_id": example_id,
+        "split": patch.get("split") or "regression",
+        "input": patch.get("input") or {},
+        "expected_output": patch.get("expected_output") or {},
+        "expected_trajectory": patch.get("expected_trajectory") or {},
+        "assertions": patch.get("assertions") or [],
+        "metadata": patch_metadata,
+    }
+    errors = validate_case(validation_case)
+    if errors:
+        raise HTTPException(status_code=422, detail={"case_id": example_id, "errors": errors})
     example = await _get_trace_repository(request).update_example(
         tenant_id=auth.tenant_id,
         dataset_id=dataset_id,
         example_id=example_id,
-        payload=body.model_dump(exclude_unset=True),
+        payload=patch,
     )
     if not example:
         raise HTTPException(status_code=404, detail="Example not found")
@@ -441,11 +499,19 @@ async def import_eval_examples(
     auth: AuthContext = Depends(get_auth_context),
 ) -> EvalExamplesImportResponse:
     _require_eval_run_access(request, auth)
+    examples = [example.model_dump() for example in body.examples]
+    validation_errors = [
+        {"case_id": example.get("case_id"), "errors": errors}
+        for example in examples
+        if (errors := validate_case(example))
+    ]
+    if validation_errors:
+        raise HTTPException(status_code=422, detail={"cases": validation_errors})
     result = await _get_trace_repository(request).import_examples(
         tenant_id=auth.tenant_id,
         dataset_id=dataset_id,
         created_by=auth.user_id,
-        examples=[example.model_dump() for example in body.examples],
+        examples=examples,
         mode=body.mode,
     )
     return EvalExamplesImportResponse(
@@ -722,12 +788,14 @@ async def get_eval_experiment_run(
     auth: AuthContext = Depends(get_auth_context),
 ) -> EvalExperimentRun:
     _require_eval_trace_access(request, auth)
-    run = await _get_trace_repository(request).get_experiment_run(
+    repo = _get_trace_repository(request)
+    run = await repo.get_experiment_run(
         tenant_id=auth.tenant_id,
         run_id=run_id,
     )
     if not run:
         raise HTTPException(status_code=404, detail="Experiment run not found")
+    run = await _hydrate_live_run(repo, tenant_id=auth.tenant_id, run=run)
     return EvalExperimentRun(**run)
 
 
@@ -747,6 +815,7 @@ async def get_eval_experiment_run_results(
     run = await repo.get_experiment_run(tenant_id=auth.tenant_id, run_id=run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Experiment run not found")
+    run = await _hydrate_live_run(repo, tenant_id=auth.tenant_id, run=run)
     cases, total = await repo.list_experiment_run_case_results(
         tenant_id=auth.tenant_id,
         run_id=run_id,
@@ -799,6 +868,103 @@ async def run_eval_experiment(
             status_code=422,
             detail="Dataset and trace targets are mutually exclusive",
         )
+    if body.run_mode == "live_candidate":
+        if not dataset_id:
+            raise HTTPException(status_code=422, detail="live_candidate requires a dataset")
+        examples = await repo.list_example_manifest(
+            tenant_id=auth.tenant_id,
+            dataset_id=str(dataset_id),
+        )
+        if not examples:
+            raise HTTPException(status_code=422, detail="Dataset has no examples")
+        invalid_cases: list[dict[str, Any]] = []
+        for example in examples:
+            input_payload = example.get("input") if isinstance(example.get("input"), dict) else {}
+            errors = validate_case(_golden_case_from_example(example))
+            if not str(input_payload.get("message") or "").strip():
+                errors.append("input.message must be a non-empty executable message")
+            metadata = example.get("metadata") if isinstance(example.get("metadata"), dict) else {}
+            if metadata.get("behavior_confirmed") is False:
+                errors.append("expected behavior must be confirmed before live execution")
+            if errors:
+                invalid_cases.append(
+                    {
+                        "case_id": str(
+                            metadata.get("case_id") or example.get("example_id") or "unknown"
+                        ),
+                        "errors": errors,
+                    }
+                )
+        if invalid_cases:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "live_candidate dataset contains invalid behavior contracts",
+                    "cases": invalid_cases[:20],
+                },
+            )
+        evaluators = []
+        for evaluator_id in body.evaluator_ids:
+            evaluator = await repo.get_evaluator(
+                tenant_id=auth.tenant_id,
+                evaluator_id=evaluator_id,
+            )
+            if not evaluator:
+                raise HTTPException(status_code=404, detail=f"Evaluator not found: {evaluator_id}")
+            evaluators.append(evaluator)
+
+        repetitions = body.repetitions or 3
+        prompt_override = body.candidate_config.system_prompt_override
+        prompt_override_hash = (
+            hashlib.sha256(prompt_override.encode("utf-8")).hexdigest() if prompt_override else None
+        )
+        execution_config = {
+            **(experiment.get("target_config") or {}),
+            **body.target_snapshot,
+            "system_prompt_override": prompt_override,
+        }
+        public_target = {
+            key: value
+            for key, value in body.target_snapshot.items()
+            if key
+            not in {
+                "system_prompt",
+                "system_prompt_override",
+                "eval_system_prompt_override",
+            }
+        }
+        public_target.update(
+            {
+                "candidate_label": body.candidate_label,
+                "baseline_label": body.baseline_label,
+                "prompt_override_hash": prompt_override_hash,
+            }
+        )
+        candidate_fingerprint = {
+            "prompt_override_hash": prompt_override_hash,
+            "requested_model_id": execution_config.get("model_id"),
+            "requested_temperature": execution_config.get("temperature"),
+            "requested_execution_profile": execution_config.get("execution_profile"),
+            "verification": "pending",
+        }
+        try:
+            job = await repo.enqueue_live_experiment_run(
+                tenant_id=auth.tenant_id,
+                experiment_id=experiment_id,
+                dataset_id=str(dataset_id),
+                evaluator_snapshots=evaluators,
+                examples=examples,
+                repetitions=repetitions,
+                created_by=auth.user_id,
+                target_snapshot=public_target,
+                execution_config=execution_config,
+                candidate_fingerprint=candidate_fingerprint,
+                baseline_run_id=body.baseline_run_id or experiment.get("baseline_run_id"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return EvalExperimentRunBatchResponse(jobs=[EvalAsyncJobResponse(**job)])
+
     jobs = []
     for evaluator_id in body.evaluator_ids:
         job = await repo.enqueue_evaluator_run(
@@ -811,6 +977,7 @@ async def run_eval_experiment(
                 "trace_id": trace_id,
                 "target_snapshot": {
                     **body.target_snapshot,
+                    "run_mode": "rescore_trace",
                     "candidate_label": body.candidate_label,
                     "baseline_label": body.baseline_label,
                 },
@@ -819,6 +986,90 @@ async def run_eval_experiment(
         )
         jobs.append(EvalAsyncJobResponse(**job))
     return EvalExperimentRunBatchResponse(jobs=jobs)
+
+
+@router.post(
+    "/experiments/{experiment_id}:promote-baseline",
+    response_model=EvalBaselinePromotionResponse,
+)
+async def promote_eval_experiment_baseline(
+    experiment_id: str,
+    body: EvalBaselinePromotionRequest,
+    request: Request,
+    auth: AuthContext = Depends(get_auth_context),
+) -> EvalBaselinePromotionResponse:
+    _require_eval_run_access(request, auth)
+    repo = _get_trace_repository(request)
+    experiment = await repo.get_experiment(tenant_id=auth.tenant_id, experiment_id=experiment_id)
+    run = await repo.get_experiment_run(tenant_id=auth.tenant_id, run_id=body.run_id)
+    if not experiment or not run or run.get("experiment_id") != experiment_id:
+        raise HTTPException(status_code=404, detail="Experiment run not found")
+    if run.get("run_mode") != "live_candidate" or run.get("status") != "succeeded":
+        raise HTTPException(
+            status_code=409, detail="Baseline requires a succeeded live_candidate run"
+        )
+    metrics = run.get("metrics") if isinstance(run.get("metrics"), dict) else {}
+    summary = run.get("score_summary") if isinstance(run.get("score_summary"), dict) else {}
+    critical_pass_rate = summary.get("critical_pass_rate", metrics.get("critical_pass_rate"))
+    if critical_pass_rate is None or float(critical_pass_rate) < 1.0:
+        raise HTTPException(status_code=409, detail="All critical behavior cases must pass")
+    if metrics.get("mixed_runtime") is True:
+        raise HTTPException(
+            status_code=409, detail="Mixed runtime fingerprints cannot become baseline"
+        )
+    run_gate = metrics.get("gate") if isinstance(metrics.get("gate"), dict) else {}
+    if (
+        run_gate.get("status") != "pass"
+        or int(metrics.get("failed_trials") or 0) > 0
+        or int(metrics.get("completed_trials") or 0) != int(metrics.get("total_trials") or 0)
+    ):
+        raise HTTPException(
+            status_code=409, detail="Baseline requires a complete, error-free live run"
+        )
+    actual_fingerprint = (
+        metrics.get("actual_fingerprint")
+        if isinstance(metrics.get("actual_fingerprint"), dict)
+        else {}
+    )
+    required_fingerprint_keys = (
+        "system_prompt_hash",
+        "tool_schema_hash",
+        "model_id",
+        "provider",
+        "runtime_revision",
+    )
+    if any(not actual_fingerprint.get(key) for key in required_fingerprint_keys):
+        raise HTTPException(
+            status_code=409, detail="Baseline requires a complete verified runtime fingerprint"
+        )
+    current_baseline = experiment.get("baseline_run_id")
+    if current_baseline and current_baseline != body.run_id:
+        comparison = await repo.compare_experiment_runs(
+            tenant_id=auth.tenant_id,
+            baseline_run_id=str(current_baseline),
+            candidate_run_id=body.run_id,
+        )
+        comparison_gate = (
+            comparison.get("gate")
+            if comparison and isinstance(comparison.get("gate"), dict)
+            else {}
+        )
+        if not comparison or comparison_gate.get("status") != "pass":
+            raise HTTPException(
+                status_code=409, detail="Candidate must pass the current baseline gate"
+            )
+    promoted = await repo.promote_experiment_baseline(
+        tenant_id=auth.tenant_id,
+        experiment_id=experiment_id,
+        run_id=body.run_id,
+        promoted_by=auth.user_id,
+        expected_previous_baseline_run_id=(
+            str(current_baseline) if current_baseline else None
+        ),
+    )
+    if not promoted:
+        raise HTTPException(status_code=409, detail="Run is not eligible for baseline promotion")
+    return EvalBaselinePromotionResponse(**promoted)
 
 
 @router.post("/evaluators/{evaluator_id}:run-async", response_model=EvalAsyncJobResponse, status_code=202)

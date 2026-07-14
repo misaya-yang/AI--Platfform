@@ -236,6 +236,7 @@ class AssistantConfig:
 
     # System prompt
     system_prompt: str | None = None
+    eval_system_prompt_override: str | None = None
 
     # Tools (future extension)
     tools_enabled: list[str] = field(default_factory=list)
@@ -1918,6 +1919,7 @@ Please use this web search context to inform your response when relevant."""
             temperature=config.temperature,
             max_tokens=config.max_tokens or 4096,
             system_prompt=config.system_prompt,
+            eval_system_prompt_override=config.eval_system_prompt_override,
             # Web search preference (True=force, False=AI decides) - passed to prompt
             web_search_enabled=config.web_search_enabled,
             # File attachments (must be processed in AgentLoop streaming-first)

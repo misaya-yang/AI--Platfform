@@ -42,8 +42,7 @@ class EvalOutboxWorker:
         self._running = True
         workers = max(1, concurrency)
         self._tasks = [
-            asyncio.create_task(self._poll_loop(worker_id=index))
-            for index in range(workers)
+            asyncio.create_task(self._poll_loop(worker_id=index)) for index in range(workers)
         ]
         logger.info("EvalOutboxWorker started with %s workers", workers)
 
@@ -101,10 +100,20 @@ class EvalOutboxWorker:
         except Exception as exc:  # noqa: BLE001 - retry via outbox state
             attempts = int(job.get("attempts") or 1)
             retry_after = min(300, 5 * attempts)
+            terminal = attempts >= self.max_attempts
             await self.repository.mark_outbox_failed(
                 job_id,
                 error=str(exc),
                 retry_after_seconds=retry_after,
                 max_attempts=self.max_attempts,
             )
+            run_id = str(payload.get("run_id") or "") if isinstance(payload, dict) else ""
+            if run_id and job_type == "eval.evaluator.run":
+                await self.repository.update_experiment_run(
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    status="failed" if terminal else "queued",
+                    error_message=str(exc)[:4000],
+                    mark_finished=terminal,
+                )
             logger.warning("Eval outbox job %s failed (attempt %s): %s", job_id, attempts, exc)

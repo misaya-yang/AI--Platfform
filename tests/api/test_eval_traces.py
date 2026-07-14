@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from src.api.deps import AuthContext
 from src.api.schemas.eval import (
     AgentTraceScoreCreate,
+    EvalBaselinePromotionRequest,
     EvalDatasetCreate,
     EvalEvaluatorCreate,
     EvalEvaluatorRunRequest,
@@ -57,6 +58,7 @@ from src.api.v1.eval import (
     list_eval_experiments,
     list_eval_traces,
     preview_eval_trace_feedback,
+    promote_eval_experiment_baseline,
     run_eval_evaluator_async,
     run_eval_experiment,
     score_kb_ragas_retrieval,
@@ -374,6 +376,14 @@ class FakeTraceRepository:
             "run_id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
         }
 
+    async def enqueue_live_experiment_run(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("live_experiment_run", kwargs))
+        return {
+            "job_id": "abababab-abab-4bab-8bab-abababababab",
+            "status": "queued",
+            "run_id": "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+        }
+
     async def list_datasets(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_datasets", kwargs))
         return [self.dataset], 1
@@ -381,6 +391,10 @@ class FakeTraceRepository:
     async def list_examples(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_examples", kwargs))
         return [self.example], 1
+
+    async def list_example_manifest(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(("example_manifest", kwargs))
+        return [self.example]
 
     async def list_evaluators(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         self.calls.append(("list_evaluators", kwargs))
@@ -489,6 +503,16 @@ class FakeTraceRepository:
             "finished_at": datetime.now(timezone.utc),
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
+        }
+
+    async def promote_experiment_baseline(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("promote_baseline", kwargs))
+        return {
+            "experiment_id": kwargs["experiment_id"],
+            "baseline_run_id": kwargs["run_id"],
+            "previous_baseline_run_id": self.experiment.get("baseline_run_id"),
+            "promoted_by": kwargs["promoted_by"],
+            "promoted_at": datetime.now(timezone.utc),
         }
 
     async def list_experiment_run_case_results(
@@ -646,9 +670,13 @@ async def test_repository_groups_experiment_scores_into_case_results() -> None:
     assert cases[0]["status"] == "failed"
     assert cases[0]["aggregate_score"] == 0.7
     assert len(cases[0]["scores"]) == 2
-    assert all("experiment_run_id" in query for query in repo.queries)
-    assert "ROW_NUMBER() OVER" in repo.queries[1]
-    assert "COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)" in repo.queries[1]
+    score_queries = [query for query in repo.queries if "agent_trace_scores" in query]
+    assert all("experiment_run_id" in query for query in score_queries)
+    assert "ROW_NUMBER() OVER" in score_queries[-1]
+    assert (
+        "COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)"
+        in score_queries[-1]
+    )
 
 
 @pytest.mark.asyncio
@@ -1161,15 +1189,15 @@ async def test_repository_example_from_trace_records_runtime_trajectory_metadata
     assert repo.insert_args is not None
     metadata = example["metadata"]
     assert metadata["review_status"] == "pending"
+    assert metadata["behavior_confirmed"] is False
+    assert example["input"]["message"] == example["input"]["input_preview"]
     assert metadata["expected_trajectory"]["required_span_kinds"] == [
         "lifecycle",
         "tool_execution",
     ]
     runtime = metadata["expected_trajectory"]["runtime"]
-    assert runtime["schema_version"] == "assistant-runtime-trajectory/v1"
-    assert runtime["context_snapshot_id"] == "ctx_runtime"
-    assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
-    assert {"type": "required_runtime_trajectory"} in metadata["assertions"]
+    assert runtime["expected_exit_reason"] == "succeeded"
+    assert metadata["assertions"] == [{"type": "no_sensitive_output"}]
 
 
 @pytest.mark.asyncio
@@ -1491,6 +1519,144 @@ async def test_eval_experiment_batch_compare_and_gate(monkeypatch) -> None:
         auth=auth,
     )
     assert gate.status == "pass"
+
+
+@pytest.mark.asyncio
+async def test_eval_experiment_live_run_freezes_private_prompt_and_defaults_repetitions(
+    monkeypatch,
+) -> None:
+    repo = FakeTraceRepository()
+    repo.example = {
+        **repo.example,
+        "input": {"message": "hello"},
+        "expected_output": {"contains": ["hello"]},
+        "metadata": {
+            "case_id": "assistant.case.live",
+            "expected_trajectory": {"required_span_kinds": ["model_invocation"]},
+            "assertions": [{"type": "output_contains", "value": "hello"}],
+            "critical": True,
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    response = await run_eval_experiment(
+        experiment_id=repo.experiment["experiment_id"],
+        body=EvalExperimentRunCreate(
+            evaluator_ids=[repo.evaluator["evaluator_id"]],
+            run_mode="live_candidate",
+            candidate_config={"system_prompt_override": "private eval prompt"},
+        ),
+        request=_request(),
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    assert response.jobs[0].status == "queued"
+    payload = next(call[1] for call in repo.calls if call[0] == "live_experiment_run")
+    assert payload["repetitions"] == 3
+    assert payload["execution_config"]["system_prompt_override"] == "private eval prompt"
+    assert "private eval prompt" not in json.dumps(payload["target_snapshot"])
+    assert payload["candidate_fingerprint"]["verification"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_eval_experiment_live_run_rejects_unconfirmed_trace_case(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.example = {
+        **repo.example,
+        "input": {"message": "hello"},
+        "metadata": {
+            "case_id": "assistant.case.unconfirmed",
+            "expected_trajectory": {},
+            "assertions": [],
+            "behavior_confirmed": False,
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await run_eval_experiment(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalExperimentRunCreate(
+                evaluator_ids=[repo.evaluator["evaluator_id"]],
+                run_mode="live_candidate",
+            ),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 422
+    assert "confirmed" in json.dumps(error.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_eval_baseline_promotion_requires_complete_verified_live_run(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.experiment["baseline_run_id"] = None
+    repo.candidate_run = {
+        **repo.candidate_run,
+        "run_mode": "live_candidate",
+        "status": "succeeded",
+        "score_summary": {"overall_score": 0.9, "critical_pass_rate": 1.0},
+        "metrics": {
+            "gate": {"status": "pass"},
+            "failed_trials": 0,
+            "completed_trials": 3,
+            "total_trials": 3,
+            "mixed_runtime": False,
+            "actual_fingerprint": {
+                "system_prompt_hash": "prompt-a",
+                "tool_schema_hash": "tools-a",
+                "model_id": "qwen3.7-plus",
+                "provider": "dashscope",
+                "runtime_revision": "runtime-a",
+            },
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    promoted = await promote_eval_experiment_baseline(
+        experiment_id=repo.experiment["experiment_id"],
+        body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+        request=_request(),
+        auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+    )
+
+    assert promoted.baseline_run_id == repo.candidate_run["run_id"]
+    assert any(call[0] == "promote_baseline" for call in repo.calls)
+    promotion_call = next(call for call in repo.calls if call[0] == "promote_baseline")
+    assert promotion_call[1]["expected_previous_baseline_run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_eval_baseline_promotion_rejects_partial_runtime_fingerprint(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.experiment["baseline_run_id"] = None
+    repo.candidate_run = {
+        **repo.candidate_run,
+        "run_mode": "live_candidate",
+        "status": "succeeded",
+        "score_summary": {"critical_pass_rate": 1.0},
+        "metrics": {
+            "gate": {"status": "pass"},
+            "failed_trials": 0,
+            "completed_trials": 3,
+            "total_trials": 3,
+            "mixed_runtime": False,
+            "actual_fingerprint": {"runtime_revision": "runtime-a"},
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException) as error:
+        await promote_eval_experiment_baseline(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    assert error.value.status_code == 409
+    assert "complete verified runtime fingerprint" in error.value.detail
 
 
 def test_eval_openapi_paths_are_registered() -> None:

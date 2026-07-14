@@ -249,6 +249,29 @@ async function installEvalHarness(page: Page) {
       return;
     }
 
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith(`/api/v1/eval/experiments/${experimentId}`)
+    ) {
+      await route.fulfill(
+        jsonResponse({
+          experiment_id: experimentId,
+          tenant_id: "tenant-a",
+          dataset_id: datasetId,
+          name: "assistant-baseline",
+          description: "",
+          baseline_run_id: null,
+          target_config: { trace_family: "assistant", model_id: "current" },
+          metadata: { source: "eval_console" },
+          created_by: "eval-user",
+          created_at: nowIso(),
+          updated_at: nowIso(),
+          runs: [],
+        })
+      );
+      return;
+    }
+
     if (request.method() === "GET" && url.pathname.endsWith("/api/v1/eval/threads/session-a")) {
       await route.fulfill(
         jsonResponse({
@@ -303,6 +326,35 @@ async function installEvalHarness(page: Page) {
           finished_at: nowIso(),
           created_at: nowIso(),
           updated_at: nowIso(),
+        })
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname.endsWith("/api/v1/eval/experiment-runs/ffffffff-ffff-4fff-8fff-ffffffffffff/results")
+    ) {
+      await route.fulfill(
+        jsonResponse({
+          run: {
+            run_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            experiment_id: experimentId,
+            tenant_id: "tenant-a",
+            evaluator_id: evaluatorId,
+            dataset_id: datasetId,
+            status: "succeeded",
+            run_mode: "rescore_trace",
+            target_snapshot: { trace_family: "assistant" },
+            score_summary: { average_score: 0.9, scored_count: 1 },
+            metrics: { trace_count: 1 },
+            created_by: "eval-user",
+            created_at: nowIso(),
+          },
+          cases: [],
+          total: 0,
+          limit: 200,
+          offset: 0,
         })
       );
       return;
@@ -696,6 +748,23 @@ async function installEvalHarness(page: Page) {
       for (const example of examples) {
         const row = example as Record<string, unknown>;
         const caseId = typeof row.case_id === "string" ? row.case_id.trim() : "";
+        if (caseId === "assistant.11111111") {
+          const input = row.input as Record<string, unknown>;
+          const trajectory = row.expected_trajectory as Record<string, unknown>;
+          const tools = trajectory.tools as Array<Record<string, unknown>>;
+          const assertions = row.assertions as Array<Record<string, unknown>>;
+          expect(input.message).toContain("hello Authorization: Bearer [redacted]");
+          expect(tools[0]).toMatchObject({
+            name: "lookup_policy",
+            required: true,
+            arguments_subset: { account_id: "known" },
+            max_calls: 1,
+            status: "succeeded",
+          });
+          expect(assertions.map((assertion) => assertion.type)).toEqual(
+            expect.arrayContaining(["tool_called", "no_sensitive_output"])
+          );
+        }
         if (mode === "skip_duplicates" && caseId && importedCaseIds.has(caseId)) {
           skipped += 1;
           continue;
@@ -883,8 +952,8 @@ test.describe("Eval trace console", () => {
     await installEvalHarness(page);
     await page.goto("/eval", { waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { name: "Eval Console" })).toBeVisible();
-    await page.getByRole("tab", { name: "Run & Results" }).click();
-    await page.getByRole("tab", { name: "KB RAGAS" }).click();
+    await page.getByRole("tab", { name: "Run & Results", exact: true }).click();
+    await page.getByRole("tab", { name: "KB RAGAS", exact: true }).click();
 
     await expect(page.getByText("Faithfulness").first()).toBeVisible();
     await expect(page.getByText("Response relevancy").first()).toBeVisible();
@@ -941,11 +1010,22 @@ test.describe("Eval trace console", () => {
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: ".playwright/eval-thread.png", fullPage: true });
 
-    await page.getByRole("tab", { name: "Golden Sets" }).click();
+    await page.getByRole("tab", { name: "Assets", exact: true }).click();
+    await page.getByRole("tab", { name: "Golden Sets", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Behavior contract" })).toBeVisible();
+    await expect(page.getByText("Expected tools", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Create dataset" }).click();
     await expect(page.getByText("Dataset created")).toBeVisible();
     await page.getByRole("button", { name: "Add trace to dataset" }).click();
-    await expect(page.getByText("Trace added to dataset")).toBeVisible();
+    await expect(page.getByText("Trace evidence is observed behavior, not the expectation. Review every field before saving.")).toBeVisible();
+    await page.getByRole("button", { name: "Add tool expectation" }).click();
+    await page.getByLabel("Tool name").fill("lookup_policy");
+    await page.getByLabel("Argument subset JSON").fill('{"account_id":"known"}');
+    await page.getByLabel("Max calls").fill("1");
+    await page.getByLabel("Expected status").fill("succeeded");
+    await page.getByRole("checkbox", { name: "I reviewed and confirmed this expected behavior" }).check();
+    await page.getByRole("button", { name: "Save behavior contract" }).click();
+    await expect(page.getByText("Behavior contract saved")).toBeVisible();
 
     const goldenFixture = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
@@ -962,13 +1042,17 @@ test.describe("Eval trace console", () => {
       page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 16.")
     ).toBeVisible();
 
-    await page.getByRole("tab", { name: "Evaluators" }).click();
-    await page.getByRole("button", { name: "Create evaluator" }).click();
-    await expect(page.getByText("Evaluator created")).toBeVisible();
-
-    await page.getByRole("tab", { name: "Experiments" }).click();
+    await page.getByRole("tab", { name: "Run & Results", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Run current Agent" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Baseline comparison" })).toBeVisible();
+    await page.getByText("Create or configure an experiment").click();
     await page.getByRole("button", { name: "Create experiment" }).click();
     await expect(page.getByText("Experiment created")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Assets", exact: true }).click();
+    await page.getByRole("tab", { name: "Evaluators", exact: true }).click();
+    await page.getByRole("button", { name: "Create evaluator" }).click();
+    await expect(page.getByText("Evaluator created")).toBeVisible();
     await page.getByRole("button", { name: "Queue evaluator" }).click();
     await expect(page.getByText("Evaluator run queued").last()).toBeVisible();
 
@@ -992,7 +1076,8 @@ test.describe("Eval trace console", () => {
     ).toBeVisible();
     expect(harness.observedTraceFamilies).toContain("rag");
 
-    await page.getByRole("tab", { name: "KB RAGAS" }).click();
+    await page.getByRole("tab", { name: "Run & Results", exact: true }).click();
+    await page.getByRole("tab", { name: "KB RAGAS", exact: true }).click();
     await expect(page.getByTestId("kb-ragas-panel")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Knowledge-base RAGAS" })).toBeVisible();
     await expect(page.getByTestId("kb-ragas-panel").getByText("refund policy")).toBeVisible();
@@ -1015,7 +1100,8 @@ test.describe("Eval trace console", () => {
     });
     await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.getByRole("heading", { name: "评测控制台" })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "知识库 RAGAS" })).toBeVisible();
+    await page.getByRole("tab", { name: "运行与结果", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "知识库 RAGAS", exact: true })).toBeVisible();
     await expect(page.getByText("Trace 持久化为异步路径")).toBeVisible();
     await expectNoHorizontalOverflow(page);
     await page.screenshot({ path: ".playwright/eval-dark-zh.png", fullPage: true });

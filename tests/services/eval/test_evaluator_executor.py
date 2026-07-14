@@ -8,8 +8,14 @@ from ai_gateway_core.eval.evaluator_executor import (
     EvaluatorExecutor,
     LlmCompleteContext,
     _parse_llm_score_response,
+    _precise_cost_cents,
     build_trajectory_summary,
 )
+
+
+def test_precise_eval_cost_is_unknown_without_catalog_pricing() -> None:
+    assert _precise_cost_cents("unknown-eval-model", 1000, 1000) is None
+    assert _precise_cost_cents("qwen3.7-plus", 1000, 1000) == 0.35
 
 
 class FakeEvalRepository:

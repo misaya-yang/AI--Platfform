@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Input, Progress, Segmented, Space, Tag } from "antd";
+import { Alert, Button, Empty, Input, Progress, Segmented, Space, Spin, Tag } from "antd";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -13,6 +13,30 @@ type ResultFilter = "all" | "failed" | "review" | "passed";
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function metricValue(run: EvalExperimentRun, ...keys: string[]): number | null {
+  for (const source of [run.metrics || {}, run.score_summary || {}]) {
+    for (const key of keys) {
+      const value = numberValue(source[key]);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+function formatValue(value: number | null, kind: "number" | "ms" | "percent" | "cost" = "number") {
+  if (value === null) return "—";
+  if (kind === "ms") return `${Math.round(value)} ms`;
+  if (kind === "percent") return `${(value * 100).toFixed(1)}%`;
+  if (kind === "cost") return `${value.toFixed(3)}¢`;
+  return value.toLocaleString(undefined, { maximumFractionDigits: 3 });
 }
 
 function statusColor(status: EvalExperimentCaseResult["status"]) {
@@ -67,11 +91,15 @@ export function ExperimentRunResults({
   if (!run) {
     return (
       <div className="eval-run-empty">
-        {error ? (
+        {loading ? (
+          <Spin size="small" description={t("eval.workbench.loadingRun", "Loading run…")}>
+            <div className="eval-run-loading-placeholder" />
+          </Spin>
+        ) : error ? (
           <Alert
             type="error"
             showIcon
-            message={t("eval.workbench.runLoadFailed", "Could not load this run")}
+            title={t("eval.workbench.runLoadFailed", "Could not load this run")}
             description={error.message}
             action={<Button onClick={onRetry}>{t("common.retry", "Retry")}</Button>}
           />
@@ -88,6 +116,24 @@ export function ExperimentRunResults({
   const scoredCount = numberValue(summary.scored_count);
   const reviewCount = numberValue(summary.review_count);
   const skippedCount = numberValue(summary.skipped_count);
+  const progress = { ...(run.metrics || {}), ...recordValue(run.metrics?.progress), ...(run.progress || {}) };
+  const completed = numberValue(progress.completed_trials ?? progress.completed_cases ?? progress.completed);
+  const failed = numberValue(progress.failed_trials ?? progress.failed_cases ?? progress.failed);
+  const total = numberValue(progress.total_trials ?? progress.total_cases ?? progress.total);
+  const progressed = numberValue(progress.attempted_trials) ?? completed ?? failed;
+  const progressPercent = progressed !== null && total && total > 0
+    ? Math.min(100, Math.round((progressed / total) * 100))
+    : null;
+  const metricCards = [
+    [t("eval.workbench.qualityScore", "Quality"), metricValue(run, "quality_score", "overall_score", "average_score"), "number"],
+    [t("eval.workbench.behaviorPassRate", "Behavior pass"), metricValue(run, "behavior_pass_rate", "pass_rate"), "percent"],
+    [t("eval.workbench.latencyP50", "P50 latency"), metricValue(run, "latency_p50_ms", "p50_latency_ms", "avg_latency_ms"), "ms"],
+    [t("eval.workbench.latencyP95", "P95 latency"), metricValue(run, "latency_p95_ms", "p95_latency_ms"), "ms"],
+    [t("eval.workbench.tokensPerTask", "Tokens / task"), metricValue(run, "total_tokens_per_task", "tokens_per_task"), "number"],
+    [t("eval.workbench.costPerTask", "Cost / task"), metricValue(run, "cost_per_task_cents", "cost_cents_per_task"), "cost"],
+    [t("eval.workbench.executionErrorRate", "Execution errors"), metricValue(run, "execution_error_rate", "error_rate"), "percent"],
+    [t("eval.workbench.flakyRate", "Flaky"), metricValue(run, "flaky_rate"), "percent"],
+  ] as const;
 
   return (
     <section className="eval-run-results" aria-live="polite">
@@ -106,22 +152,27 @@ export function ExperimentRunResults({
 
       {isPending ? (
         <div className="eval-run-progress" role="status">
-          <Progress percent={run.status === "running" ? 60 : 20} status="active" showInfo={false} />
-          <span>{run.status === "running" ? t("eval.workbench.scoringCases", "Scoring test cases…") : t("eval.workbench.waitingEvaluator", "Waiting for evaluator worker…")}</span>
+          {progressPercent === null ? <Spin size="small" /> : <Progress percent={progressPercent} status="active" />}
+          <span>
+            {total !== null
+              ? t("eval.workbench.realProgress", "{{completed}} / {{total}} completed · {{failed}} failed", { completed: completed ?? 0, total, failed: failed ?? 0 })
+              : run.status === "running" ? t("eval.workbench.scoringCases", "Scoring test cases…") : t("eval.workbench.waitingEvaluator", "Waiting for evaluator worker…")}
+          </span>
         </div>
       ) : null}
-      {run.error_message ? <Alert type="error" showIcon message={run.error_message} /> : null}
+      {run.error_message ? <Alert type="error" showIcon title={run.error_message} /> : null}
       {error ? (
         <Alert
           type="error"
           showIcon
-          message={t("eval.workbench.resultsLoadFailed", "Could not load case results")}
+          title={t("eval.workbench.resultsLoadFailed", "Could not load case results")}
           description={error.message}
           action={<Button onClick={onRetry}>{t("common.retry", "Retry")}</Button>}
         />
       ) : null}
 
       <div className="eval-run-metrics">
+        {metricCards.map(([label, value, kind]) => <div key={label}><span>{label}</span><strong>{formatValue(value, kind)}</strong></div>)}
         <div><span>{t("eval.workbench.averageScore", "Average score")}</span><strong>{averageScore === null ? "—" : averageScore.toFixed(3)}</strong></div>
         <div><span>{t("eval.workbench.scored", "Scored")}</span><strong>{scoredCount ?? "—"}</strong></div>
         <div><span>{t("eval.workbench.needsReview", "Needs review")}</span><strong>{reviewCount ?? "—"}</strong></div>
@@ -156,10 +207,15 @@ export function ExperimentRunResults({
                 <Tag color={statusColor(item.status)}>{item.status}</Tag>
                 <div>
                   <strong>{item.case_id}</strong>
-                  <span>{item.trace.model_id || "unknown model"} · {item.trace.total_latency_ms || 0} ms</span>
+                  <span>{item.trace.model_id || "unknown model"} · {item.trace.total_latency_ms ?? "—"} ms</span>
                 </div>
               </div>
               <div className="eval-case-score-list">
+                {item.scores.length === 0 && typeof item.aggregate_score === "number" ? (
+                  <Tag color={item.status === "failed" ? "error" : "success"}>
+                    {t("eval.workbench.aggregateScore", "Aggregate")}: {item.aggregate_score.toFixed(3)}
+                  </Tag>
+                ) : null}
                 {item.scores.map((score) => (
                   <Tag key={`${score.score_name}:${score.target_type || "trace"}:${score.target_id || score.span_id || ""}`} color={score.label === "pass" ? "success" : score.label === "fail" ? "error" : "warning"}>
                     {score.score_name}: {typeof score.numeric_value === "number" ? score.numeric_value.toFixed(3) : score.label || "review"}
@@ -181,7 +237,14 @@ export function ExperimentRunResults({
           ))}
         </div>
       ) : (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={isPending ? t("eval.workbench.resultsPending", "Results will appear when scoring completes.") : t("eval.workbench.noMatchingCases", "No cases match this filter.")} />
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={isPending
+            ? t("eval.workbench.resultsPending", "Results will appear when scoring completes.")
+            : cases.length === 0
+              ? t("eval.workbench.noRunCases", "This run did not return case results.")
+              : t("eval.workbench.noMatchingCases", "No cases match this filter.")}
+        />
       )}
     </section>
   );

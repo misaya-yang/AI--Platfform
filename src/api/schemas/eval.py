@@ -13,6 +13,7 @@ ScorerType = Literal["human", "llm", "rule", "system"]
 EvaluatorType = Literal["human", "rule", "trajectory", "span", "llm", "llm_judge", "composite", "ragas"]
 TraceExportFormat = Literal["openinference", "otel", "langsmith-jsonl"]
 EvalRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+EvalRunMode = Literal["rescore_trace", "live_candidate"]
 ScoreTargetType = Literal["trace", "span", "thread", "dataset_run", "example"]
 EvalReviewStatus = Literal["pending", "approved", "rejected", "needs_fix"]
 EvalGateStatus = Literal["pass", "fail", "warning"]
@@ -333,9 +334,19 @@ class EvalExperimentRun(BaseModel):
     evaluator_id: str | None = None
     dataset_id: str | None = None
     status: EvalRunStatus = "queued"
+    run_mode: EvalRunMode = "rescore_trace"
+    repetitions: int = 1
+    baseline_run_id: str | None = None
+    dataset_manifest_hash: str | None = None
+    evaluator_suite_hash: str | None = None
+    candidate_fingerprint: dict[str, Any] = Field(default_factory=dict)
     target_snapshot: dict[str, Any] = Field(default_factory=dict)
     score_summary: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    progress: dict[str, int] = Field(default_factory=dict)
+    runtime_fingerprint: dict[str, Any] = Field(default_factory=dict)
+    gate_status: str | None = None
+    attribution_status: str | None = None
     error_message: str | None = None
     created_by: str
     started_at: datetime | None = None
@@ -358,6 +369,9 @@ class EvalExperiment(BaseModel):
     dataset_id: str | None = None
     name: str
     description: str = ""
+    baseline_run_id: str | None = None
+    baseline_promoted_by: str | None = None
+    baseline_promoted_at: datetime | None = None
     target_config: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_by: str
@@ -380,9 +394,17 @@ class EvalAsyncJobResponse(BaseModel):
     run_id: str | None = None
 
 
+class EvalCandidateConfig(BaseModel):
+    system_prompt_override: str | None = Field(default=None, max_length=16_000)
+
+
 class EvalExperimentRunCreate(BaseModel):
     dataset_id: str | None = None
     evaluator_ids: list[str] = Field(default_factory=list, min_length=1, max_length=10)
+    run_mode: EvalRunMode = "rescore_trace"
+    repetitions: int | None = Field(default=None, ge=1, le=10)
+    baseline_run_id: str | None = None
+    candidate_config: EvalCandidateConfig = Field(default_factory=EvalCandidateConfig)
     target_snapshot: dict[str, Any] = Field(default_factory=dict)
     candidate_label: str = Field(default="candidate", max_length=96)
     baseline_label: str | None = Field(default=None, max_length=96)
@@ -398,9 +420,27 @@ class EvalExperimentRunComparisonResponse(BaseModel):
     candidate_run_id: str
     baseline_summary: dict[str, Any] = Field(default_factory=dict)
     candidate_summary: dict[str, Any] = Field(default_factory=dict)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+    changed_dimensions: list[str] = Field(default_factory=list)
+    attribution: str = "unverifiable"
     deltas: dict[str, Any] = Field(default_factory=dict)
+    metric_diffs: dict[str, Any] = Field(default_factory=dict)
     regression_summary: dict[str, Any] = Field(default_factory=dict)
+    statistics: dict[str, Any] = Field(default_factory=dict)
+    gate: dict[str, Any] = Field(default_factory=dict)
     case_diffs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class EvalBaselinePromotionRequest(BaseModel):
+    run_id: str
+
+
+class EvalBaselinePromotionResponse(BaseModel):
+    experiment_id: str
+    baseline_run_id: str
+    previous_baseline_run_id: str | None = None
+    promoted_by: str
+    promoted_at: datetime | None = None
 
 
 class EvalGateDryRunRequest(BaseModel):

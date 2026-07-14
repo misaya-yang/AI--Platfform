@@ -5,6 +5,7 @@ Tests session management, streaming, and configuration handling.
 """
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -204,6 +205,41 @@ class TestAssistantConfig:
 
         assert config.traceparent == traceparent
         assert config.otel_trace_id == "4bf92f3577b34da6a3ce929d0e0e4736"
+
+    def test_eval_run_allows_internal_candidate_without_prompt_override(self):
+        from assistant_service.api.routes.chat import (
+            ChatRequest,
+            _validate_eval_prompt_override,
+        )
+
+        _validate_eval_prompt_override(
+            ChatRequest(message="hello", eval_run=True),
+            SimpleNamespace(user_id="eval-candidate", user_type="system"),
+        )
+
+    def test_eval_prompt_override_is_internal_and_reaches_agent_config(self):
+        from assistant_service.api.routes.chat import (
+            ChatRequest,
+            _build_config,
+            _validate_eval_prompt_override,
+        )
+        from fastapi import HTTPException
+
+        body = ChatRequest(
+            message="hello",
+            eval_run=True,
+            eval_system_prompt_override="trusted eval prompt",
+        )
+        with pytest.raises(HTTPException) as exc:
+            _validate_eval_prompt_override(
+                body,
+                SimpleNamespace(user_id="user-a", user_type="human"),
+            )
+        assert exc.value.status_code == 403
+
+        internal = SimpleNamespace(user_id="eval-candidate", user_type="system")
+        _validate_eval_prompt_override(body, internal)
+        assert _build_config(body, None).eval_system_prompt_override == "trusted eval prompt"
 
 
 class TestAssistantE2EStub:

@@ -39,6 +39,8 @@ class ChatRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int | None = None
     system_prompt: str | None = None
+    eval_run: bool = False
+    eval_system_prompt_override: str | None = None
     kb_dataset_ids: list[str] | None = None
     kb_mode: str | None = "auto"
     kb_top_k: int | None = None
@@ -146,6 +148,8 @@ def _build_config(
             )
         )
         if mi is None or not provider_configured:
+            if body.eval_run:
+                raise HTTPException(status_code=422, detail=f"Eval model unavailable: {body.model_id}")
             available = model_registry.get_available_models()
             if available:
                 mi = available[0]
@@ -174,6 +178,7 @@ def _build_config(
         web_search_max_results=body.web_search_max_results or 5,
         file_paths=body.file_paths or [],
         system_prompt=body.system_prompt,
+        eval_system_prompt_override=body.eval_system_prompt_override,
         enable_task_planning=body.enable_task_planning,
         confirm_plan=body.confirm_plan,
         execution_profile=body.execution_profile,
@@ -191,6 +196,18 @@ def _build_config(
     )
 
 
+def _validate_eval_prompt_override(body: ChatRequest, user: UserContext) -> None:
+    override = body.eval_system_prompt_override
+    if not body.eval_run and override is None:
+        return
+    if user.user_id != "eval-candidate" or user.user_type != "system":
+        raise HTTPException(status_code=403, detail="Trusted eval prompt override is internal only")
+    if override is None:
+        return
+    if not override.strip() or len(override) > 16_000:
+        raise HTTPException(status_code=422, detail="Invalid trusted eval prompt override")
+
+
 @router.post("/chat")
 async def chat(
     body: ChatRequest,
@@ -198,6 +215,7 @@ async def chat(
     user: UserContext = Depends(get_user_context),
 ):
     """Non-streaming chat completion."""
+    _validate_eval_prompt_override(body, user)
     assistant = get_assistant_service(request)
     model_registry = get_model_registry(request)
     traceparent = _request_traceparent(request)
@@ -232,6 +250,7 @@ async def chat_stream(
     user: UserContext = Depends(get_user_context),
 ):
     """SSE streaming chat completion."""
+    _validate_eval_prompt_override(body, user)
     session_id = body.session_id or str(uuid.uuid4())
     stub_text = _build_e2e_memory_stub_response(body, user)
     if stub_text is not None:

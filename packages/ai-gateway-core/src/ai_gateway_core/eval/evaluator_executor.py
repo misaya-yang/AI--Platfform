@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_gateway_core.billing.pricing_catalog import resolve_pricing_with_status
 from ai_gateway_core.eval.kb_ragas_sample import kb_ragas_sample_from_target
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.persistence.repositories.agent_trace_repository import AgentTraceRepository
@@ -16,6 +17,7 @@ logger = get_logger(__name__)
 
 LlmCompleteFn = Callable[..., Awaitable[str]]
 KbRagasEvaluateFn = Callable[..., Awaitable[list[dict[str, Any]]]]
+CandidateRunFn = Callable[..., Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -77,8 +79,13 @@ def _trace_target(detail: dict[str, Any] | None) -> dict[str, Any] | None:
         "input_preview": trace.get("input_preview") or "",
         "output_preview": trace.get("output_preview") or "",
         "status": trace.get("status"),
-        "total_latency_ms": int(trace.get("total_latency_ms") or 0),
+        "total_latency_ms": trace.get("total_latency_ms"),
+        "input_tokens": trace.get("input_tokens"),
+        "output_tokens": trace.get("output_tokens"),
+        "total_tokens": trace.get("total_tokens"),
+        "total_cost_cents": trace.get("total_cost_cents"),
         "model_id": trace.get("model_id"),
+        "provider": trace.get("provider"),
         "metadata": metadata,
         "metrics": metrics,
         "spans": detail.get("spans") or [],
@@ -94,6 +101,21 @@ def _target_metrics(target: dict[str, Any]) -> dict[str, Any]:
         if key in metadata and key not in merged:
             merged[key] = metadata[key]
     return merged
+
+
+def _precise_cost_cents(model_id: str, input_tokens: int, output_tokens: int) -> float | None:
+    if not model_id:
+        return None
+    pricing, pricing_status = resolve_pricing_with_status(model_id)
+    if pricing_status == "unknown":
+        return None
+    input_rate = float(pricing.get("input") or 0)
+    output_rate = float(pricing.get("output") or 0)
+    return round(
+        ((max(0, input_tokens) / 1000) * input_rate + (max(0, output_tokens) / 1000) * output_rate)
+        * 100,
+        6,
+    )
 
 
 def _preview_excerpt(value: Any, *, limit: int = 120) -> str:
@@ -186,6 +208,49 @@ def _failed_span_count(target: dict[str, Any]) -> int:
         for span in spans
         if isinstance(span, dict) and str(span.get("status") or "").lower() in {"failed", "error"}
     )
+
+
+def _observed_trajectory(
+    target: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tools: list[dict[str, Any]] = []
+    retrieval: list[dict[str, Any]] = []
+    for span in target.get("spans") or []:
+        if not isinstance(span, dict):
+            continue
+        span_kind = str(span.get("span_kind") or "")
+        item = {
+            "name": span.get("name"),
+            "status": span.get("status"),
+            "sequence_no": span.get("sequence_no"),
+            "input_preview": span.get("input_preview") or "",
+            "output_preview": span.get("output_preview") or "",
+            "error_message": span.get("error_message") or "",
+        }
+        if span_kind == "tool_execution":
+            tools.append(item)
+        elif span_kind in {"retrieval", "rag_retrieval", "retriever", "document_fetch"}:
+            attributes = span.get("attributes") if isinstance(span.get("attributes"), dict) else {}
+            documents = attributes.get("retrieval.documents")
+            if not isinstance(documents, list):
+                retrieval_payload = (
+                    attributes.get("retrieval")
+                    if isinstance(attributes.get("retrieval"), dict)
+                    else {}
+                )
+                documents = retrieval_payload.get("documents")
+            item["dataset_ids"] = attributes.get("retrieval.dataset_ids") or []
+            item["documents"] = [
+                {
+                    key: document.get(key)
+                    for key in ("document_id", "id", "chunk_id", "rank", "score")
+                    if document.get(key) is not None
+                }
+                for document in (documents or [])[:20]
+                if isinstance(document, dict)
+            ]
+            retrieval.append(item)
+    return tools, retrieval
 
 
 def _apply_rule(rule: dict[str, Any], target: dict[str, Any]) -> tuple[bool, str]:
@@ -457,11 +522,13 @@ class EvaluatorExecutor:
         *,
         llm_complete: LlmCompleteFn | None = None,
         kb_ragas_evaluate: KbRagasEvaluateFn | None = None,
+        candidate_run: CandidateRunFn | None = None,
         created_by: str = "eval-worker",
     ) -> None:
         self.repository = repository
         self.llm_complete = llm_complete
         self.kb_ragas_evaluate = kb_ragas_evaluate
+        self.candidate_run = candidate_run
         self.created_by = created_by
 
     async def run_job(
@@ -485,6 +552,9 @@ class EvaluatorExecutor:
             status="running",
             mark_started=True,
         )
+
+        if str(job_payload.get("run_mode") or "") == "live_candidate":
+            return await self._run_live_job(tenant_id=tenant_id, job_payload=job_payload)
 
         dataset_id = str(job_payload.get("dataset_id") or "").strip()
         trace_id = str(job_payload.get("trace_id") or "").strip()
@@ -699,6 +769,442 @@ class EvaluatorExecutor:
             scores_written=written,
         )
 
+    async def _run_live_job(
+        self,
+        *,
+        tenant_id: str,
+        job_payload: dict[str, Any],
+    ) -> EvaluatorRunResult:
+        run_id = str(job_payload.get("run_id") or "")
+        if self.candidate_run is None:
+            error = "Live candidate runner is not configured"
+            await self.repository.update_experiment_run(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                status="failed",
+                error_message=error,
+                mark_finished=True,
+            )
+            return EvaluatorRunResult(run_id=run_id, status="failed", error_message=error)
+
+        run = await self.repository.get_experiment_run(tenant_id=tenant_id, run_id=run_id)
+        if not run:
+            return EvaluatorRunResult(run_id=run_id, status="failed", error_message="Run not found")
+        execution_config = (
+            run.get("execution_config") if isinstance(run.get("execution_config"), dict) else {}
+        )
+        evaluators = execution_config.get("evaluators")
+        if not isinstance(evaluators, list) or not evaluators:
+            error = "Frozen evaluator suite is missing"
+            await self.repository.update_experiment_run(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                status="failed",
+                error_message=error,
+                mark_finished=True,
+            )
+            return EvaluatorRunResult(run_id=run_id, status="failed", error_message=error)
+
+        run_cases = await self.repository.list_experiment_run_cases(
+            tenant_id=tenant_id,
+            run_id=run_id,
+        )
+        trial_results: list[dict[str, Any]] = []
+        scores_written = 0
+        infrastructure_errors: list[str] = []
+        for run_case in run_cases:
+            run_case_id = str(run_case.get("run_case_id") or "")
+            observed = (
+                run_case.get("observed_metrics")
+                if isinstance(run_case.get("observed_metrics"), dict)
+                else {}
+            )
+            if run_case.get("status") == "succeeded" and observed:
+                trial_results.append(observed)
+                continue
+            await self.repository.update_experiment_run_case(
+                tenant_id=tenant_id,
+                run_case_id=run_case_id,
+                status="running",
+            )
+            try:
+                candidate = await self.candidate_run(
+                    tenant_id=tenant_id,
+                    run_case=run_case,
+                    execution_config=execution_config,
+                )
+                detail = candidate.get("detail") if isinstance(candidate, dict) else None
+                target = _trace_target(detail if isinstance(detail, dict) else None)
+                if not target:
+                    raise RuntimeError("Candidate trace was not persisted")
+                target.update(
+                    {
+                        "example_id": run_case.get("example_id"),
+                        "case_id": run_case.get("case_id"),
+                        "expected_output": run_case.get("expected_output") or {},
+                        "expected_trajectory": run_case.get("expected_trajectory") or {},
+                        "assertions": run_case.get("assertions") or [],
+                    }
+                )
+                candidate_usage = (
+                    candidate.get("usage") if isinstance(candidate.get("usage"), dict) else {}
+                )
+                usage_known = any(
+                    key in candidate_usage
+                    for key in (
+                        "input_tokens",
+                        "output_tokens",
+                        "prompt_tokens",
+                        "completion_tokens",
+                    )
+                )
+                if usage_known:
+                    input_tokens = int(
+                        candidate_usage.get("input_tokens")
+                        or candidate_usage.get("prompt_tokens")
+                        or 0
+                    )
+                    output_tokens = int(
+                        candidate_usage.get("output_tokens")
+                        or candidate_usage.get("completion_tokens")
+                        or 0
+                    )
+                    target["input_tokens"] = input_tokens
+                    target["output_tokens"] = output_tokens
+                    target["total_tokens"] = int(
+                        candidate_usage.get("total_tokens") or input_tokens + output_tokens
+                    )
+                    target["total_cost_cents"] = _precise_cost_cents(
+                        str(target.get("model_id") or ""),
+                        input_tokens,
+                        output_tokens,
+                    )
+                else:
+                    target["input_tokens"] = None
+                    target["output_tokens"] = None
+                    target["total_tokens"] = None
+                    target["total_cost_cents"] = None
+                trace_id = str(target["trace_id"])
+                contract = (
+                    candidate.get("contract_result")
+                    if isinstance(candidate.get("contract_result"), dict)
+                    else {}
+                )
+                contract_pass = contract.get("passed") is True
+                behavior_score = {
+                    "score_name": "behavior_contract",
+                    "score_type": "numeric",
+                    "numeric_value": 1.0 if contract_pass else 0.0,
+                    "label": "pass" if contract_pass else "fail",
+                    "explanation": "; ".join(str(item) for item in contract.get("failures") or [])
+                    or "behavior contract passed",
+                    "scorer_type": "rule",
+                    "score_source": "rule",
+                    "evaluator_name": "behavior_contract",
+                    "evaluator_version": "v1",
+                    "confidence": 1.0,
+                    "target_type": "trace",
+                    "target_id": trace_id,
+                    "metadata": {
+                        "experiment_run_id": run_id,
+                        "run_case_id": run_case_id,
+                        "example_id": run_case.get("example_id"),
+                        "case_id": run_case.get("case_id"),
+                        "trial_index": run_case.get("trial_index"),
+                    },
+                }
+                if await self.repository.create_eval_score(
+                    tenant_id=tenant_id,
+                    trace_id=trace_id,
+                    created_by=self.created_by,
+                    payload=behavior_score,
+                    trace_family="assistant",
+                ):
+                    scores_written += 1
+
+                numeric_scores = [float(behavior_score["numeric_value"])]
+                score_labels = [str(behavior_score["label"])]
+                for evaluator in evaluators:
+                    if (
+                        not isinstance(evaluator, dict)
+                        or evaluator.get("evaluator_type") == "human"
+                    ):
+                        continue
+                    llm_context = LlmCompleteContext(
+                        tenant_id=tenant_id,
+                        trace_family="assistant",
+                        trace_id=trace_id,
+                    )
+                    payloads = await self._score_target_payloads(
+                        evaluator,
+                        target,
+                        llm_context=llm_context,
+                    )
+                    for payload in payloads:
+                        metadata = (
+                            payload.get("metadata")
+                            if isinstance(payload.get("metadata"), dict)
+                            else {}
+                        )
+                        payload["metadata"] = {
+                            **metadata,
+                            "experiment_run_id": run_id,
+                            "run_case_id": run_case_id,
+                            "example_id": run_case.get("example_id"),
+                            "case_id": run_case.get("case_id"),
+                            "trial_index": run_case.get("trial_index"),
+                            "candidate_trace_id": trace_id,
+                        }
+                        created = await self.repository.create_eval_score(
+                            tenant_id=tenant_id,
+                            trace_id=trace_id,
+                            created_by=self.created_by,
+                            payload=payload,
+                            trace_family="assistant",
+                        )
+                        if created:
+                            scores_written += 1
+                            label = str(created.get("label") or "")
+                            score_labels.append(label)
+                            value = created.get("numeric_value")
+                            if (
+                                label in {"pass", "fail"}
+                                and isinstance(value, int | float)
+                                and not isinstance(value, bool)
+                                and math.isfinite(float(value))
+                            ):
+                                numeric_scores.append(float(value))
+
+                fingerprint = (
+                    candidate.get("fingerprint")
+                    if isinstance(candidate.get("fingerprint"), dict)
+                    else {}
+                )
+                tool_trajectory, rag_evidence = _observed_trajectory(target)
+                runtime_trajectory = (
+                    target.get("metadata", {}).get("runtime_trajectory")
+                    if isinstance(target.get("metadata"), dict)
+                    else {}
+                )
+                performance_metrics = {
+                    "latency_ms_lt": target.get("total_latency_ms"),
+                    "total_tokens_lt": target.get("total_tokens"),
+                    "cost_cents_lt": target.get("total_cost_cents"),
+                }
+                explicit_performance_pass = True
+                for assertion in run_case.get("assertions") or []:
+                    if not isinstance(assertion, dict):
+                        continue
+                    assertion_type = str(assertion.get("type") or "")
+                    if assertion_type not in performance_metrics:
+                        continue
+                    actual = performance_metrics[assertion_type]
+                    limit = assertion.get("value")
+                    if (
+                        not isinstance(actual, int | float)
+                        or not isinstance(limit, int | float)
+                        or actual >= limit
+                    ):
+                        explicit_performance_pass = False
+                trial = {
+                    "case_id": run_case.get("case_id"),
+                    "trial_index": int(run_case.get("trial_index") or 1),
+                    "critical": bool((run_case.get("metadata") or {}).get("critical")),
+                    "trace_id": trace_id,
+                    "execution_succeeded": target.get("status") == "succeeded",
+                    "deterministic_pass": contract_pass,
+                    "behavior_pass": contract_pass
+                    and all(label == "pass" for label in score_labels),
+                    "aggregate_score": round(sum(numeric_scores) / len(numeric_scores), 4),
+                    "score_labels": score_labels,
+                    "latency_ms": target.get("total_latency_ms"),
+                    "input_tokens": target.get("input_tokens"),
+                    "output_tokens": target.get("output_tokens"),
+                    "total_tokens": target.get("total_tokens"),
+                    "cost_cents": target.get("total_cost_cents"),
+                    "output_preview": target.get("output_preview") or "",
+                    "fingerprint": fingerprint,
+                    "contract_failures": [str(item) for item in contract.get("failures") or []],
+                    "explicit_performance_pass": explicit_performance_pass,
+                    "tool_trajectory": tool_trajectory,
+                    "rag_evidence": rag_evidence,
+                    "exit_reason": (
+                        runtime_trajectory.get("exit_reason")
+                        if isinstance(runtime_trajectory, dict)
+                        else None
+                    ),
+                }
+                await self.repository.update_experiment_run_case(
+                    tenant_id=tenant_id,
+                    run_case_id=run_case_id,
+                    status="succeeded",
+                    candidate_trace_id=trace_id,
+                    observed_metrics=trial,
+                )
+                trial_results.append(trial)
+            except Exception as exc:  # noqa: BLE001 - isolate failed eval trials
+                message = str(exc)[:2000]
+                infrastructure_errors.append(
+                    f"{run_case.get('case_id')}#{run_case.get('trial_index')}: {message}"
+                )
+                trial = {
+                    "case_id": run_case.get("case_id"),
+                    "trial_index": int(run_case.get("trial_index") or 1),
+                    "critical": bool((run_case.get("metadata") or {}).get("critical")),
+                    "execution_succeeded": False,
+                    "behavior_pass": False,
+                    "error": message,
+                }
+                await self.repository.update_experiment_run_case(
+                    tenant_id=tenant_id,
+                    run_case_id=run_case_id,
+                    status="failed",
+                    observed_metrics=trial,
+                    error_message=message,
+                )
+                trial_results.append(trial)
+
+        attempted = len(trial_results)
+        completed = sum(1 for item in trial_results if item.get("execution_succeeded"))
+        executed_results = [item for item in trial_results if item.get("execution_succeeded")]
+        latencies = (
+            [float(item["latency_ms"]) for item in executed_results]
+            if executed_results
+            and all(isinstance(item.get("latency_ms"), int | float) for item in executed_results)
+            else []
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in trial_results:
+            grouped.setdefault(str(item.get("case_id") or ""), []).append(item)
+        case_scores = [
+            sum(values) / len(values)
+            for items in grouped.values()
+            if (
+                values := [
+                    float(item["aggregate_score"])
+                    for item in items
+                    if isinstance(item.get("aggregate_score"), int | float)
+                ]
+            )
+        ]
+        behavior_passed_cases = sum(
+            1
+            for items in grouped.values()
+            if items and all(item.get("behavior_pass") is True for item in items)
+        )
+        flaky_cases = sum(
+            1
+            for items in grouped.values()
+            if len({bool(item.get("behavior_pass")) for item in items}) > 1
+        )
+        critical_cases = [
+            items for items in grouped.values() if any(item.get("critical") for item in items)
+        ]
+        critical_passed = sum(
+            1
+            for items in critical_cases
+            if all(item.get("behavior_pass") is True for item in items)
+        )
+        fingerprint_values = [
+            item.get("fingerprint")
+            for item in trial_results
+            if isinstance(item.get("fingerprint"), dict) and item.get("fingerprint")
+        ]
+        fingerprints_complete = bool(trial_results) and len(fingerprint_values) == len(
+            trial_results
+        )
+        fingerprints = {
+            json.dumps(value, sort_keys=True, default=str) for value in fingerprint_values
+        }
+
+        def _average_known(key: str) -> float | None:
+            if not executed_results or any(
+                not isinstance(item.get(key), int | float) for item in executed_results
+            ):
+                return None
+            return round(
+                sum(float(item[key]) for item in executed_results) / len(executed_results),
+                4,
+            )
+
+        sorted_latencies = sorted(latencies)
+        p95_index = max(0, math.ceil(len(sorted_latencies) * 0.95) - 1)
+        latency_p50 = None
+        if sorted_latencies:
+            midpoint = len(sorted_latencies) // 2
+            latency_p50 = (
+                sorted_latencies[midpoint]
+                if len(sorted_latencies) % 2
+                else (sorted_latencies[midpoint - 1] + sorted_latencies[midpoint]) / 2
+            )
+        summary = {
+            "overall_score": round(sum(case_scores) / len(case_scores), 4) if case_scores else 0.0,
+            "average_score": round(sum(case_scores) / len(case_scores), 4) if case_scores else 0.0,
+            "behavior_pass_rate": (
+                round(behavior_passed_cases / len(grouped), 4) if grouped else 0.0
+            ),
+            "critical_pass_rate": round(critical_passed / len(critical_cases), 4)
+            if critical_cases
+            else 1.0,
+            "flaky_rate": round(flaky_cases / len(grouped), 4) if grouped else 0.0,
+            "case_count": len(grouped),
+            "trial_count": attempted,
+        }
+        summary["quality_score"] = summary["overall_score"]
+        metrics = {
+            "attempted_trials": attempted,
+            "completed_trials": completed,
+            "failed_trials": attempted - completed,
+            "total_trials": len(run_cases),
+            "execution_error_rate": round((attempted - completed) / attempted, 4)
+            if attempted
+            else 1.0,
+            "behavior_failure_rate": (
+                round((len(grouped) - behavior_passed_cases) / len(grouped), 4) if grouped else 1.0
+            ),
+            "latency_p50_ms": round(latency_p50, 2) if latency_p50 is not None else None,
+            "latency_p95_ms": round(sorted_latencies[p95_index], 2) if sorted_latencies else None,
+            "input_tokens_per_task": _average_known("input_tokens"),
+            "output_tokens_per_task": _average_known("output_tokens"),
+            "total_tokens_per_task": _average_known("total_tokens"),
+            "cost_per_task_cents": _average_known("cost_cents"),
+            "critical_pass_rate": summary["critical_pass_rate"],
+            "mixed_runtime": len(fingerprints) > 1,
+            "fingerprint_complete": fingerprints_complete,
+            "actual_fingerprint": json.loads(next(iter(fingerprints)))
+            if fingerprints_complete and len(fingerprints) == 1
+            else {},
+            "scores_written": scores_written,
+            "gate": {
+                "status": "pass"
+                if summary["critical_pass_rate"] == 1.0
+                and attempted == completed
+                and all(
+                    item.get("explicit_performance_pass", True) is True for item in trial_results
+                )
+                else "fail"
+            },
+        }
+        status = "succeeded" if completed else "failed"
+        error_message = None if status == "succeeded" else "; ".join(infrastructure_errors)[:4000]
+        await self.repository.update_experiment_run(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            status=status,
+            score_summary=summary,
+            metrics=metrics,
+            error_message=error_message,
+            mark_finished=True,
+        )
+        return EvaluatorRunResult(
+            run_id=run_id,
+            status=status,
+            score_summary=summary,
+            metrics=metrics,
+            error_message=error_message,
+            scores_written=scores_written,
+        )
+
     async def _resolve_targets(
         self,
         *,
@@ -810,13 +1316,21 @@ class EvaluatorExecutor:
             unresolved_count=unresolved_count,
         )
 
-    def _selected_spans(self, target: dict[str, Any], filter_config: dict[str, Any]) -> list[dict[str, Any]]:
+    def _selected_spans(
+        self, target: dict[str, Any], filter_config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         spans = target.get("spans") if isinstance(target.get("spans"), list) else []
         span_kinds = filter_config.get("span_kinds")
         allowed_kinds = (
             {str(item) for item in span_kinds if isinstance(item, str)}
             if isinstance(span_kinds, list) and span_kinds
-            else {"tool_execution", "retriever", "model_invocation", "document_fetch", "gateway_proxy"}
+            else {
+                "tool_execution",
+                "retriever",
+                "model_invocation",
+                "document_fetch",
+                "gateway_proxy",
+            }
         )
         selected: list[dict[str, Any]] = []
         for span in spans:
@@ -836,16 +1350,26 @@ class EvaluatorExecutor:
             "input_preview": span.get("input_preview") or parent_target.get("input_preview") or "",
             "output_preview": span.get("output_preview") or "",
             "status": span.get("status") or parent_target.get("status"),
-            "total_latency_ms": int(span.get("duration_ms") or parent_target.get("total_latency_ms") or 0),
+            "total_latency_ms": int(
+                span.get("duration_ms") or parent_target.get("total_latency_ms") or 0
+            ),
             "model_id": parent_target.get("model_id"),
             "metadata": {
-                **(parent_target.get("metadata") if isinstance(parent_target.get("metadata"), dict) else {}),
+                **(
+                    parent_target.get("metadata")
+                    if isinstance(parent_target.get("metadata"), dict)
+                    else {}
+                ),
                 "span_kind": span.get("span_kind"),
                 "span_name": span.get("name"),
             },
-            "metrics": parent_target.get("metrics") if isinstance(parent_target.get("metrics"), dict) else {},
+            "metrics": parent_target.get("metrics")
+            if isinstance(parent_target.get("metrics"), dict)
+            else {},
             "spans": [span],
-            "events": parent_target.get("events") if isinstance(parent_target.get("events"), list) else [],
+            "events": parent_target.get("events")
+            if isinstance(parent_target.get("events"), list)
+            else [],
             "span_id": span_id,
             "target_type": "span",
             "target_id": span_id,
@@ -858,7 +1382,11 @@ class EvaluatorExecutor:
         *,
         llm_context: LlmCompleteContext | None = None,
     ) -> list[dict[str, Any]]:
-        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+        filter_config = (
+            evaluator.get("filter_config")
+            if isinstance(evaluator.get("filter_config"), dict)
+            else {}
+        )
         mode = str(filter_config.get("mode") or "rule").strip().lower()
         spans = self._selected_spans(target, filter_config)
         if not spans:
@@ -889,7 +1417,9 @@ class EvaluatorExecutor:
                 "filter_config": _rules_from_filter_config(filter_config),
             }
             if mode in {"llm", "llm_judge"}:
-                payload = await self._score_with_llm(component_evaluator, span_target, llm_context=llm_context)
+                payload = await self._score_with_llm(
+                    component_evaluator, span_target, llm_context=llm_context
+                )
             else:
                 payload = _score_with_rules(component_evaluator, span_target)
             payload["span_id"] = span_target.get("span_id")
@@ -950,10 +1480,13 @@ class EvaluatorExecutor:
             signature = inspect.signature(self.llm_complete)
         except (TypeError, ValueError):
             return await self.llm_complete(model_id, prompt, context)
-        accepts_context = any(
-            parameter.kind is inspect.Parameter.VAR_POSITIONAL
-            for parameter in signature.parameters.values()
-        ) or len(signature.parameters) >= 3
+        accepts_context = (
+            any(
+                parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            )
+            or len(signature.parameters) >= 3
+        )
         if accepts_context:
             return await self.llm_complete(model_id, prompt, context)
         return await self.llm_complete(model_id, prompt)
@@ -973,11 +1506,19 @@ class EvaluatorExecutor:
             return _DEFAULT_RAG_RUBRIC
         return "Score helpfulness, grounding, and safety from 0 to 1 using bounded previews."
 
-    def _resolve_ground_truth(self, evaluator: dict[str, Any], target: dict[str, Any]) -> str | None:
-        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+    def _resolve_ground_truth(
+        self, evaluator: dict[str, Any], target: dict[str, Any]
+    ) -> str | None:
+        filter_config = (
+            evaluator.get("filter_config")
+            if isinstance(evaluator.get("filter_config"), dict)
+            else {}
+        )
         if filter_config.get("ground_truth"):
             return str(filter_config["ground_truth"]).strip() or None
-        expected = target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
+        expected = (
+            target.get("expected_output") if isinstance(target.get("expected_output"), dict) else {}
+        )
         for key in ("output_preview", "contains", "answer"):
             value = expected.get(key)
             if value:
@@ -1019,18 +1560,26 @@ class EvaluatorExecutor:
         evaluator: dict[str, Any],
         target: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        filter_config = evaluator.get("filter_config") if isinstance(evaluator.get("filter_config"), dict) else {}
+        filter_config = (
+            evaluator.get("filter_config")
+            if isinstance(evaluator.get("filter_config"), dict)
+            else {}
+        )
         metadata = evaluator.get("metadata") if isinstance(evaluator.get("metadata"), dict) else {}
         configured_metrics = filter_config.get("metrics") or metadata.get("metrics")
-        metrics = list(
-            dict.fromkeys(
-                item.strip()
-                for item in configured_metrics
-                if isinstance(configured_metrics, list)
-                and isinstance(item, str)
-                and item.strip()
+        metrics = (
+            list(
+                dict.fromkeys(
+                    item.strip()
+                    for item in configured_metrics
+                    if isinstance(configured_metrics, list)
+                    and isinstance(item, str)
+                    and item.strip()
+                )
             )
-        ) if isinstance(configured_metrics, list) else []
+            if isinstance(configured_metrics, list)
+            else []
+        )
         if not metrics:
             metrics = ["context_relevancy"]
 
@@ -1134,10 +1683,7 @@ class EvaluatorExecutor:
                 break
             seen_metrics.add(metric)
             normalized_results.append((item, metric, score, service_label, failure_kind))
-        if (
-            len(normalized_results) != len(raw_results)
-            or seen_metrics != set(metrics)
-        ):
+        if len(normalized_results) != len(raw_results) or seen_metrics != set(metrics):
             return review_scores(
                 "KB RAGAS evaluation returned invalid metric results.",
                 "infrastructure",
@@ -1149,7 +1695,9 @@ class EvaluatorExecutor:
             label = (
                 "review"
                 if service_label == "review"
-                else "pass" if score >= pass_threshold else "fail"
+                else "pass"
+                if score >= pass_threshold
+                else "fail"
             )
             payloads.append(
                 {
@@ -1272,7 +1820,8 @@ class EvaluatorExecutor:
             weight = float(component.get("weight") or 1.0)
             component_evaluator = {
                 **evaluator,
-                "name": component.get("name") or f"{evaluator.get('name') or 'composite'}:{component_type}",
+                "name": component.get("name")
+                or f"{evaluator.get('name') or 'composite'}:{component_type}",
                 "evaluator_type": component_type,
                 "filter_config": component.get("config") or filter_config,
             }
@@ -1309,7 +1858,9 @@ class EvaluatorExecutor:
             "score_name": evaluator.get("name") or "composite",
             "score_type": "numeric",
             "numeric_value": round(final_score, 4),
-            "label": "pass" if final_score >= float(filter_config.get("pass_threshold", 0.8)) else "fail",
+            "label": "pass"
+            if final_score >= float(filter_config.get("pass_threshold", 0.8))
+            else "fail",
             "explanation": "Composite evaluator score from rule, trajectory, and judge components.",
             "scorer_type": "system",
             "score_source": "system",

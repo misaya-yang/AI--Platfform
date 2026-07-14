@@ -11,6 +11,8 @@ import hashlib
 import json
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
@@ -304,6 +306,17 @@ def _stable_tool_identity(tool: dict[str, Any]) -> dict[str, Any]:
     return _clean(tool)
 
 
+@lru_cache(maxsize=1)
+def runtime_source_hash() -> str:
+    """Hash the loaded assistant Python source, including local hot updates."""
+    root = Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def build_cache_context_metrics(
     *,
     system_prompt: str,
@@ -332,11 +345,14 @@ def build_cache_context_metrics(
 
     payload: dict[str, Any] = {
         "prompt_prefix_hash": stable_cache_hash(prefix_identity),
+        "system_prompt_hash": stable_cache_hash(system_prompt),
         "prompt_prefix_message_count": prefix_message_count,
         "prompt_prefix_chars": len(system_prompt or ""),
         "tool_schema_count": len(tool_schemas),
+        "tool_schema_hash": stable_cache_hash(stable_tool_schemas),
         "tool_schema_order_hash": stable_cache_hash(tool_names),
         "tool_schema_names_hash": stable_cache_hash(sorted(tool_names)),
+        "runtime_revision": runtime_source_hash(),
     }
 
     if context_estimated_input_tokens is not None:

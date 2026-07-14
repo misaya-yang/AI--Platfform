@@ -77,8 +77,13 @@ class _OnlineRepo:
         self.active_runs = active_runs or set()
         self.pending_online_runs = pending_online_runs
 
-    async def list_evaluators(self, **_kwargs: Any) -> tuple[list[dict[str, Any]], int]:
-        return self.evaluators, len(self.evaluators)
+    async def get_trace_detail(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"trace": {"metadata": {}, "user_id": "production-user"}}
+
+    async def list_evaluators(
+        self, *, limit: int, offset: int, **_kwargs: Any
+    ) -> tuple[list[dict[str, Any]], int]:
+        return self.evaluators[offset : offset + limit], len(self.evaluators)
 
     async def count_pending_online_eval_runs(self, *, tenant_id: str) -> int:  # noqa: ARG002
         return self.pending_online_runs
@@ -213,3 +218,65 @@ async def test_schedule_online_eval_skips_when_queue_is_full() -> None:
     assert result["scheduled"] == 0
     assert result["reason"] == "online_eval_queue_full"
     assert repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_online_eval_skips_internal_eval_trace() -> None:
+    repo = _OnlineRepo([])
+
+    async def get_internal_trace(**_kwargs: Any) -> dict[str, Any]:
+        return {"trace": {"metadata": {"eval_origin": "candidate"}}}
+
+    repo.get_trace_detail = get_internal_trace  # type: ignore[method-assign]
+    result = await schedule_online_eval_for_trace(
+        repo,
+        tenant_id="tenant-a",
+        payload={
+            "trace_id": "55555555-5555-4555-8555-555555555555",
+            "trace_family": "assistant",
+            "status": "succeeded",
+        },
+    )
+
+    assert result["scheduled"] == 0
+    assert result["reason"] == "internal_eval_trace"
+
+
+@pytest.mark.asyncio
+async def test_schedule_online_eval_pages_through_all_evaluators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ai_gateway_core.eval.online_sampling.should_sample_trace_id",
+        lambda _trace_id, _rate: True,
+    )
+    evaluators = [
+        {
+            "evaluator_id": f"eval-{index}",
+            "evaluator_type": "rule",
+            "sampling_config": {
+                "online": {
+                    "enabled": True,
+                    "rate": 1.0,
+                    "trace_families": ["assistant"],
+                }
+            },
+        }
+        for index in range(101)
+    ]
+    repo = _OnlineRepo(evaluators)
+
+    result = await schedule_online_eval_for_trace(
+        repo,
+        tenant_id="tenant-a",
+        payload={
+            "trace_id": "66666666-6666-4666-8666-666666666666",
+            "trace_family": "assistant",
+            "status": "succeeded",
+        },
+        evaluator_limit=100,
+        max_pending_online_runs=200,
+    )
+
+    assert result["matched"] == 101
+    assert result["scheduled"] == 101
