@@ -545,20 +545,6 @@ class StreamingRateLimitMiddleware(PureASGIMiddleware):
 
         await self.app(scope, receive, rate_limit_send)
 
-    async def process_request(self, scope: Scope, receive: Receive) -> bool:
-        """非流式请求执行限流检查"""
-        _ = receive
-        if not self.config.enabled:
-            return True
-
-        path = scope.get("path", "")
-        if self._is_whitelisted(path):
-            return True
-
-        # TODO: 实现实际的限流检查
-        # 这里为了简化，暂时直接通过
-        return True
-
     def _is_whitelisted(self, path: str) -> bool:
         """检查路径是否在白名单"""
         return any(path == wp or path.startswith(wp + "/") for wp in self.config.whitelist_paths)

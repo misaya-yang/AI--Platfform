@@ -9,6 +9,7 @@ def test_build_kb_ragas_sample_extracts_contexts_from_retriever_span() -> None:
             "trace_id": "trace-rag-1",
             "trace_family": "rag",
             "input_preview": "refund policy",
+            "output_preview": "Refunds are available for 30 days.",
             "metadata": {
                 "gen_ai.retrieval.query.text": "refund policy",
                 "dataset_id": "dataset-9",
@@ -43,6 +44,7 @@ def test_build_kb_ragas_sample_extracts_contexts_from_retriever_span() -> None:
     ]
     assert sample.dataset_id == "dataset-9"
     assert sample.trace_id == "trace-rag-1"
+    assert sample.answer == "Refunds are available for 30 days."
 
 
 def test_build_kb_ragas_sample_returns_none_without_contexts() -> None:
@@ -63,6 +65,7 @@ def test_kb_ragas_sample_from_target_uses_ground_truth() -> None:
         "trace_id": "trace-rag-2",
         "trace_family": "rag",
         "input_preview": "pricing",
+        "output_preview": "The starter plan costs $10.",
         "metadata": {},
         "spans": [
             {
@@ -78,4 +81,5 @@ def test_kb_ragas_sample_from_target_uses_ground_truth() -> None:
 
     assert sample is not None
     assert sample.ground_truth == "Starter plan is $10"
+    assert sample.answer == "The starter plan costs $10."
     assert sample.contexts == ["Plans start at $10/month."]

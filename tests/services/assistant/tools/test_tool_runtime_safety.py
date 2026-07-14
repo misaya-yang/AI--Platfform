@@ -10,6 +10,7 @@ from assistant_service.core.audit.tool_audit import ToolAuditService
 from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 from assistant_service.core.mcp.client import MCPTool
 from assistant_service.core.mcp.manager import MCPManager
+from assistant_service.core.tool_invoker import RegistryToolInvoker, ToolInvocationContext
 from assistant_service.core.tools.tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -98,6 +99,37 @@ async def test_registry_allows_gateway_or_test_only_bypass_for_risky_tools() -> 
     assert gateway_result.success is True
     assert test_bypass_result.success is True
     assert executor.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_gateway_requires_tool_confirmation_in_power_profile() -> None:
+    registry = ToolRegistry()
+    executor = _RecordingExecutor()
+    definition = _definition("confirmation_tool", ToolRiskLevel.LOW)
+    definition.requires_confirmation = True
+    registry.register(definition, executor)
+    gateway = AssistantExecutionGateway(
+        tool_invoker=RegistryToolInvoker(registry),
+        database=None,
+    )
+
+    result = await gateway.invoke_tool(
+        "confirmation_tool",
+        {},
+        ToolInvocationContext(
+            session_id="session-a",
+            user_id="user-a",
+            tenant_id="tenant-a",
+            request_id="request-a",
+            run_id="11111111-1111-1111-1111-111111111111",
+            policy_profile="power",
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "APPROVAL_REQUIRED"
+    assert result.metadata["approval_required"] is True
+    assert executor.calls == 0
 
 
 def test_duplicate_tool_registration_fails_without_trusted_override() -> None:

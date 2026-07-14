@@ -62,7 +62,13 @@ export function isErrorStatus(status?: TraceStatus | string | null) {
   return status === "failed" || status === "timeout" || status === "cancelled";
 }
 
-export const KB_RAGAS_METRICS = ["context_relevancy", "context_precision"] as const;
+export const KB_RAGAS_METRICS = [
+  "faithfulness",
+  "response_relevancy",
+  "context_precision",
+  "context_recall",
+  "context_relevancy",
+] as const;
 export type KbRagasMetricName = (typeof KB_RAGAS_METRICS)[number];
 
 export function isKbRagasScore(score: AgentTraceScore): boolean {

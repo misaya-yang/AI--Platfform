@@ -10,6 +10,7 @@ from typing import Any
 class KbRagasSample:
     question: str
     contexts: list[str]
+    answer: str | None = None
     ground_truth: str | None = None
     dataset_id: str | None = None
     trace_id: str | None = None
@@ -87,6 +88,7 @@ def build_kb_ragas_sample(
     return KbRagasSample(
         question=question,
         contexts=contexts,
+        answer=_preview_text(trace.get("output_preview"), limit=4_000) or None,
         ground_truth=str(ground_truth).strip() if ground_truth else None,
         dataset_id=dataset_id,
         trace_id=str(trace.get("trace_id") or "") or None,
@@ -103,6 +105,7 @@ def kb_ragas_sample_from_target(
             "trace_id": target.get("trace_id"),
             "trace_family": target.get("trace_family") or "rag",
             "input_preview": target.get("input_preview"),
+            "output_preview": target.get("output_preview"),
             "metadata": target.get("metadata") if isinstance(target.get("metadata"), dict) else {},
         },
         "spans": target.get("spans") if isinstance(target.get("spans"), list) else [],

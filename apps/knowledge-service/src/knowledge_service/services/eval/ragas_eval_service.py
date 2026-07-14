@@ -9,11 +9,21 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...core.observability.logging import get_logger
+from ..knowledge.embedding import BaseEmbedding
 from ..knowledge.qa_service import LLMClient, LLMConfig
 
 logger = get_logger(__name__)
 
-_SUPPORTED_METRICS = frozenset({"context_relevancy", "context_precision"})
+_METRIC_ALIASES = {"answer_relevancy": "response_relevancy"}
+_SUPPORTED_METRICS = frozenset(
+    {
+        "context_relevancy",
+        "context_precision",
+        "context_recall",
+        "faithfulness",
+        "response_relevancy",
+    }
+)
 _DEFAULT_METRICS = ("context_relevancy",)
 _MAX_JUDGE_DATA_CHARS = 24_000
 _MAX_JUDGE_FIELD_CHARS = 4_000
@@ -45,18 +55,54 @@ def _average_precision(verdicts: list[bool]) -> float:
     return precision_sum / relevant if relevant else 0.0
 
 
+def _claim_support_ratio(claims: Any) -> float:
+    if not isinstance(claims, list) or not claims:
+        raise ValueError("claim metric requires at least one claim")
+    verdicts: list[bool] = []
+    for claim in claims:
+        if (
+            not isinstance(claim, dict)
+            or not str(claim.get("claim") or "").strip()
+            or type(claim.get("supported")) is not bool
+        ):
+            raise ValueError("each claim requires text and a boolean supported verdict")
+        verdicts.append(claim["supported"])
+    return sum(verdicts) / len(verdicts)
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        raise ValueError("embedding vectors must be non-empty and have equal dimensions")
+    left_values = [float(value) for value in left]
+    right_values = [float(value) for value in right]
+    if not all(math.isfinite(value) for value in left_values + right_values):
+        raise ValueError("embedding vectors must contain finite values")
+    denominator = math.sqrt(sum(value * value for value in left_values)) * math.sqrt(
+        sum(value * value for value in right_values)
+    )
+    if denominator == 0.0:
+        raise ValueError("embedding vectors must have non-zero magnitude")
+    dot_product = sum(
+        a * b for a, b in zip(left_values, right_values, strict=True)
+    )
+    return max(0.0, min(1.0, dot_product / denominator))
+
+
 def _serialize_untrusted_data(
     *,
     question: str,
+    answer: str | None,
     reference_answer: str | None,
     contexts: list[str],
 ) -> str:
     bounded_question = question[:_MAX_JUDGE_FIELD_CHARS]
+    bounded_answer = answer[:_MAX_JUDGE_FIELD_CHARS] if answer is not None else None
     bounded_reference = (
         reference_answer[:_MAX_JUDGE_FIELD_CHARS] if reference_answer is not None else None
     )
     empty_payload = {
         "question": bounded_question,
+        "answer": bounded_answer,
         "reference_answer": bounded_reference,
         "contexts": ["" for _context in contexts],
     }
@@ -100,18 +146,27 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
 class KBRagasEvalService:
     """Evaluate KB retrieval quality with a default LLM (LLMConfig / env)."""
 
-    def __init__(self, llm_config: LLMConfig | None = None) -> None:
+    def __init__(
+        self,
+        llm_config: LLMConfig | None = None,
+        *,
+        embedding: BaseEmbedding | None = None,
+    ) -> None:
         self.llm_config = llm_config or LLMConfig()
         self._client = LLMClient(self.llm_config)
+        self._embedding = embedding
 
     async def close(self) -> None:
         await self._client.close()
+        if self._embedding is not None:
+            await self._embedding.close()
 
     async def evaluate_retrieval(
         self,
         *,
         query: str,
         contexts: list[str],
+        answer: str | None = None,
         metrics: list[str] | None = None,
         ground_truth: str | None = None,
     ) -> list[MetricResult]:
@@ -121,19 +176,33 @@ class KBRagasEvalService:
             raise ValueError("query and contexts are required for KB RAGAS evaluation")
 
         requested = metrics or list(_DEFAULT_METRICS)
-        unsupported = list(dict.fromkeys(metric for metric in requested if metric not in _SUPPORTED_METRICS))
+        canonical_metrics = [_METRIC_ALIASES.get(metric, metric) for metric in requested]
+        unsupported = list(
+            dict.fromkeys(
+                metric
+                for metric, canonical in zip(requested, canonical_metrics, strict=True)
+                if canonical not in _SUPPORTED_METRICS
+            )
+        )
         if unsupported:
             raise ValueError(f"Unsupported KB RAGAS metrics: {', '.join(map(str, unsupported))}")
-        selected = list(dict.fromkeys(requested))
+        selected = list(dict.fromkeys(canonical_metrics))
+        normalized_answer = str(answer or "").strip() or None
+        normalized_ground_truth = str(ground_truth or "").strip() or None
 
         results: list[MetricResult] = []
         for metric in selected:
-            if metric == "context_precision" and not str(ground_truth or "").strip():
+            prerequisite = None
+            if metric in {"context_precision", "context_recall"} and not normalized_ground_truth:
+                prerequisite = "ground_truth"
+            elif metric in {"faithfulness", "response_relevancy"} and not normalized_answer:
+                prerequisite = "answer"
+            if prerequisite:
                 results.append(
                     MetricResult(
                         metric=metric,
                         score=0.0,
-                        explanation="context_precision requires ground_truth; metric skipped",
+                        explanation=f"{metric} requires {prerequisite}; metric skipped",
                         label="review",
                         failure_kind="semantic_review",
                     )
@@ -143,7 +212,8 @@ class KBRagasEvalService:
                 metric=metric,
                 question=question,
                 contexts=normalized_contexts,
-                ground_truth=str(ground_truth or "").strip() or None,
+                answer=normalized_answer,
+                ground_truth=normalized_ground_truth,
             )
             results.append(payload)
         return results
@@ -154,10 +224,12 @@ class KBRagasEvalService:
         metric: str,
         question: str,
         contexts: list[str],
+        answer: str | None,
         ground_truth: str | None,
     ) -> MetricResult:
         untrusted_data = _serialize_untrusted_data(
             question=question,
+            answer=answer,
             reference_answer=ground_truth,
             contexts=contexts,
         )
@@ -167,6 +239,32 @@ class KBRagasEvalService:
                 "Return one boolean verdict per context, in rank order, indicating whether "
                 "that context is useful for answering the question from the reference answer.\n"
                 "Return JSON only: {\"verdicts\": [true, false], \"explanation\": \"...\"}.\n\n"
+                f"UNTRUSTED_DATA_JSON:\n{untrusted_data}\n"
+            )
+        elif metric == "faithfulness":
+            prompt = (
+                "You are a RAGAS-style evaluator for response faithfulness.\n"
+                "Decompose the answer into standalone factual claims and mark each claim "
+                "supported only when the retrieved contexts entail it.\n"
+                "Return JSON only: {\"claims\": [{\"claim\": \"...\", "
+                "\"supported\": true}], \"explanation\": \"...\"}.\n\n"
+                f"UNTRUSTED_DATA_JSON:\n{untrusted_data}\n"
+            )
+        elif metric == "context_recall":
+            prompt = (
+                "You are a RAGAS-style evaluator for context recall.\n"
+                "Decompose the reference answer into standalone factual claims and mark each "
+                "claim supported only when the retrieved contexts contain enough evidence for it.\n"
+                "Return JSON only: {\"claims\": [{\"claim\": \"...\", "
+                "\"supported\": true}], \"explanation\": \"...\"}.\n\n"
+                f"UNTRUSTED_DATA_JSON:\n{untrusted_data}\n"
+            )
+        elif metric == "response_relevancy":
+            prompt = (
+                "You are a RAGAS-style evaluator for response relevancy.\n"
+                "Generate exactly three distinct questions that the answer could plausibly answer.\n"
+                "Return JSON only: {\"questions\": [\"...\", \"...\", \"...\"], "
+                "\"explanation\": \"...\"}.\n\n"
                 f"UNTRUSTED_DATA_JSON:\n{untrusted_data}\n"
             )
         else:
@@ -204,6 +302,26 @@ class KBRagasEvalService:
                 ):
                     raise ValueError("context_precision requires one boolean verdict per context")
                 score = _average_precision(verdicts)
+            elif metric in {"faithfulness", "context_recall"}:
+                score = _claim_support_ratio(parsed.get("claims"))
+            elif metric == "response_relevancy":
+                questions = parsed.get("questions")
+                if (
+                    not isinstance(questions, list)
+                    or len(questions) != 3
+                    or any(not isinstance(item, str) or not item.strip() for item in questions)
+                ):
+                    raise ValueError("response_relevancy requires exactly three questions")
+                if self._embedding is None:
+                    raise ValueError("response_relevancy embedding is not configured")
+                vectors = await self._embedding.embed_documents(
+                    [question, *(item.strip() for item in questions)]
+                )
+                if len(vectors) != 4:
+                    raise ValueError("response_relevancy embedding returned an invalid vector count")
+                score = sum(
+                    _cosine_similarity(vectors[0], vector) for vector in vectors[1:]
+                ) / 3
             else:
                 if "score" not in parsed:
                     raise ValueError("LLM judge response missing score")

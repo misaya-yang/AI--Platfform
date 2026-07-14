@@ -22,6 +22,7 @@ async def test_kb_ragas_client_parses_metric_results() -> None:
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["query"] == "refund policy"
         assert payload["contexts"] == ["chunk one"]
+        assert payload["answer"] == "Refunds are available for 30 days."
         return httpx.Response(
             200,
             json={
@@ -48,6 +49,7 @@ async def test_kb_ragas_client_parses_metric_results() -> None:
 
     results = await client.evaluate_retrieval(
         query="refund policy",
+        answer="Refunds are available for 30 days.",
         contexts=["chunk one"],
         metrics=["context_relevancy"],
     )

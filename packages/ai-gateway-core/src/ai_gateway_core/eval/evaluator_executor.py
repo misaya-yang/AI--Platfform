@@ -754,6 +754,25 @@ class EvaluatorExecutor:
 
         frozen_manifest = tuple(manifest[:expected_count])
         unresolved_count = max(expected_count - len(frozen_manifest), 0)
+        source_trace_ids = list(
+            dict.fromkeys(
+                str(example["source_trace_id"])
+                for example in frozen_manifest
+                if isinstance(example, dict)
+                and example.get("example_id")
+                and example.get("source_trace_id")
+            )
+        )
+        batch_loader = getattr(self.repository, "get_trace_details", None)
+        details_by_trace = (
+            await batch_loader(
+                tenant_id=tenant_id,
+                trace_ids=source_trace_ids,
+                trace_family=trace_family,
+            )
+            if callable(batch_loader) and source_trace_ids
+            else {}
+        )
         targets: list[dict[str, Any]] = []
         for example in frozen_manifest:
             if not isinstance(example, dict):
@@ -764,11 +783,14 @@ class EvaluatorExecutor:
             if not example_id or not source_trace_id:
                 unresolved_count += 1
                 continue
-            detail = await self.repository.get_trace_detail(
-                tenant_id=tenant_id,
-                trace_id=str(source_trace_id),
-                trace_family=trace_family,
-            )
+            if callable(batch_loader):
+                detail = details_by_trace.get(str(source_trace_id))
+            else:
+                detail = await self.repository.get_trace_detail(
+                    tenant_id=tenant_id,
+                    trace_id=str(source_trace_id),
+                    trace_family=trace_family,
+                )
             target = _trace_target(detail)
             if not target or not target.get("trace_id"):
                 unresolved_count += 1
@@ -1056,6 +1078,7 @@ class EvaluatorExecutor:
             raw_results = await self.kb_ragas_evaluate(
                 query=sample.question,
                 contexts=sample.contexts,
+                answer=sample.answer,
                 metrics=metrics,
                 ground_truth=sample.ground_truth,
                 llm_config=llm_config,
@@ -1176,7 +1199,8 @@ class EvaluatorExecutor:
         assertions = _bounded_reference_json(target.get("assertions") or [])
         prompt = (
             "You are an evaluator. Return JSON only with keys: "
-            "numeric_value (0-1), label, explanation, confidence (0-1).\n"
+            "numeric_value (0-1), label (pass, fail, or review), explanation, "
+            "confidence (0-1).\n"
             f"Trace family: {context.trace_family}\n"
             f"Rubric:\n{rubric}\n\n"
             f"Input preview:\n{target.get('input_preview') or ''}\n\n"
@@ -1200,11 +1224,14 @@ class EvaluatorExecutor:
                     confidence = float(parsed.get("confidence", 0.6))
                     if not 0 <= numeric <= 1 or not 0 <= confidence <= 1:
                         raise ValueError("LLM judge score or confidence out of range")
+                    label = str(parsed.get("label") or "").strip().lower()
+                    if label not in {"pass", "fail", "review"}:
+                        label = "pass" if numeric >= 0.7 else "review"
                     return {
                         "score_name": evaluator.get("name") or "quality",
                         "score_type": "numeric",
                         "numeric_value": max(0.0, min(1.0, numeric)),
-                        "label": str(parsed.get("label") or ("pass" if numeric >= 0.7 else "review")),
+                        "label": label,
                         "explanation": str(parsed.get("explanation") or "")[:2000],
                         "scorer_type": "llm",
                         "score_source": "llm",

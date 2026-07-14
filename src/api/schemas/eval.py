@@ -531,6 +531,7 @@ class KbRagasBatchScoreResponse(BaseModel):
 class KbRagasScoreRetrievalRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4000)
     contexts: list[str] = Field(..., min_length=1, max_length=32)
+    answer: str | None = Field(default=None, max_length=8000)
     metrics: list[str] | None = None
     ground_truth: str | None = Field(default=None, max_length=8000)
     dataset_id: str | None = None

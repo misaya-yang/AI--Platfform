@@ -11,16 +11,17 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder - Build the React application
 # -----------------------------------------------------------------------------
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
 # Build arguments for mirror configuration
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
-# Configure npm registry and install pnpm
+# Configure npm registry and activate the repository-pinned pnpm version
 RUN npm config set registry ${NPM_REGISTRY} && \
-    npm install -g pnpm@10.27.0 && \
+    corepack enable && \
+    corepack prepare pnpm@10.33.0 --activate && \
     pnpm config set registry ${NPM_REGISTRY}
 
 # Copy package files

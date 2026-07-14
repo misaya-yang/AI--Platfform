@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -898,6 +899,18 @@ def test_frontend_support_email_defaults_follow_auth_domain() -> None:
     )
     assert "ARG VITE_SUPPORT_EMAIL=\n" in dockerfile
     assert "ARG VITE_SUPPORT_EMAIL=admin@example.com" not in dockerfile
+
+
+def test_frontend_builder_matches_ci_toolchain() -> None:
+    package = json.loads(Path("web/package.json").read_text())
+    dockerfile = Path("web/Dockerfile").read_text()
+
+    assert package["engines"]["node"] == "^22.12.0"
+    assert package["packageManager"] == "pnpm@10.33.0"
+    assert package["devDependencies"]["@types/node"].startswith("^22.")
+    assert "FROM node:22-alpine AS builder" in dockerfile
+    assert "corepack prepare pnpm@10.33.0 --activate" in dockerfile
+    assert "npm install -g pnpm@" not in dockerfile
 
 
 def test_deploy_app_includes_application_microservices() -> None:

@@ -372,6 +372,7 @@ async def test_score_retrieval_with_kb_ragas_maps_client_results() -> None:
     class _Client:
         async def evaluate_retrieval(self, **kwargs: Any) -> list[Any]:
             assert kwargs["query"] == "refund policy"
+            assert kwargs["answer"] == "Refunds are available for 30 days."
             assert kwargs["contexts"] == ["chunk"]
             from src.services.eval.kb_ragas_client import KbRagasMetricResult
 
@@ -387,6 +388,7 @@ async def test_score_retrieval_with_kb_ragas_maps_client_results() -> None:
 
     payload = await score_retrieval_with_kb_ragas(
         query="refund policy",
+        answer="Refunds are available for 30 days.",
         contexts=["chunk"],
         client=_Client(),  # type: ignore[arg-type]
     )

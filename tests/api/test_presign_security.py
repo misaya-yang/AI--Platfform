@@ -12,14 +12,24 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 
+from src.api.deps import get_user_context
 from src.api.v1.presign import (
+    PresignedUploadRequest,
+    UploadConfirmRequest,
     _cleanup_expired_sessions,
     _get_effective_tenant_id,
     _upload_sessions,
     _validate_document_access,
+    confirm_upload,
+    get_presigned_upload_url,
+    get_task_status,
+)
+from src.api.v1.presign import (
+    router as presign_router,
 )
 from src.core.auth.user_resolver import UserContext
 
@@ -302,3 +312,87 @@ class TestUploadSessionSecurity:
         # Simulating a spoofed key
         spoofed_key = "images/other_tenant/other_doc/malicious.png"
         assert session["storage_key"] != spoofed_key  # Should not match
+
+
+class TestUnavailableDirectUpload:
+    def setup_method(self):
+        _upload_sessions.clear()
+
+    def teardown_method(self):
+        _upload_sessions.clear()
+
+    @pytest.fixture
+    def user(self):
+        return UserContext(
+            user_id="user123",
+            tenant_id="tenant456",
+            is_authenticated=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_upload_fails_before_presigning_or_creating_session(self, user):
+        with pytest.raises(HTTPException) as exc_info:
+            await get_presigned_upload_url(
+                request=PresignedUploadRequest(
+                    filename="document.pdf",
+                    content_type="application/pdf",
+                    document_id="doc123",
+                ),
+                user=user,
+            )
+
+        assert exc_info.value.status_code == 501
+        assert _upload_sessions == {}
+
+    @pytest.mark.asyncio
+    async def test_confirm_fails_without_consuming_session_or_touching_storage(self, user):
+        _upload_sessions["upload-1"] = {
+            "user_id": user.user_id,
+            "document_id": "doc123",
+            "storage_key": "tenant456/doc123/document.pdf",
+        }
+        with pytest.raises(HTTPException) as exc_info:
+            await confirm_upload(
+                request=UploadConfirmRequest(
+                    upload_id="upload-1",
+                    storage_key="tenant456/doc123/document.pdf",
+                    document_id="doc123",
+                    filename="document.pdf",
+                    content_type="application/pdf",
+                ),
+                user=user,
+            )
+
+        assert exc_info.value.status_code == 501
+        assert "upload-1" in _upload_sessions
+
+    @pytest.mark.asyncio
+    async def test_status_fails_instead_of_returning_placeholder(self, user):
+        with pytest.raises(HTTPException) as exc_info:
+            await get_task_status("task-1", user=user)
+
+        assert exc_info.value.status_code == 501
+
+    @pytest.mark.asyncio
+    async def test_upload_route_returns_501_without_storage_service(self, user):
+        app = FastAPI()
+        app.include_router(presign_router, prefix="/api/v1")
+        app.dependency_overrides[get_user_context] = lambda: user
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/v1/presign/upload",
+                json={
+                    "filename": "document.pdf",
+                    "content_type": "application/pdf",
+                    "document_id": "doc123",
+                },
+            )
+
+        assert response.status_code == 501
+        assert response.json()["detail"] == (
+            "Direct presigned upload is not implemented; use the standard upload API."
+        )

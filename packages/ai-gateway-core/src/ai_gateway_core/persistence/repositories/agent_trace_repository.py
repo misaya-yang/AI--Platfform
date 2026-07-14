@@ -348,6 +348,85 @@ class AgentTraceRepository(BaseRepository):
             "scores": [self._decode_score_row(row) for row in scores],
         }
 
+    async def get_trace_details(
+        self,
+        *,
+        tenant_id: str,
+        trace_ids: list[str],
+        user_id: str | None = None,
+        trace_family: str = "assistant",
+    ) -> dict[str, dict[str, Any]]:
+        requested_ids = list(dict.fromkeys(str(trace_id) for trace_id in trace_ids if trace_id))
+        if not requested_ids:
+            return {}
+
+        params: list[Any] = [requested_ids, tenant_id, trace_family]
+        filters = ["trace_id = ANY($1::uuid[])", "tenant_id = $2", "trace_family = $3"]
+        if user_id:
+            params.append(user_id)
+            filters.append(f"user_id = ${len(params)}")
+
+        traces = await self.fetch(
+            f"""
+            SELECT *, 0::int AS scores_count
+            FROM agent_traces
+            WHERE {' AND '.join(filters)}
+            ORDER BY array_position($1::uuid[], trace_id)
+            """,
+            *params,
+        )
+        allowed_ids = [str(row["trace_id"]) for row in traces]
+        if not allowed_ids:
+            return {}
+
+        spans = await self.fetch(
+            """
+            SELECT * FROM agent_trace_spans
+            WHERE trace_id = ANY($1::uuid[])
+            ORDER BY trace_id, sequence_no ASC, started_at ASC
+            """,
+            allowed_ids,
+        )
+        events = await self.fetch(
+            """
+            SELECT * FROM agent_trace_events
+            WHERE trace_id = ANY($1::uuid[])
+            ORDER BY trace_id, sequence_no ASC, occurred_at ASC
+            """,
+            allowed_ids,
+        )
+        scores = await self.fetch(
+            """
+            SELECT * FROM agent_trace_scores
+            WHERE trace_id = ANY($1::uuid[])
+            ORDER BY trace_id, created_at DESC
+            """,
+            allowed_ids,
+        )
+
+        details = {
+            trace_id: {
+                "trace": self._decode_trace_row(row),
+                "spans": [],
+                "events": [],
+                "scores": [],
+            }
+            for row in traces
+            if (trace_id := str(row["trace_id"]))
+        }
+        for key, rows, decoder in (
+            ("spans", spans, self._decode_span_row),
+            ("events", events, self._decode_event_row),
+            ("scores", scores, self._decode_score_row),
+        ):
+            for row in rows:
+                trace_id = str(row["trace_id"])
+                if trace_id in details:
+                    details[trace_id][key].append(decoder(row))
+        for detail in details.values():
+            detail["trace"]["scores_count"] = len(detail["scores"])
+        return details
+
     async def create_score(
         self,
         *,

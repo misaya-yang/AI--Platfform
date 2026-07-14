@@ -34,6 +34,7 @@ import {
 } from "@/api/assistant";
 import { ArtifactsPanel } from "@/components/artifacts";
 import { createSession, listSessions } from "@/api/sessions";
+import { listConnections } from "@/api/confluence";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 
@@ -219,7 +220,7 @@ export function AssistantPage() {
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [showConnectors, setShowConnectors] = useState(false);
-  const [connectorCount] = useState(0); // TODO: fetch from API
+  const [connectorCount, setConnectorCount] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
@@ -402,7 +403,7 @@ export function AssistantPage() {
   useEffect(() => {
     async function loadData() {
       try {
-        const [modelsData, datasetsData, configData] = await Promise.all([
+        const [modelsData, datasetsData, configData, connectionsData] = await Promise.all([
           listModels().catch(() => []),
           listDatasets().catch(() => []),
           getConfig().catch(() => ({
@@ -411,10 +412,12 @@ export function AssistantPage() {
             kb_enabled: false,
             web_search_enabled: false,
           })),
+          listConnections("active").catch(() => []),
         ]);
         setModels(modelsData);
         setDatasets(datasetsData);
         setConfig(configData);
+        setConnectorCount(connectionsData.filter((connection) => connection.status === "active").length);
 
         if (modelsData.length > 0) {
           const defaultId = configData.default_model_id || modelsData[0].id;
@@ -1016,6 +1019,7 @@ export function AssistantPage() {
     <ConnectorsPanel
       open={showConnectors}
       onClose={() => setShowConnectors(false)}
+      onCountChange={setConnectorCount}
     />
     </RightPanelContext.Provider>
     </>

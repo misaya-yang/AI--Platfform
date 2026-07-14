@@ -776,6 +776,7 @@ async def test_kb_ragas_batch_score_endpoint_queues_rag_traces(monkeypatch) -> N
 async def test_kb_ragas_score_retrieval_endpoint_maps_service_payload(monkeypatch) -> None:
     async def _score_retrieval_with_kb_ragas(**kwargs: Any) -> dict[str, Any]:
         assert kwargs["query"] == "refund policy"
+        assert kwargs["answer"] == "Refunds are available for 30 days."
         assert kwargs["contexts"] == ["Refunds are allowed within 30 days."]
         return {
             "judge_model": "qwen-test",
@@ -794,6 +795,7 @@ async def test_kb_ragas_score_retrieval_endpoint_maps_service_payload(monkeypatc
     result = await score_kb_ragas_retrieval(
         body=KbRagasScoreRetrievalRequest(
             query="refund policy",
+            answer="Refunds are available for 30 days.",
             contexts=["Refunds are allowed within 30 days."],
             metrics=["context_relevancy"],
         ),

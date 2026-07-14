@@ -212,6 +212,9 @@
       "documents": "Retrieved chunks"
     },
     "metrics": {
+      "faithfulness": "Faithfulness",
+      "response_relevancy": "Response relevancy",
+      "context_recall": "Context recall",
       "context_relevancy": "Context relevancy",
       "context_precision": "Context precision"
     },

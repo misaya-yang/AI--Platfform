@@ -26,16 +26,31 @@ class _RaisingLLMClient(_FakeLLMClient):
         raise RuntimeError("judge unavailable")
 
 
+class _FakeEmbedding:
+    def __init__(self, vectors: list[list[float]]) -> None:
+        self.vectors = vectors
+        self.texts: list[str] = []
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.texts = texts
+        return self.vectors
+
+    async def close(self) -> None:
+        return None
+
+
 def service_with_response(
     monkeypatch: pytest.MonkeyPatch,
     response: str,
+    *,
+    embedding: Any | None = None,
 ) -> tuple[KBRagasEvalService, _FakeLLMClient]:
     client = _FakeLLMClient(response)
     monkeypatch.setattr(
         "knowledge_service.services.eval.ragas_eval_service.LLMClient",
         lambda _config: client,
     )
-    return KBRagasEvalService(), client
+    return KBRagasEvalService(embedding=embedding), client
 
 
 @pytest.mark.asyncio
@@ -144,7 +159,7 @@ async def test_unknown_metrics_are_rejected(monkeypatch: pytest.MonkeyPatch) -> 
         await service.evaluate_retrieval(
             query="q",
             contexts=["c"],
-            metrics=["context_relevancy", "faithfulness"],
+            metrics=["context_relevancy", "unknown_metric"],
         )
 
 
@@ -230,3 +245,88 @@ async def test_context_precision_malformed_verdicts_are_review(
 
     assert result[0].label == "review"
     assert result[0].score == 0.0
+
+
+@pytest.mark.asyncio
+async def test_faithfulness_scores_supported_answer_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _client = service_with_response(
+        monkeypatch,
+        '{"claims": [{"claim": "A", "supported": true}, '
+        '{"claim": "B", "supported": false}], "explanation": "one unsupported"}',
+    )
+
+    result = await service.evaluate_retrieval(
+        query="q",
+        answer="A and B",
+        contexts=["A is supported"],
+        metrics=["faithfulness"],
+    )
+
+    assert result[0].metric == "faithfulness"
+    assert result[0].score == 0.5
+    assert result[0].label == "fail"
+
+
+@pytest.mark.asyncio
+async def test_context_recall_scores_reference_claim_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _client = service_with_response(
+        monkeypatch,
+        '{"claims": [{"claim": "A", "supported": true}, '
+        '{"claim": "B", "supported": true}], "explanation": "covered"}',
+    )
+
+    result = await service.evaluate_retrieval(
+        query="q",
+        contexts=["A and B"],
+        ground_truth="A and B",
+        metrics=["context_recall"],
+    )
+
+    assert result[0].metric == "context_recall"
+    assert result[0].score == 1.0
+    assert result[0].label == "pass"
+
+
+@pytest.mark.asyncio
+async def test_answer_relevancy_alias_uses_existing_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    embedding = _FakeEmbedding([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+    service, client = service_with_response(
+        monkeypatch,
+        '{"questions": ["q1", "q2", "q3"], "explanation": "reverse questions"}',
+        embedding=embedding,
+    )
+
+    result = await service.evaluate_retrieval(
+        query="original question",
+        answer="generated answer",
+        contexts=["context"],
+        metrics=["answer_relevancy"],
+    )
+
+    assert result[0].metric == "response_relevancy"
+    assert result[0].score == pytest.approx(2 / 3)
+    assert embedding.texts == ["original question", "q1", "q2", "q3"]
+    assert "generated answer" in client.messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_answer_metrics_without_answer_are_semantic_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, client = service_with_response(monkeypatch, '{"score": 1.0}')
+
+    result = await service.evaluate_retrieval(
+        query="q",
+        contexts=["c"],
+        metrics=["faithfulness", "response_relevancy"],
+    )
+
+    assert [item.label for item in result] == ["review", "review"]
+    assert all(item.failure_kind == "semantic_review" for item in result)
+    assert client.messages == []

@@ -212,6 +212,9 @@
       "documents": "召回片段数"
     },
     "metrics": {
+      "faithfulness": "回答忠实度",
+      "response_relevancy": "回答相关性",
+      "context_recall": "上下文召回率",
       "context_relevancy": "上下文相关性",
       "context_precision": "上下文精确度"
     },

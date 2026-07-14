@@ -111,7 +111,6 @@ from .artifact_persister import (
     sanitize_output_files as _artifact_sanitize_output_files,
 )
 from .middleware import MiddlewareChain, ToolVerdict, VerdictKind
-from .middlewares.permission import PermissionMiddleware
 from .middlewares.response_cap import ResponseCapMiddleware
 from .middlewares.runtime_memory import RuntimeMemoryMiddleware
 from .stream_helpers import merge_stream_tool_calls
@@ -162,6 +161,126 @@ PRIOR_TOOL_RESULTS_MARKER = "[Previous tool results"
 # Redaction lives in ai_gateway_core.security so trace_writer.py and agent_loop.py
 # share one pattern set instead of maintaining copies that can drift out of sync.
 _redact_trace_text = _redact_trace_text_shared
+
+
+def _streaming_tool_step_info(name: str, args: dict[str, Any]) -> dict[str, str]:
+    """Map a tool call to the compact Manus-style task panel fields."""
+    if name == "search_knowledge_base":
+        return {
+            "title": "检索知识库",
+            "description": str(args.get("query") or "")[:120],
+            "icon": "kb",
+        }
+    if name == "execute_python_code":
+        return {"title": "执行代码", "description": "Python", "icon": "code"}
+    if name == "generate_image":
+        return {
+            "title": "生成图片",
+            "description": str(args.get("prompt") or "")[:120],
+            "icon": "image",
+        }
+    if name == "generate_document":
+        return {
+            "title": "生成文档",
+            "description": str(args.get("title") or "Document")[:120],
+            "icon": "doc",
+        }
+    if name == "generate_pptx":
+        return {
+            "title": "生成PPT",
+            "description": str(args.get("title") or "Presentation")[:120],
+            "icon": "ppt",
+        }
+    return {"title": f"执行工具: {name}", "description": "", "icon": "tool"}
+
+
+def _trim_history_for_streaming(
+    messages_history: list[dict[str, Any]],
+    max_messages: int = 24,
+    max_chars: int = 20000,
+) -> list[dict[str, Any]]:
+    """Keep recent model-visible turns within the streaming prompt budget."""
+    selected: list[dict[str, Any]] = []
+    running_chars = 0
+    for item in reversed(messages_history):
+        if len(selected) >= max_messages:
+            break
+        role = str(item.get("role") or "user")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        content = item.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        content_text = str(content or "")
+        projected = running_chars + len(content_text)
+        if selected and projected > max_chars:
+            break
+        per_message_limit = 8000 if PRIOR_TOOL_RESULTS_MARKER in content_text else 2500
+        selected.append(
+            {
+                "role": role,
+                "content": _fmt_truncate_chars(content_text, per_message_limit),
+            }
+        )
+        running_chars = projected
+
+    selected.reverse()
+    return selected
+
+
+def _compact_forced_synthesis_messages(
+    messages: list[dict[str, Any]],
+    user_message: str,
+) -> list[dict[str, Any]]:
+    """Rebuild a minimal alternating-role prompt after an empty synthesis."""
+    tool_messages = [message for message in messages if message.get("role") == "tool"]
+    digest_lines: list[str] = []
+    for message in tool_messages[-5:]:
+        tool_name = message.get("name") or "tool"
+        content = str(message.get("content") or "").strip()
+        if content:
+            digest_lines.append(f"• {tool_name}: {content[:1200]}")
+    digest = "\n".join(digest_lines) or "(no tool results captured)"
+    system_messages = [message for message in messages if message.get("role") == "system"]
+    return [
+        *system_messages,
+        {
+            "role": "user",
+            "content": (
+                f"{user_message}\n\n"
+                "---\nTool results collected so far:\n"
+                f"{digest}\n\n"
+                "Please give the user a direct, helpful answer using these results. "
+                "If the tools didn't find what the user needed, say so politely and "
+                "suggest one concrete next step."
+            ),
+        },
+    ]
+
+
+def _forced_synthesis_fallback(messages: list[dict[str, Any]]) -> str:
+    """Build the final user-facing fallback from recent tool observations."""
+    summary_bits: list[str] = []
+    tool_messages = [message for message in messages if message.get("role") == "tool"]
+    for message in tool_messages[-3:]:
+        tool_name = message.get("name") or "tool"
+        content = str(message.get("content") or "").strip()
+        if content:
+            summary_bits.append(f"- **{tool_name}**: {content[:220]}")
+    if summary_bits:
+        return (
+            "I ran into trouble composing a final answer, but here's what I found. "
+            "Please try rephrasing your question or ask a follow-up.\n\n"
+            + "\n".join(summary_bits)
+        )
+    return (
+        "I wasn't able to complete this request. Please try rephrasing your question "
+        "or breaking it into smaller parts."
+    )
 
 
 # =============================================================================
@@ -279,6 +398,16 @@ class AgentLoopEvent:
             "data": self.data,
             "timestamp": self.timestamp,
         }
+
+
+@dataclass
+class StreamingModelTurn:
+    """Mutable result populated while a single model turn is streamed."""
+
+    first_token_emitted: bool
+    content: str = ""
+    thinking_content: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -592,11 +721,6 @@ class AgentLoop:
                 phase_tag=AgentLoopPhase.MEMORY_LOADING,
             )
         )
-        # PermissionMiddleware with the default allow-all policy is a no-op;
-        # deployments that want real gating swap in a stricter policy via
-        # `loop.middleware_chain.add(PermissionMiddleware(my_policy))` or by
-        # overriding this method in a subclass.
-        chain.add(PermissionMiddleware())
         # ResponseCapMiddleware: uniform ~25K-token cap on every tool result,
         # with per-tool overrides available at construction. Sits last so
         # earlier middlewares see the untruncated payload.
@@ -2176,6 +2300,523 @@ class AgentLoop:
             except Exception:
                 logger.debug("Failed to persist context detail", exc_info=True)
 
+    async def _persist_streaming_user_message(
+        self,
+        ctx: AgentLoopContext,
+        metadata: dict[str, Any],
+    ) -> None:
+        try:
+            await self.session_manager.add_message(
+                session_id=ctx.session_id,
+                role="user",
+                content=ctx.message,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception(
+                "[CRITICAL] User message persistence failed for session %s",
+                ctx.session_id,
+            )
+
+    def _on_user_message_persist_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("User message persist failed: %s", task.exception())
+
+    def _schedule_streaming_user_message_persistence(self, ctx: AgentLoopContext) -> None:
+        if not self.session_manager:
+            return
+        try:
+            from datetime import datetime
+
+            metadata: dict[str, Any] = {"timestamp": datetime.utcnow().isoformat()}
+            if ctx.config.file_paths:
+                image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
+                metadata["attachments"] = [
+                    {
+                        "type": "image" if str(path).lower().endswith(image_exts) else "file",
+                        "url": path,
+                        "filename": str(path).split("/")[-1] if "/" in str(path) else str(path),
+                    }
+                    for path in ctx.config.file_paths
+                ]
+            task = asyncio.create_task(
+                self._persist_streaming_user_message(ctx, metadata)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._on_user_message_persist_done)
+        except (RuntimeError, TypeError):
+            logger.exception("Failed to schedule user message persistence")
+
+    async def _get_streaming_tools(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContextLike,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        if not self.tool_invoker:
+            return [], []
+
+        invocation_context = self._build_invocation_context(ctx, user=user)
+        tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
+            context=invocation_context,
+        )
+        try:
+            from ..tools.connector_registry import get_connector_registry
+            from ..tools.tool_registry import ToolCallRequest
+
+            registry = get_connector_registry()
+            claimed = registry.connector_tool_names()
+            if claimed:
+                connector_request = ToolCallRequest(
+                    call_id=ctx.request_id if hasattr(ctx, "request_id") else "agent-tool-list",
+                    tool_name="__connector_visibility_probe__",
+                    arguments={},
+                    user=user or ctx.user,
+                    metadata={
+                        "tenant_id": invocation_context.tenant_id,
+                        "session_id": invocation_context.session_id,
+                    },
+                )
+                visible = await registry.visible_tools(connector_request)
+                tool_defs = [tool for tool in tool_defs if tool.name not in claimed]
+                seen = {tool.name for tool in tool_defs}
+                for connector_tool in visible:
+                    if connector_tool.name not in seen:
+                        tool_defs.append(connector_tool)
+                        seen.add(connector_tool.name)
+        except Exception:
+            logger.exception(
+                "Connector-registry tool merge failed; continuing without connectors"
+            )
+
+        selected = select_tools(tool_defs, ctx.message)
+        tools: list[dict[str, Any]] = []
+        for tool in selected:
+            try:
+                tools.append(tool.to_openai_schema(compact=True))
+            except TypeError:
+                tools.append(tool.to_openai_schema())
+        names = [tool.name for tool in selected]
+        logger.info(
+            "[STREAMING-FIRST] All tools available: %s "
+            "(web_search_preference=%s, kb_ids=%s)",
+            names,
+            ctx.config.web_search_enabled,
+            ctx.config.kb_dataset_ids,
+        )
+        return tools, names
+
+    async def _get_streaming_dataset_name_map(
+        self,
+        ctx: AgentLoopContext,
+        user: UserContextLike,
+    ) -> dict[str, str] | None:
+        if not self.kb_service or not ctx.config.kb_dataset_ids:
+            return None
+        try:
+            rows = await asyncio.wait_for(self.kb_service.list_datasets(user), timeout=0.3)
+            if not isinstance(rows, list):
+                return None
+            names = {
+                str(row["dataset_id"]): str(row["name"])
+                for row in rows
+                if row and row.get("dataset_id") and row.get("name")
+            }
+            return names or None
+        except Exception:
+            logger.debug("Failed to load dataset name map", exc_info=True)
+            return None
+
+    async def _stream_model_turn(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        phase: AgentLoopPhase,
+        provider_name: str,
+        iteration: int,
+        started_at: float,
+        ttft_start: float,
+        denied_tools: set[str],
+        kb_search_completed: bool,
+        result: StreamingModelTurn,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        llm_started_at = time.time()
+        logger.info(
+            "[STREAMING-FIRST] Starting LLM call (iter=%s), total prep: %.0fms",
+            iteration,
+            (llm_started_at - started_at) * 1000,
+        )
+        tools_for_call: list[dict[str, Any]] | None = tools or None
+        if tools_for_call and kb_search_completed:
+            filtered_tools = [
+                schema
+                for schema in tools_for_call
+                if _fmt_tool_schema_name(schema) != "search_knowledge_base"
+            ]
+            if len(filtered_tools) != len(tools_for_call):
+                tools_for_call = filtered_tools
+                logger.debug(
+                    "[STREAMING-FIRST] Removed search_knowledge_base from remaining "
+                    "toolset after first KB completion."
+                )
+
+        model_info = self.model_registry.get_model(ctx.config.model_id)
+        native_search_config: dict[str, Any] | None = None
+        if model_info and getattr(model_info, "supports_native_search", False):
+            native_search_config = getattr(model_info, "native_search_config", None)
+
+        if tools_for_call and denied_tools:
+            tools_for_call = [
+                tool
+                for tool in tools_for_call
+                if (
+                    tool.get("function", {}).get("name")
+                    if isinstance(tool, dict)
+                    else getattr(tool, "name", "")
+                )
+                not in denied_tools
+            ]
+
+        await self._save_checkpoint(
+            ctx,
+            phase="model_turn_started",
+            iteration=iteration,
+            messages=messages,
+            resume_payload={
+                "tool_count": len(tools_for_call or []),
+                "generated_content_chars": len(ctx.generated_content or ""),
+            },
+        )
+
+        tool_calls_accumulated: dict[str, dict[str, Any]] = {}
+        tool_call_order: list[str] = []
+        anonymous_tool_counter = 0
+        call_usage: dict[str, int] = {}
+        thinking_started = False
+        thinking_ended = False
+        accumulated_thinking = ""
+        async for delta in self.model_registry.chat_stream(
+            model_id=ctx.config.model_id,
+            messages=messages,
+            temperature=ctx.config.temperature,
+            max_tokens=ctx.config.max_tokens,
+            tools=tools_for_call,
+            thinking_level=ctx.config.thinking_level,
+            native_search_config=native_search_config,
+        ):
+            if delta.thinking_content:
+                if not thinking_started:
+                    thinking_started = True
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="thinking_start",
+                        data={"model_id": ctx.config.model_id},
+                    )
+                accumulated_thinking += delta.thinking_content
+                result.thinking_content += delta.thinking_content
+                yield AgentLoopEvent(
+                    phase=phase,
+                    event_type="thinking_delta",
+                    data=delta.thinking_content,
+                )
+
+            if delta.content:
+                if thinking_started and not thinking_ended:
+                    thinking_ended = True
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="thinking_end",
+                        data={"content": accumulated_thinking},
+                    )
+                for text_chunk in _fmt_split_text_for_stream(delta.content):
+                    result.content += text_chunk
+                    ctx.generated_content += text_chunk
+                    if not result.first_token_emitted:
+                        ttft_ms = (time.time() - ttft_start) * 1000
+                        result.first_token_emitted = True
+                        logger.info("[STREAMING-FIRST] TTFT: %.0fms", ttft_ms)
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="ttft",
+                            data={"ttft_ms": round(ttft_ms, 2)},
+                        )
+                    yield AgentLoopEvent(
+                        phase=phase,
+                        event_type="text_delta",
+                        data=text_chunk,
+                    )
+
+            if delta.tool_calls:
+                anonymous_tool_counter = merge_stream_tool_calls(
+                    delta.tool_calls,
+                    tool_calls_accumulated,
+                    tool_call_order,
+                    anonymous_tool_counter,
+                )
+
+            if delta.usage:
+                normalized_usage = normalize_provider_cache_usage(
+                    delta.usage,
+                    provider_name,
+                )
+                for key, value in normalized_usage.items():
+                    if isinstance(value, (int, float)):
+                        call_usage[key] = max(call_usage.get(key, 0), int(value))
+                    elif value is not None:
+                        with contextlib.suppress(Exception):
+                            call_usage[key] = int(value)
+
+        for key, value in call_usage.items():
+            ctx.usage[key] = int(value)
+
+        if thinking_started and not thinking_ended:
+            yield AgentLoopEvent(
+                phase=phase,
+                event_type="thinking_end",
+                data={"content": accumulated_thinking},
+            )
+
+        tool_calls = [tool_calls_accumulated[key] for key in tool_call_order]
+        if len(tool_calls) > 1:
+            seen: set[tuple[str, str]] = set()
+            deduped: list[dict[str, Any]] = []
+            for tool_call in tool_calls:
+                function = tool_call.get("function") or {}
+                name = str(function.get("name") or "")
+                raw_arguments = function.get("arguments") or ""
+                try:
+                    parsed = json.loads(raw_arguments) if raw_arguments else {}
+                    normalized_arguments = json.dumps(
+                        parsed,
+                        sort_keys=True,
+                        ensure_ascii=False,
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    normalized_arguments = str(raw_arguments)
+                key = (name, normalized_arguments)
+                if key in seen:
+                    logger.info(
+                        "[STREAMING-FIRST] Dropping duplicate tool call at "
+                        "batch-level: name=%s (same name+args as a prior call "
+                        "this iteration)",
+                        name,
+                    )
+                    continue
+                seen.add(key)
+                deduped.append(tool_call)
+            tool_calls = deduped
+        result.tool_calls = tool_calls
+
+    async def _run_forced_synthesis(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        messages: list[dict[str, Any]],
+        phase: AgentLoopPhase,
+        provider_name: str,
+        ttft_start: float,
+        attempt_label: str,
+    ) -> AsyncGenerator[AgentLoopEvent, None]:
+        first_token_emitted = bool(ctx.generated_content)
+        forced_usage: dict[str, int] = {}
+        try:
+            async for delta in self.model_registry.chat_stream(
+                model_id=ctx.config.model_id,
+                messages=messages,
+                temperature=min(ctx.config.temperature, 0.3),
+                max_tokens=min(ctx.config.max_tokens or 2048, 2048),
+                tools=None,
+            ):
+                if delta.content:
+                    for text_chunk in _fmt_split_text_for_stream(delta.content):
+                        ctx.generated_content += text_chunk
+                        if not first_token_emitted:
+                            ttft_ms = (time.time() - ttft_start) * 1000
+                            first_token_emitted = True
+                            logger.info(
+                                "[STREAMING-FIRST] TTFT (forced/%s): %.0fms",
+                                attempt_label,
+                                ttft_ms,
+                            )
+                            yield AgentLoopEvent(
+                                phase=phase,
+                                event_type="ttft",
+                                data={"ttft_ms": round(ttft_ms, 2)},
+                            )
+                        yield AgentLoopEvent(
+                            phase=phase,
+                            event_type="text_delta",
+                            data=text_chunk,
+                        )
+                if delta.usage:
+                    for key, value in normalize_provider_cache_usage(
+                        delta.usage,
+                        provider_name,
+                    ).items():
+                        if isinstance(value, (int, float)):
+                            forced_usage[key] = max(forced_usage.get(key, 0), int(value))
+                        elif value is not None:
+                            with contextlib.suppress(Exception):
+                                forced_usage[key] = int(value)
+        except Exception:
+            logger.exception(
+                "[STREAMING-FIRST] Forced synthesis (%s) raised; continuing to next fallback",
+                attempt_label,
+            )
+        for key, value in forced_usage.items():
+            ctx.usage[key] = int(value)
+
+    async def _persist_streaming_assistant_message(
+        self,
+        ctx: AgentLoopContext,
+        *,
+        contexts_for_persistence: list[dict[str, Any]],
+        web_search_results_for_persistence: dict[str, Any] | None,
+        quiz_id_for_persistence: str | None,
+        created_artifact_ids: list[str],
+        turn_thinking_content: str,
+        turn_tool_calls: list[dict[str, Any]],
+        turn_tool_results: list[dict[str, Any]],
+    ) -> None:
+        if not self.session_manager or not ctx.generated_content:
+            return
+        try:
+            from datetime import datetime
+
+            usage_in = int((ctx.usage or {}).get("input_tokens", 0) or 0)
+            usage_out = int((ctx.usage or {}).get("output_tokens", 0) or 0)
+            usage_payload = {
+                **(ctx.usage or {}),
+                "prompt_tokens": usage_in,
+                "completion_tokens": usage_out,
+            }
+            _persisted_thinking: str | None = None
+            if turn_thinking_content:
+                stripped = turn_thinking_content.strip()
+                if stripped:
+                    if len(stripped) > 16000:
+                        _persisted_thinking = (
+                            stripped[:8000]
+                            + "\n\n…[truncated]…\n\n"
+                            + stripped[-8000:]
+                        )
+                    else:
+                        _persisted_thinking = stripped
+
+            metadata = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "model_id": ctx.config.model_id,
+                "usage": usage_payload,
+                "contexts": contexts_for_persistence or None,
+                "web_search_results": web_search_results_for_persistence,
+                "quiz_id": quiz_id_for_persistence,
+                "artifact_ids": created_artifact_ids or None,
+                "engine": "agent_loop",
+                "mode": "streaming_first",
+                "thinking_content": _persisted_thinking,
+                "tool_calls": turn_tool_calls or None,
+                "tool_results": turn_tool_results or None,
+            }
+            size_ceiling = 800_000
+            for field_to_shed in ("tool_results", "tool_calls", "thinking_content"):
+                try:
+                    size = len(json.dumps(metadata, default=str))
+                except (TypeError, ValueError):
+                    break
+                if size <= size_ceiling:
+                    break
+                if metadata.get(field_to_shed) is not None:
+                    logger.warning(
+                        "[persist] metadata %d bytes over ceiling; shedding %s",
+                        size,
+                        field_to_shed,
+                    )
+                    metadata[field_to_shed] = None
+
+            await self.session_manager.add_message(
+                session_id=ctx.session_id,
+                role="assistant",
+                content=ctx.generated_content,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("Failed to persist assistant message (streaming-first)")
+
+    async def _sync_streaming_memory(
+        self,
+        ctx: AgentLoopContext,
+        terminal_envelope: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        memory_sync_allowed, memory_sync_reason = should_sync_turn_to_memory(
+            terminal_envelope
+        )
+        if self.memory_service and ctx.message and memory_sync_allowed:
+            try:
+                from ..memory.preference_extractor import (
+                    extract_preferences,
+                    merge_preferences,
+                    split_memory_updates,
+                )
+
+                extracted = extract_preferences(ctx.message)
+                preference_updates, fact_updates = split_memory_updates(extracted)
+                if preference_updates:
+                    existing_preferences = await self.memory_service.get_user_memory(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        key="preferences",
+                    )
+                    await self.memory_service.set_user_memory(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        key="preferences",
+                        value=merge_preferences(existing_preferences, preference_updates),
+                        metadata={"source": "auto_extract", "namespace": "preferences"},
+                    )
+                for key, value in fact_updates.items():
+                    await self.memory_service.set_user_memory(
+                        tenant_id=ctx.tenant_id,
+                        user_id=ctx.user_id,
+                        key=key,
+                        value=value,
+                        metadata={"source": "auto_extract", "namespace": "profile"},
+                    )
+            except Exception:
+                logger.exception("Failed to persist structured user memory")
+        elif self.memory_service and ctx.message:
+            logger.info(
+                "Skipping structured user memory sync for run=%s: %s",
+                ctx.run_id,
+                memory_sync_reason,
+            )
+
+        if not (
+            self.assistant_runtime
+            and self.assistant_runtime.features.memory_v2
+            and str(ctx.config.runtime_mode or "compat").lower() != "off"
+            and str(ctx.config.memory_profile or "basic").lower() != "off"
+        ):
+            return None
+        try:
+            sync_result = await self.assistant_runtime.sync_turn_to_memory(
+                tenant_id=ctx.tenant_id,
+                user_id=ctx.user_id,
+                session_id=ctx.session_id,
+                user_message=ctx.message,
+                assistant_message=ctx.generated_content,
+                terminal_envelope=terminal_envelope,
+            )
+            return sync_result.to_dict()
+        except Exception:
+            logger.exception("Failed to persist assistant runtime daily memory")
+            return {
+                "synced": False,
+                "skipped": True,
+                "reason": "memory_sync_failed",
+            }
+
     # =========================================================================
     # Streaming-First Mode Implementation (Manus-style)
     # =========================================================================
@@ -2239,7 +2880,6 @@ class AgentLoop:
             web_search_results_for_persistence: dict[str, Any] | None = None
             quiz_id_for_persistence: str | None = None
             created_artifact_ids: list[str] = []
-            memory_sync_result: dict[str, Any] | None = None
             # Turn-level accumulators for activity-drawer persistence.
             # These cross iteration boundaries (per-iteration `accumulated_thinking`
             # and `tool_calls_accumulated` get reset), so we append to these from
@@ -2252,94 +2892,12 @@ class AgentLoop:
 
             _sanitize_output_files = _artifact_sanitize_output_files
 
-            def _tool_step_info(name: str, args: dict[str, Any]) -> dict[str, str]:
-                """Minimal mapping for Manus-style task panel visualization."""
-                if name == "search_knowledge_base":
-                    q = str(args.get("query") or "")[:120]
-                    return {"title": "检索知识库", "description": q, "icon": "kb"}
-                if name == "execute_python_code":
-                    return {"title": "执行代码", "description": "Python", "icon": "code"}
-                if name == "generate_image":
-                    p = str(args.get("prompt") or "")[:120]
-                    return {"title": "生成图片", "description": p, "icon": "image"}
-                if name == "generate_document":
-                    t = str(args.get("title") or "Document")[:120]
-                    return {"title": "生成文档", "description": t, "icon": "doc"}
-                if name == "generate_pptx":
-                    t = str(args.get("title") or "Presentation")[:120]
-                    return {"title": "生成PPT", "description": t, "icon": "ppt"}
-                return {"title": f"执行工具: {name}", "description": "", "icon": "tool"}
-
             # Pure helpers extracted to tool_result_formatter.py — kept as local
             # aliases so call sites below don't need to change yet.
-            _truncate_text = _fmt_truncate_chars
             _split_text_for_stream = _fmt_split_text_for_stream
             _compact_context_payload = _fmt_compact_context_payload
             _compact_tool_result_for_model = _fmt_compact_tool_result_for_model
-            _tool_schema_name = _fmt_tool_schema_name
             _kb_query_fingerprint = _fmt_kb_query_fingerprint
-
-            def _select_tools_for_request(
-                all_defs: list[Any],
-                user_message: str,
-            ) -> list[Any]:
-                """ADR-003 Phase 2: Token-aware, relevance-scored tool selection."""
-                return select_tools(all_defs, user_message)
-
-            def _trim_history_for_streaming(
-                messages_history: list[dict[str, Any]],
-                max_messages: int = 24,
-                max_chars: int = 20000,
-            ) -> list[dict[str, Any]]:
-                """
-                Keep recent turns only for streaming-first calls.
-
-                This avoids carrying very long sessions into each model/tool round,
-                which inflates prompt tokens and delays first visible text.
-                """
-                if not messages_history:
-                    return []
-
-                selected: list[dict[str, Any]] = []
-                running_chars = 0
-                for item in reversed(messages_history):
-                    if len(selected) >= max_messages:
-                        break
-                    role = str(item.get("role") or "user")
-                    if role not in {"user", "assistant", "tool"}:
-                        continue
-                    content = item.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            str(part.get("text") or "")
-                            for part in content
-                            if isinstance(part, dict) and part.get("type") == "text"
-                        )
-                    content_text = str(content or "")
-                    projected = running_chars + len(content_text)
-                    # Always keep at least the latest turn, then enforce the budget.
-                    if selected and projected > max_chars:
-                        break
-                    # Messages carrying a prior-turn tool-results block (quiz
-                    # questions, web-search hits, …) need a larger per-message
-                    # cap; 2500 chars would amputate the block mid-list and
-                    # cause cross-model follow-ups to hallucinate (see
-                    # _session_history_to_messages in assistant_service.py).
-                    per_msg_cap = (
-                        8000
-                        if PRIOR_TOOL_RESULTS_MARKER in content_text
-                        else 2500
-                    )
-                    selected.append(
-                        {
-                            "role": role,
-                            "content": _truncate_text(content_text, per_msg_cap),
-                        }
-                    )
-                    running_chars = projected
-
-                selected.reverse()
-                return selected
 
             # Determine whether the selected model supports vision.
             model_info = (
@@ -2349,49 +2907,7 @@ class AgentLoop:
             provider_name = str(getattr(model_provider, "value", model_provider) or "")
             model_supports_vision = bool(getattr(model_info, "supports_vision", False))
 
-            # Fire-and-forget persist user message for session restoration.
-            if self.session_manager:
-                try:
-                    from datetime import datetime
-
-                    user_msg_metadata: dict[str, Any] = {
-                        "timestamp": datetime.utcnow().isoformat(),
-                    }
-                    if ctx.config.file_paths:
-                        image_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
-                        user_msg_metadata["attachments"] = [
-                            {
-                                "type": "image" if str(fp).lower().endswith(image_exts) else "file",
-                                "url": fp,
-                                "filename": str(fp).split("/")[-1] if "/" in str(fp) else str(fp),
-                            }
-                            for fp in (ctx.config.file_paths or [])
-                        ]
-
-                    async def _persist_user_message() -> None:
-                        try:
-                            await self.session_manager.add_message(
-                                session_id=ctx.session_id,
-                                role="user",
-                                content=ctx.message,
-                                metadata=user_msg_metadata,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "[CRITICAL] User message persistence failed for session %s",
-                                ctx.session_id,
-                            )
-
-                    _task = asyncio.create_task(_persist_user_message())
-                    # Keep strong ref so Python 3.11+ doesn't GC mid-flight
-                    self._background_tasks.add(_task)
-                    def _done(t: asyncio.Task) -> None:
-                        self._background_tasks.discard(t)
-                        if not t.cancelled() and t.exception() is not None:
-                            logger.error(f"User message persist failed: {t.exception()}")
-                    _task.add_done_callback(_done)
-                except (RuntimeError, TypeError):
-                    logger.exception("Failed to schedule user message persistence")
+            self._schedule_streaming_user_message_persistence(ctx)
 
             # Process uploaded files (if any) so the model can see them.
             processed_files = None
@@ -2437,85 +2953,8 @@ class AgentLoop:
                     )
                     processed_files = None
 
-            # Step 2: Get tool definitions (ALL tools available - AI decides when to use)
-            tools = []
-            available_tool_names: list[str] = []
-            invocation_context = self._build_invocation_context(ctx, user=user)
-            if self.tool_invoker:
-                # ADR-002: tenant-filtered tool definitions
-                tool_defs = await self.tool_invoker.get_tool_definitions_filtered(
-                    context=invocation_context,
-                )
-                # Connector tools (Confluence, future Gmail/Drive/Linear) live
-                # in BOTH the global ToolRegistry (so execution dispatch works
-                # for any inbound call) AND the ConnectorRegistry with a
-                # per-tenant predicate. For the PER-REQUEST model tool list,
-                # we subtract connector-claimed tools and re-add only those
-                # whose predicate says this tenant has an active connection.
-                # Unconnected tenants pay zero context tax.
-                try:
-                    from ..tools.connector_registry import get_connector_registry
-                    from ..tools.tool_registry import ToolCallRequest as _TR
-
-                    registry = get_connector_registry()
-                    claimed = registry.connector_tool_names()
-                    if claimed:
-                        connector_request = _TR(
-                            call_id=ctx.request_id if hasattr(ctx, "request_id") else "agent-tool-list",
-                            tool_name="__connector_visibility_probe__",
-                            arguments={},
-                            user=user or ctx.user,
-                            metadata={
-                                "tenant_id": invocation_context.tenant_id,
-                                "session_id": invocation_context.session_id,
-                            },
-                        )
-                        visible = await registry.visible_tools(connector_request)
-                        # Drop every connector-claimed tool from the base list,
-                        # then add back the predicate-allowed subset.
-                        tool_defs = [t for t in tool_defs if t.name not in claimed]
-                        seen = {t.name for t in tool_defs}
-                        for cd in visible:
-                            if cd.name not in seen:
-                                tool_defs.append(cd)
-                                seen.add(cd.name)
-                except Exception:
-                    logger.exception("Connector-registry tool merge failed; continuing without connectors")
-                tool_defs = _select_tools_for_request(tool_defs, ctx.message)
-                tools = []
-                for t in tool_defs:
-                    try:
-                        tools.append(t.to_openai_schema(compact=True))
-                    except TypeError:
-                        # Backward compatibility for tests/mocks/custom tool defs
-                        # that haven't adopted the optional compact parameter.
-                        tools.append(t.to_openai_schema())
-                available_tool_names = [t.name for t in tool_defs]
-                logger.info(
-                    f"[STREAMING-FIRST] All tools available: {available_tool_names} "
-                    f"(web_search_preference={ctx.config.web_search_enabled}, kb_ids={ctx.config.kb_dataset_ids})"
-                )
-
-            # Best-effort dataset_id -> dataset_name mapping for prompt clarity (low latency budget).
-            dataset_name_map: dict[str, str] | None = None
-            if self.kb_service and ctx.config.kb_dataset_ids:
-                try:
-                    ds_rows = await asyncio.wait_for(
-                        self.kb_service.list_datasets(user),
-                        timeout=0.3,
-                    )
-                    if isinstance(ds_rows, list):
-                        ds_map = {}
-                        for row in ds_rows:
-                            ds_id = (row or {}).get("dataset_id")
-                            name = (row or {}).get("name")
-                            if ds_id and name:
-                                ds_map[str(ds_id)] = str(name)
-                        if ds_map:
-                            dataset_name_map = ds_map
-                except Exception:
-                    logger.debug("Failed to load dataset name map", exc_info=True)
-                    dataset_name_map = None
+            tools, available_tool_names = await self._get_streaming_tools(ctx, user)
+            dataset_name_map = await self._get_streaming_dataset_name_map(ctx, user)
 
             # runtime skill metadata: load dynamically and inject only compact metadata.
             if self.assistant_runtime:
@@ -2844,10 +3283,6 @@ class AgentLoop:
             # Step 3: Start streaming loop with tool handling
             max_iterations = ctx.config.max_tool_iterations
             iteration = 0
-            accumulated_content = ""
-            accumulated_thinking = ""
-            thinking_started = False
-            thinking_ended = False
             kb_call_count = 0
             kb_call_limit = max(1, int(getattr(ctx.config, "kb_max_queries", 1) or 1))
             kb_dedup = KBDedupState()
@@ -2892,222 +3327,26 @@ class AgentLoop:
                     )
                     return
 
-                # Stream from model with tools
-                t_llm_start = time.time()
-                logger.info(
-                    f"[STREAMING-FIRST] Starting LLM call (iter={iteration}), total prep: {(t_llm_start - t0) * 1000:.0f}ms"
+                model_turn = StreamingModelTurn(
+                    first_token_emitted=first_token_emitted
                 )
-                tools_for_iteration = tools if tools else None
-                if tools_for_iteration and kb_dedup.search_completed:
-                    filtered_tools = [
-                        schema
-                        for schema in tools_for_iteration
-                        if _tool_schema_name(schema) != "search_knowledge_base"
-                    ]
-                    if len(filtered_tools) != len(tools_for_iteration):
-                        tools_for_iteration = filtered_tools
-                        logger.debug(
-                            "[STREAMING-FIRST] Removed search_knowledge_base from remaining "
-                            "toolset after first KB completion."
-                        )
-
-                # Native web search: enable for capable models (Qwen
-                # `enable_search`, Anthropic `web_search_20250305`, Gemini 3.x
-                # `google_search`). Gemini 3 supports combining built-in
-                # grounding with functionDeclarations, so no provider skip.
-                # PR-2 deleted the Tavily-backed ``search_web`` tool, so this
-                # block no longer rewrites the toolset; it only resolves the
-                # native_search_cfg passed to chat_stream below.
-                _model_info = self.model_registry.get_model(ctx.config.model_id)
-                native_search_cfg: dict[str, Any] | None = None
-                if _model_info and getattr(_model_info, "supports_native_search", False):
-                    native_search_cfg = getattr(
-                        _model_info, "native_search_config", None
-                    )
-
-                tools_for_call = tools_for_iteration
-                if tools_for_call and denied_tools:
-                    tools_for_call = [
-                        t
-                        for t in tools_for_call
-                        if (
-                            t.get("function", {}).get("name")
-                            if isinstance(t, dict)
-                            else getattr(t, "name", "")
-                        )
-                        not in denied_tools
-                    ]
-
-                await self._save_checkpoint(
+                async for event in self._stream_model_turn(
                     ctx,
-                    phase="model_turn_started",
+                    messages=messages,
+                    tools=tools,
+                    phase=phase,
+                    provider_name=provider_name,
                     iteration=iteration,
-                    messages=messages,
-                    resume_payload={
-                        "tool_count": len(tools_for_call or []),
-                        "generated_content_chars": len(ctx.generated_content or ""),
-                    },
-                )
-
-                tool_calls_accumulated: dict[str, dict[str, Any]] = {}
-                tool_call_order: list[str] = []
-                anonymous_tool_counter = 0
-                call_usage: dict[str, int] = {}
-                # Reset thinking state per iteration
-                thinking_started = False
-                thinking_ended = False
-                accumulated_thinking = ""
-                async for delta in self.model_registry.chat_stream(
-                    model_id=ctx.config.model_id,
-                    messages=messages,
-                    temperature=ctx.config.temperature,
-                    max_tokens=ctx.config.max_tokens,
-                    tools=tools_for_call,
-                    thinking_level=ctx.config.thinking_level,
-                    native_search_config=native_search_cfg,
+                    started_at=t0,
+                    ttft_start=ttft_start,
+                    denied_tools=denied_tools,
+                    kb_search_completed=kb_dedup.search_completed,
+                    result=model_turn,
                 ):
-                    # Emit thinking content (Qwen reasoning_content / Gemini thought parts)
-                    if delta.thinking_content:
-                        if not thinking_started:
-                            thinking_started = True
-                            yield AgentLoopEvent(
-                                phase=phase,
-                                event_type="thinking_start",
-                                data={"model_id": ctx.config.model_id},
-                            )
-                        accumulated_thinking += delta.thinking_content
-                        turn_thinking_content += delta.thinking_content
-                        yield AgentLoopEvent(
-                            phase=phase,
-                            event_type="thinking_delta",
-                            data=delta.thinking_content,
-                        )
-
-                    # Emit text content immediately (streaming-first!)
-                    if delta.content:
-                        # Close thinking block before content starts
-                        if thinking_started and not thinking_ended:
-                            thinking_ended = True
-                            yield AgentLoopEvent(
-                                phase=phase,
-                                event_type="thinking_end",
-                                data={"content": accumulated_thinking},
-                            )
-                        for text_chunk in _split_text_for_stream(delta.content):
-                            accumulated_content += text_chunk
-                            ctx.generated_content += text_chunk
-
-                            # Track TTFT on first visible content chunk.
-                            if not first_token_emitted:
-                                ttft_ms = (time.time() - ttft_start) * 1000
-                                first_token_emitted = True
-                                logger.info(f"[STREAMING-FIRST] TTFT: {ttft_ms:.0f}ms")
-                                yield AgentLoopEvent(
-                                    phase=phase,
-                                    event_type="ttft",
-                                    data={"ttft_ms": round(ttft_ms, 2)},
-                                )
-
-                            yield AgentLoopEvent(
-                                phase=phase,
-                                event_type="text_delta",
-                                data=text_chunk,
-                            )
-
-                    # Collect tool calls
-                    if delta.tool_calls:
-                        anonymous_tool_counter = merge_stream_tool_calls(
-                            delta.tool_calls,
-                            tool_calls_accumulated,
-                            tool_call_order,
-                            anonymous_tool_counter,
-                        )
-
-                    # Track usage
-                    if delta.usage:
-                        normalized_usage = normalize_provider_cache_usage(
-                            delta.usage,
-                            provider_name,
-                        )
-                        for key, value in normalized_usage.items():
-                            if isinstance(value, (int, float)):
-                                ivalue = int(value)
-                                call_usage[key] = max(call_usage.get(key, 0), ivalue)
-                            elif value is not None:
-                                # Keep latest non-numeric field if providers add any extra metadata.
-                                # Numeric tokens are accumulated separately after each model call.
-                                with contextlib.suppress(Exception):
-                                    call_usage[key] = int(value)
-
-                # Aggregate usage per model call (sum across iterations, max within each call).
-                for key, value in call_usage.items():
-                    # Keep latest model-call usage for UI consistency (legacy behavior).
-                    ctx.usage[key] = int(value)
-
-                # Close any open thinking block after stream ends
-                if thinking_started and not thinking_ended:
-                    thinking_ended = True
-                    yield AgentLoopEvent(
-                        phase=phase,
-                        event_type="thinking_end",
-                        data={"content": accumulated_thinking},
-                    )
-
-                tool_calls_batch = [tool_calls_accumulated[k] for k in tool_call_order]
-
-                # Post-accumulator dedup: collapse tool calls that share the
-                # same (name, fully-assembled-args) pair within a single
-                # iteration.
-                #
-                # This is a provider-agnostic safety net. The symptom we first
-                # saw in prod was two Activity-drawer `generate_quiz` pills
-                # for a single logical call on Gemini 3 Flash — the
-                # `_stream_google` in-stream dedup (keyed on name+args) was in
-                # place but something still leaked through. Rather than chase
-                # the exact provider wire shape (chunk-key drift in
-                # `merge_stream_tool_calls`, partial-args accumulator races,
-                # re-emission in the finish chunk, etc. — each provider has
-                # its own quirks), we dedup once here after the accumulator
-                # has fully assembled each call. By this point chunks are
-                # merged, so an `(name, normalized_args_json)` comparison is
-                # reliable.
-                #
-                # Trade-off: a model that legitimately calls the same tool
-                # twice with identical args in the same iteration gets the
-                # second call silently dropped. That's an unusual pattern for
-                # us — same-name calls typically vary args (e.g. different
-                # search queries). If it becomes a problem, promote the INFO
-                # log below to capture enough context for triage.
-                if len(tool_calls_batch) > 1:
-                    _seen_tc: set[tuple[str, str]] = set()
-                    _deduped: list[dict[str, Any]] = []
-                    for _tc in tool_calls_batch:
-                        _fn = _tc.get("function") or {}
-                        _name = str(_fn.get("name") or "")
-                        _raw_args = _fn.get("arguments") or ""
-                        # Normalize args for comparison: re-serialize parsed
-                        # JSON with sort_keys so whitespace/ordering noise
-                        # doesn't defeat the dedup. Fall back to raw string
-                        # for unparseable fragments (keeps them distinct).
-                        try:
-                            _parsed = json.loads(_raw_args) if _raw_args else {}
-                            _args_norm = json.dumps(
-                                _parsed, sort_keys=True, ensure_ascii=False
-                            )
-                        except (json.JSONDecodeError, ValueError):
-                            _args_norm = str(_raw_args)
-                        _tc_key = (_name, _args_norm)
-                        if _tc_key in _seen_tc:
-                            logger.info(
-                                "[STREAMING-FIRST] Dropping duplicate tool "
-                                "call at batch-level: name=%s (same name+args "
-                                "as a prior call this iteration)",
-                                _name,
-                            )
-                            continue
-                        _seen_tc.add(_tc_key)
-                        _deduped.append(_tc)
-                    tool_calls_batch = _deduped
+                    yield event
+                first_token_emitted = model_turn.first_token_emitted
+                turn_thinking_content += model_turn.thinking_content
+                tool_calls_batch = model_turn.tool_calls
 
                 # If no tool calls, we're done
                 if not tool_calls_batch:
@@ -3120,11 +3359,10 @@ class AgentLoop:
                 # Add assistant message with tool calls to history
                 assistant_msg = {
                     "role": "assistant",
-                    "content": accumulated_content,
+                    "content": model_turn.content,
                     "tool_calls": tool_calls_batch,
                 }
                 messages.append(assistant_msg)
-                accumulated_content = ""  # Reset for next iteration
 
                 # ADR-003: Pre-execute parallel sub-agent calls, cache results by tool_id
                 _subagent_results: dict[str, str] = {}
@@ -3367,7 +3605,7 @@ class AgentLoop:
                     step_success: bool | None = None
                     step_error: str | None = None
                     step_result_preview: str | None = None
-                    step_info = _tool_step_info(tool_name, tool_args)
+                    step_info = _streaming_tool_step_info(tool_name, tool_args)
                     step_started_payload: dict[str, Any] = {
                         "step_id": step_id,
                         "title": step_info.get("title") or f"执行工具: {tool_name}",
@@ -4322,66 +4560,6 @@ class AgentLoop:
 
                 # Continue loop to get LLM's response to tool results
 
-            # If the loop hit limits without yielding a natural answer, force
-            # one final synthesis pass (tools disabled) based on collected
-            # observations. `async def` with `yield` can't `return` a value,
-            # so we signal success by checking `ctx.generated_content` after
-            # each call instead of returning a bool.
-            async def _run_forced_synthesis(
-                messages_for_call: list[dict[str, Any]], attempt_label: str
-            ):
-                """Stream a single no-tools completion, yielding events.
-                Caller checks `ctx.generated_content` afterwards to see if
-                anything was produced."""
-                nonlocal first_token_emitted
-                forced_usage: dict[str, int] = {}
-                try:
-                    async for _delta in self.model_registry.chat_stream(
-                        model_id=ctx.config.model_id,
-                        messages=messages_for_call,
-                        temperature=min(ctx.config.temperature, 0.3),
-                        max_tokens=min(ctx.config.max_tokens or 2048, 2048),
-                        tools=None,
-                    ):
-                        if _delta.content:
-                            for _text_chunk in _split_text_for_stream(_delta.content):
-                                ctx.generated_content += _text_chunk
-                                if not first_token_emitted:
-                                    _ttft_ms = (time.time() - ttft_start) * 1000
-                                    first_token_emitted = True
-                                    logger.info(
-                                        "[STREAMING-FIRST] TTFT (forced/%s): %.0fms",
-                                        attempt_label,
-                                        _ttft_ms,
-                                    )
-                                    yield AgentLoopEvent(
-                                        phase=phase,
-                                        event_type="ttft",
-                                        data={"ttft_ms": round(_ttft_ms, 2)},
-                                    )
-                                yield AgentLoopEvent(
-                                    phase=phase,
-                                    event_type="text_delta",
-                                    data=_text_chunk,
-                                )
-                        if _delta.usage:
-                            for _k, _v in normalize_provider_cache_usage(
-                                _delta.usage,
-                                provider_name,
-                            ).items():
-                                if isinstance(_v, (int, float)):
-                                    forced_usage[_k] = max(forced_usage.get(_k, 0), int(_v))
-                                elif _v is not None:
-                                    with contextlib.suppress(Exception):
-                                        forced_usage[_k] = int(_v)
-                except Exception:
-                    logger.exception(
-                        "[STREAMING-FIRST] Forced synthesis (%s) raised; continuing to next fallback",
-                        attempt_label,
-                    )
-                for _k, _v in forced_usage.items():
-                    ctx.usage[_k] = int(_v)
-
             # Forced-synthesis trigger: fire when the loop ended badly, not
             # just when content is empty. Captures the leaked-narrative case
             # ("正在生成 PPT…") where the model lied then ran out of iterations
@@ -4406,7 +4584,14 @@ class AgentLoop:
                     not ctx.generated_content.strip(),
                 )
                 # Attempt 1: same messages, tools disabled, small token budget.
-                async for _ev in _run_forced_synthesis(messages, "full"):
+                async for _ev in self._run_forced_synthesis(
+                    ctx,
+                    messages=messages,
+                    phase=phase,
+                    provider_name=provider_name,
+                    ttft_start=ttft_start,
+                    attempt_label="full",
+                ):
                     yield _ev
 
             if not ctx.generated_content.strip():
@@ -4414,40 +4599,18 @@ class AgentLoop:
                     "[STREAMING-FIRST] Forced synthesis #1 empty. Retrying with "
                     "compacted history (system + user + tool digest)."
                 )
-                # Attempt 2: reduce to a minimal shape the model can't refuse.
-                # Some models return empty when the message list has many
-                # assistant turns with tool_calls but no final text — this
-                # rebuilds a clean "here's the question, here's what I found,
-                # now answer" shape.
-                #
-                # NOTE: derive the tool digest from `messages` (the live source
-                # of truth), NOT from `ctx.tool_results` — that field is dead
-                # state from the old 8-step pipeline and is never written to
-                # by this loop.
-                _tool_msgs = [m for m in messages if m.get("role") == "tool"]
-                _digest_lines: list[str] = []
-                for _tm in _tool_msgs[-5:]:
-                    _tname = _tm.get("name") or "tool"
-                    _tcontent = str(_tm.get("content") or "").strip()
-                    if _tcontent:
-                        _digest_lines.append(f"• {_tname}: {_tcontent[:1200]}")
-                _digest = "\n".join(_digest_lines) or "(no tool results captured)"
-                _head_system = [m for m in messages if m.get("role") == "system"]
-                # One user message, not two — Anthropic's API rejects
-                # consecutive same-role messages with "roles must alternate".
-                _compact_user_content = (
-                    f"{ctx.message}\n\n"
-                    "---\nTool results collected so far:\n"
-                    f"{_digest}\n\n"
-                    "Please give the user a direct, helpful answer using "
-                    "these results. If the tools didn't find what the user "
-                    "needed, say so politely and suggest one concrete next step."
+                compact_messages = _compact_forced_synthesis_messages(
+                    messages,
+                    ctx.message,
                 )
-                _compact_messages: list[dict[str, Any]] = [
-                    *_head_system,
-                    {"role": "user", "content": _compact_user_content},
-                ]
-                async for _ev in _run_forced_synthesis(_compact_messages, "compact"):
+                async for _ev in self._run_forced_synthesis(
+                    ctx,
+                    messages=compact_messages,
+                    phase=phase,
+                    provider_name=provider_name,
+                    ttft_start=ttft_start,
+                    attempt_label="compact",
+                ):
                     yield _ev
 
             if not ctx.generated_content.strip():
@@ -4474,30 +4637,7 @@ class AgentLoop:
                         "recoverable": True,
                     },
                 )
-                # Build a best-effort answer from the tool observations so the
-                # user sees SOMETHING useful — but framed as a summary from
-                # the assistant, not an internal error dump. Derive from
-                # `messages` since `ctx.tool_results` is dead state.
-                _tool_msgs_final = [m for m in messages if m.get("role") == "tool"]
-                _summary_bits: list[str] = []
-                for _tm in _tool_msgs_final[-3:]:
-                    _tname = _tm.get("name") or "tool"
-                    _tcontent = str(_tm.get("content") or "").strip()
-                    if _tcontent:
-                        _summary_bits.append(f"- **{_tname}**: {_tcontent[:220]}")
-                if _summary_bits:
-                    _fallback_text = (
-                        "I ran into trouble composing a final answer, but "
-                        "here's what I found. Please try rephrasing your "
-                        "question or ask a follow-up.\n\n"
-                        + "\n".join(_summary_bits)
-                    )
-                else:
-                    _fallback_text = (
-                        "I wasn't able to complete this request. Please "
-                        "try rephrasing your question or breaking it into "
-                        "smaller parts."
-                    )
+                _fallback_text = _forced_synthesis_fallback(messages)
                 ctx.generated_content = _fallback_text
                 for _chunk in _split_text_for_stream(_fallback_text):
                     yield AgentLoopEvent(
@@ -4509,156 +4649,21 @@ class AgentLoop:
             # Emit completion event
             total_time_ms = (time.time() - start_time) * 1000
 
-            # Persist assistant message with metadata for session restoration (history + contexts + artifacts)
-            if self.session_manager and ctx.generated_content:
-                try:
-                    from datetime import datetime
-
-                    usage_in = int((ctx.usage or {}).get("input_tokens", 0) or 0)
-                    usage_out = int((ctx.usage or {}).get("output_tokens", 0) or 0)
-                    # Store both normalized keys and OpenAI-style keys for frontend compatibility.
-                    usage_payload = {
-                        **(ctx.usage or {}),
-                        "prompt_tokens": usage_in,
-                        "completion_tokens": usage_out,
-                    }
-
-                    # Cap thinking payload to avoid JSONB bloat (sessions cap
-                    # metadata at 1MB). Reasoning models can emit 10k+ chars;
-                    # we keep the head + tail so reload still shows context.
-                    _persisted_thinking: str | None = None
-                    if turn_thinking_content:
-                        _stripped = turn_thinking_content.strip()
-                        if _stripped:
-                            if len(_stripped) > 16000:
-                                _persisted_thinking = (
-                                    _stripped[:8000]
-                                    + "\n\n…[truncated]…\n\n"
-                                    + _stripped[-8000:]
-                                )
-                            else:
-                                _persisted_thinking = _stripped
-
-                    _metadata = {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "model_id": ctx.config.model_id,
-                        "usage": usage_payload,
-                        "contexts": contexts_for_persistence or None,
-                        "web_search_results": web_search_results_for_persistence,
-                        "quiz_id": quiz_id_for_persistence,
-                        "artifact_ids": created_artifact_ids or None,
-                        "engine": "agent_loop",
-                        "mode": "streaming_first",
-                        # Activity-drawer restoration fields. Any of these
-                        # may be None/[] for turns without reasoning/tools;
-                        # the frontend guards on presence.
-                        "thinking_content": _persisted_thinking,
-                        "tool_calls": turn_tool_calls or None,
-                        "tool_results": turn_tool_results or None,
-                    }
-
-                    # Final safety net: if the metadata is about to push the
-                    # row past the 1MB JSONB ceiling, shed activity fields in
-                    # priority order (tool_results first, then tool_calls,
-                    # then thinking). Losing an Activity drawer view is a far
-                    # better failure mode than losing the entire assistant
-                    # message on the hard guard in database_session_manager.
-                    _size_ceiling = 800_000
-                    for _shed in ("tool_results", "tool_calls", "thinking_content"):
-                        try:
-                            _size = len(json.dumps(_metadata, default=str))
-                        except (TypeError, ValueError):
-                            break
-                        if _size <= _size_ceiling:
-                            break
-                        if _metadata.get(_shed) is not None:
-                            logger.warning(
-                                "[persist] metadata %d bytes over ceiling; "
-                                "shedding %s",
-                                _size,
-                                _shed,
-                            )
-                            _metadata[_shed] = None
-
-                    await self.session_manager.add_message(
-                        session_id=ctx.session_id,
-                        role="assistant",
-                        content=ctx.generated_content,
-                        metadata=_metadata,
-                    )
-                except Exception:
-                    logger.exception("Failed to persist assistant message (streaming-first)")
-
-            turn_terminal_envelope = self._terminal_envelope(ctx, status="succeeded")
-            memory_sync_allowed, memory_sync_reason = should_sync_turn_to_memory(
-                turn_terminal_envelope
+            await self._persist_streaming_assistant_message(
+                ctx,
+                contexts_for_persistence=contexts_for_persistence,
+                web_search_results_for_persistence=web_search_results_for_persistence,
+                quiz_id_for_persistence=quiz_id_for_persistence,
+                created_artifact_ids=created_artifact_ids,
+                turn_thinking_content=turn_thinking_content,
+                turn_tool_calls=turn_tool_calls,
+                turn_tool_results=turn_tool_results,
             )
-
-            if self.memory_service and ctx.message and memory_sync_allowed:
-                try:
-                    from ..memory.preference_extractor import (
-                        extract_preferences,
-                        merge_preferences,
-                        split_memory_updates,
-                    )
-
-                    extracted = extract_preferences(ctx.message)
-                    preference_updates, fact_updates = split_memory_updates(extracted)
-
-                    if preference_updates:
-                        existing_preferences = await self.memory_service.get_user_memory(
-                            tenant_id=ctx.tenant_id,
-                            user_id=ctx.user_id,
-                            key="preferences",
-                        )
-                        await self.memory_service.set_user_memory(
-                            tenant_id=ctx.tenant_id,
-                            user_id=ctx.user_id,
-                            key="preferences",
-                            value=merge_preferences(existing_preferences, preference_updates),
-                            metadata={"source": "auto_extract", "namespace": "preferences"},
-                        )
-
-                    for key, value in fact_updates.items():
-                        await self.memory_service.set_user_memory(
-                            tenant_id=ctx.tenant_id,
-                            user_id=ctx.user_id,
-                            key=key,
-                            value=value,
-                            metadata={"source": "auto_extract", "namespace": "profile"},
-                        )
-                except Exception:
-                    logger.exception("Failed to persist structured user memory")
-            elif self.memory_service and ctx.message:
-                logger.info(
-                    "Skipping structured user memory sync for run=%s: %s",
-                    ctx.run_id,
-                    memory_sync_reason,
-                )
-
-            if (
-                self.assistant_runtime
-                and self.assistant_runtime.features.memory_v2
-                and str(ctx.config.runtime_mode or "compat").lower() != "off"
-                and str(ctx.config.memory_profile or "basic").lower() != "off"
-            ):
-                try:
-                    sync_result = await self.assistant_runtime.sync_turn_to_memory(
-                        tenant_id=ctx.tenant_id,
-                        user_id=ctx.user_id,
-                        session_id=ctx.session_id,
-                        user_message=ctx.message,
-                        assistant_message=ctx.generated_content,
-                        terminal_envelope=turn_terminal_envelope,
-                    )
-                    memory_sync_result = sync_result.to_dict()
-                except Exception:
-                    logger.exception("Failed to persist assistant runtime daily memory")
-                    memory_sync_result = {
-                        "synced": False,
-                        "skipped": True,
-                        "reason": "memory_sync_failed",
-                    }
+            turn_terminal_envelope = self._terminal_envelope(ctx, status="succeeded")
+            memory_sync_result = await self._sync_streaming_memory(
+                ctx,
+                turn_terminal_envelope,
+            )
 
             yield AgentLoopEvent(
                 phase=phase,

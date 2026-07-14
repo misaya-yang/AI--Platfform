@@ -23,6 +23,7 @@ import { api } from "@/lib/api";
 interface ConnectorsPanelProps {
   open: boolean;
   onClose: () => void;
+  onCountChange?: (count: number) => void;
 }
 
 interface ConfluenceMcpStatus {
@@ -47,7 +48,7 @@ function apiErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps) {
+export default function ConnectorsPanel({ open, onClose, onCountChange }: ConnectorsPanelProps) {
   const navigate = useNavigate();
   const [connections, setConnections] = useState<ConfluenceConnection[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,6 +70,7 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
     try {
       const data = await listConnections();
       setConnections(data);
+      onCountChange?.(data.filter((connection) => connection.status === "active").length);
       // Check MCP status
       if (data.some((c) => c.status === "active")) {
         try {
@@ -79,9 +81,10 @@ export default function ConnectorsPanel({ open, onClose }: ConnectorsPanelProps)
       }
     } catch {
       // No connections yet
+      onCountChange?.(0);
     }
     setLoading(false);
-  }, []);
+  }, [onCountChange]);
 
   useEffect(() => {
     if (!open) return;

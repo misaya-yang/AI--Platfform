@@ -902,6 +902,7 @@ async def score_kb_ragas_retrieval(
         payload = await score_retrieval_with_kb_ragas(
             query=body.query,
             contexts=body.contexts,
+            answer=body.answer,
             metrics=body.metrics,
             ground_truth=body.ground_truth,
             llm_config=body.llm_config,

@@ -504,6 +504,47 @@ test("assistant route admits permitted users", async ({ page }) => {
   await expect(page.locator('a[href="/assistant"]')).toBeVisible();
 });
 
+test("assistant shows the active Confluence connector count", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-connector-count-user",
+    email: "connector-count@example.com",
+    display_name: "Connector Count",
+    roles: ["user"],
+    permissions: ["console:dashboard:view", "conversation:playground:access"],
+    effective_permissions: ["console:dashboard:view", "conversation:playground:access"],
+  });
+  await installAssistantHarness(page, async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+    });
+  });
+  await page.route("**/api/v1/confluence/connections?*", async (route) => {
+    const connection = (connectionId: string) => ({
+      connection_id: connectionId,
+      tenant_id: "default",
+      name: connectionId,
+      domain: `${connectionId}.atlassian.net`,
+      email: "connector@example.com",
+      sync_mode: "manual",
+      polling_interval_minutes: 60,
+      status: "active",
+      last_sync_at: null,
+      last_error: null,
+      created_by: "e2e-connector-count-user",
+      created_at: null,
+      updated_at: null,
+    });
+    await route.fulfill(jsonResponse([connection("first"), connection("second")]));
+  });
+
+  await page.goto("/assistant");
+  await page.locator("button:has(svg.lucide-plus)").last().click();
+  await expect(page.getByRole("button", { name: /connectors|连接器/i })).toContainText("2");
+});
+
 test("assistant route keeps model testers playground-only", async ({ page }) => {
   await installClientAuth(page, {
     user_id: "e2e-model-tester-route-user",

@@ -109,6 +109,18 @@ class FakeEvalRepository:
         }
 
 
+class BatchFakeEvalRepository(FakeEvalRepository):
+    async def get_trace_details(self, **kwargs: Any) -> dict[str, dict[str, Any]]:
+        self.calls.append(("get_trace_details", kwargs))
+        details: dict[str, dict[str, Any]] = {}
+        for trace_id in kwargs.get("trace_ids") or []:
+            details[str(trace_id)] = {
+                **self.trace_detail,
+                "trace": {**self.trace_detail["trace"], "trace_id": str(trace_id)},
+            }
+        return details
+
+
 class EmptyPayloadEvaluatorExecutor(EvaluatorExecutor):
     async def _score_target_payloads(
         self,
@@ -514,6 +526,31 @@ async def test_run_fails_with_honest_counters_when_one_target_score_is_not_persi
 
 
 @pytest.mark.asyncio
+async def test_dataset_targets_use_one_batch_trace_detail_call() -> None:
+    repo = BatchFakeEvalRepository()
+    repo.examples = [
+        {"example_id": f"case-{index}", "source_trace_id": f"trace-{index % 3}"}
+        for index in range(201)
+    ]
+
+    result = await EvaluatorExecutor(repo).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-batch-targets",
+            "evaluator_id": "eval-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert result.scores_written == 201
+    batch_calls = [call for call in repo.calls if call[0] == "get_trace_details"]
+    assert len(batch_calls) == 1
+    assert batch_calls[0][1]["trace_ids"] == ["trace-0", "trace-1", "trace-2"]
+    assert not any(call[0] == "get_trace_detail" for call in repo.calls)
+
+
+@pytest.mark.asyncio
 async def test_llm_evaluator_uses_injected_complete_and_writes_scores() -> None:
     repo = FakeEvalRepository()
     repo.evaluator["evaluator_type"] = "llm"
@@ -544,6 +581,34 @@ async def test_llm_evaluator_uses_injected_complete_and_writes_scores() -> None:
     score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
     assert score_calls[0][1]["trace_family"] == "rag"
     assert score_calls[0][1]["payload"]["scorer_type"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_llm_evaluator_normalizes_unknown_label_from_numeric_score() -> None:
+    repo = FakeEvalRepository()
+    repo.evaluator["evaluator_type"] = "llm"
+
+    async def _complete(_model_id: str, _prompt: str) -> str:
+        return (
+            '{"numeric_value": 0.95, "label": "excellent", '
+            '"explanation": "strong", "confidence": 0.9}'
+        )
+
+    executor = EvaluatorExecutor(repo, llm_complete=_complete)
+
+    result = await executor.run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-normalized-label",
+            "evaluator_id": "eval-1",
+            "trace_id": "trace-1",
+        },
+    )
+
+    score_calls = [call for call in repo.calls if call[0] == "create_eval_score"]
+    assert score_calls[0][1]["payload"]["label"] == "pass"
+    assert result.score_summary["scored_count"] == 1
+    assert result.score_summary["average_score"] == 0.95
 
 
 @pytest.mark.asyncio
@@ -1074,6 +1139,7 @@ async def test_ragas_evaluator_writes_multiple_metric_scores() -> None:
 
     async def _kb_ragas_evaluate(**kwargs: Any) -> list[dict[str, Any]]:
         assert kwargs["query"] == "refund policy"
+        assert kwargs["answer"] == "2 docs"
         assert kwargs["contexts"] == ["Refunds are allowed within 30 days."]
         assert kwargs["ground_truth"] == "Refunds within 30 days."
         return [

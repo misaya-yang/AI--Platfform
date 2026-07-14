@@ -1235,6 +1235,13 @@ class AssistantExecutionGateway:
         else:
             lattice_payload = None
 
+        get_tool_definitions = getattr(self.tool_invoker, "get_tool_definitions", None)
+        if decision.allowed and callable(get_tool_definitions):
+            definitions = get_tool_definitions(context, [tool_name])
+            if any(getattr(definition, "requires_confirmation", False) for definition in definitions):
+                decision.requires_approval = True
+                decision.reason = "Tool definition requires explicit confirmation"
+
         sandbox_decision = self._sandbox_resolver.resolve(
             tool_name=tool_name,
             execution_profile=profile,

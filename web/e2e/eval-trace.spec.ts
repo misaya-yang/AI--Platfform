@@ -879,6 +879,18 @@ test.describe("Eval trace console", () => {
     assertNoRuntimeFailures();
   });
 
+  test("shows the supported RAGAS metric set", async ({ page }) => {
+    await installEvalHarness(page);
+    await page.goto("/eval", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "Eval Console" })).toBeVisible();
+    await page.getByRole("tab", { name: "Run & Results" }).click();
+    await page.getByRole("tab", { name: "KB RAGAS" }).click();
+
+    await expect(page.getByText("Faithfulness").first()).toBeVisible();
+    await expect(page.getByText("Response relevancy").first()).toBeVisible();
+    await expect(page.getByText("Context recall").first()).toBeVisible();
+  });
+
   test("renders assistant traces, family tabs, focus path, and score submission", async ({
     page,
   }) => {

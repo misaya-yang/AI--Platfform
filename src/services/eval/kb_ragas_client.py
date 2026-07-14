@@ -80,6 +80,7 @@ class KbRagasClient:
         *,
         query: str,
         contexts: list[str],
+        answer: str | None = None,
         metrics: list[str] | None = None,
         ground_truth: str | None = None,
         llm_config: dict[str, Any] | None = None,
@@ -87,6 +88,7 @@ class KbRagasClient:
         payload = {
             "query": query,
             "contexts": contexts,
+            "answer": answer,
             "metrics": metrics,
             "ground_truth": ground_truth,
             "llm_config": llm_config,
