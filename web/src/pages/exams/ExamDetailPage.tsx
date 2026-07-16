@@ -98,9 +98,9 @@ export function ExamDetailPage() {
 
       const reps = await listExamReports(examId).catch(() => ({ reports: [] }));
       setReports(reps.reports);
-      if (reps.reports.length > 0 && !activeReport) {
+      if (reps.reports.length > 0) {
         const latest = await getExamReport(examId, reps.reports[0].report_id).catch(() => null);
-        if (latest) setActiveReport(latest);
+        if (latest) setActiveReport((current) => current ?? latest);
       }
     } catch {
       // silent
@@ -188,29 +188,29 @@ export function ExamDetailPage() {
   const statusColor: BadgeVariant = exam.status === "published" ? "default" : exam.status === "closed" ? "outline-solid" : "secondary";
 
   return (
-    <div className="space-y-6 p-6 max-w-6xl mx-auto">
+    <div className="mx-auto max-w-6xl space-y-5 p-4 sm:space-y-6 sm:p-6">
       {/* Back + Header */}
       <div>
         <Button variant="ghost" size="sm" onClick={() => navigate("/exams")} className="gap-1 mb-2 -ml-2">
           <ArrowLeft className="h-4 w-4" /> {t("exams.back")}
         </Button>
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-semibold">{exam.title}</h1>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="min-w-0 text-2xl font-semibold">{exam.title}</h1>
               <Badge variant={statusColor}>{exam.status}</Badge>
             </div>
             {exam.description && <p className="text-muted-foreground mt-1">{exam.description}</p>}
-            <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
               <span>{t("exams.questions", { count: exam.question_count })}</span>
-              <span>{t("exams.pass", { score: Math.round((exam.passing_score || 0.6) * 100) })}</span>
+              <span>{t("exams.pass", { score: Math.round((exam.passing_score ?? 0.6) * 100) })}</span>
               {exam.time_limit_minutes && <span>{t("exams.timeLimit", { min: exam.time_limit_minutes })}</span>}
               {exam.deadline && <span>Due: {new Date(exam.deadline).toLocaleString()}</span>}
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {exam.status === "draft" && (
-              <Button onClick={handlePublish}>{t("exams.publish")}</Button>
+              <Button variant="primary" onClick={handlePublish}>{t("exams.publish")}</Button>
             )}
             {exam.status === "published" && (
               <>
@@ -227,7 +227,7 @@ export function ExamDetailPage() {
 
       {/* Stats cards */}
       {stats && (
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
           <StatCard icon={Users} label={t("exams.statsParticipants")} value={stats.total_participants} />
           <StatCard
             icon={BarChart3}
@@ -244,7 +244,7 @@ export function ExamDetailPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b">
+      <div className="ui-tabs-rail border-b" role="tablist" aria-label={t("exams.title")}>
         {([
           { key: "participants", label: t("exams.detail.participants"), icon: Users },
           { key: "questions", label: t("exams.detail.questionAnalysis"), icon: ClipboardList },
@@ -252,8 +252,10 @@ export function ExamDetailPage() {
         ] as const).map(({ key, label, icon: Icon }) => (
           <button
             key={key}
+            role="tab"
+            aria-selected={tab === key}
             onClick={() => setTab(key)}
-            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+            className={`flex shrink-0 items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               tab === key
                 ? "border-primary text-primary"
                 : "border-transparent text-muted-foreground hover:text-foreground"
@@ -269,7 +271,7 @@ export function ExamDetailPage() {
         <ParticipantsTab
           attempts={attempts}
           total={attTotal}
-          passingScore={exam.passing_score || 0.6}
+          passingScore={exam.passing_score ?? 0.6}
           onExport={handleExport}
         />
       )}
@@ -297,11 +299,11 @@ export function ExamDetailPage() {
 
 function StatCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string | number }) {
   return (
-    <div className="rounded-xl border bg-card p-4 flex items-center gap-3">
-      <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+    <div className="flex min-w-0 items-center gap-3 rounded-xl border bg-card p-3 sm:p-4">
+      <div className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 sm:flex">
         <Icon className="h-5 w-5 text-primary" />
       </div>
-      <div>
+      <div className="min-w-0">
         <p className="text-xl font-semibold">{value}</p>
         <p className="text-xs text-muted-foreground">{label}</p>
       </div>
@@ -329,7 +331,7 @@ function ParticipantsTab({
           <Download className="h-3.5 w-3.5" /> {t("exams.detail.exportCsv")}
         </Button>
       </div>
-      <div className="rounded-xl border overflow-hidden">
+      <div className="ui-scroll-affordance rounded-xl border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -388,19 +390,19 @@ function QuestionsTab({ stats }: { stats: ExamStats }) {
         const isWeak = pct < 50;
         return (
           <div key={q.question_num} className="rounded-xl border p-4">
-            <div className="flex items-start justify-between">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono bg-muted px-1.5 py-0.5 rounded">Q{q.question_num}</span>
                   <span className="text-sm truncate">{q.question_text}</span>
                 </div>
-                <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                   <span>{t("exams.detail.answer", { answer: q.correct_answer })}</span>
                   <span>{t("exams.detail.answered", { count: q.total_answered })}</span>
                   {q.most_common_wrong && <span>{t("exams.detail.mostCommonWrong", { answer: q.most_common_wrong })}</span>}
                 </div>
               </div>
-              <div className="ml-4 text-right">
+              <div className="text-left sm:ml-4 sm:text-right">
                 <span className={`text-lg font-semibold ${isWeak ? "text-red-500" : pct >= 80 ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
                   {pct}%
                 </span>
@@ -437,8 +439,8 @@ function AnalysisTab({
   const { t } = useTranslation();
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-wrap items-center gap-2">
           <Brain className="h-5 w-5 text-primary" />
           <span className="font-medium">{t("exams.analysis.title")}</span>
           {reports.length > 0 && (
@@ -461,7 +463,7 @@ function AnalysisTab({
               ))}
             </select>
           )}
-          <Button onClick={onAnalyze} disabled={analyzing} className="gap-2">
+          <Button variant="primary" onClick={onAnalyze} disabled={analyzing} className="gap-2">
             {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Brain className="h-4 w-4" />}
             {analyzing ? t("exams.analysis.analyzing") : report ? t("exams.analysis.regenerate") : t("exams.analysis.generate")}
           </Button>
@@ -469,7 +471,7 @@ function AnalysisTab({
       </div>
 
       {report ? (
-        <div className="rounded-xl border bg-card p-6">
+        <div className="rounded-xl border bg-card p-4 sm:p-6">
           <div className="text-xs text-muted-foreground mb-4">
             {t("exams.analysis.generated", { time: new Date(report.generated_at).toLocaleString() })} · {t("exams.analysis.model", { model: report.model_id })}
           </div>

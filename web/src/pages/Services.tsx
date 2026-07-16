@@ -69,7 +69,10 @@ export function ServicesPage() {
   // Services state
   const servicesQuery = useServices();
   const healthQuery = useHealth();
-  const services = servicesQuery.data || [];
+  const services = useMemo(
+    () => servicesQuery.data ?? [],
+    [servicesQuery.data]
+  );
   const health = healthQuery.data || {};
   // Filtered Services
   const filteredServices = useMemo(() => {
@@ -107,7 +110,10 @@ export function ServicesPage() {
     queryKey: providersApi.providerQueryKeys.templates,
     queryFn: providersApi.listProviderTemplates,
   });
-  const providers = providersQuery.data || [];
+  const providers = useMemo(
+    () => providersQuery.data ?? [],
+    [providersQuery.data]
+  );
   const providerMap = providers.reduce(
     (acc, p) => ({ ...acc, [p.provider_id]: p.display_name }),
     {} as Record<string, string>
@@ -345,61 +351,69 @@ export function ServicesPage() {
   return (
     <div className="space-y-4 p-1 pt-3">
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-border/40 pb-3">
-          <TabsList className="bg-muted/50 p-1 h-auto rounded-xl">
-            <TabsTrigger
-              value="services"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
-            >
-              <Server className="h-4 w-4" />
-              {t("services.page.tabs.services")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="providers"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
-            >
-              <Cloud className="h-4 w-4" />
-              {t("services.page.tabs.providers")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="models"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
-            >
-              <Cpu className="h-4 w-4" />
-              {t("services.page.tabs.models")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="exams"
-              className="gap-2 rounded-lg px-4 py-2 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs transition-all text-muted-foreground"
-            >
-              <ClipboardList className="h-4 w-4" />
-              {t("services.page.tabs.exams", "考试管理")}
-            </TabsTrigger>
-          </TabsList>
+        <div className="flex flex-col items-stretch justify-between gap-3 border-b border-border/40 pb-3 sm:flex-row sm:items-center">
+          <div className="ui-scroll-affordance w-full pb-1 sm:w-auto sm:pb-0">
+            <TabsList className="h-auto min-w-max justify-start rounded-lg bg-muted/50 p-1">
+              <TabsTrigger
+                value="services"
+                className="gap-2 rounded-md px-3 py-2 text-muted-foreground transition-colors data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs sm:px-4"
+              >
+                <Server className="h-4 w-4" />
+                {t("services.page.tabs.services")}
+              </TabsTrigger>
+              <TabsTrigger
+                value="providers"
+                className="gap-2 rounded-md px-3 py-2 text-muted-foreground transition-colors data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs sm:px-4"
+              >
+                <Cloud className="h-4 w-4" />
+                {t("services.page.tabs.providers")}
+              </TabsTrigger>
+              <TabsTrigger
+                value="models"
+                className="gap-2 rounded-md px-3 py-2 text-muted-foreground transition-colors data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs sm:px-4"
+              >
+                <Cpu className="h-4 w-4" />
+                {t("services.page.tabs.models")}
+              </TabsTrigger>
+              <TabsTrigger
+                value="exams"
+                className="gap-2 rounded-md px-3 py-2 text-muted-foreground transition-colors data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs sm:px-4"
+              >
+                <ClipboardList className="h-4 w-4" />
+                {t("services.page.tabs.exams", "考试管理")}
+              </TabsTrigger>
+            </TabsList>
+          </div>
 
-          <div className="flex items-center gap-2">
-            <div className="relative w-60">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder={t("services.page.searchPlaceholder", "Search...")}
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="pl-9 h-9 bg-background/50 border-border/50 focus:bg-background transition-colors rounded-xl"
-              />
-            </div>
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            {activeTab !== "exams" && (
+              <div className="relative w-full sm:w-60">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  aria-label={t("services.page.searchPlaceholder", "Search...")}
+                  placeholder={t("services.page.searchPlaceholder", "Search...")}
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  className="h-9 rounded-md border-border/60 bg-background pl-9 transition-colors focus:bg-background"
+                />
+              </div>
+            )}
 
             {activeTab === "services" && (
-              <ServiceForm
-                onRegistered={() => qc.invalidateQueries({ queryKey: ["services"] })}
-              />
+              <div className="w-full sm:w-auto [&_button]:w-full sm:[&_button]:w-auto">
+                <ServiceForm
+                  onRegistered={() => qc.invalidateQueries({ queryKey: ["services"] })}
+                />
+              </div>
             )}
             {activeTab === "providers" && (
               <Button
+                variant="primary"
                 onClick={() => {
                   setEditingProvider(null);
                   setProviderFormOpen(true);
                 }}
-                className="rounded-full shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all hover:scale-105 active:scale-95"
+                className="h-9 w-full px-3 sm:w-auto"
               >
                 <Plus className="h-4 w-4 mr-2" />
                 {t("services.page.addProvider")}
@@ -407,12 +421,13 @@ export function ServicesPage() {
             )}
             {activeTab === "models" && (
               <Button
+                variant="primary"
                 onClick={() => {
                   setEditingModel(null);
                   setModelFormOpen(true);
                 }}
                 disabled={providers.length === 0}
-                className="rounded-full shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all hover:scale-105 active:scale-95"
+                className="h-9 w-full px-3 sm:w-auto"
               >
                 <Plus className="h-4 w-4 mr-2" />
                 {t("services.page.addModel")}
@@ -427,19 +442,19 @@ export function ServicesPage() {
             {servicesQuery.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[1, 2, 3, 4, 5, 6].map((i) => (
-                  <div key={i} className="h-24 rounded-xl bg-muted/20 animate-pulse" />
+                  <div key={i} className="h-24 rounded-lg bg-muted/20 animate-pulse" />
                 ))}
               </div>
             ) : filteredServices.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
-                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
-                  <Server className="h-10 w-10 text-muted-foreground/50" />
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/40 px-6 py-14 text-center">
+                <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted/50">
+                  <Server className="h-6 w-6 text-muted-foreground/60" />
                 </div>
-                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noServices")}</p>
+                <p className="font-medium text-foreground">{t("services.page.noServices")}</p>
                 {searchQuery ? (
-                  <p className="text-sm text-muted-foreground/60 mt-1">{t("services.search.noResults", "No services match your search.")}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("services.search.noResults", "No services match your search.")}</p>
                 ) : (
-                  <p className="text-sm text-muted-foreground/60 mt-1">{t("services.empty.hint", "Get started by registering your first service.")}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{t("services.empty.hint", "Get started by registering your first service.")}</p>
                 )}
               </div>
             ) : (
@@ -457,7 +472,7 @@ export function ServicesPage() {
             )}
             {selectedServiceId && services.some(s => s.service_id === selectedServiceId) && (
               <div className="fixed bottom-6 right-6 z-50">
-                <div className="bg-foreground text-background px-4 py-2 rounded-full shadow-2xl text-sm font-medium animate-in slide-in-from-bottom-5 fade-in">
+                <div className="animate-in rounded-lg border border-border bg-card px-4 py-2 text-sm font-medium text-foreground shadow-sm slide-in-from-bottom-5 fade-in">
                   {t("services.selected", "Selected")}: {selectedServiceId}
                 </div>
               </div>
@@ -469,16 +484,16 @@ export function ServicesPage() {
             {providersQuery.isLoading ? (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {[1, 2, 3, 4, 5, 6].map((i) => (
-                  <div key={i} className="h-20 rounded-xl bg-muted/20 animate-pulse" />
+                  <div key={i} className="h-20 rounded-lg bg-muted/20 animate-pulse" />
                 ))}
               </div>
             ) : filteredProviders.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
-                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
-                  <Cloud className="h-10 w-10 text-muted-foreground/50" />
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/40 px-6 py-14 text-center">
+                <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted/50">
+                  <Cloud className="h-6 w-6 text-muted-foreground/60" />
                 </div>
-                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noProviders")}</p>
-                {searchQuery && <p className="text-sm text-muted-foreground/60 mt-1">{t("providers.search.noResults", "No providers match your search.")}</p>}
+                <p className="font-medium text-foreground">{t("services.page.noProviders")}</p>
+                {searchQuery && <p className="mt-1 text-sm text-muted-foreground">{t("providers.search.noResults", "No providers match your search.")}</p>}
               </div>
             ) : (
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -504,19 +519,19 @@ export function ServicesPage() {
             {modelsQuery.isLoading ? (
               <div className="space-y-4">
                 {[1, 2, 3, 4, 5].map((i) => (
-                  <div key={i} className="h-16 rounded-xl bg-muted/20 animate-pulse" />
+                  <div key={i} className="h-16 rounded-lg bg-muted/20 animate-pulse" />
                 ))}
               </div>
             ) : models.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-3xl bg-muted/5">
-                <div className="h-20 w-20 rounded-full bg-muted/20 flex items-center justify-center mb-4">
-                  <Cpu className="h-10 w-10 text-muted-foreground/50" />
+              <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/40 px-6 py-14 text-center">
+                <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-muted/50">
+                  <Cpu className="h-6 w-6 text-muted-foreground/60" />
                 </div>
-                <p className="text-muted-foreground text-lg font-medium">{t("services.page.noModels")}</p>
-                {searchQuery && <p className="text-sm text-muted-foreground/60 mt-1">{t("models.search.noResults", "No models match your search.")}</p>}
+                <p className="font-medium text-foreground">{t("services.page.noModels")}</p>
+                {searchQuery && <p className="mt-1 text-sm text-muted-foreground">{t("models.search.noResults", "No models match your search.")}</p>}
               </div>
             ) : (
-              <div className="bg-background/50 backdrop-blur-xs rounded-2xl border border-border/50 overflow-hidden shadow-xs">
+              <div className="overflow-hidden rounded-lg border border-border/60 bg-card">
                 <ModelTable
                   models={models}
                   providers={providerMap}

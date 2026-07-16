@@ -230,25 +230,26 @@ export default function ConnectionCreatePage() {
   };
 
   return (
-    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
+    <div className="min-h-full bg-background">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
-        <div className="max-w-3xl mx-auto px-6">
+      <div className="sticky top-0 z-20 border-b border-border bg-card">
+        <div className="mx-auto max-w-3xl px-4 sm:px-6">
           <div className="flex items-center h-16 gap-4">
             <Button
               variant="ghost"
               size="icon"
+              aria-label={t("common.back", { defaultValue: "Back" })}
               onClick={() => navigate("/confluence")}
               className="h-9 w-9"
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
-                <Cloud className="h-5 w-5 text-white" />
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/15 bg-primary/10">
+                <Cloud className="h-5 w-5 text-primary" />
               </div>
-              <div>
-                <h1 className="text-lg font-semibold text-foreground">{t("confluence.create.title")}</h1>
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-semibold text-foreground">{t("confluence.create.title")}</h1>
                 <p className="text-xs text-muted-foreground">{t("confluence.create.subtitle")}</p>
               </div>
             </div>
@@ -257,10 +258,10 @@ export default function ConnectionCreatePage() {
       </div>
 
       {/* Content */}
-      <div className="max-w-3xl mx-auto px-6 py-8">
+      <div className="mx-auto max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
         <form onSubmit={handleSubmit} className="space-y-8">
           {/* Basic Info Card */}
-          <Card className="p-6 border-border/60">
+          <Card className="border-border/60 p-4 sm:p-6">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
                 <Globe className="h-4 w-4 text-blue-500" />
@@ -305,7 +306,7 @@ export default function ConnectionCreatePage() {
           </Card>
 
           {/* Credentials Card */}
-          <Card className="p-6 border-border/60">
+          <Card className="border-border/60 p-4 sm:p-6">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
                 <Key className="h-4 w-4 text-amber-500" />
@@ -351,6 +352,9 @@ export default function ConnectionCreatePage() {
                     type="button"
                     variant="ghost"
                     size="icon"
+                    aria-label={showToken
+                      ? t("common.hide", { defaultValue: "Hide API token" })
+                      : t("common.show", { defaultValue: "Show API token" })}
                     onClick={() => setShowToken(!showToken)}
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8"
                   >
@@ -407,7 +411,7 @@ export default function ConnectionCreatePage() {
           </Card>
 
           {/* Submit */}
-          <div className="flex items-center justify-between pt-4">
+          <div className="flex flex-col-reverse gap-3 pt-4 sm:flex-row sm:items-center sm:justify-between">
             <Button
               type="button"
               variant="ghost"
@@ -416,7 +420,7 @@ export default function ConnectionCreatePage() {
               {t("common.cancel")}
             </Button>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               {testStatus === "success" && (
                 <Badge variant="outline" className="bg-emerald-50 text-emerald-600 border-emerald-200">
                   <CheckCircle className="h-3 w-3 mr-1" />
@@ -425,8 +429,9 @@ export default function ConnectionCreatePage() {
               )}
               <Button
                 type="submit"
+                variant="primary"
                 disabled={createMutation.isPending}
-                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0 min-w-[140px]"
+                className="min-w-[140px]"
               >
                 {createMutation.isPending ? (
                   <>

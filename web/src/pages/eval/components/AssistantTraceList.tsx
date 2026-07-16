@@ -35,6 +35,9 @@ export interface AssistantTraceFilters {
 interface AssistantTraceListProps {
   traces: AgentTraceSummary[];
   total: number;
+  offset: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
   filters: AssistantTraceFilters;
   setFilters: Dispatch<SetStateAction<AssistantTraceFilters>>;
   title?: string;
@@ -57,6 +60,9 @@ function statusColor(status: TraceStatus) {
 export function AssistantTraceList({
   traces,
   total,
+  offset,
+  pageSize,
+  onPageChange,
   filters,
   setFilters,
   title,
@@ -381,7 +387,15 @@ export function AssistantTraceList({
           loading={loading}
           rowKey="trace_id"
           size="small"
-          pagination={false}
+          pagination={{
+            current: Math.floor(offset / pageSize) + 1,
+            pageSize,
+            total,
+            showSizeChanger: false,
+            size: "small",
+            hideOnSinglePage: true,
+            onChange: onPageChange,
+          }}
           scroll={{ x: 1320, y: 420 }}
           locale={{
             emptyText: (

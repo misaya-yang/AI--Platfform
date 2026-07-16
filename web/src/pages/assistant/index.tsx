@@ -6,7 +6,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, Component, type ErrorInfo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   ArrowDown,
   PanelLeftClose,
@@ -222,6 +222,7 @@ export function AssistantPage() {
   const [showConnectors, setShowConnectors] = useState(false);
   const [connectorCount, setConnectorCount] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
+  const shouldReduceMotion = useReducedMotion();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const showLeftPanel = useAppStore((state) => state.assistantSidebarOpen);
   const setShowLeftPanel = useAppStore((state) => state.setAssistantSidebarOpen);
@@ -445,6 +446,15 @@ export function AssistantPage() {
   }, []);
 
   useEffect(() => {
+    if (!isMobile || !showLeftPanel) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowLeftPanel(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isMobile, setShowLeftPanel, showLeftPanel]);
+
+  useEffect(() => {
     if (sessionsLoading || messages.length > 0) return;
     if (historyRestoreState === "loading" || historyRestoreState === "failed") return;
 
@@ -476,6 +486,7 @@ export function AssistantPage() {
   // Sync settings when session changes
   const onSessionSelect = useCallback(async (sessionId: string) => {
     cancelImageMode(); // Reset image mode when switching sessions
+    if (isMobile) setShowLeftPanel(false);
     const sessionConfig = await handleSelectSession(sessionId);
     if (sessionConfig) {
       if (sessionConfig.selected_model && models.some((m) => m.id === sessionConfig.selected_model)) {
@@ -486,17 +497,18 @@ export function AssistantPage() {
       if (typeof sessionConfig.temperature === "number") setTemperature(sessionConfig.temperature);
       if (sessionConfig.selected_style) setSelectedStyle(sessionConfig.selected_style);
     }
-  }, [handleSelectSession, models, cancelImageMode]);
+  }, [handleSelectSession, models, cancelImageMode, isMobile, setShowLeftPanel]);
 
   // Handle new chat - reset all state including feature toggles
   const onNewChat = useCallback(() => {
     cancelImageMode(); // Reset image mode
     handleNewChat();
+    if (isMobile) setShowLeftPanel(false);
     // Reset feature toggles to defaults
     setSelectedDatasets([]);  // Clear selected knowledge bases
     setWebSearchEnabled(false);  // Disable web search
     // Keep model and temperature as user preferences
-  }, [handleNewChat, cancelImageMode]);
+  }, [handleNewChat, cancelImageMode, isMobile, setShowLeftPanel]);
 
   useChatShortcuts({
     surface: "assistant",
@@ -516,6 +528,14 @@ export function AssistantPage() {
     }
 
     const successfulUploads = files.filter((f) => f.status === "success" && f.response);
+    if (
+      isStreaming ||
+      isUploading ||
+      isGeneratingImage ||
+      (!input.trim() && successfulUploads.length === 0)
+    ) {
+      return;
+    }
     const filePaths = successfulUploads.map((f) => f.response!.file_path);
 
     let messageContent = input.trim();
@@ -557,7 +577,7 @@ export function AssistantPage() {
     
     setInput("");
     clearFiles();
-  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, sendMessage, clearFiles, t, toast]);
+  }, [input, files, selectedModel, selectedDatasets, webSearchEnabled, temperature, selectedStyle, models, datasets, isStreaming, isUploading, isGeneratingImage, sendMessage, clearFiles, t, toast]);
 
   // Handle Image Send
   const handleImageSend = useCallback(() => {
@@ -607,24 +627,67 @@ export function AssistantPage() {
     <TooltipProvider>
       <div
         className={cn(
-          "flex flex-col",
+          "relative flex w-full flex-col",
           ASSISTANT_UI_V2 ? "assistant-v2 font-assistant" : "bg-slate-50 dark:bg-slate-900"
         )}
-        style={{ height: "calc(100vh - 40px)", margin: "0 -16px -16px -16px", width: "calc(100% + 32px)" }}
+        style={{
+          height: isMobile
+            ? "calc(100dvh - 72px)"
+            : "calc(100dvh - 86px)",
+        }}
       >
-        <div className="flex flex-1 overflow-hidden">
+        <div className="relative flex flex-1 overflow-hidden">
           
           {/* Left Sidebar — matches --assistant-canvas-bg so the sidebar
               and chat area feel like the same plane in both themes. */}
-          <AnimatePresence>
+          <AnimatePresence initial={false}>
+            {showLeftPanel && isMobile && (
+              <motion.button
+                key="assistant-history-backdrop"
+                type="button"
+                aria-label={t("assistant.hideHistory", "Hide history")}
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: shouldReduceMotion ? 0 : 0.18 }}
+                className="absolute inset-0 z-20 bg-black/35"
+                onClick={() => setShowLeftPanel(false)}
+              />
+            )}
             {showLeftPanel && (
               <motion.aside
-                initial={{ width: 0, opacity: 0 }}
-                animate={{ width: 280, opacity: 1 }}
-                exit={{ width: 0, opacity: 0 }}
-                className="border-r border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))] overflow-hidden shrink-0"
+                key="assistant-history-sheet"
+                role={isMobile ? "dialog" : undefined}
+                aria-modal={isMobile || undefined}
+                aria-label={t("assistant.showHistory", "Conversation history")}
+                initial={
+                  shouldReduceMotion
+                    ? false
+                    : isMobile
+                      ? { x: "-100%", opacity: 0 }
+                      : { width: 0, opacity: 0 }
+                }
+                animate={
+                  isMobile
+                    ? { x: 0, opacity: 1 }
+                    : { width: 280, opacity: 1 }
+                }
+                exit={
+                  shouldReduceMotion
+                    ? { opacity: 0 }
+                    : isMobile
+                      ? { x: "-100%", opacity: 0 }
+                      : { width: 0, opacity: 0 }
+                }
+                transition={{ duration: shouldReduceMotion ? 0 : 0.2, ease: "easeOut" }}
+                className={cn(
+                  "shrink-0 overflow-hidden border-r border-[hsl(var(--assistant-border))] bg-[hsl(var(--assistant-canvas-bg))]",
+                  isMobile
+                    ? "absolute inset-y-0 left-0 z-30 w-[min(88vw,390px)] shadow-xl"
+                    : "relative w-[280px]"
+                )}
               >
-                <div className="h-full w-[280px]">
+                <div className={cn("h-full", isMobile ? "w-full" : "w-[280px]")}>
                   <ConversationSidebar
                     sessions={sessions}
                     activeSessionId={activeSessionId ?? null}
@@ -642,7 +705,7 @@ export function AssistantPage() {
           {/* Main Content */}
           <div className={cn("flex-1 flex flex-col min-w-0 relative", ASSISTANT_UI_V2 ? "assistant-v2" : "bg-slate-50 dark:bg-slate-900")}>
             {/* Header */}
-            <div className="flex items-center gap-2 py-3 px-4 shrink-0">
+            <div className="flex shrink-0 items-center gap-1.5 px-3 py-2.5 sm:gap-2 sm:px-4 sm:py-3">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -734,10 +797,10 @@ export function AssistantPage() {
               className="flex-1 overflow-y-auto"
               onScroll={handleScroll}
             >
-              <div className={cn("mx-auto px-6 py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
+              <div className={cn("mx-auto px-3 py-5 sm:px-6 sm:py-8", ASSISTANT_UI_V2 ? "max-w-[760px] w-full" : "max-w-3xl")}>
                 {messages.length === 0 ? (
                   <div className="space-y-5">
-                    {!showLeftPanel && sessions.length > 0 && (
+                    {!isMobile && !showLeftPanel && sessions.length > 0 && (
                       <div className="rounded-2xl border border-amber-200/70 bg-amber-50/80 px-4 py-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100">
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -867,8 +930,8 @@ export function AssistantPage() {
             {/* Scroll Button */}
             <AnimatePresence>
               {showScrollButton && (
-                <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="absolute left-1/2 -translate-x-1/2 bottom-[180px] z-10">
-                  <Button size="icon" variant="outline" onClick={scrollToBottom} className="h-9 w-9 rounded-full shadow-lg">
+                <motion.div initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: 10 }} className="absolute bottom-[180px] left-1/2 z-10 -translate-x-1/2">
+                  <Button size="icon" variant="outline" onClick={scrollToBottom} className="h-9 w-9 rounded-full shadow-sm" aria-label={t("playground.scrollToBottom", "Scroll to bottom")}>
                     <ArrowDown className="h-4 w-4 text-slate-500" />
                   </Button>
                 </motion.div>
@@ -922,19 +985,23 @@ export function AssistantPage() {
           <AnimatePresence>
             {isMobile && rightPanel === "activity" && activeActivityMessage && (
               <motion.div
-                initial={{ opacity: 0 }}
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 className="fixed inset-0 z-40 bg-black/45"
                 onClick={closeActivity}
+                role="presentation"
               >
                 <motion.div
-                  initial={{ y: "100%" }}
+                  initial={shouldReduceMotion ? false : { y: "100%" }}
                   animate={{ y: 0 }}
-                  exit={{ y: "100%" }}
-                  transition={{ type: "spring", damping: 28, stiffness: 260 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { y: "100%" }}
+                  transition={shouldReduceMotion ? { duration: 0 } : { type: "spring", damping: 28, stiffness: 260 }}
                   className="absolute bottom-0 left-0 right-0 h-[78vh] rounded-t-2xl overflow-hidden"
                   onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={t("playground.activity.title", "Activity")}
                 >
                   <ActivityPanel
                     open
@@ -952,7 +1019,7 @@ export function AssistantPage() {
               right lane feels uniform when switching chips. */}
           <AnimatePresence>
             {showArtifacts && !isMobile && rightPanel === "artifacts" && (
-              <motion.aside initial={{ width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={{ width: 0, opacity: 0 }} className="overflow-hidden shrink-0">
+              <motion.aside initial={shouldReduceMotion ? false : { width: 0, opacity: 0 }} animate={{ width: 380, opacity: 1 }} exit={shouldReduceMotion ? { opacity: 0 } : { width: 0, opacity: 0 }} className="shrink-0 overflow-hidden">
                 <div className="h-full w-[380px]">
                   <ArtifactsPanel
                     isOpen={showArtifacts}
@@ -972,19 +1039,23 @@ export function AssistantPage() {
           <AnimatePresence>
             {showArtifacts && isMobile && (
               <motion.div
-                initial={{ opacity: 0 }}
+                initial={shouldReduceMotion ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 className="fixed inset-0 z-40 bg-black/45"
                 onClick={() => setShowArtifacts(false)}
+                role="presentation"
               >
                 <motion.div
-                  initial={{ y: "100%" }}
+                  initial={shouldReduceMotion ? false : { y: "100%" }}
                   animate={{ y: 0 }}
-                  exit={{ y: "100%" }}
-                  transition={{ type: "spring", damping: 28, stiffness: 260 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { y: "100%" }}
+                  transition={shouldReduceMotion ? { duration: 0 } : { type: "spring", damping: 28, stiffness: 260 }}
                   className="absolute bottom-0 left-0 right-0 h-[78vh] rounded-t-2xl overflow-hidden"
                   onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={t("assistant.artifacts", "Artifacts")}
                 >
                   <ArtifactsPanel
                     isOpen={showArtifacts}

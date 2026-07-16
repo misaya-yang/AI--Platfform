@@ -36,6 +36,18 @@ export function SourcesTab({
   const [searchParams, setSearchParams] = useSearchParams();
   const showConfluence = searchParams.get("source") === "confluence";
 
+  const setSourceView = (source?: "confluence") => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", "sources");
+    if (source) {
+      nextParams.set("source", source);
+    } else {
+      nextParams.delete("source");
+      nextParams.delete("binding");
+    }
+    setSearchParams(nextParams, { replace: true });
+  };
+
   // If Confluence panel is active, show the full SyncSourcesTab
   if (showConfluence) {
     return (
@@ -44,7 +56,7 @@ export function SourcesTab({
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => setSearchParams({})}
+          onClick={() => setSourceView()}
           className="mb-2"
         >
           <ArrowRight className="h-4 w-4 mr-1.5 rotate-180" />
@@ -65,11 +77,10 @@ export function SourcesTab({
       description: t("knowledge.sources.fileUploadDesc"),
       icon: Upload,
       colorClass: {
-        gradient: "from-emerald-500/10 to-teal-500/10",
-        border: "border-emerald-500/20",
-        iconBg: "bg-linear-to-br from-emerald-500/10 to-teal-500/10 border-emerald-500/20",
-        iconColor: "text-emerald-500",
-        buttonHover: "hover:bg-emerald-500/10 hover:text-emerald-600 hover:border-emerald-500/30",
+        border: "border-border/80",
+        iconBg: "bg-primary/10 border-primary/15",
+        iconColor: "text-primary",
+        buttonHover: "hover:bg-muted/60 hover:text-foreground",
       },
       stat: {
         label: t("knowledge.sources.uploadedFiles"),
@@ -86,11 +97,10 @@ export function SourcesTab({
       description: t("knowledge.sources.webImportDesc"),
       icon: Link,
       colorClass: {
-        gradient: "from-primary/10 to-primary/5",
-        border: "border-primary/20",
-        iconBg: "bg-linear-to-br from-primary/10 to-primary/5 border-primary/20",
+        border: "border-border/80",
+        iconBg: "bg-primary/10 border-primary/15",
         iconColor: "text-primary",
-        buttonHover: "hover:bg-primary/10 hover:text-primary hover:border-primary/30",
+        buttonHover: "hover:bg-muted/60 hover:text-foreground",
       },
       stat: {
         label: t("knowledge.sources.importedPages"),
@@ -107,11 +117,10 @@ export function SourcesTab({
       description: t("knowledge.sources.confluenceSyncDesc"),
       icon: Cloud,
       colorClass: {
-        gradient: "from-blue-500/10 to-cyan-500/10",
-        border: "border-blue-500/20",
-        iconBg: "bg-linear-to-br from-blue-500/10 to-cyan-500/10 border-blue-500/20",
-        iconColor: "text-blue-500",
-        buttonHover: "hover:bg-blue-500/10 hover:text-blue-600 hover:border-blue-500/30",
+        border: "border-border/80",
+        iconBg: "bg-primary/10 border-primary/15",
+        iconColor: "text-primary",
+        buttonHover: "hover:bg-muted/60 hover:text-foreground",
       },
       stat: {
         label: t("knowledge.sources.syncedPages"),
@@ -119,7 +128,7 @@ export function SourcesTab({
       },
       action: {
         label: t("knowledge.sources.manageSync"),
-        onClick: () => setSearchParams({ source: "confluence" }),
+        onClick: () => setSourceView("confluence"),
       },
     },
   ];
@@ -137,13 +146,14 @@ export function SourcesTab({
       </div>
 
       {/* Source Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:gap-6">
         {sourceCards.map((card) => {
           const IconComponent = card.icon;
           return (
             <Card
               key={card.key}
-              className={`relative overflow-hidden bg-linear-to-br ${card.colorClass.gradient} ${card.colorClass.border} p-6 transition-all duration-200 hover:shadow-md`}
+              variant="interactive"
+              className={`relative overflow-hidden ${card.colorClass.border} p-5 sm:p-6`}
             >
               {/* Icon */}
               <div
@@ -169,7 +179,7 @@ export function SourcesTab({
               <Button
                 variant="outline"
                 size="sm"
-                className={`w-full ${card.colorClass.buttonHover}`}
+                className={`h-10 w-full sm:h-8 ${card.colorClass.buttonHover}`}
                 onClick={card.action.onClick}
               >
                 {card.action.label}

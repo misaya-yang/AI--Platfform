@@ -208,7 +208,7 @@ function PageListRow({
   const hasSyncConfig = page.sync_mode !== null;
 
   return (
-    <div className="group flex items-center gap-3 px-4 py-3 hover:bg-muted/40 border-b border-border/40 last:border-b-0 transition-colors">
+    <div className="group flex min-w-[720px] items-center gap-3 border-b border-border/40 px-4 py-3 transition-colors last:border-b-0 hover:bg-muted/40 sm:min-w-0">
       {/* Checkbox */}
       <Checkbox
         checked={isSelected}
@@ -809,24 +809,25 @@ export default function SyncedPagesPage() {
   }
 
   return (
-    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
+    <div className="min-h-full bg-background">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-4">
+      <div className="sticky top-0 z-20 border-b border-border bg-card">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6">
+          <div className="flex min-h-16 flex-col items-stretch gap-2 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+            <div className="flex min-w-0 items-center gap-3 sm:gap-4">
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label={t("common.back")}
                 onClick={() => navigate("/confluence")}
                 className="h-9 w-9"
               >
                 <ArrowLeft className="h-4 w-4" />
               </Button>
 
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-lg font-semibold text-foreground">
+              <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-2">
+                  <h1 className="truncate text-lg font-semibold text-foreground">
                     {binding?.space_name || binding?.space_key || t("confluence.syncedPages.title")}
                   </h1>
                   {binding?.root_page_title && (
@@ -842,7 +843,7 @@ export default function SyncedPagesPage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="ui-scroll-affordance flex w-full items-center gap-2 sm:w-auto sm:gap-3">
               {/* Sync mode badge */}
               <Badge variant="outline" className="text-muted-foreground border-border/60">
                 {binding?.sync_mode === "polling" ? (
@@ -861,6 +862,7 @@ export default function SyncedPagesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="h-10 shrink-0 sm:h-8"
                 onClick={() => setShowSyncConfigDialog(true)}
                 disabled={!binding}
               >
@@ -871,6 +873,7 @@ export default function SyncedPagesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="h-10 shrink-0 sm:h-8"
                 onClick={() => setShowAddPagesModal(true)}
                 disabled={!binding}
               >
@@ -881,6 +884,7 @@ export default function SyncedPagesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="h-10 shrink-0 sm:h-8"
                 onClick={handleSyncAll}
                 disabled={isFullSyncing || binding?.status === "syncing"}
               >
@@ -895,8 +899,9 @@ export default function SyncedPagesPage() {
               <Button
                 variant="ghost"
                 size="icon"
+                aria-label={t("common.refresh")}
                 onClick={handleRefresh}
-                className="h-9 w-9"
+                className="h-10 w-10 shrink-0 sm:h-9 sm:w-9"
               >
                 <RefreshCcw className={`h-4 w-4 ${loadingPages ? "animate-spin" : ""}`} />
               </Button>
@@ -907,7 +912,7 @@ export default function SyncedPagesPage() {
 
       {/* Error Banner - shown when binding has error */}
       {binding?.status === "error" && (
-        <div className="max-w-7xl mx-auto px-6 pt-4">
+        <div className="max-w-7xl mx-auto px-4 pt-4 sm:px-6">
           <Card className="p-4 bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-800">
             <div className="flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
@@ -939,13 +944,13 @@ export default function SyncedPagesPage() {
       )}
 
       {/* Toolbar */}
-      <div className="max-w-7xl mx-auto px-6 py-4">
+      <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6">
         <Card className="p-4">
-          <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:justify-between sm:flex-wrap">
             {/* Left: Filter & Search */}
-            <div className="flex items-center gap-3">
+            <div className="grid w-full grid-cols-[112px_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:gap-3">
               <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as PageStatus)}>
-                <SelectTrigger className="w-32 h-9">
+                <SelectTrigger className="h-9 w-full sm:w-32">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -956,19 +961,19 @@ export default function SyncedPagesPage() {
                 </SelectContent>
               </Select>
 
-              <div className="relative">
+              <div className="relative min-w-0">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder={t("confluence.syncedPages.searchPlaceholder")}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 w-64 h-9"
+                  className="h-9 w-full pl-9 sm:w-64"
                 />
               </div>
             </div>
 
             {/* Center: Stats */}
-            <div className="flex items-center gap-4 text-sm">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
               <span className="text-muted-foreground">
                 <span className="font-medium text-emerald-600">{stats.synced}</span>
                 {" "}{t("confluence.syncedPages.status.synced")}
@@ -1020,10 +1025,11 @@ export default function SyncedPagesPage() {
       </div>
 
       {/* Content */}
-      <div className="max-w-7xl mx-auto px-6 pb-8">
-        <Card className="overflow-hidden">
+      <div className="max-w-7xl mx-auto px-4 pb-8 sm:px-6">
+        <Card className={filteredPages.length > 0 ? "ui-scroll-affordance block" : "overflow-hidden"}>
           {/* Table Header */}
-          <div className="flex items-center gap-3 px-4 py-3 bg-muted/30 border-b border-border/50 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+          {filteredPages.length > 0 && (
+          <div className="flex min-w-[720px] items-center gap-3 border-b border-border/50 bg-muted/30 px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground sm:min-w-0">
             {viewMode === "list" && (
               <Checkbox
                 checked={selectedIds.size === filteredPages.length && filteredPages.length > 0}
@@ -1037,6 +1043,7 @@ export default function SyncedPagesPage() {
             <span className="w-28 text-right shrink-0">{t("confluence.syncedPages.columns.lastSync")}</span>
             <span className="w-28 shrink-0 text-right">{t("confluence.syncedPages.columns.actions")}</span>
           </div>
+          )}
 
           {/* Content */}
           {loadingPages ? (
@@ -1105,10 +1112,10 @@ export default function SyncedPagesPage() {
                 {t("confluence.syncedPages.clearSelection")}
               </Button>
               <Button
+                variant="primary"
                 size="sm"
                 onClick={handleBatchSync}
                 disabled={isBatchSyncing}
-                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white"
               >
                 {isBatchSyncing ? (
                   <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />

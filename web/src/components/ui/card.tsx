@@ -2,14 +2,26 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
+type CardVariant = "panel" | "open" | "interactive" | "blocking";
+
+interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
+  variant?: CardVariant;
+}
+
 const Card = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
+  CardProps
+>(({ className, variant = "panel", ...props }, ref) => (
   <div
     ref={ref}
     className={cn(
-      "rounded-lg border bg-card text-card-foreground",
+      "rounded-lg text-card-foreground",
+      variant === "panel" && "border border-border/75 bg-card",
+      variant === "open" && "bg-transparent",
+      variant === "interactive" &&
+        "border border-border/70 bg-card transition-[background-color,border-color,box-shadow] duration-150 hover:border-primary/25 hover:bg-card/95 focus-within:border-primary/35",
+      variant === "blocking" &&
+        "border border-destructive/20 bg-destructive/5",
       className
     )}
     {...props}
@@ -81,4 +93,3 @@ export {
   CardContent,
   CardFooter,
 };
-

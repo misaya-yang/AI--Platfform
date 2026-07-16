@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { History } from "lucide-react";
+import { History, RefreshCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { Document } from "@/types/knowledge";
@@ -97,7 +97,8 @@ export function DocumentRow({
     <>
       <div
         className={`
-          flex items-center px-5 py-3 border-b border-border/60 last:border-b-0 hover:bg-muted/40 transition-colors
+          flex flex-wrap items-center gap-y-3 px-4 py-3 border-b border-border/60 last:border-b-0 hover:bg-muted/40 transition-colors
+          sm:flex-nowrap sm:gap-y-0 sm:px-5
           ${selected ? "bg-primary/5" : ""} ${checked ? "bg-primary/10" : ""}
         `}
       >
@@ -110,21 +111,22 @@ export function DocumentRow({
             />
           </div>
         )}
-        <div className="flex items-center gap-3 flex-1 min-w-0">
+        <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-auto sm:flex-1">
           {getFileIcon()}
-          <span
-            className="truncate text-primary hover:text-primary/90 cursor-pointer font-medium text-sm"
+          <button
+            type="button"
+            className="min-w-0 truncate text-left text-sm font-medium text-primary hover:text-primary/90"
             onClick={onSelect}
           >
             {doc.title}
-          </span>
+          </button>
         </div>
 
-        <div className="w-24 text-sm text-muted-foreground text-center">
+        <div className="hidden w-24 text-sm text-muted-foreground text-center sm:block">
           {formatFileSize(doc.size_bytes)}
         </div>
 
-        <div className="w-28 flex justify-center">
+        <div className="order-2 flex w-auto justify-start sm:order-none sm:w-28 sm:justify-center">
           <StatusBadge 
             status={doc.status} 
             error={doc.error} 
@@ -133,9 +135,9 @@ export function DocumentRow({
           />
         </div>
 
-        <div className="w-28 text-sm text-muted-foreground text-center">{t("knowledge.documentRow.defaultCategory")}</div>
+        <div className="hidden w-28 text-sm text-muted-foreground text-center sm:block">{t("knowledge.documentRow.defaultCategory")}</div>
 
-        <div className="w-40 text-sm text-muted-foreground text-center">
+        <div className="hidden w-40 text-sm text-muted-foreground text-center sm:block">
           {doc.created_at
             ? new Date(doc.created_at).toLocaleString(i18n.language === "zh-CN" ? "zh-CN" : "en-US", {
                 year: "numeric",
@@ -147,9 +149,9 @@ export function DocumentRow({
             : "-"}
         </div>
 
-        <div className="w-48 flex justify-center gap-2 text-sm">
+        <div className="order-3 ml-auto flex w-auto flex-wrap justify-end gap-1 text-sm sm:order-none sm:ml-0 sm:w-48 sm:gap-2">
           <button
-            className="text-primary hover:text-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="min-h-10 px-1 text-primary hover:text-primary/90 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:px-0"
             onClick={(e) => {
               e.stopPropagation();
               onSelect();
@@ -159,37 +161,40 @@ export function DocumentRow({
             {t("knowledge.documentRow.segments")}
           </button>
           <button
-            className="text-amber-600 hover:text-amber-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-0.5"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();
               setVersionHistoryOpen(true);
             }}
             disabled={loading}
             title={t("knowledge.documentRow.versionHistoryTitle")}
+            aria-label={t("knowledge.documentRow.versionHistoryTitle")}
           >
             <History className="h-3.5 w-3.5" />
-            {t("knowledge.documentRow.history")}
           </button>
           <button
-            className="text-primary hover:text-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();
               setReindexOpen(true);
             }}
             disabled={loading}
             title={t("knowledge.documentRow.reindexTitle")}
+            aria-label={t("knowledge.documentRow.reindexTitle")}
           >
-            {loading ? "..." : t("knowledge.documentRow.rebuild")}
+            <RefreshCcw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
           </button>
           <button
-            className="text-rose-500 hover:text-rose-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50 sm:h-7 sm:w-7"
             onClick={(e) => {
               e.stopPropagation();
               setDeleteOpen(true);
             }}
             disabled={loading}
+            title={t("common.delete")}
+            aria-label={t("common.delete")}
           >
-            {t("common.delete")}
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>

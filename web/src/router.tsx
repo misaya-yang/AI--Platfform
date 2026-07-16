@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppLayout } from "@/layouts/AppLayout";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
+import { NotFoundPage } from "@/components/SystemStatusPage";
 
 function lazyNamed<TModule, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -34,6 +35,22 @@ const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPag
 const ExamsPage = lazyNamed(() => import("@/pages/exams"), "ExamsPage");
 const ExamDetailPage = lazyNamed(() => import("@/pages/exams/ExamDetailPage"), "ExamDetailPage");
 const EvalPage = lazyNamed(() => import("@/pages/eval"), "EvalPage");
+const ConfluenceConnectionListPage = lazyNamed(
+  () => import("@/pages/confluence"),
+  "ConnectionListPage"
+);
+const ConfluenceConnectionCreatePage = lazyNamed(
+  () => import("@/pages/confluence"),
+  "ConnectionCreatePage"
+);
+const ConfluenceBindSpacePage = lazyNamed(
+  () => import("@/pages/confluence"),
+  "BindSpacePage"
+);
+const ConfluenceSyncedPagesPage = lazyNamed(
+  () => import("@/pages/confluence"),
+  "SyncedPagesPage"
+);
 
 function RouteFallback() {
   return (
@@ -139,6 +156,38 @@ export function AppRouter() {
             }
           />
           <Route
+            path="/confluence"
+            element={
+              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+                <ConfluenceConnectionListPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/confluence/connections/new"
+            element={
+              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+                <ConfluenceConnectionCreatePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/confluence/connections/:connectionId/bind"
+            element={
+              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+                <ConfluenceBindSpacePage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/confluence/bindings/:bindingId/pages"
+            element={
+              <ProtectedRoute requiredPermission="knowledge:confluence:manage">
+                <ConfluenceSyncedPagesPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/settings"
             element={
               <ProtectedRoute requiredPermission="console:settings:view">
@@ -179,6 +228,7 @@ export function AppRouter() {
             }
           />
         </Route>
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Suspense>
   );

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   generateImage,
@@ -29,6 +29,7 @@ export function useImageGeneration(
   const { t } = useTranslation();
   const [isImageMode, setIsImageMode] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const imageGenerationInFlightRef = useRef(false);
 
   const handleImageGenerate = useCallback(() => {
     setIsImageMode(true);
@@ -39,8 +40,14 @@ export function useImageGeneration(
   }, []);
 
   const sendImageGeneration = useCallback(async (prompt: string, style: string) => {
-    if (!prompt.trim() || isGeneratingImage || !selectedModel) return;
+    if (
+      !prompt.trim() ||
+      isGeneratingImage ||
+      imageGenerationInFlightRef.current ||
+      !selectedModel
+    ) return;
 
+    imageGenerationInFlightRef.current = true;
     setIsGeneratingImage(true);
     setIsImageMode(false);
 
@@ -185,6 +192,7 @@ export function useImageGeneration(
         addSessionMessage(sessionId, { role: "assistant", content: errorContent }).catch(console.error);
       }
     } finally {
+      imageGenerationInFlightRef.current = false;
       setIsGeneratingImage(false);
     }
   }, [isGeneratingImage, selectedModel, activeSessionId, config, t, setMessages, setArtifacts, setActiveSessionId, setSessions, createSession, listSessions]);

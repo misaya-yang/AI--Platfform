@@ -327,6 +327,7 @@ export default function DatasetCreatePage() {
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [createdDatasetId, setCreatedDatasetId] = useState<string | null>(null);
 
   // Form validation errors
   const [nameError, setNameError] = useState<string | null>(null);
@@ -446,41 +447,44 @@ export default function DatasetCreatePage() {
       const embModel = EMBEDDING_MODELS.find((m) => m.provider === provider && m.model === model);
       const rerankProvider = rerankModel.startsWith("bge-") ? "bge" : "dashscope";
 
-      // Create dataset
-      const dataset = await createDataset({
-        name: name.trim(),
-        description: description.trim(),
-        visibility,
-        kb_type: kbType,
-        use_case: useCase,
-        embedding_provider: provider,
-        embedding_model: model,
-        embedding_dimension: embModel?.dimension || 1024,
-        index_config: {
-          chunking: {
-            mode: chunkingMode,
-            chunk_size: maxChunkSize,
-            chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
-            extract_metadata: metadataExtract,
-            remove_extra_spaces: true,
-          },
-          retrieval: {
-            mode: "hybrid",
-            top_k: maxRecall,
-            score_threshold: scoreThreshold,
-            rerank: {
-              enabled: rerankModel !== "default",
-              provider: rerankProvider,
-              model: rerankModel === "default" ? "gte-rerank" : rerankModel,
+      let datasetId = createdDatasetId;
+      if (!datasetId) {
+        const dataset = await createDataset({
+          name: name.trim(),
+          description: description.trim(),
+          visibility,
+          kb_type: kbType,
+          use_case: useCase,
+          embedding_provider: provider,
+          embedding_model: model,
+          embedding_dimension: embModel?.dimension || 1024,
+          index_config: {
+            chunking: {
+              mode: chunkingMode,
+              chunk_size: maxChunkSize,
+              chunk_overlap: Math.min(50, Math.floor(maxChunkSize * 0.1)),
+              extract_metadata: metadataExtract,
+              remove_extra_spaces: true,
+            },
+            retrieval: {
+              mode: "hybrid",
+              top_k: maxRecall,
+              score_threshold: scoreThreshold,
+              rerank: {
+                enabled: rerankModel !== "default",
+                provider: rerankProvider,
+                model: rerankModel === "default" ? "gte-rerank" : rerankModel,
+              },
             },
           },
-        },
-      });
-
-      const datasetId = dataset.dataset_id;
+        });
+        datasetId = dataset.dataset_id;
+        setCreatedDatasetId(datasetId);
+      }
 
       // Upload files
-      for (const pf of pendingFiles) {
+      let failedUploads = 0;
+      for (const pf of pendingFiles.filter((file) => file.status !== "done")) {
         setPendingFiles((prev) =>
           prev.map((f) => (f.id === pf.id ? { ...f, status: "uploading" } : f))
         );
@@ -490,6 +494,7 @@ export default function DatasetCreatePage() {
             prev.map((f) => (f.id === pf.id ? { ...f, status: "done" } : f))
           );
         } catch (err) {
+          failedUploads += 1;
           setPendingFiles((prev) =>
             prev.map((f) =>
               f.id === pf.id
@@ -501,7 +506,7 @@ export default function DatasetCreatePage() {
       }
 
       // Upload URLs
-      for (const pu of pendingUrls) {
+      for (const pu of pendingUrls.filter((url) => url.status !== "done")) {
         setPendingUrls((prev) =>
           prev.map((u) => (u.id === pu.id ? { ...u, status: "uploading" } : u))
         );
@@ -511,6 +516,7 @@ export default function DatasetCreatePage() {
             prev.map((u) => (u.id === pu.id ? { ...u, status: "done" } : u))
           );
         } catch (err) {
+          failedUploads += 1;
           setPendingUrls((prev) =>
             prev.map((u) =>
               u.id === pu.id
@@ -519,6 +525,17 @@ export default function DatasetCreatePage() {
             )
           );
         }
+      }
+
+      if (failedUploads > 0) {
+        setError(
+          t(
+            "knowledge.create.partialUploadFailed",
+            "{{count}} source(s) could not be added. The knowledge base was created; retry to upload only the failed sources.",
+            { count: failedUploads }
+          )
+        );
+        return;
       }
 
       // Navigate to dataset detail
@@ -560,13 +577,21 @@ export default function DatasetCreatePage() {
   // Render
   // ============================================================
 
+  const wizardSteps = [
+    { num: 1, label: t("knowledge.create.step1") },
+    { num: 2, label: t("knowledge.create.step2") },
+    { num: 3, label: t("knowledge.create.step3") },
+  ];
+
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-full bg-background">
       {/* Header */}
-      <div className="bg-card border-b px-6 py-4">
+      <div className="bg-card border-b px-4 py-4 sm:px-6">
         <div className="max-w-4xl mx-auto flex items-center gap-4">
           <button
+            type="button"
             onClick={() => navigate("/knowledge")}
+            aria-label={t("common.back", "Back")}
             className="text-muted-foreground hover:text-foreground/80 transition"
           >
             <ArrowLeft className="h-5 w-5" />
@@ -578,13 +603,20 @@ export default function DatasetCreatePage() {
 
       {/* Step Indicator */}
       <div className="bg-card border-b">
-        <div className="max-w-4xl mx-auto px-6 py-6">
-          <div className="flex items-center justify-center gap-4">
-            {[
-              { num: 1, label: t("knowledge.create.step1") },
-              { num: 2, label: t("knowledge.create.step2") },
-              { num: 3, label: t("knowledge.create.step3") },
-            ].map((s, i) => (
+        <div className="max-w-4xl mx-auto px-4 py-4 sm:px-6 sm:py-6">
+          <div className="flex items-center justify-between gap-3 sm:hidden" aria-live="polite">
+            <span className="text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              {t("knowledge.create.stepProgress", "Step {{current}} of {{total}}", {
+                current: step,
+                total: wizardSteps.length,
+              })}
+            </span>
+            <span className="text-sm font-semibold text-foreground">
+              {wizardSteps[step - 1]?.label}
+            </span>
+          </div>
+          <div className="hidden items-center justify-center gap-4 sm:flex">
+            {wizardSteps.map((s, i) => (
               <div key={s.num} className="flex items-center">
                 <div className="flex items-center gap-2">
                   <div
@@ -617,7 +649,7 @@ export default function DatasetCreatePage() {
       </div>
 
       {/* Content */}
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="max-w-4xl mx-auto px-4 py-6 sm:px-6 sm:py-8">
         {error && (
           <div className="mb-6 p-4 bg-red-500/10 dark:bg-red-500/15 border border-red-500/20 rounded-lg flex items-start gap-3">
             <AlertCircle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
@@ -705,18 +737,27 @@ export default function DatasetCreatePage() {
                   </Tooltip>
                 </TooltipProvider>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" role="radiogroup" aria-label={t("knowledge.create.kbType")}>
                 {KB_TYPE_OPTIONS.map((opt) => {
                   const Icon = opt.icon;
                   return (
                     <Card
                       key={opt.id}
+                      role="radio"
+                      aria-checked={kbType === opt.id}
+                      tabIndex={0}
                       className={`p-4 cursor-pointer transition-all ${
                         kbType === opt.id
                           ? "border-2 border-primary bg-primary/5"
                           : "border hover:border-primary/30"
                       }`}
                       onClick={() => setKbType(opt.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setKbType(opt.id);
+                        }
+                      }}
                     >
                       <div className="flex items-center gap-3">
                         <div className={`p-2 rounded-lg bg-muted/50 ${kbType === opt.id ? "bg-primary/10" : ""}`}>
@@ -761,18 +802,27 @@ export default function DatasetCreatePage() {
                   </Tooltip>
                 </TooltipProvider>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" role="radiogroup" aria-label={t("knowledge.create.useCase")}>
                 {USE_CASE_OPTIONS.map((opt) => {
                   const Icon = opt.icon;
                   return (
                     <Card
                       key={opt.id}
+                      role="radio"
+                      aria-checked={useCase === opt.id}
+                      tabIndex={0}
                       className={`p-4 cursor-pointer transition-all ${
                         useCase === opt.id
                           ? "border-2 border-primary bg-primary/5"
                           : "border hover:border-primary/30"
                       }`}
                       onClick={() => setUseCase(opt.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setUseCase(opt.id);
+                        }
+                      }}
                     >
                       <div className="flex items-center gap-2">
                         <Icon className={`h-4 w-4 ${useCase === opt.id ? "text-primary" : "text-muted-foreground"}`} />
@@ -800,18 +850,27 @@ export default function DatasetCreatePage() {
                   </Tooltip>
                 </TooltipProvider>
               </div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3" role="radiogroup" aria-label={t("knowledge.create.visibility")}>
                 {VISIBILITY_OPTIONS.map((opt) => {
                   const Icon = opt.icon;
                   return (
                     <Card
                       key={opt.id}
+                      role="radio"
+                      aria-checked={visibility === opt.id}
+                      tabIndex={0}
                       className={`p-4 cursor-pointer transition-all ${
                         visibility === opt.id
                           ? "border-2 border-primary bg-primary/5"
                           : "border hover:border-primary/30"
                       }`}
                       onClick={() => setVisibility(opt.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setVisibility(opt.id);
+                        }
+                      }}
                     >
                       <div className="flex items-center gap-2">
                         <Icon className={`h-4 w-4 ${visibility === opt.id ? "text-primary" : "text-muted-foreground"}`} />
@@ -839,7 +898,16 @@ export default function DatasetCreatePage() {
             {/* File Upload */}
             <div
               className="border-2 border-dashed border-border rounded-lg p-8 text-center hover:border-primary/40 transition cursor-pointer"
+              role="button"
+              tabIndex={0}
+              aria-label={t("knowledge.create.uploadFiles")}
               onClick={() => fileInputRef.current?.click()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
               onDragOver={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -862,7 +930,10 @@ export default function DatasetCreatePage() {
                 multiple
                 className="hidden"
                 accept=".pdf,.doc,.docx,.txt,.md,.pptx,.ppt,.png,.jpg,.jpeg,.bmp,.gif,.xls,.xlsx"
-                onChange={(e) => handleFilesSelect(e.target.files)}
+                onChange={(e) => {
+                  handleFilesSelect(e.target.files);
+                  e.currentTarget.value = "";
+                }}
               />
             </div>
 
@@ -988,15 +1059,24 @@ export default function DatasetCreatePage() {
               <Label className="text-sm font-medium">
                 {t("knowledge.create.chunkingMode")} <span className="text-red-500">*</span>
               </Label>
-              <div className="mt-3 grid grid-cols-3 gap-3">
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3" role="radiogroup" aria-label={t("knowledge.create.chunkingMode")}>
                 {CHUNKING_MODES.map((mode) => (
                   <Card
                     key={mode.id}
+                    role="radio"
+                    aria-checked={chunkingMode === mode.id}
+                    tabIndex={0}
                     className={`p-4 cursor-pointer transition-all ${chunkingMode === mode.id
                       ? "border-2 border-primary bg-primary/5"
                       : "border hover:border-border"
-                      }`}
+                    }`}
                     onClick={() => handleChunkingModeSelect(mode.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        handleChunkingModeSelect(mode.id);
+                      }
+                    }}
                   >
                     <div className="flex items-start justify-between">
                       <h4 className="text-sm font-medium text-foreground">{t(mode.nameKey)}</h4>
@@ -1217,9 +1297,9 @@ export default function DatasetCreatePage() {
         )}
 
         {/* Navigation Buttons */}
-        <div className="flex items-center justify-between mt-8 pt-6 border-t">
+        <div className="sticky bottom-0 z-10 -mx-4 mt-8 flex items-center justify-between border-t bg-background/95 px-4 py-4 backdrop-blur-sm sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pt-6 sm:backdrop-blur-none">
           <div>
-            {step > 1 && (
+            {step > 1 && !createdDatasetId && (
               <Button variant="outline" onClick={() => setStep((s) => s - 1)}>
                 {t("knowledge.create.previous")}
               </Button>
@@ -1231,17 +1311,17 @@ export default function DatasetCreatePage() {
             </Button>
             {step < 3 ? (
               <Button
+                variant="primary"
                 onClick={handleNextStep}
-                className="bg-primary hover:bg-primary/90"
               >
                 {t("knowledge.create.next")}
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             ) : (
               <Button
+                variant="primary"
                 onClick={handleSubmit}
                 disabled={isSubmitting}
-                className="bg-primary hover:bg-primary/90"
               >
                 {isSubmitting ? (
                   <>

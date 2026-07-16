@@ -1,36 +1,28 @@
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { Bot } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 export function WelcomeScreen() {
   const { t } = useTranslation();
+  const shouldReduceMotion = useReducedMotion();
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      className="flex flex-col items-center justify-center min-h-[50vh] text-center"
+      transition={{ duration: shouldReduceMotion ? 0 : 0.22, ease: "easeOut" }}
+      className="flex min-h-[50vh] flex-col items-center justify-center text-center"
     >
-      {/* Welcome hero */}
-      <div className="relative mb-8">
-        <motion.div
-          className="h-20 w-20 rounded-2xl bg-primary/10 dark:bg-primary/15 flex items-center justify-center"
-          animate={{ rotate: [0, 2, -2, 0] }}
-          transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-        >
+      <div className="mb-7">
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 dark:bg-primary/15">
           <Bot className="h-10 w-10 text-primary" />
-        </motion.div>
-        <motion.div
-          className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-emerald-500 shadow-xs"
-          animate={{ scale: [1, 1.2, 1] }}
-          transition={{ duration: 2, repeat: Infinity }}
-        />
+        </div>
       </div>
 
-      <h2 className="text-2xl font-bold text-foreground mb-2">
+      <h2 className="mb-2 text-2xl font-semibold tracking-tight text-foreground">
         {t("assistant.welcomeTitle", "How can I help you today?")}
       </h2>
-      <p className="text-muted-foreground max-w-md text-sm leading-relaxed mb-8">
+      <p className="mb-8 max-w-md text-sm leading-relaxed text-muted-foreground">
         {t(
           "assistant.welcomeDesc",
           "Select a model and knowledge bases, then send a message to begin."

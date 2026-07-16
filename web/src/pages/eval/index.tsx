@@ -77,21 +77,6 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value || "Unknown error"));
 }
 
-function isWithinDateRange(trace: AgentTraceSummary, filters: AssistantTraceFilters) {
-  const sourceDate = trace.started_at || trace.created_at;
-  if (!sourceDate) return true;
-  const timestamp = new Date(sourceDate).getTime();
-  if (filters.start_date) {
-    const start = new Date(filters.start_date).setHours(0, 0, 0, 0);
-    if (timestamp < start) return false;
-  }
-  if (filters.end_date) {
-    const end = new Date(filters.end_date).setHours(23, 59, 59, 999);
-    if (timestamp > end) return false;
-  }
-  return true;
-}
-
 function isWithinScoreFilter(trace: AgentTraceSummary, filters: AssistantTraceFilters) {
   if (!filters.score_status || filters.score_status === "all") return true;
   if (filters.score_status === "scored") return trace.scores_count > 0;
@@ -269,9 +254,16 @@ function evaluatorPresetForType(
 function buildServerFilters(
   filters: AssistantTraceFilters,
   traceFamily: TraceFamily,
-  kbDatasetId?: string
+  kbDatasetId?: string,
+  offset = 0,
 ): ListAgentTracesParams {
   const datasetFilter = kbDatasetId?.trim() || undefined;
+  const startedAfter = filters.start_date
+    ? new Date(`${filters.start_date}T00:00:00`).toISOString()
+    : undefined;
+  const startedBefore = filters.end_date
+    ? new Date(`${filters.end_date}T23:59:59.999`).toISOString()
+    : undefined;
   return {
     trace_family: traceFamily,
     metadata_dataset_id: traceFamily === "rag" && datasetFilter ? datasetFilter : undefined,
@@ -289,8 +281,10 @@ function buildServerFilters(
     max_score: filters.max_score,
     min_latency_ms: filters.min_latency_ms,
     max_latency_ms: filters.max_latency_ms,
-    limit: 100,
-    offset: 0,
+    started_after: startedAfter,
+    started_before: startedBefore,
+    limit: 50,
+    offset,
   };
 }
 
@@ -381,13 +375,20 @@ export function EvalPage() {
   const [traceRunFocusRevision, setTraceRunFocusRevision] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
   const kbDatasetFilter = searchParams.get("dataset_id") || "";
-  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState("overview");
+  const requestedWorkbenchTab = searchParams.get("tab");
+  const requestedTraceFamily = searchParams.get("family");
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState(
+    ["overview", "runs", "traces", "assets", "gates"].includes(requestedWorkbenchTab || "")
+      ? requestedWorkbenchTab!
+      : "overview"
+  );
+  const [traceOffset, setTraceOffset] = useState(0);
   const [activeRunTab, setActiveRunTab] = useState("experiment_runs");
   const [activeAssetsTab, setActiveAssetsTab] = useState("golden_sets");
   const [contractPrefillRevision, setContractPrefillRevision] = useState(0);
   const serverFilters = useMemo(
-    () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter),
-    [activeTraceFamily, filters, kbDatasetFilter]
+    () => buildServerFilters(filters, activeTraceFamily, kbDatasetFilter, traceOffset),
+    [activeTraceFamily, filters, kbDatasetFilter, traceOffset]
   );
   const traceFamilyEnabled =
     activeTraceFamily === "assistant"
@@ -416,8 +417,31 @@ export function EvalPage() {
   const visibleTraces = useMemo(() => {
     if (!traceFamilyEnabled) return [];
     const traces = tracesQuery.data?.traces || [];
-    return traces.filter((trace) => isWithinDateRange(trace, filters) && isWithinScoreFilter(trace, filters));
+    return traces.filter((trace) => isWithinScoreFilter(trace, filters));
   }, [filters, traceFamilyEnabled, tracesQuery.data?.traces]);
+
+  useEffect(() => {
+    if (
+      requestedTraceFamily === "assistant"
+      || requestedTraceFamily === "langgraph_proxy"
+      || requestedTraceFamily === "rag"
+    ) {
+      setActiveTraceFamily(requestedTraceFamily);
+    }
+  }, [requestedTraceFamily]);
+
+  useEffect(() => {
+    if (
+      requestedWorkbenchTab
+      && ["overview", "runs", "traces", "assets", "gates"].includes(requestedWorkbenchTab)
+    ) {
+      setActiveWorkbenchTab(requestedWorkbenchTab);
+    }
+  }, [requestedWorkbenchTab]);
+
+  useEffect(() => {
+    setTraceOffset(0);
+  }, [activeTraceFamily, filters, kbDatasetFilter]);
 
   useEffect(() => {
     if (pinnedTraceId) return;
@@ -1022,6 +1046,9 @@ export function EvalPage() {
 
   const handleTraceFamilyChange = (key: string) => {
     const nextFamily = key as TraceFamily;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("family", nextFamily);
+    setSearchParams(nextParams, { replace: true });
     setPinnedTraceId(undefined);
     setActiveTraceFamily(nextFamily);
     setFilters({ status: "all", score_status: "all" });
@@ -1031,6 +1058,9 @@ export function EvalPage() {
   };
 
   const handleWorkbenchTabChange = (key: string) => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", key);
+    setSearchParams(nextParams, { replace: true });
     setActiveWorkbenchTab(key);
   };
 
@@ -1040,14 +1070,14 @@ export function EvalPage() {
     setPinnedTraceId(item.candidate_trace_id);
     setSelectedTraceId(item.candidate_trace_id);
     setTraceRunFocusRevision((revision) => revision + 1);
-    setActiveWorkbenchTab("traces");
+    handleWorkbenchTabChange("traces");
   };
 
   const openComparedTrace = (traceId: string) => {
     setPinnedTraceId(traceId);
     setSelectedTraceId(traceId);
     setTraceRunFocusRevision((revision) => revision + 1);
-    setActiveWorkbenchTab("traces");
+    handleWorkbenchTabChange("traces");
   };
 
   const dashboardMetrics = dashboardQuery.data?.metrics || {};
@@ -1128,6 +1158,9 @@ export function EvalPage() {
       hasCapturedFamilyTraces={hasCapturedFamilyTraces}
       traces={visibleTraces}
       traceTotal={tracesQuery.data?.total || 0}
+      traceOffset={traceOffset}
+      tracePageSize={50}
+      onTracePageChange={(page) => setTraceOffset((page - 1) * 50)}
       filters={filters}
       setFilters={setFilters}
       traceListCopy={traceListCopy}
@@ -1757,7 +1790,6 @@ export function EvalPage() {
             <SearchCheck size={15} />
             {t("eval.eyebrow")}
           </div>
-          <h1>{t("eval.title")}</h1>
           <p>{t("eval.description")}</p>
         </div>
         <div className="eval-latency-note">
@@ -1814,7 +1846,7 @@ export function EvalPage() {
           gap: 16px;
           margin-bottom: 14px;
         }
-        .eval-page-heading h1 {
+        .eval-page-heading h2 {
           margin: 4px 0 4px;
           font-size: 24px;
           line-height: 1.18;

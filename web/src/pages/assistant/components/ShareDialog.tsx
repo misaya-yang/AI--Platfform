@@ -69,14 +69,17 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
       <div
         className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="assistant-share-dialog-title"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-700">
           <div className="flex items-center gap-2">
             <Share2 className="w-5 h-5 text-primary" />
-            <h3 className="text-lg font-semibold">{t("assistant.shareConversation", "Share Conversation")}</h3>
+            <h3 id="assistant-share-dialog-title" className="text-lg font-semibold">{t("assistant.shareConversation", "Share Conversation")}</h3>
           </div>
-          <button onClick={handleClose} className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700">
+          <button type="button" onClick={handleClose} className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700" aria-label={t("common.close", "Close")}>
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -120,6 +123,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
               </p>
 
               <button
+                type="button"
                 onClick={handleCreate}
                 disabled={isCreating}
                 className="w-full py-2.5 px-4 rounded-xl bg-primary text-white font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
@@ -154,8 +158,10 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                   className="flex-1 bg-transparent text-sm font-mono truncate outline-hidden"
                 />
                 <button
+                  type="button"
                   onClick={handleCopy}
                   className="shrink-0 p-2 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                  aria-label={copied ? t("assistant.linkCopied", "Link copied") : t("common.copy", "Copy")}
                 >
                   {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
                 </button>
@@ -164,6 +170,7 @@ export function ShareDialog({ sessionId, messageCount, artifactCount, isOpen, on
                   target="_blank"
                   rel="noopener noreferrer"
                   className="shrink-0 p-2 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                  aria-label={t("common.openInNewTab", "Open share link")}
                 >
                   <ExternalLink className="w-4 h-4" />
                 </a>

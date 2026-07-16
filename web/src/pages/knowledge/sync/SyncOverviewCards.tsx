@@ -53,44 +53,38 @@ export function SyncOverviewCards({ bindings }: SyncOverviewCardsProps) {
       icon: Cloud,
       label: t("knowledge.sync.syncSources"),
       value: stats.totalSources,
-      color: "from-blue-500/10 to-cyan-500/10 border-blue-500/20",
-      iconColor: "text-blue-500",
+      iconColor: "text-primary",
     },
     {
       key: "pages",
       icon: FileText,
       label: t("knowledge.sync.syncedPagesCount"),
       value: `${stats.syncedPages}/${stats.totalPages}`,
-      color: "from-emerald-500/10 to-teal-500/10 border-emerald-500/20",
-      iconColor: "text-emerald-500",
+      iconColor: "text-primary",
     },
     {
       key: "lastSync",
       icon: Clock,
       label: t("knowledge.sync.lastSync"),
       value: stats.lastSyncAt ? formatRelativeTime(stats.lastSyncAt) : t("knowledge.sync.never"),
-      color: "from-amber-500/10 to-orange-500/10 border-amber-500/20",
-      iconColor: "text-amber-500",
+      iconColor: "text-muted-foreground",
     },
     {
       key: "active",
       icon: RefreshCcw,
       label: t("knowledge.sync.inProgress"),
       value: stats.activeSyncs,
-      color: stats.activeSyncs > 0
-        ? "from-purple-500/10 to-pink-500/10 border-purple-500/20"
-        : "from-slate-500/10 to-gray-500/10 border-slate-500/20",
-      iconColor: stats.activeSyncs > 0 ? "text-purple-500" : "text-slate-400",
+      iconColor: stats.activeSyncs > 0 ? "text-primary" : "text-muted-foreground",
       animate: stats.activeSyncs > 0,
     },
   ];
 
   return (
-    <div className="grid grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
       {cards.map((card) => (
         <div
           key={card.key}
-          className={`relative overflow-hidden rounded-xl bg-linear-to-br ${card.color} border p-4`}
+          className="relative overflow-hidden rounded-xl border border-border/80 bg-card p-4"
         >
           <div className="flex items-start justify-between">
             <div>

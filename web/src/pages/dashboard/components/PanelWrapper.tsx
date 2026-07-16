@@ -164,8 +164,10 @@ export function PanelWrapper({
           {extra}
           {onRefresh && (
             <Tooltip title={t("common.refresh")}>
-              <div
+              <button
+                type="button"
                 onClick={onRefresh}
+                aria-label={t("common.refresh")}
                 style={{
                   width: 32,
                   height: 32,
@@ -183,7 +185,7 @@ export function PanelWrapper({
                   e.currentTarget.style.transform = "rotate(180deg)";
                 }}
                 onMouseLeave={(e) => {
-                  e.currentTarget.style.background = colors.innerBg;
+                  e.currentTarget.style.background = colors.cardBg;
                   e.currentTarget.style.transform = "rotate(0deg)";
                 }}
               >
@@ -194,7 +196,7 @@ export function PanelWrapper({
                     color: colors.textPrimary,
                   }}
                 />
-              </div>
+              </button>
             </Tooltip>
           )}
         </div>

@@ -2,7 +2,8 @@
  * ConfluenceSyncTab - Main Confluence sync management tab
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Plus, Server, Loader2, AlertCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +21,7 @@ import {
 
 export function ConfluenceSyncTab() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [selectedConnectionId, setSelectedConnectionId] = useState<
     string | null
   >(null);
@@ -43,15 +45,16 @@ export function ConfluenceSyncTab() {
   // Connection stats
   const connectionStats = useConnectionStats(connections);
 
-  // Auto-select first connection
-  if (
-    connections &&
-    connections.length > 0 &&
-    !selectedConnectionId &&
-    !connectionsLoading
-  ) {
-    setSelectedConnectionId(connections[0].connection_id);
-  }
+  // Keep selection aligned with the loaded connection set.
+  useEffect(() => {
+    if (connectionsLoading) return;
+    const nextSelection =
+      connections?.some((connection) => connection.connection_id === selectedConnectionId)
+        ? selectedConnectionId
+        : connections?.[0]?.connection_id || null;
+    if (nextSelection === selectedConnectionId) return;
+    setSelectedConnectionId(nextSelection);
+  }, [connections, connectionsLoading, selectedConnectionId]);
 
   // Error state
   if (connectionsError) {
@@ -80,17 +83,29 @@ export function ConfluenceSyncTab() {
       />
 
       {/* Main Content */}
-      <div className="grid grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         {/* Left: Connection Pool */}
-        <div className="col-span-4">
-          <Card className="h-[calc(100vh-280px)]">
+        <div className={connections && connections.length > 0 ? "xl:col-span-4" : "xl:col-span-12"}>
+          <Card className={connections && connections.length > 0 ? "xl:h-[calc(100vh-280px)]" : "mx-auto w-full max-w-2xl"}>
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2">
                   <Server className="h-4 w-4" />
                   {t("tasks.confluence.connectionPool")}
                 </CardTitle>
-                {/* TODO: Add connection dialog */}
+                {connections && connections.length > 0 && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-10 px-2 sm:h-8"
+                    onClick={() => navigate("/confluence/connections/new")}
+                    aria-label={t("tasks.confluence.addConnection")}
+                  >
+                    <Plus className="mr-1 h-4 w-4" />
+                    <span className="hidden sm:inline">{t("tasks.confluence.addConnection")}</span>
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent className="p-0">
@@ -99,7 +114,7 @@ export function ConfluenceSyncTab() {
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : connections && connections.length > 0 ? (
-                <ScrollArea className="h-[calc(100vh-360px)] px-4">
+                <ScrollArea className="max-h-[420px] px-4 xl:h-[calc(100vh-360px)] xl:max-h-none">
                   <div className="space-y-3 pb-4">
                     {connections.map((conn) => {
                       const stats = connectionStats[conn.connection_id] || {
@@ -130,7 +145,11 @@ export function ConfluenceSyncTab() {
                   <p className="text-xs text-muted-foreground/70 mt-1 mb-4">
                     {t("tasks.confluence.noConnectionsDesc")}
                   </p>
-                  <Button size="sm" variant="outline">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => navigate("/confluence/connections/new")}
+                  >
                     <Plus className="h-4 w-4 mr-1" />
                     {t("tasks.confluence.addConnection")}
                   </Button>
@@ -141,8 +160,8 @@ export function ConfluenceSyncTab() {
         </div>
 
         {/* Right: Binding Details */}
-        <div className="col-span-8">
-          <Card className="h-[calc(100vh-280px)]">
+        <div className={connections && connections.length > 0 ? "xl:col-span-8" : "hidden"}>
+          <Card className="xl:h-[calc(100vh-280px)]">
             <CardHeader className="pb-3">
               <CardTitle className="text-base">
                 {selectedConnectionId
@@ -152,7 +171,7 @@ export function ConfluenceSyncTab() {
             </CardHeader>
             <CardContent>
               {selectedConnectionId ? (
-                <ScrollArea className="h-[calc(100vh-380px)]">
+                <ScrollArea className="max-h-[520px] xl:h-[calc(100vh-380px)] xl:max-h-none">
                   <BindingTable
                     bindings={bindings || []}
                     isLoading={bindingsLoading}

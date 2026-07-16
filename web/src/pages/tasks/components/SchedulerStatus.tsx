@@ -24,7 +24,7 @@ export function SchedulerStatus({
 
   if (!status) {
     return (
-      <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border">
+      <div className="flex items-center justify-between rounded-lg border bg-muted/50 p-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           <span>{t("tasks.confluence.scheduler.loading")}</span>
@@ -38,8 +38,8 @@ export function SchedulerStatus({
   const totalTasks = status.task_count;
 
   return (
-    <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border">
-      <div className="flex items-center gap-4">
+    <div className="flex flex-col items-stretch justify-between gap-3 rounded-lg border bg-muted/50 p-3 sm:flex-row sm:items-center">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         {/* Status indicator */}
         <div className="flex items-center gap-2">
           <div
@@ -75,7 +75,7 @@ export function SchedulerStatus({
         {/* Stats */}
         {isRunning && (
           <>
-            <div className="h-4 w-px bg-border" />
+            <div className="hidden h-4 w-px bg-border sm:block" />
             <div className="flex items-center gap-1 text-sm">
               <Activity className="h-4 w-4 text-blue-500" />
               <span className="text-muted-foreground">
@@ -85,7 +85,7 @@ export function SchedulerStatus({
                 {activeCount}/{status.max_concurrent}
               </span>
             </div>
-            <div className="h-4 w-px bg-border" />
+            <div className="hidden h-4 w-px bg-border sm:block" />
             <div className="flex items-center gap-1 text-sm">
               <span className="text-muted-foreground">
                 {t("tasks.confluence.scheduler.tasks")}:
@@ -102,7 +102,9 @@ export function SchedulerStatus({
         size="sm"
         onClick={onRefresh}
         disabled={isLoading}
-        className="h-7"
+        className="h-10 self-end px-3 sm:h-8 sm:self-auto sm:px-2"
+        aria-label={t("common.refresh")}
+        title={t("common.refresh")}
       >
         <RefreshCw
           className={cn("h-3.5 w-3.5", isLoading && "animate-spin")}

@@ -157,7 +157,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button size="sm">{t("services.addService")}</Button>
+        <Button variant="primary" size="sm" className="h-10 sm:h-8">{t("services.addService")}</Button>
       </DialogTrigger>
       <DialogContent className="w-[95vw] max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
@@ -241,7 +241,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
               <Button variant="outline" onClick={() => setOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button onClick={handleSimpleRegister} disabled={saving}>
+              <Button variant="primary" onClick={handleSimpleRegister} disabled={saving}>
                 {saving ? t("services.registering") : t("services.register")}
               </Button>
             </div>
@@ -254,7 +254,7 @@ export function ServiceForm({ onRegistered }: { onRegistered?: () => void }) {
               <Button variant="outline" onClick={() => setOpen(false)}>
                 {t("common.cancel")}
               </Button>
-              <Button onClick={handleYamlRegister} disabled={saving}>
+              <Button variant="primary" onClick={handleYamlRegister} disabled={saving}>
                 {saving ? t("services.registering") : t("services.register")}
               </Button>
             </div>

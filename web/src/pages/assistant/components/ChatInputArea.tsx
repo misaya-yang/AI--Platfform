@@ -1,6 +1,6 @@
 import { useRef, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { Send, Loader2, X, FileText, ImageIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -72,6 +72,15 @@ export function ChatInputArea({
 }: ChatInputAreaProps) {
   const { t } = useTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const shouldReduceMotion = useReducedMotion();
+
+  const hasUploadedFiles = files.some((f) => f.status === "success" && f.response);
+  const canSend =
+    !isStreaming &&
+    !isUploading &&
+    !isGeneratingImage &&
+    hasAvailableModel &&
+    Boolean(input.trim() || hasUploadedFiles);
 
   // Auto-resize textarea
   const handleTextareaChange = useCallback(
@@ -98,22 +107,13 @@ export function ChatInputArea({
       const isSubmitShortcut =
         (e.key === "Enter" && !e.shiftKey) ||
         (e.key === "Enter" && (e.metaKey || e.ctrlKey));
-      if (isSubmitShortcut) {
+      if (isSubmitShortcut && canSend) {
         e.preventDefault();
         onSend();
       }
     },
-    [isStreaming, onSend, onStop]
+    [canSend, isStreaming, onSend, onStop]
   );
-
-  // Check if can send
-  const hasUploadedFiles = files.some((f) => f.status === "success" && f.response);
-  const canSend =
-    !isStreaming &&
-    !isUploading &&
-    !isGeneratingImage &&
-    hasAvailableModel &&
-    Boolean(input.trim() || hasUploadedFiles);
 
   // Reset height when input clears
   useEffect(() => {
@@ -128,18 +128,18 @@ export function ChatInputArea({
       <AnimatePresence>
         {files.length > 0 && (
           <motion.div
-            initial={{ height: 0, opacity: 0 }}
+            initial={shouldReduceMotion ? false : { height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+            exit={shouldReduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
             className="overflow-hidden border-b border-[hsl(var(--assistant-border-soft))]"
           >
             <div className="px-4 py-3 flex flex-wrap gap-2">
               {files.map((f, index) => (
                 <motion.div
                   key={`${f.file.name}-${index}`}
-                  initial={{ opacity: 0, scale: 0.8 }}
+                  initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.96 }}
                   animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
+                  exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.96 }}
                   className={cn(
                     "relative group rounded-xl px-3 py-2 text-xs flex items-center gap-2 transition-colors overflow-hidden",
                     f.status === "error"
@@ -173,9 +173,11 @@ export function ChatInputArea({
                       : formatFileSize(f.file.size)}
                   </span>
                   <button
+                    type="button"
                     onClick={() => removeFile(index)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity absolute -top-1 -right-1 bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-800 rounded-full p-0.5 hover:bg-slate-900 dark:hover:bg-white z-20"
+                    className="absolute -right-1 -top-1 z-20 rounded-full bg-slate-800 p-1 text-white opacity-70 transition-opacity hover:bg-slate-900 hover:opacity-100 focus-visible:opacity-100 dark:bg-slate-200 dark:text-slate-800 dark:hover:bg-white sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100"
                     disabled={f.status === "uploading"}
+                    aria-label={`${t("common.delete")}: ${f.file.name}`}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -186,7 +188,7 @@ export function ChatInputArea({
         )}
       </AnimatePresence>
 
-      <div className="p-4">
+      <div className="px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-3 sm:p-4">
         <div className={cn("w-full mx-auto", ASSISTANT_UI_V2 ? "max-w-[760px]" : "max-w-3xl")}>
           {/* Input container — restrained: 10px radius, hairline border,
               no drop-shadow-sm at rest; focus-within swaps to accent-tinted
@@ -260,15 +262,18 @@ export function ChatInputArea({
                 Accent-tinted fill, 6px radius, no glow, no scale wiggle. */}
             {isStreaming ? (
               <Button
+                type="button"
                 size="icon"
                 className="h-9 w-9 shrink-0 rounded-md bg-[hsl(var(--destructive))]/90 hover:bg-[hsl(var(--destructive))] text-white transition-colors duration-150"
                 onClick={onStop}
+                aria-label={t("assistant.stopGenerating", "Stop generating")}
                 aria-keyshortcuts="Escape"
               >
                 <X className="h-4 w-4" />
               </Button>
             ) : (
               <Button
+                type="button"
                 size="icon"
                 className={cn(
                   "h-9 w-9 shrink-0 rounded-md transition-colors duration-150",
@@ -278,6 +283,7 @@ export function ChatInputArea({
                 )}
                 onClick={onSend}
                 disabled={!canSend}
+                aria-label={t("common.send", "Send")}
                 aria-keyshortcuts="Enter,Control+Enter,Meta+Enter"
               >
                 {isUploading || isGeneratingImage ? (
@@ -292,7 +298,7 @@ export function ChatInputArea({
           </div>
 
           {/* Control Bar - Style selector */}
-          <div className="flex items-center justify-between mt-2 px-1">
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1">
             <div className="flex items-center gap-2">
               <StyleSelector
                 selectedStyle={selectedStyle}

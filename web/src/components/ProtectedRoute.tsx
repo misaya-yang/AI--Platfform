@@ -1,6 +1,8 @@
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/useAuthStore";
 
+export { ForbiddenPage } from "@/components/SystemStatusPage";
+
 interface ProtectedRouteProps {
   children: React.ReactNode;
   requiredPermission?: string;
@@ -61,25 +63,4 @@ export function ProtectedRoute({
   }
 
   return <>{children}</>;
-}
-
-// Forbidden page component
-export function ForbiddenPage() {
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <div className="text-center space-y-4">
-        <h1 className="text-6xl font-bold text-muted-foreground">403</h1>
-        <h2 className="text-2xl font-semibold">Access Denied</h2>
-        <p className="text-muted-foreground">
-          You don't have permission to access this page.
-        </p>
-        <a
-          href="/"
-          className="inline-block px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-        >
-          Go to Dashboard
-        </a>
-      </div>
-    </div>
-  );
 }

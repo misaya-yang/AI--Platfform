@@ -56,53 +56,6 @@ export function MultimodalInput({
   const [isUploading, setIsUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Handle file selection and upload
-  const handleFileSelect = useCallback(
-    async (selectedFiles: FileList | null) => {
-      if (!selectedFiles || selectedFiles.length === 0) return;
-
-      // Calculate remaining slots BEFORE processing
-      const MAX_FILES = 5;
-
-      setFiles((currentFiles) => {
-        const remainingSlots = MAX_FILES - currentFiles.length;
-
-        if (remainingSlots <= 0) {
-          console.warn("Maximum file limit reached (5 files)");
-          return currentFiles;
-        }
-
-        // Filter supported files and limit to remaining slots
-        const validFiles = Array.from(selectedFiles)
-          .filter((file) => {
-            if (!isFileTypeSupported(file)) {
-              console.warn(`Unsupported file type: ${file.name}`);
-              return false;
-            }
-            return true;
-          })
-          .slice(0, remainingSlots);
-
-        if (validFiles.length === 0) return currentFiles;
-
-        // Add files to state with pending status
-        const newFiles: UploadedFile[] = validFiles.map((file) => ({
-          file,
-          status: "pending" as const,
-        }));
-
-        // Start uploads outside of setState (side effect)
-        setTimeout(() => uploadFiles(newFiles), 0);
-
-        return [...currentFiles, ...newFiles];
-      });
-    },
-    []
-  );
-
-  // Handle paste event for images (shared hook)
-  const handlePaste = usePasteImage(handleFileSelect);
-
   // Upload files asynchronously with compression and progress
   const uploadFiles = useCallback(async (filesToUpload: UploadedFile[]) => {
     if (filesToUpload.length === 0) return;
@@ -176,6 +129,53 @@ export function MultimodalInput({
 
     setIsUploading(false);
   }, []);
+
+  // Handle file selection and upload
+  const handleFileSelect = useCallback(
+    async (selectedFiles: FileList | null) => {
+      if (!selectedFiles || selectedFiles.length === 0) return;
+
+      // Calculate remaining slots BEFORE processing
+      const MAX_FILES = 5;
+
+      setFiles((currentFiles) => {
+        const remainingSlots = MAX_FILES - currentFiles.length;
+
+        if (remainingSlots <= 0) {
+          console.warn("Maximum file limit reached (5 files)");
+          return currentFiles;
+        }
+
+        // Filter supported files and limit to remaining slots
+        const validFiles = Array.from(selectedFiles)
+          .filter((file) => {
+            if (!isFileTypeSupported(file)) {
+              console.warn(`Unsupported file type: ${file.name}`);
+              return false;
+            }
+            return true;
+          })
+          .slice(0, remainingSlots);
+
+        if (validFiles.length === 0) return currentFiles;
+
+        // Add files to state with pending status
+        const newFiles: UploadedFile[] = validFiles.map((file) => ({
+          file,
+          status: "pending" as const,
+        }));
+
+        // Start uploads outside of setState (side effect)
+        setTimeout(() => uploadFiles(newFiles), 0);
+
+        return [...currentFiles, ...newFiles];
+      });
+    },
+    [uploadFiles]
+  );
+
+  // Handle paste event for images (shared hook)
+  const handlePaste = usePasteImage(handleFileSelect);
 
   // Remove file from list
   const removeFile = useCallback((index: number) => {
@@ -309,9 +309,11 @@ export function MultimodalInput({
 
               {/* Remove button */}
               <button
+                type="button"
                 onClick={() => removeFile(index)}
-                className="opacity-0 group-hover:opacity-100 transition-opacity absolute -top-1.5 -right-1.5 bg-foreground/80 text-background rounded-full p-0.5 hover:bg-foreground z-20"
+                className="absolute -right-1.5 -top-1.5 z-20 rounded-full bg-foreground/80 p-1 text-background opacity-70 transition-opacity hover:bg-foreground hover:opacity-100 focus-visible:opacity-100 sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100"
                 disabled={f.status === "uploading" || f.status === "compressing"}
+                aria-label={`${t("common.delete")}: ${f.file.name}`}
               >
                 <X className="h-3 w-3" />
               </button>
@@ -322,7 +324,7 @@ export function MultimodalInput({
 
       {/* Error message */}
       {hasFailedUploads && (
-        <div className="px-4 py-2 text-xs text-red-500 dark:text-red-400">
+        <div className="px-4 py-2 text-xs text-red-500 dark:text-red-400" role="alert">
           {t("assistant.upload.failedNotice")}
         </div>
       )}
@@ -400,7 +402,7 @@ export function MultimodalInput({
             onClick={() => onStop?.()}
             aria-label={t("assistant.stopGenerating", "Stop generating")}
             aria-keyshortcuts="Escape"
-            className="h-10 w-10 shrink-0 rounded-xl bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/20 transition-colors"
+            className="h-10 w-10 shrink-0 rounded-lg bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
           >
             <X className="h-5 w-5" />
           </Button>
@@ -413,9 +415,9 @@ export function MultimodalInput({
             aria-label={t("common.send")}
             aria-keyshortcuts="Enter,Control+Enter,Meta+Enter"
             className={cn(
-              "h-10 w-10 shrink-0 rounded-xl shadow-lg transition-all duration-200",
+              "h-10 w-10 shrink-0 rounded-lg transition-colors duration-150",
               canSend
-                ? "bg-primary hover:bg-primary/90 shadow-xs hover:shadow-md hover:scale-105"
+                ? "bg-primary text-primary-foreground hover:bg-primary/90"
                 : "bg-muted text-muted-foreground opacity-50"
             )}
           >

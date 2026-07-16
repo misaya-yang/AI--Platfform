@@ -199,6 +199,7 @@
   },
   "user": {
     "profile": "个人资料",
+    "openMenu": "打开用户菜单",
     "changePassword": "修改密码",
     "logout": "退出登录",
     "language": "语言",
@@ -223,21 +224,41 @@
   },
   "login": {
     "title": "账号登录",
+    "brandEyebrow": "AI 运营工作台",
+    "brandTitle": "统一管理模型服务、知识资产与交付质量。",
+    "brandDescription": "面向日常运营的集中工作台，用于配置服务、维护可信知识，并追踪每一次生产请求。",
+    "secureAccess": "企业级安全访问",
     "username": "用户名",
     "password": "密码",
     "submit": "登录",
     "forgotPassword": "忘记密码",
     "rememberMe": "记住我",
     "emailLabel": "邮箱账号",
+    "emailPlaceholder": "用户名或完整邮箱",
+    "emailHint": "请输入用户名，或 {{domain}} 域名下的完整企业邮箱。",
     "passwordLabel": "密码",
     "passwordPlaceholder": "请输入密码",
     "rememberMeDays": "30天内免登录",
     "loggingIn": "登录中...",
-    "loginButton": "登 录",
+    "loginButton": "登录",
     "enterpriseOnly": "仅限 @{{domain}} 企业邮箱",
     "loginWith": "使用企业邮箱登录 AI Platform",
     "showPassword": "显示密码",
     "hidePassword": "隐藏密码",
+    "highlights": {
+      "operations": {
+        "title": "模型运营",
+        "description": "在同一控制面配置供应商、服务、路由与容量。"
+      },
+      "knowledge": {
+        "title": "可信知识",
+        "description": "维护数据集和外部来源，并清晰掌控检索配置。"
+      },
+      "observability": {
+        "title": "全程可追踪",
+        "description": "在完整运营上下文中查看健康状态、请求与评测信号。"
+      }
+    },
     "errors": {
       "emailRequired": "请输入邮箱",
       "invalidCredentials": "邮箱或密码错误",
@@ -250,6 +271,18 @@
       "content": "请联系系统管理员重置密码。",
       "adminEmail": "管理员邮箱：{{email}}",
       "ok": "知道了"
+    }
+  },
+  "systemPages": {
+    "eyebrow": "AI Gateway 控制台",
+    "returnToWorkspace": "返回工作台",
+    "forbidden": {
+      "title": "无权访问",
+      "description": "当前账号没有打开此页面的权限。请返回可用工作台，或联系管理员申请权限。"
+    },
+    "notFound": {
+      "title": "页面不存在",
+      "description": "页面地址可能有误，或内容已被移动。请返回工作台后继续操作。"
     }
   },
   "dashboard": {
@@ -550,9 +583,10 @@
     },
     "permissions": {
       "categories": {
-        "console": "控制台",
-        "conversation": "对话",
-        "knowledge": "知识库",
+      "console": "控制台",
+      "conversation": "对话",
+      "service": "服务",
+      "knowledge": "知识库",
         "user": "用户",
         "role": "角色",
         "admin": "管理"
@@ -570,23 +604,39 @@
       },
       "displayNamePlaceholder": "请输入显示名称",
       "departmentPlaceholder": "选择部门",
-      "roles": {
+    "roles": {
         "title": "角色分配",
         "desc": "选择用户角色，角色决定基础权限",
         "system": "系统",
         "noDescription": "无描述",
         "permissionCount": "{{count}} 个权限",
-        "noAccess": "无权限查看角色列表"
-      },
-      "extraPermissions": {
+      "noAccess": "无权限查看角色列表"
+    },
+    "serviceAccess": {
+      "title": "Agent 服务访问",
+      "desc": "为该用户配置 API 与 Playground 共用的服务白名单和拒绝名单。",
+      "mode": "访问模式",
+      "allServices": "全部服务（可叠加拒绝名单）",
+      "allowlistOnly": "仅白名单服务",
+      "policy": "策略说明",
+      "allowlistPolicy": "仅可调用标记为允许的服务，拒绝名单始终优先。",
+      "allPolicy": "默认可调用所有服务，可通过拒绝名单禁用特定服务。",
+      "noAccess": "当前账号无权读取服务列表。",
+      "loading": "正在加载服务...",
+      "empty": "暂无可配置服务",
+      "allow": "允许",
+      "deny": "拒绝"
+    },
+    "extraPermissions": {
         "title": "额外权限",
         "desc": "直接分配给用户的独立权限（角色权限之外）",
         "tipLabel": "提示",
         "tipText": "角色已包含的权限显示为灰色。额外权限用于授予角色之外的特殊权限。",
         "categoryCount": "{{count}} 个权限",
         "fromRole": "已通过角色获得此权限",
-        "roleBadge": "角色",
-        "noAccess": "无权限查看权限列表"
+      "roleBadge": "角色",
+      "empty": "当前账号暂无可分配的额外权限。",
+      "noAccess": "无权限查看权限列表"
       },
       "unsavedChanges": "您有未保存的更改",
       "saveChanges": "保存更改"
@@ -654,7 +704,7 @@
       "connectionPool": "连接池",
       "bindingDetails": "绑定详情",
       "selectConnection": "选择连接",
-      "selectConnectionHint": "请从左侧选择一个连接查看详情",
+      "selectConnectionHint": "请选择一个连接查看详情",
       "noConnections": "暂无连接",
       "noConnectionsDesc": "创建 Confluence 连接开始同步",
       "addConnection": "添加连接",
@@ -1650,7 +1700,7 @@
       "manageSync": "管理同步",
       "sourceManagement": "数据源管理",
       "sourceManagementDesc": "选择一种方式添加数据到知识库",
-      "totalDocSources": "共 {{count}} 个文档来源"
+      "totalDocSources": "文档来源：{{count}}"
     },
     "sync": {
       "confluenceSync": "Confluence 同步",

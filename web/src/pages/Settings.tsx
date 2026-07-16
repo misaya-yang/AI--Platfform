@@ -146,14 +146,14 @@ export function SettingsPage() {
   const apiKeysQuery = useQuery({ queryKey: ["api-keys"], queryFn: getApiKeys });
   const lbQuery = useQuery({ queryKey: ["load-balancer"], queryFn: getLoadBalancerConfig });
 
-  const status = statusQuery.data || {};
-  const authConfig = authQuery.data?.runtime || {};
-  const rateLimits = rateLimitsQuery.data?.rules || [];
-  const apiKeys = apiKeysQuery.data?.keys || [];
-  const lbConfig = lbQuery.data || {};
-  const lbStrategies = lbConfig.available_strategies || [];
-  const capacity = status.capacity || {};
-  const capacityBudgets: CapacityBudgetStatus[] = capacity.budgets || [];
+  const status = statusQuery.data ?? {};
+  const authConfig = authQuery.data?.runtime;
+  const rateLimits = rateLimitsQuery.data?.rules ?? [];
+  const apiKeys = apiKeysQuery.data?.keys ?? [];
+  const lbConfig = lbQuery.data;
+  const lbStrategies = lbConfig?.available_strategies ?? [];
+  const capacity = status.capacity ?? {};
+  const capacityBudgets: CapacityBudgetStatus[] = capacity.budgets ?? [];
 
   // 鉴权配置表单
   const [authForm, setAuthForm] = useState({
@@ -167,27 +167,27 @@ export function SettingsPage() {
   // 负载均衡策略
   const [lbStrategy, setLbStrategy] = useState("round_robin");
 
-  /* eslint-disable react-hooks/set-state-in-effect -- Intentional: form initialization from query data */
   useEffect(() => {
-    if (authConfig) {
-      setAuthForm({
-        jwt_enabled: authConfig.jwt_enabled || false,
-        jwt_secret: authConfig.jwt_secret || "",
-        jwt_issuer: authConfig.jwt_issuer || "",
-        api_key_enabled: authConfig.api_key_enabled || false,
-        api_key_header: authConfig.api_key_header || "X-API-Key",
-      });
-    }
+    if (!authConfig) return;
+
+    setAuthForm({
+      jwt_enabled: authConfig.jwt_enabled ?? false,
+      jwt_secret: authConfig.jwt_secret ?? "",
+      jwt_issuer: authConfig.jwt_issuer ?? "",
+      api_key_enabled: authConfig.api_key_enabled ?? false,
+      api_key_header: authConfig.api_key_header ?? "X-API-Key",
+    });
   }, [authConfig]);
 
   useEffect(() => {
+    if (!lbConfig) return;
+
     if (lbConfig.runtime?.strategy) {
       setLbStrategy(lbConfig.runtime.strategy);
     } else if (lbConfig.strategy) {
       setLbStrategy(lbConfig.strategy);
     }
   }, [lbConfig]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // 限流表单
   const [rateLimitForm, setRateLimitForm] = useState({
@@ -248,8 +248,7 @@ export function SettingsPage() {
       </div>
 
       {/* 配置层级说明 */}
-      <Card className="relative overflow-hidden border-primary/20 bg-linear-to-r from-primary/5 to-transparent dark:from-primary/10 dark:to-transparent">
-        {/* Left gradient border */}
+      <Card className="relative overflow-hidden border-border/80 bg-muted/20">
         <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary" />
         <CardContent className="pt-4 pl-5">
           <div className="flex items-start gap-3">
@@ -259,15 +258,15 @@ export function SettingsPage() {
               </svg>
             </div>
             <div className="space-y-1">
-              <h4 className="text-sm font-medium text-primary dark:text-primary/90">{t("settings.configLevels.title")}</h4>
-              <p className="text-sm text-primary/90 dark:text-primary/70">
+              <h4 className="text-sm font-medium text-foreground">{t("settings.configLevels.title")}</h4>
+              <p className="text-sm text-muted-foreground">
                 {t("settings.configLevels.description")}
               </p>
-              <ul className="text-sm text-primary dark:text-primary/70 list-disc list-inside space-y-0.5">
+              <ul className="text-sm text-muted-foreground list-disc list-inside space-y-0.5">
                 <li>{t("settings.configLevels.globalConfig")}</li>
                 <li>{t("settings.configLevels.serviceConfig")}</li>
               </ul>
-              <p className="text-xs text-primary dark:text-primary mt-2">
+              <p className="text-xs text-foreground mt-2">
                 {t("settings.configLevels.priority")}
               </p>
             </div>
@@ -327,13 +326,19 @@ export function SettingsPage() {
       </Card>
 
       <Tabs defaultValue="auth" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="auth">{t("settings.tabs.auth")}</TabsTrigger>
-          <TabsTrigger value="rate-limit">{t("settings.tabs.rateLimit")}</TabsTrigger>
-          <TabsTrigger value="capacity">Capacity</TabsTrigger>
-          <TabsTrigger value="load-balancer">{t("settings.tabs.loadBalancer")}</TabsTrigger>
-          <TabsTrigger value="api-keys">{t("settings.tabs.apiKeys")}</TabsTrigger>
-        </TabsList>
+        <div className="ui-scroll-affordance w-full pb-1">
+          <TabsList className="h-auto min-w-max justify-start">
+            <TabsTrigger value="auth">{t("settings.tabs.auth")}</TabsTrigger>
+            <TabsTrigger value="rate-limit">{t("settings.tabs.rateLimit")}</TabsTrigger>
+            <TabsTrigger value="capacity">Capacity</TabsTrigger>
+            <TabsTrigger value="load-balancer">
+              {t("settings.tabs.loadBalancer")}
+            </TabsTrigger>
+            <TabsTrigger value="api-keys">
+              {t("settings.tabs.apiKeys")}
+            </TabsTrigger>
+          </TabsList>
+        </div>
 
         {/* 鉴权配置 */}
         <TabsContent value="auth" className="space-y-4">
@@ -345,10 +350,19 @@ export function SettingsPage() {
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label>{t("settings.auth.jwt.enable")}</Label>
-                  <p className="text-xs text-muted-foreground">{t("settings.auth.jwt.enableDesc")}</p>
+                  <Label htmlFor="settings-jwt-enabled">
+                    {t("settings.auth.jwt.enable")}
+                  </Label>
+                  <p
+                    id="settings-jwt-enabled-description"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {t("settings.auth.jwt.enableDesc")}
+                  </p>
                 </div>
                 <Switch
+                  id="settings-jwt-enabled"
+                  aria-describedby="settings-jwt-enabled-description"
                   checked={authForm.jwt_enabled}
                   onCheckedChange={(checked) =>
                     setAuthForm({ ...authForm, jwt_enabled: checked })
@@ -388,10 +402,19 @@ export function SettingsPage() {
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label>{t("settings.auth.apiKey.enable")}</Label>
-                  <p className="text-xs text-muted-foreground">{t("settings.auth.apiKey.enableDesc")}</p>
+                  <Label htmlFor="settings-api-key-enabled">
+                    {t("settings.auth.apiKey.enable")}
+                  </Label>
+                  <p
+                    id="settings-api-key-enabled-description"
+                    className="text-xs text-muted-foreground"
+                  >
+                    {t("settings.auth.apiKey.enableDesc")}
+                  </p>
                 </div>
                 <Switch
+                  id="settings-api-key-enabled"
+                  aria-describedby="settings-api-key-enabled-description"
                   checked={authForm.api_key_enabled}
                   onCheckedChange={(checked) =>
                     setAuthForm({ ...authForm, api_key_enabled: checked })
@@ -414,6 +437,7 @@ export function SettingsPage() {
 
           <div className="flex justify-end">
             <Button
+              variant="primary"
               onClick={() => updateAuthMutation.mutate({ ...authForm, enabled: authForm.jwt_enabled || authForm.api_key_enabled, provider: "custom" })}
               disabled={updateAuthMutation.isPending}
               className="transition-all duration-200"
@@ -431,7 +455,7 @@ export function SettingsPage() {
               <CardDescription>{t("settings.rateLimit.addDescription")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label>{t("settings.rateLimit.scope")}</Label>
                   <Select
@@ -463,7 +487,7 @@ export function SettingsPage() {
                 )}
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div className="space-y-2">
                   <Label>{t("settings.rateLimit.requests")}</Label>
                   <Input
@@ -610,23 +634,41 @@ export function SettingsPage() {
               <CardDescription>{t("settings.loadBalancer.description")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="space-y-3">
+              <div
+                className="space-y-3"
+                role="radiogroup"
+                aria-label={t("settings.loadBalancer.title")}
+              >
                 {lbStrategies.map((s: LbStrategy) => (
-                  <div
+                  <label
                     key={s.value}
-                    className={`flex items-center justify-between rounded-xl border p-4 cursor-pointer transition-all duration-200 ${
+                    className={`flex w-full cursor-pointer items-center justify-between rounded-lg border p-4 transition-colors focus-within:ring-2 focus-within:ring-ring/30 ${
                       lbStrategy === s.value
-                        ? "border-primary/40 bg-primary/5 dark:bg-primary/10 shadow-xs"
-                        : "hover:bg-muted/50 hover:border-border/80"
+                        ? "border-primary/40 bg-primary/5 dark:bg-primary/10"
+                        : "hover:border-border/80 hover:bg-muted/50"
                     }`}
-                    onClick={() => setLbStrategy(s.value)}
                   >
-                    <div>
-                      <div className={`font-medium ${lbStrategy === s.value ? "text-primary" : ""}`}>{s.label}</div>
-                      <div className="text-sm text-muted-foreground">{s.description}</div>
+                    <input
+                      type="radio"
+                      name="load-balancer-strategy"
+                      value={s.value}
+                      checked={lbStrategy === s.value}
+                      onChange={() => setLbStrategy(s.value)}
+                      className="sr-only"
+                    />
+                    <div className="min-w-0">
+                      <div
+                        className={`font-medium ${lbStrategy === s.value ? "text-primary" : ""}`}
+                      >
+                        {s.label}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        {s.description}
+                      </div>
                     </div>
                     <div
-                      className={`h-5 w-5 rounded-full border-2 transition-all duration-200 flex items-center justify-center ${
+                      aria-hidden="true"
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
                         lbStrategy === s.value
                           ? "border-primary bg-primary"
                           : "border-muted-foreground/50"
@@ -638,7 +680,7 @@ export function SettingsPage() {
                         </svg>
                       )}
                     </div>
-                  </div>
+                  </label>
                 ))}
               </div>
 
@@ -663,7 +705,7 @@ export function SettingsPage() {
               <CardDescription>{t("settings.apiKeys.createDescription")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label>{t("settings.apiKeys.name")}</Label>
                   <Input

@@ -283,14 +283,14 @@ function SessionItem({
               (GPT shows raw icons that get a subtle bg per icon on its
               own hover). The plate makes the row look busier than it
               is. */}
-          <div className="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))]" title={t("assistant.rename", "Rename")}>
+          <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-70 transition-opacity sm:opacity-0 sm:group-focus-within:opacity-100 sm:group-hover:opacity-100">
+            <button type="button" onClick={(e) => { e.stopPropagation(); startEdit(); }} className="hidden rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))] sm:inline-flex" title={t("assistant.rename", "Rename")} aria-label={`${t("assistant.rename", "Rename")}: ${title}`}>
               <Pencil className="h-3.5 w-3.5" />
             </button>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <button type="button" className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))]" title={t("assistant.more", "More")}>
+                <button type="button" className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-[hsl(var(--assistant-surface-soft))] hover:text-[hsl(var(--assistant-text-primary))]" title={t("assistant.more", "More")} aria-label={`${t("assistant.more", "More")}: ${title}`}>
                   <span className="text-xs font-bold leading-none">···</span>
                 </button>
               </DropdownMenuTrigger>
@@ -313,7 +313,7 @@ function SessionItem({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-destructive/10 hover:text-destructive" title={t("assistant.delete", "Delete")}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} className="hidden rounded-md p-1.5 text-[hsl(var(--assistant-text-secondary))] hover:bg-destructive/10 hover:text-destructive sm:inline-flex" title={t("assistant.delete", "Delete")} aria-label={`${t("assistant.delete", "Delete")}: ${title}`}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -486,7 +486,7 @@ export function ConversationSidebar({
             className="pl-8 pr-8 h-9 text-sm"
           />
           {searchQuery && (
-            <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-muted" onClick={() => setSearchQuery("")}>
+            <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 hover:bg-muted" onClick={() => setSearchQuery("")} aria-label={`${t("common.clear")} ${t("common.search")}`}>
               <X className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
           )}

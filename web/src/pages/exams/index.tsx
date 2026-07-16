@@ -50,7 +50,7 @@ import type { QuizData } from "@/pages/assistant/types";
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline-solid" }> = {
   draft: { label: "Draft", variant: "secondary" },
   published: { label: "Published", variant: "default" },
-  closed: { label: "Closed", variant: "outline" },
+  closed: { label: "Closed", variant: "outline-solid" },
   archived: { label: "Archived", variant: "destructive" },
 };
 
@@ -269,14 +269,14 @@ function ExamsContent({
   };
 
   return (
-    <div className={showHeader ? "space-y-6 p-6 max-w-6xl mx-auto" : "space-y-4"}>
+    <div className={showHeader ? "mx-auto max-w-6xl space-y-5 p-4 sm:space-y-6 sm:p-6" : "space-y-4"}>
       {showHeader && (
-        <div className="flex items-center justify-between">
-          <div>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
             <h1 className="text-2xl font-semibold tracking-tight">{t("exams.title")}</h1>
             <p className="text-muted-foreground text-sm mt-1">{t("exams.subtitle")}</p>
           </div>
-          <Button onClick={() => setShowCreate(true)} className="gap-2">
+          <Button variant="primary" onClick={() => setShowCreate(true)} className="w-full gap-2 sm:w-auto">
             <Plus className="h-4 w-4" />
             {t("exams.createExam")}
           </Button>
@@ -285,7 +285,7 @@ function ExamsContent({
 
       {!showHeader && (
         <div className="flex justify-end">
-          <Button onClick={() => setShowCreate(true)} className="gap-2" size="sm">
+          <Button variant="primary" onClick={() => setShowCreate(true)} className="gap-2" size="sm">
             <Plus className="h-4 w-4" />
             {t("exams.createExam")}
           </Button>
@@ -293,8 +293,8 @@ function ExamsContent({
       )}
 
       {/* Filters */}
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1 max-w-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="relative w-full flex-1 sm:max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder={t("exams.searchPlaceholder")}
@@ -303,7 +303,7 @@ function ExamsContent({
             className="pl-9"
           />
         </div>
-        <div className="flex gap-1">
+        <div className="ui-tabs-rail" role="group" aria-label={t("exams.status", { defaultValue: "Exam status" })}>
           {["all", "draft", "published", "closed"].map((s) => (
             <Button
               key={s}
@@ -318,7 +318,7 @@ function ExamsContent({
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
         {[
           { label: t("exams.statsTotal"), value: total, icon: ClipboardList },
           { label: t("exams.statsPublished"), value: exams.filter((e) => e.status === "published").length, icon: ExternalLink },
@@ -329,11 +329,11 @@ function ExamsContent({
             return `${Math.round((scored.reduce((s, e) => s + (e.avg_score || 0), 0) / scored.length) * 100)}%`;
           })(), icon: BarChart3 },
         ].map(({ label, value, icon: Icon }) => (
-          <div key={label} className="rounded-xl border bg-card p-4 flex items-center gap-3">
-            <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+          <div key={label} className="flex min-w-0 items-center gap-3 rounded-xl border bg-card p-3 sm:p-4">
+            <div className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 sm:flex">
               <Icon className="h-5 w-5 text-primary" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-semibold">{value}</p>
               <p className="text-xs text-muted-foreground">{label}</p>
             </div>
@@ -357,14 +357,23 @@ function ExamsContent({
       ) : (
         <div className="space-y-3">
           {filtered.map((exam) => (
-            <div
+            <article
               key={exam.exam_id}
-              className="rounded-xl border bg-card hover:bg-accent/30 transition-colors cursor-pointer p-4"
+              role="link"
+              tabIndex={0}
+              className="cursor-pointer rounded-xl border bg-card p-4 transition-colors hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35"
               onClick={() => navigate(`/exams/${exam.exam_id}`)}
+              onKeyDown={(event) => {
+                if (event.currentTarget !== event.target) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  navigate(`/exams/${exam.exam_id}`);
+                }
+              }}
             >
-              <div className="flex items-start justify-between">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h3 className="font-medium truncate">{exam.title}</h3>
                     <Badge variant={(STATUS_CONFIG[exam.status] || STATUS_CONFIG.draft).variant}>
                       {statusLabels[exam.status] || exam.status}
@@ -373,7 +382,7 @@ function ExamsContent({
                   {exam.description && (
                     <p className="text-sm text-muted-foreground mt-1 line-clamp-1">{exam.description}</p>
                   )}
-                  <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground">
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
                     <span className="flex items-center gap-1">
                       <ClipboardList className="h-3 w-3" /> {t("exams.questions", { count: exam.question_count })}
                     </span>
@@ -393,9 +402,9 @@ function ExamsContent({
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 ml-4" onClick={(e) => e.stopPropagation()}>
+                <div className="flex flex-wrap items-center gap-2 sm:ml-4" onClick={(e) => e.stopPropagation()}>
                   {exam.status === "draft" && (
-                    <Button size="sm" onClick={() => handlePublish(exam)}>{t("exams.publish")}</Button>
+                    <Button variant="primary" size="sm" onClick={() => handlePublish(exam)}>{t("exams.publish")}</Button>
                   )}
                   {exam.status === "published" && exam.share_code && (
                     <Button size="sm" variant="outline" className="gap-1" onClick={() => copyShareLink(exam)}>
@@ -408,7 +417,7 @@ function ExamsContent({
                   )}
                 </div>
               </div>
-            </div>
+            </article>
           ))}
         </div>
       )}
@@ -533,7 +542,7 @@ function CreateExamDialog({
             />
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <Label>{t("exams.create.passingScore")}</Label>
               <Input
@@ -572,7 +581,7 @@ function CreateExamDialog({
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{t("exams.create.cancel")}</Button>
-          <Button onClick={handleCreate} disabled={!selectedQuiz || !title || creating}>
+          <Button variant="primary" onClick={handleCreate} disabled={!selectedQuiz || !title || creating}>
             {creating && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
             {t("exams.create.createDraft")}
           </Button>

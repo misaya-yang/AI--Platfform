@@ -199,6 +199,7 @@
   },
   "user": {
     "profile": "Profile",
+    "openMenu": "Open user menu",
     "changePassword": "Change Password",
     "logout": "Logout",
     "language": "Language",
@@ -223,12 +224,18 @@
   },
   "login": {
     "title": "Sign In",
+    "brandEyebrow": "AI operations workspace",
+    "brandTitle": "Operate models, knowledge, and delivery from one console.",
+    "brandDescription": "A focused workspace for configuring services, maintaining trusted knowledge, and following every request through production.",
+    "secureAccess": "Protected enterprise access",
     "username": "Username",
     "password": "Password",
     "submit": "Sign In",
     "forgotPassword": "Forgot Password",
     "rememberMe": "Remember me",
     "emailLabel": "Email",
+    "emailPlaceholder": "Username or full email",
+    "emailHint": "Enter your username or your full enterprise email for the {{domain}} domain.",
     "passwordLabel": "Password",
     "passwordPlaceholder": "Enter your password",
     "rememberMeDays": "Stay logged in for 30 days",
@@ -238,6 +245,20 @@
     "loginWith": "Sign in with enterprise email to AI Platform",
     "showPassword": "Show password",
     "hidePassword": "Hide password",
+    "highlights": {
+      "operations": {
+        "title": "Model operations",
+        "description": "Configure providers, services, routing, and capacity from a shared control plane."
+      },
+      "knowledge": {
+        "title": "Governed knowledge",
+        "description": "Maintain datasets and connected sources with visible retrieval controls."
+      },
+      "observability": {
+        "title": "Traceable delivery",
+        "description": "Review health, requests, and evaluation signals without losing operational context."
+      }
+    },
     "errors": {
       "emailRequired": "Email is required",
       "invalidCredentials": "Invalid email or password",
@@ -250,6 +271,18 @@
       "content": "Please contact your system administrator to reset your password.",
       "adminEmail": "Admin email: {{email}}",
       "ok": "OK"
+    }
+  },
+  "systemPages": {
+    "eyebrow": "AI Gateway Console",
+    "returnToWorkspace": "Return to workspace",
+    "forbidden": {
+      "title": "Access denied",
+      "description": "Your account does not have permission to open this page. Return to an available workspace or contact an administrator."
+    },
+    "notFound": {
+      "title": "Page not found",
+      "description": "The address may be incorrect or the page may have moved. Return to your workspace and continue from there."
     }
   },
   "dashboard": {
@@ -550,9 +583,10 @@
     },
     "permissions": {
       "categories": {
-        "console": "Console",
-        "conversation": "Conversation",
-        "knowledge": "Knowledge",
+      "console": "Console",
+      "conversation": "Conversation",
+      "service": "Service",
+      "knowledge": "Knowledge",
         "user": "User",
         "role": "Role",
         "admin": "Admin"
@@ -570,23 +604,39 @@
       },
       "displayNamePlaceholder": "Enter display name",
       "departmentPlaceholder": "Select department",
-      "roles": {
+    "roles": {
         "title": "Role Assignment",
         "desc": "Assign roles to define base permissions",
         "system": "System",
         "noDescription": "No description",
         "permissionCount": "{{count}} permissions",
-        "noAccess": "You don't have permission to view roles"
-      },
-      "extraPermissions": {
+      "noAccess": "You don't have permission to view roles"
+    },
+    "serviceAccess": {
+      "title": "Agent Service Access",
+      "desc": "Configure service allowlists and denylists shared by the API and Playground.",
+      "mode": "Access mode",
+      "allServices": "All services (with optional denylist)",
+      "allowlistOnly": "Allowlist only",
+      "policy": "Policy",
+      "allowlistPolicy": "Only services marked Allow can be called. The denylist always takes precedence.",
+      "allPolicy": "All services are available by default. Use the denylist to block specific services.",
+      "noAccess": "You don't have permission to view services.",
+      "loading": "Loading services...",
+      "empty": "No configurable services",
+      "allow": "Allow",
+      "deny": "Deny"
+    },
+    "extraPermissions": {
         "title": "Extra Permissions",
         "desc": "Direct permissions assigned to user (outside roles)",
         "tipLabel": "Tip",
         "tipText": "Role permissions are shown in gray. Extra permissions grant access beyond roles.",
         "categoryCount": "{{count}} permissions",
         "fromRole": "Granted via role",
-        "roleBadge": "Role",
-        "noAccess": "You don't have permission to view permissions"
+      "roleBadge": "Role",
+      "empty": "No extra permissions are available for this account.",
+      "noAccess": "You don't have permission to view permissions"
       },
       "unsavedChanges": "You have unsaved changes",
       "saveChanges": "Save changes"
@@ -654,7 +704,7 @@
       "connectionPool": "Connection Pool",
       "bindingDetails": "Binding Details",
       "selectConnection": "Select Connection",
-      "selectConnectionHint": "Select a connection from the left to view details",
+      "selectConnectionHint": "Select a connection to view its details",
       "noConnections": "No Connections",
       "noConnectionsDesc": "Create a Confluence connection to start syncing",
       "addConnection": "Add Connection",
@@ -1650,7 +1700,7 @@
       "manageSync": "Manage Sync",
       "sourceManagement": "Source Management",
       "sourceManagementDesc": "Choose a method to add data to the knowledge base",
-      "totalDocSources": "Total {{count}} document sources"
+      "totalDocSources": "Document sources: {{count}}"
     },
     "sync": {
       "confluenceSync": "Confluence Sync",
