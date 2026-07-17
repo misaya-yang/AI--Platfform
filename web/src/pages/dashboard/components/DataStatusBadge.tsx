@@ -12,9 +12,9 @@ interface DataStatusBadgeProps {
 }
 
 const STATUS_CONFIG: Record<DataStatus, { color: string; label: string; bgColor: string }> = {
-  live: { color: "#10b981", label: "dashboard.dataStatus.live", bgColor: "rgba(16, 185, 129, 0.15)" },
-  stale: { color: "#f59e0b", label: "dashboard.dataStatus.stale", bgColor: "rgba(245, 158, 11, 0.15)" },
-  no_data: { color: "#94a3b8", label: "dashboard.dataStatus.noData", bgColor: "rgba(148, 163, 184, 0.15)" },
+  live: { color: "hsl(var(--success))", label: "dashboard.dataStatus.live", bgColor: "hsl(var(--success) / 0.15)" },
+  stale: { color: "hsl(var(--warning))", label: "dashboard.dataStatus.stale", bgColor: "hsl(var(--warning) / 0.15)" },
+  no_data: { color: "hsl(var(--muted-foreground))", label: "dashboard.dataStatus.noData", bgColor: "hsl(var(--muted) / 0.75)" },
 };
 
 function resolveStatus(dataStatus?: string, freshnessMinutes?: number): DataStatus {

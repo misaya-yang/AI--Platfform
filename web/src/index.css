@@ -26,6 +26,44 @@
   --font-mono:
     'IBM Plex Mono', 'JetBrains Mono', SFMono-Regular, Menlo, monospace;
 
+  /* Carbon Indigo neutral ramp. Tailwind slate/gray/zinc utilities all
+     resolve through this one scale so legacy components follow the theme. */
+  --color-slate-50: #f7f7f9;
+  --color-slate-100: #f0f1f4;
+  --color-slate-200: #dcdde2;
+  --color-slate-300: #c3c4ca;
+  --color-slate-400: #9598a2;
+  --color-slate-500: #62656e;
+  --color-slate-600: #4a4c54;
+  --color-slate-700: #34353e;
+  --color-slate-800: #202128;
+  --color-slate-900: #17181d;
+  --color-slate-950: #0f1013;
+
+  --color-gray-50: var(--color-slate-50);
+  --color-gray-100: var(--color-slate-100);
+  --color-gray-200: var(--color-slate-200);
+  --color-gray-300: var(--color-slate-300);
+  --color-gray-400: var(--color-slate-400);
+  --color-gray-500: var(--color-slate-500);
+  --color-gray-600: var(--color-slate-600);
+  --color-gray-700: var(--color-slate-700);
+  --color-gray-800: var(--color-slate-800);
+  --color-gray-900: var(--color-slate-900);
+  --color-gray-950: var(--color-slate-950);
+
+  --color-zinc-50: var(--color-slate-50);
+  --color-zinc-100: var(--color-slate-100);
+  --color-zinc-200: var(--color-slate-200);
+  --color-zinc-300: var(--color-slate-300);
+  --color-zinc-400: var(--color-slate-400);
+  --color-zinc-500: var(--color-slate-500);
+  --color-zinc-600: var(--color-slate-600);
+  --color-zinc-700: var(--color-slate-700);
+  --color-zinc-800: var(--color-slate-800);
+  --color-zinc-900: var(--color-slate-900);
+  --color-zinc-950: var(--color-slate-950);
+
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
@@ -265,45 +303,44 @@
 
 /* ═══════════════════════════════════════════
    AI Gateway — professional operations console
-   Slate/steel neutrals with restrained amber attention
+   Carbon neutrals with indigo product chrome
    ═══════════════════════════════════════════ */
 
 @layer base {
   :root {
-    /* Calm operational neutral + steel primary */
-    --background: 210 20% 96%;
-    --foreground: 220 24% 14%;
+    --background: 240 14% 97%;
+    --foreground: 228 10% 10%;
 
     --card: 0 0% 100%;
-    --card-foreground: 220 24% 14%;
+    --card-foreground: 228 10% 10%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 220 24% 14%;
+    --popover-foreground: 228 10% 10%;
 
-    --primary: 212 39% 35%;
-    --primary-foreground: 220 20% 98%;
+    --primary: 240 60% 60%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 215 18% 92%;
-    --secondary-foreground: 220 22% 20%;
+    --secondary: 225 15% 95%;
+    --secondary-foreground: 228 10% 10%;
 
-    --muted: 215 18% 92%;
-    --muted-foreground: 216 14% 43%;
+    --muted: 225 15% 95%;
+    --muted-foreground: 225 6% 41%;
 
-    --accent: 212 39% 35%;
-    --accent-foreground: 220 20% 98%;
+    --accent: 240 60% 60%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: 0 84% 60%;
+    --destructive: 0 64% 56%;
     --destructive-foreground: 0 0% 98%;
 
-    --success: 158 46% 41%;
+    --success: 156 51% 37%;
     --success-foreground: 0 0% 98%;
 
-    --warning: 35 54% 48%;
-    --warning-foreground: 36 45% 13%;
+    --warning: 33 63% 40%;
+    --warning-foreground: 34 58% 13%;
 
-    --border: 215 18% 86%;
-    --input: 215 18% 86%;
-    --ring: 212 39% 35%;
+    --border: 230 9% 88%;
+    --input: 230 9% 88%;
+    --ring: 240 60% 60%;
 
     --radius: 0.5rem;
     --transition-fast: 150ms;
@@ -311,76 +348,71 @@
 
     --sidebar-bg: 0 0% 100%;
 
-    /* Assistant UI scoped tokens — same steel operations palette (light).
-       Single attention hue is amber (--assistant-accent).
-       Hierarchy: text-primary > text-secondary > text-tertiary. */
-    --assistant-canvas-bg: 210 20% 97%;
-    --assistant-surface-bg: 0 0% 100%;         /* panel / chip inner */
-    --assistant-surface-soft: 215 18% 94%;      /* code block, muted fill */
-    --assistant-text-primary: 220 24% 14%;
-    --assistant-text-secondary: 216 14% 43%;
-    --assistant-text-tertiary: 216 10% 59%;
-    --assistant-border: 215 18% 86%;            /* hairline */
-    --assistant-border-soft: 215 18% 90%;       /* softer hairline */
-    --assistant-accent: 35 48% 46%;
-    --assistant-accent-soft: 36 48% 91%;       /* tinted bg for accent marker */
-    --assistant-chip-bg: 215 18% 94%;
-    --assistant-user-bubble: 215 18% 92%;
-    --assistant-shadow: 0 1px 2px rgba(20,24,32,.04), 0 4px 24px rgba(20,24,32,.04);
-    --assistant-shadow-lift: 0 2px 8px rgba(20,24,32,.06), 0 12px 40px rgba(20,24,32,.08);
+    --assistant-canvas-bg: 240 14% 97%;
+    --assistant-surface-bg: 0 0% 100%;
+    --assistant-surface-soft: 225 15% 95%;
+    --assistant-text-primary: 228 10% 10%;
+    --assistant-text-secondary: 225 6% 41%;
+    --assistant-text-tertiary: 226 5% 45%;
+    --assistant-border: 230 9% 88%;
+    --assistant-border-soft: 228 12% 92%;
+    --assistant-accent: 240 60% 60%;
+    --assistant-accent-soft: 240 100% 96%;
+    --assistant-chip-bg: 225 15% 95%;
+    --assistant-user-bubble: 240 100% 96%;
+    --assistant-shadow: 0 1px 2px rgba(23,24,28,.04), 0 4px 24px rgba(23,24,28,.04);
+    --assistant-shadow-lift: 0 2px 8px rgba(23,24,28,.06), 0 12px 40px rgba(23,24,28,.08);
   }
 
   .dark {
-    /* Dark canvas — graphite slate, not green-black */
-    --background: 220 21% 8%;
-    --foreground: 210 25% 95%;
+    --background: 225 12% 7%;
+    --foreground: 240 5% 96%;
 
-    --card: 219 21% 12%;
-    --card-foreground: 210 25% 95%;
+    --card: 230 12% 10%;
+    --card-foreground: 240 5% 96%;
 
-    --popover: 219 21% 12%;
-    --popover-foreground: 210 25% 95%;
+    --popover: 233 11% 14%;
+    --popover-foreground: 240 5% 96%;
 
-    --primary: 214 39% 68%;
-    --primary-foreground: 220 21% 8%;
+    --primary: 240 100% 82%;
+    --primary-foreground: 225 12% 7%;
 
-    --secondary: 218 20% 17%;
-    --secondary-foreground: 210 25% 95%;
+    --secondary: 233 11% 14%;
+    --secondary-foreground: 240 5% 96%;
 
-    --muted: 218 20% 17%;
-    --muted-foreground: 214 13% 66%;
+    --muted: 233 11% 14%;
+    --muted-foreground: 233 6% 69%;
 
-    --accent: 214 39% 68%;
-    --accent-foreground: 220 21% 8%;
+    --accent: 240 100% 82%;
+    --accent-foreground: 225 12% 7%;
 
-    --destructive: 0 72% 58%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 2 80% 71%;
+    --destructive-foreground: 225 12% 7%;
 
-    --success: 158 45% 58%;
-    --success-foreground: 0 0% 98%;
+    --success: 149 42% 59%;
+    --success-foreground: 225 12% 7%;
 
-    --warning: 35 50% 60%;
-    --warning-foreground: 36 45% 13%;
+    --warning: 36 61% 62%;
+    --warning-foreground: 225 12% 7%;
 
-    --border: 218 18% 22%;
-    --input: 218 18% 22%;
-    --ring: 214 39% 68%;
+    --border: 234 9% 22%;
+    --input: 234 9% 22%;
+    --ring: 240 100% 82%;
 
-    --sidebar-bg: 220 21% 8%;
+    --sidebar-bg: 225 12% 7%;
 
-    /* Assistant UI scoped tokens — aligned with global graphite slate. */
-    --assistant-canvas-bg: 220 21% 8%;         /* = --background */
-    --assistant-surface-bg: 219 21% 12%;       /* = --card */
-    --assistant-surface-soft: 218 20% 17%;     /* = --muted */
-    --assistant-text-primary: 210 25% 92%;
-    --assistant-text-secondary: 214 13% 66%;   /* clearly readable on canvas */
-    --assistant-text-tertiary: 214 10% 48%;
-    --assistant-border: 218 18% 22%;           /* = --border */
-    --assistant-border-soft: 218 18% 17%;
-    --assistant-accent: 35 50% 62%;            /* restrained amber */
-    --assistant-accent-soft: 35 32% 22%;
-    --assistant-chip-bg: 218 20% 16%;
-    --assistant-user-bubble: 218 20% 17%;
+    --assistant-canvas-bg: 225 12% 7%;
+    --assistant-surface-bg: 230 12% 10%;
+    --assistant-surface-soft: 233 11% 14%;
+    --assistant-text-primary: 240 5% 96%;
+    --assistant-text-secondary: 233 6% 69%;
+    --assistant-text-tertiary: 226 5% 51%;
+    --assistant-border: 234 9% 22%;
+    --assistant-border-soft: 233 10% 18%;
+    --assistant-accent: 240 100% 82%;
+    --assistant-accent-soft: 240 28% 22%;
+    --assistant-chip-bg: 233 11% 14%;
+    --assistant-user-bubble: 240 28% 22%;
     --assistant-shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 24px rgba(0,0,0,.35);
     --assistant-shadow-lift: 0 2px 8px rgba(0,0,0,.4), 0 12px 40px rgba(0,0,0,.55);
   }

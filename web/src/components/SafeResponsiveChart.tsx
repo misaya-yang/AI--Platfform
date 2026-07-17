@@ -112,7 +112,7 @@ export function SafeResponsiveChart({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: "#94a3b8",
+            color: "hsl(var(--muted-foreground))",
             fontSize: 12,
           }}
         >

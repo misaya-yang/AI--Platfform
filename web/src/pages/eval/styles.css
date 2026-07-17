@@ -1,7 +1,7 @@
 .eval-console {
-  --eval-canvas: hsl(214 24% 96%);
+  --eval-canvas: hsl(var(--background));
   --eval-panel: hsl(var(--card));
-  --eval-panel-raised: hsl(0 0% 100%);
+  --eval-panel-raised: hsl(var(--popover));
   --eval-ink: hsl(var(--foreground));
   --eval-muted: hsl(var(--muted-foreground));
   --eval-line: hsl(var(--border) / 0.72);
@@ -10,17 +10,16 @@
   --eval-success: hsl(var(--success));
   --eval-warning: hsl(var(--warning));
   --eval-danger: hsl(var(--destructive));
-  background:
-    linear-gradient(180deg, hsl(var(--background)) 0%, var(--eval-canvas) 100%);
+  background: var(--eval-canvas);
 }
 
 .dark .eval-console {
-  --eval-canvas: hsl(220 24% 7%);
-  --eval-panel: hsl(220 22% 10%);
-  --eval-panel-raised: hsl(219 21% 12%);
-  --eval-line: hsl(218 18% 22% / 0.78);
-  --eval-line-strong: hsl(218 18% 26%);
-  background: hsl(220 24% 7%);
+  --eval-canvas: hsl(var(--background));
+  --eval-panel: hsl(var(--card));
+  --eval-panel-raised: hsl(var(--popover));
+  --eval-line: hsl(var(--border) / 0.78);
+  --eval-line-strong: hsl(var(--border));
+  background: var(--eval-canvas);
 }
 
 .eval-trace-shell {
@@ -817,7 +816,7 @@
 }
 
 .dark .eval-golden-import-dropzone.ant-upload-wrapper .ant-upload-drag {
-  background: hsl(219 21% 12%);
+  background: var(--eval-panel-raised);
 }
 
 .eval-golden-import-dropzone-icon {

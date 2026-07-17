@@ -415,11 +415,10 @@ export function AppLayout() {
            kind of sans you see in tool chrome from Linear / Raycast
            rather than a SaaS admin dashboard. */
         .app-nav-link {
-          color: hsl(215 16% 42%);
+          color: hsl(var(--muted-foreground));
           cursor: pointer;
           font-size: 14.5px;
         }
-        .dark .app-nav-link { color: hsl(220 8% 68%); }
         .app-nav-link:hover { background: hsl(var(--muted) / 0.5); color: hsl(var(--foreground)); }
         .app-nav-link:hover .app-nav-icon { color: hsl(var(--foreground)); }
         .app-nav-icon {

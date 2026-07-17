@@ -49,10 +49,10 @@ export class RootErrorBoundary extends Component<Props, State> {
     if (!this.state.error) return this.props.children;
 
     const isDark = document.documentElement.classList.contains("dark");
-    const bg = isDark ? "#0b1020" : "#ffffff";
-    const fg = isDark ? "#f1f5f9" : "#111827";
-    const sub = isDark ? "#cbd5e1" : "#374151";
-    const border = isDark ? "#1e293b" : "#e5e7eb";
+    const bg = isDark ? "#0f1013" : "#f7f7f9";
+    const fg = isDark ? "#f4f4f5" : "#17181c";
+    const sub = isDark ? "#acadb5" : "#62656e";
+    const border = isDark ? "#34353e" : "#dcdde2";
 
     return (
       <div
@@ -93,7 +93,7 @@ export class RootErrorBoundary extends Component<Props, State> {
                 padding: "8px 18px",
                 borderRadius: 8,
                 border: "none",
-                background: "#7c3aed",
+                background: "#5b5bd6",
                 color: "#fff",
                 fontSize: 13,
                 fontWeight: 500,
@@ -128,7 +128,7 @@ export class RootErrorBoundary extends Component<Props, State> {
                 marginTop: 18,
                 padding: 12,
                 borderRadius: 6,
-                background: isDark ? "#0f172a" : "#f3f4f6",
+                background: isDark ? "#202128" : "#f0f1f4",
                 overflow: "auto",
                 maxHeight: 180,
               }}

@@ -565,7 +565,7 @@ export function RequestTracePanel() {
           </div>
           <style>{`
             .trace-row-active > td {
-              background: ${darkMode ? "rgba(135,148,255,0.14)" : "rgba(20,84,60,0.06)"} !important;
+              background: hsl(var(--primary) / 0.14) !important;
             }
             .request-trace-panel .ant-table-wrapper,
             .request-trace-panel .ant-spin-nested-loading,

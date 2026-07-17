@@ -19,7 +19,7 @@ import { FONT_FAMILY, LAYOUT, getColors } from "@/pages/dashboard/styles";
 
 // ── Design-handoff brand avatars — letter tint ────────────────────
 const PROVIDER_META: Record<string, { color: string; letter: string }> = {
-  openai:     { color: "#64748b", letter: "O" },
+  openai:     { color: "#62656e", letter: "O" },
   anthropic:  { color: "#b77955", letter: "A" },
   deepseek:   { color: "#5f7396", letter: "D" },
   dashscope:  { color: "#b86e32", letter: "A" }, // 阿里云
@@ -68,42 +68,6 @@ const PROVIDER_ENDPOINTS = {
   providers: "/api/v1/providers?include_disabled=true",
   assistantModels: "/api/v1/assistant/models",
 } as const;
-
-function getProviderStatusColors(darkMode: boolean) {
-  const base = getColors(darkMode);
-  return {
-    ...base,
-    cardBg: darkMode ? "#181d25" : "#fbfcfe",
-    cardHover: darkMode ? "#202734" : "#eef2f7",
-    innerBg: darkMode ? "#111620" : "#f5f7fa",
-    border: darkMode ? "#303948" : "#d9dee6",
-    borderSoft: darkMode ? "#252d39" : "#e7ebf1",
-    divider: darkMode ? "#252d39" : "#e9edf3",
-    textPrimary: darkMode ? "#eef2f6" : "#1a202b",
-    textSecondary: darkMode ? "#a6b0bf" : "#505c6e",
-    textMuted: darkMode ? "#7f8b9b" : "#6f7c8e",
-    textFaint: darkMode ? "#5f6b7b" : "#a3adba",
-    accent: darkMode ? "#8fa9cf" : "#37577c",
-    accentBright: darkMode ? "#b7c9e4" : "#4f6f96",
-    accentDeep: darkMode ? "#6f8db6" : "#29435f",
-    accentBg: darkMode ? "rgba(143,169,207,0.15)" : "#e9eff7",
-    success: darkMode ? "#69b58d" : "#2f8f68",
-    successBg: darkMode ? "rgba(105,181,141,0.15)" : "#e7f4ee",
-    successSoft: darkMode ? "rgba(105,181,141,0.13)" : "#e7f4ee",
-    warning: darkMode ? "#d0a96b" : "#a8712d",
-    warningBg: darkMode ? "rgba(208,169,107,0.15)" : "#f7eddb",
-    warningSoft: darkMode ? "rgba(208,169,107,0.14)" : "#f7eddb",
-    error: darkMode ? "#ee7d78" : "#d64545",
-    errorBg: darkMode ? "rgba(238,125,120,0.15)" : "#fff0ef",
-    errorSoft: darkMode ? "rgba(238,125,120,0.13)" : "#fff0ef",
-    gold: darkMode ? "#d0a96b" : "#ae7c32",
-    info: darkMode ? "#8fa9cf" : "#4f6f96",
-    infoBg: darkMode ? "rgba(143,169,207,0.14)" : "#e9eff7",
-    navy: darkMode ? "#b7c9e4" : "#29435f",
-    operator: darkMode ? "#8fa9cf" : "#37577c",
-    operatorSoft: darkMode ? "rgba(143,169,207,0.12)" : "#e9eff7",
-  };
-}
 
 const ICON = {
   refresh: (
@@ -364,7 +328,7 @@ function providerSourceLabel(sources: ProviderDataSource[], isZh: boolean) {
 // ── HealthBar: 10 small vertical bars ──────────────────────────────
 function HealthBar({ score }: { score: number | null }) {
   const { darkMode } = useAppStore();
-  const c = getProviderStatusColors(darkMode);
+  const c = getColors(darkMode);
   if (score === null) return <span style={{ color: c.textFaint }}>—</span>;
   const dots = Math.round(score / 10);
   return (
@@ -397,7 +361,7 @@ function HealthBar({ score }: { score: number | null }) {
 // ── Status badge ───────────────────────────────────────────────────
 function StatusBadge({ on, tOn, tOff }: { on: boolean; tOn: string; tOff: string }) {
   const { darkMode } = useAppStore();
-  const c = getProviderStatusColors(darkMode);
+  const c = getColors(darkMode);
   if (on) {
     return (
       <span style={{
@@ -425,7 +389,7 @@ function StatusBadge({ on, tOn, tOff }: { on: boolean; tOn: string; tOff: string
 
 function ReadinessBadge({ state, label }: { state: "ready" | "warning" | "off"; label: string }) {
   const { darkMode } = useAppStore();
-  const c = getProviderStatusColors(darkMode);
+  const c = getColors(darkMode);
   const tone = state === "ready"
     ? { fg: c.success, bg: c.successBg }
     : state === "warning"
@@ -474,7 +438,7 @@ function ProviderDetailModal({
 }) {
   const { t } = useTranslation();
   const { darkMode } = useAppStore();
-  const c = getProviderStatusColors(darkMode);
+  const c = getColors(darkMode);
   const meta = PROVIDER_META[providerKey.toLowerCase()] || { color: c.accent, letter: providerKey[0]?.toUpperCase() || "?" };
 
   const configuredModelsQuery = useQuery({
@@ -587,7 +551,7 @@ function ProviderDetailModal({
 export function ProviderStatusCard() {
   const { t, i18n } = useTranslation();
   const { darkMode } = useAppStore();
-  const c = getProviderStatusColors(darkMode);
+  const c = getColors(darkMode);
   const {
     data: providers,
     isLoading,
@@ -1021,7 +985,7 @@ export function ProviderStatusCard() {
   );
 }
 
-function rowBtn(c: ReturnType<typeof getProviderStatusColors>) {
+function rowBtn(c: ReturnType<typeof getColors>) {
   return {
     width: 28, height: 28, borderRadius: 6,
     border: `1px solid ${c.borderSoft}`,

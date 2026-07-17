@@ -396,7 +396,7 @@ function GenerationContent({ state }: { state: AgentStatusStreamState }) {
           <motion.span
             key={state.generation.tokensGenerated}
             initial={{ scale: 1.2, color: "#10b981" }}
-            animate={{ scale: 1, color: "#64748b" }}
+            animate={{ scale: 1, color: "hsl(var(--muted-foreground))" }}
             className="font-mono"
           >
             {state.generation.tokensGenerated}
