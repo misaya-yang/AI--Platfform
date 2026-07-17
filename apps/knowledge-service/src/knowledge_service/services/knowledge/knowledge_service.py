@@ -828,7 +828,7 @@ class KnowledgeService:
         user: UserContext,
         dataset_id: str,
         queries: list[Any],
-        top_k: int = 5,
+        top_k: int | None = None,
         mode: str = "hybrid",
         document_id: str | None = None,
         dense_weight: float | None = None,

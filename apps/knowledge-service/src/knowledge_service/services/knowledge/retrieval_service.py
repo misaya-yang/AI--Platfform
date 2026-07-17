@@ -27,6 +27,7 @@ from .retrieval import (
     compute_text_match_score,
     cosine_similarity,
     mmr_select,
+    query_to_sparse_vector,
     reciprocal_rank_fusion,
     tokenize,
 )
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
+
+MULTI_QUERY_TOP_K = {1: 5, 2: 6, 3: 8, 4: 9, 5: 10}
 
 
 @dataclass(frozen=True)
@@ -733,9 +736,6 @@ class RetrievalService:
                     results.append(result)
             return _merge_bm25_results(results)
 
-        # Kick off BM25 first (no embeddings needed) while we prepare dense vectors
-        bm25_task = asyncio.create_task(_run_bm25_multi()) if bm25_queries else None
-
         # Decide if we need query embedding (dense/hybrid, or MMR without rerank).
         need_query_vector = effective_mode in {"dense", "hybrid"} or (
             mmr_enabled and not rerank_enabled
@@ -836,12 +836,78 @@ class RetrievalService:
                 time.perf_counter() - dense_prepare_started
             ) * 1000
 
-        # Execute dense (after vectors) and await BM25 concurrently
-        dense_hits, dense_hits_raw_count, dense_ranked_lists = await _run_dense_multi()
-        if bm25_task is not None:
-            bm25_hits, bm25_hits_raw_count, bm25_ranked_lists = await bm25_task
-        else:
+        # Fast path: all query routes become one Qdrant request with 2Q prefetches.
+        native_hybrid_used = False
+        native_hybrid_error: str | None = None
+        native_prefetch_count = 0
+        native_rrf_ms = 0.0
+        native_hits: list[Any] = []
+        native_hybrid_enabled = bool(retrieval_defaults.get("native_hybrid", True))
+        if (
+            native_hybrid_enabled
+            and effective_mode == "hybrid"
+            and effective_fusion_method == "rrf"
+            and collection
+            and not dense_disabled_reason
+            and not filters_vary_by_query
+            and all(query_modes[query_text] == "hybrid" for query_text in queries_to_run)
+        ):
+            native_routes = []
+            for query_text in queries_to_run:
+                query_vector = query_vectors.get(query_text)
+                sparse_indices, sparse_values = query_to_sparse_vector(query_text)
+                if not query_vector or not sparse_indices:
+                    native_routes = []
+                    break
+                native_routes.append(
+                    {
+                        "query_vector": query_vector,
+                        "sparse_indices": sparse_indices,
+                        "sparse_values": sparse_values,
+                        "dense_limit": max(
+                            int(_query_option(query_text, "vector_top_k", vector_k)), 1
+                        ),
+                        "sparse_limit": max(
+                            int(_query_option(query_text, "keyword_top_k", keyword_k)), 1
+                        ),
+                        "document_id": _query_option(query_text, "document_id", document_id),
+                        "source_type": _query_option(
+                            query_text, "source_type_filter", source_type_filter
+                        ),
+                        "language": _query_option(
+                            query_text, "language_filter", language_filter
+                        ),
+                        "metadata_filter": _query_option(
+                            query_text, "metadata_filter", metadata_filter
+                        ),
+                    }
+                )
+            if native_routes:
+                native_started = time.perf_counter()
+                try:
+                    native_hits = await self.vector_store.hybrid_search_multi_native(
+                        collection_name=collection,
+                        routes=native_routes,
+                        top_k=candidate_k,
+                        with_payload=True,
+                        rrf_k=rrf_k_value,
+                    )
+                    native_hybrid_used = True
+                    native_prefetch_count = len(native_routes) * 2
+                except Exception as exc:
+                    native_hybrid_error = str(exc)
+                    logger.warning("Native hybrid search failed, falling back: %s", exc)
+                finally:
+                    native_rrf_ms = (time.perf_counter() - native_started) * 1000
+
+        if native_hybrid_used:
+            dense_hits, dense_hits_raw_count, dense_ranked_lists = [], 0, {}
             bm25_hits, bm25_hits_raw_count, bm25_ranked_lists = [], 0, {}
+        else:
+            (
+                (dense_hits, dense_hits_raw_count, dense_ranked_lists),
+                (bm25_hits, bm25_hits_raw_count, bm25_ranked_lists),
+            ) = await asyncio.gather(_run_dense_multi(), _run_bm25_multi())
 
         # --- Merge candidates with clear score tracking ---
         candidates: dict[str, dict[str, Any]] = {}
@@ -930,6 +996,37 @@ class RetrievalService:
                 bm25_score=float(h.get("bm25_score") or 0.0),
             )
 
+        if native_hybrid_used:
+            native_score_max = max(
+                (float(getattr(hit, "score", 0.0) or 0.0) for hit in native_hits),
+                default=1.0,
+            ) or 1.0
+            for global_rank, hit in enumerate(native_hits, 1):
+                payload = dict(getattr(hit, "payload", None) or {})
+                text = str(payload.get("text") or "").strip()
+                if not text:
+                    continue
+                seg_id = str(
+                    payload.get("segment_id") or getattr(hit, "point_id", "") or ""
+                )
+                if not seg_id:
+                    continue
+                upsert_candidate(
+                    seg_id,
+                    str(payload.get("document_id") or ""),
+                    text,
+                    payload,
+                    source="qdrant_rrf",
+                )
+                score = float(getattr(hit, "score", 0.0) or 0.0)
+                normalized_score = score / native_score_max
+                candidate = candidates[seg_id]
+                candidate["_rrf_score_raw"] = score
+                candidate["_rrf_score"] = normalized_score
+                candidate["_fusion_score"] = normalized_score
+                candidate["_final_score"] = normalized_score
+                candidate["_global_rank"] = global_rank
+
         # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
         # Build score dicts for normalization
         dense_scores_dict = {
@@ -981,7 +1078,7 @@ class RetrievalService:
         rrf_scores = None
         rrf_max = 1.0
         rrf_ranked_lists = {**dense_ranked_lists, **bm25_ranked_lists}
-        use_rrf = effective_fusion_method == "rrf" and (
+        use_rrf = not native_hybrid_used and effective_fusion_method == "rrf" and (
             effective_mode == "hybrid"
             or len(rrf_ranked_lists) > 1
         )
@@ -1003,6 +1100,8 @@ class RetrievalService:
             weighted_bm25_weight = effective_bm25_weight / total_w if total_w > 0 else 0.5
 
         for cid, cand in candidates.items():
+            if native_hybrid_used:
+                continue
             dense_norm = cand.get("_dense_score_norm")
             bm25_norm = cand.get("_bm25_score_norm")
 
@@ -1070,15 +1169,23 @@ class RetrievalService:
             "document_id": document_id,
             "enforce_config": retrieval_enforce,
             # Retrieval counts (for backward compatibility with frontend)
-            "vector_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
-            "keyword_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
-            "dense_hits_count": len(dense_hits) if effective_mode in {"dense", "hybrid"} else None,
+            "vector_hits_count": None
+            if native_hybrid_used
+            else (len(dense_hits) if effective_mode in {"dense", "hybrid"} else None),
+            "keyword_hits_count": None
+            if native_hybrid_used
+            else (len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None),
+            "dense_hits_count": None
+            if native_hybrid_used
+            else (len(dense_hits) if effective_mode in {"dense", "hybrid"} else None),
             "dense_hits_raw_count": dense_hits_raw_count
-            if effective_mode in {"dense", "hybrid"}
+            if effective_mode in {"dense", "hybrid"} and not native_hybrid_used
             else None,
-            "bm25_hits_count": len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None,
+            "bm25_hits_count": None
+            if native_hybrid_used
+            else (len(bm25_hits) if effective_mode in {"bm25", "hybrid"} else None),
             "bm25_hits_raw_count": bm25_hits_raw_count
-            if effective_mode in {"bm25", "hybrid"}
+            if effective_mode in {"bm25", "hybrid"} and not native_hybrid_used
             else None,
             # Top K settings
             "dense_top_k": int(vector_k) if effective_mode in {"dense", "hybrid"} else None,
@@ -1091,7 +1198,13 @@ class RetrievalService:
             "dense_weight": effective_dense_weight if effective_mode == "hybrid" else None,
             "bm25_weight": effective_bm25_weight if effective_mode == "hybrid" else None,
             "rrf_k": int(rrf_k_value) if effective_fusion_method == "rrf" else None,
-            "rrf_ranked_list_count": len(rrf_ranked_lists) if use_rrf else 0,
+            "rrf_ranked_list_count": native_prefetch_count
+            if native_hybrid_used
+            else (len(rrf_ranked_lists) if use_rrf else 0),
+            "native_hybrid": native_hybrid_used,
+            "native_prefetch_count": native_prefetch_count,
+            "native_rrf_ms": round(native_rrf_ms, 2),
+            "fusion_applied_by": "qdrant" if native_hybrid_used else "python",
             # Post-processing config
             "rerank": bool(rerank_enabled),
             "rerank_provider": effective_rerank_provider if rerank_enabled else None,
@@ -1117,9 +1230,16 @@ class RetrievalService:
             meta["dense_disabled_reason"] = dense_disabled_reason[:500]
         if recall_errors:
             meta["recall_errors"] = recall_errors
+        if native_hybrid_error:
+            meta["native_hybrid_error"] = native_hybrid_error
 
         # Log pipeline stages with details
-        if effective_mode in {"dense", "hybrid"}:
+        if native_hybrid_used:
+            meta["pipeline_stages"].append(
+                f"Qdrant native RRF: {len(native_hits)} candidates from "
+                f"{native_prefetch_count} prefetches"
+            )
+        elif effective_mode in {"dense", "hybrid"}:
             meta["pipeline_stages"].append(
                 f"Dense retrieval: {len(dense_hits)}/{dense_hits_raw_count} results"
             )
@@ -1127,12 +1247,14 @@ class RetrievalService:
                 meta["pipeline_stages"].append(
                     f"Dense retrieval disabled (fallback to BM25): {dense_disabled_reason[:120]}"
                 )
-        if effective_mode in {"bm25", "hybrid"}:
+        if not native_hybrid_used and effective_mode in {"bm25", "hybrid"}:
             meta["pipeline_stages"].append(
                 f"BM25 retrieval: {len(bm25_hits)}/{bm25_hits_raw_count} results"
             )
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
-        if effective_mode == "hybrid":
+        if native_hybrid_used:
+            meta["pipeline_stages"].append(f"Fusion (qdrant rrf): k={rrf_k_value}")
+        elif effective_mode == "hybrid":
             meta["pipeline_stages"].append(
                 f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}"
             )
@@ -1453,6 +1575,10 @@ class RetrievalService:
             payload["_fusion_score"] = round(fusion, 4) if fusion is not None else "N/A"
             if c.get("_rrf_score") is not None:
                 payload["_rrf_score"] = round(c.get("_rrf_score"), 4)
+            if c.get("_rrf_score_raw") is not None:
+                payload["_rrf_score_raw"] = round(c.get("_rrf_score_raw"), 6)
+            if c.get("_global_rank") is not None:
+                payload["global_rank"] = int(c["_global_rank"])
 
             # Stage 4: Rerank score
             rerank = c.get("_rerank_score")
@@ -2179,7 +2305,7 @@ class RetrievalService:
         user: UserContext,
         dataset_id: str,
         queries: list[Any],
-        top_k: int = 5,
+        top_k: int | None = None,
         mode: str = "hybrid",
         document_id: str | None = None,
         dense_weight: float | None = None,
@@ -2277,6 +2403,11 @@ class RetrievalService:
 
         primary_spec = unique_specs[0]
         primary_query = str(primary_spec["query"])
+        resolved_top_k = (
+            max(int(top_k), 1)
+            if top_k is not None
+            else MULTI_QUERY_TOP_K.get(min(len(unique_specs), 5), 10)
+        )
 
         def _primary_option(key: str, default: Any) -> Any:
             value = primary_spec.get(key)
@@ -2289,7 +2420,7 @@ class RetrievalService:
                 user=user,
                 dataset_id=dataset_id,
                 query=primary_query,
-                top_k=top_k,
+                top_k=resolved_top_k,
                 mode=_primary_option("mode", mode),
                 document_id=document_id,
                 dense_weight=_primary_option("dense_weight", dense_weight),
@@ -2329,6 +2460,7 @@ class RetrievalService:
                 "input_query_count": len(valid_specs),
                 "unique_query_count": len(unique_specs),
                 "duplicate_query_count": len(valid_specs) - len(unique_specs),
+                "final_top_k": resolved_top_k,
                 "queue_wait_ms": 0.0,
                 "retrieve_time_ms": round(retrieve_time_ms, 2),
             }
@@ -2346,7 +2478,7 @@ class RetrievalService:
                 "vlm_description": getattr(result, "vlm_description", None),
                 "associated_images": list(getattr(result, "associated_images", ()) or ()),
             }
-            for result in results[: max(int(top_k), 1)]
+            for result in results[:resolved_top_k]
         ]
         batch_results = [
             {
@@ -2360,6 +2492,7 @@ class RetrievalService:
         meta = {
             "total_queries": len(valid_specs),
             "unique_queries": len(unique_specs),
+            "final_top_k": resolved_top_k,
             "total_results": len(serialized_results),
             "execution_time_ms": round(execution_time_ms, 2),
             "max_parallel": int(

@@ -80,7 +80,7 @@ services:
 
   # Qdrant - Vector Database for Knowledge Base
   qdrant:
-    image: qdrant/qdrant:v1.14.0
+    image: qdrant/qdrant:v1.18.2
     container_name: ai-gateway-qdrant
     ports:
       - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"

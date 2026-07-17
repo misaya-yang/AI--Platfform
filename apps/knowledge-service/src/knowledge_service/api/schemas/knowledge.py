@@ -535,7 +535,7 @@ class BatchRetrieveRequestSchema(BaseModel):
 
     queries: list[str | BatchRetrieveQuerySchema] | None = None  # List of queries for batch retrieval
     query: str | None = None  # Single query or comma-separated queries
-    top_k: int = 5  # Global final Top-K
+    top_k: int | None = None  # Explicit override; otherwise derived from unique query count
     mode: str = "hybrid"
     document_id: str | None = None
 

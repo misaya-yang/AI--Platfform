@@ -121,6 +121,7 @@ class FakeHybridVectorStore:
     def __init__(self, probe: RecallProbe):
         self.probe = probe
         self.calls = []
+        self.native_calls = []
         self.retrieve_vectors_calls = 0
         self.url = "memory://qdrant"
 
@@ -157,6 +158,10 @@ class FakeHybridVectorStore:
             ),
         ]
 
+    async def hybrid_search_multi_native(self, **kwargs):
+        self.native_calls.append(kwargs)
+        raise RuntimeError("native RRF unavailable in fallback test")
+
     async def retrieve_vectors(self, *, collection_name, point_ids):
         _ = collection_name
         self.retrieve_vectors_calls += 1
@@ -171,6 +176,46 @@ class FakeEmbedder:
 
     async def embed_query(self, query):
         return [2.0, 0.0] if "rewrite" in query else [1.0, 0.0]
+
+
+class FakeNativeHybridVectorStore(FakeHybridVectorStore):
+    async def hybrid_search_multi_native(self, **kwargs):
+        self.native_calls.append(kwargs)
+        return [
+            SimpleNamespace(
+                point_id="shared",
+                score=0.9,
+                payload={
+                    "segment_id": "shared",
+                    "document_id": "doc-shared",
+                    "text": "shared answer",
+                    "metadata": {"kind": "shared"},
+                },
+            ),
+            SimpleNamespace(
+                point_id="dense-rewrite",
+                score=0.8,
+                payload={
+                    "segment_id": "dense-rewrite",
+                    "document_id": "doc-dense-rewrite",
+                    "text": "rewrite dense exclusive answer",
+                    "metadata": {"kind": "dense", "tags": ["rewrite"]},
+                },
+            ),
+            SimpleNamespace(
+                point_id="lexical-original",
+                score=0.7,
+                payload={
+                    "segment_id": "lexical-original",
+                    "document_id": "doc-lexical-original",
+                    "text": "original lexical candidate",
+                    "metadata": {"kind": "lexical"},
+                },
+            ),
+        ]
+
+    async def search(self, **kwargs):
+        pytest.fail(f"fallback dense search must not run: {kwargs}")
 
 
 def _make_hybrid_service(probe: RecallProbe):
@@ -459,6 +504,85 @@ async def test_retrieve_batch_runs_one_global_rrf_rerank_and_mmr(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_batch_uses_one_native_rrf_rerank_and_mmr(monkeypatch):
+    probe = RecallProbe()
+    svc, database, _ = _make_hybrid_service(probe)
+    vector_store = FakeNativeHybridVectorStore(probe)
+    svc.vector_store = vector_store
+    rerank_calls = []
+    mmr_calls = []
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    def _python_rrf_must_not_run(*args, **kwargs):
+        pytest.fail(f"Python RRF must not run: {args}, {kwargs}")
+
+    class FakeReranker:
+        async def rerank(self, *, query, documents, top_n):
+            rerank_calls.append({"query": query, "documents": documents, "top_n": top_n})
+            return [
+                RerankResult(index=index, relevance_score=1.0 - index * 0.1)
+                for index in range(min(len(documents), top_n))
+            ]
+
+    def _mmr(candidates, relevance, vectors, *, top_k, **_kwargs):
+        mmr_calls.append(list(candidates))
+        selected = candidates[:top_k]
+        return selected, {
+            segment_id: MMRPick(
+                item_id=segment_id,
+                mmr_score=relevance[segment_id],
+                relevance=relevance[segment_id],
+                max_sim_to_selected=0.0,
+            )
+            for segment_id in selected
+        }
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.reciprocal_rank_fusion",
+        _python_rrf_must_not_run,
+    )
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.text_reranker.create_reranker",
+        lambda **_kwargs: FakeReranker(),
+    )
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.mmr_select",
+        _mmr,
+    )
+
+    batch_results, meta = await svc.retrieve_batch(
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        queries=["original full question", "rewrite query"],
+        top_k=2,
+        mode="hybrid",
+        rerank=True,
+        rerank_model="bge-reranker-v2-m3",
+        mmr=True,
+    )
+
+    results = batch_results[0]["results"]
+    pipeline_meta = batch_results[0]["meta"]
+    assert len(vector_store.native_calls) == 1
+    assert len(vector_store.native_calls[0]["routes"]) == 2
+    assert vector_store.native_calls[0]["rrf_k"] == 60
+    assert not vector_store.calls and not database.calls
+    assert len(rerank_calls) == len(mmr_calls) == 1
+    assert pipeline_meta["native_hybrid"] is True
+    assert pipeline_meta["native_prefetch_count"] == 4
+    assert pipeline_meta["rrf_ranked_list_count"] == 4
+    assert pipeline_meta["fusion_applied_by"] == "qdrant"
+    assert [item["metadata"]["global_rank"] for item in results] == [1, 2]
+    assert len(results) == meta["total_results"] == 2
+
+
+@pytest.mark.asyncio
 async def test_retrieve_batch_applies_complex_per_query_filters_after_dense_recall(
     monkeypatch,
 ):
@@ -632,6 +756,63 @@ async def test_retrieve_batch_single_query_uses_one_global_pipeline():
     assert calls[0]["_query_specs"] == [{"query": "only query"}]
     assert batch_results[0]["query"] == "only query"
     assert meta["total_queries"] == meta["unique_queries"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query_count", "expected_top_k"),
+    [(1, 5), (2, 6), (3, 8), (4, 9), (5, 10)],
+)
+async def test_retrieve_batch_default_top_k_follows_unique_query_count(query_count, expected_top_k):
+    svc = object.__new__(RetrievalService)
+    calls = []
+
+    async def _require_dataset_access(user, dataset_id, required="viewer"):
+        return {"dataset_id": dataset_id}
+
+    async def _retrieve(**kwargs):
+        calls.append(kwargs)
+        return [], {}
+
+    svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc._retrieve_queries = _retrieve
+
+    _, meta = await RetrievalService.retrieve_batch(
+        svc,
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        queries=[f"query-{index}" for index in range(query_count)],
+    )
+
+    assert calls[0]["top_k"] == expected_top_k
+    assert meta["final_top_k"] == expected_top_k
+
+
+@pytest.mark.asyncio
+async def test_retrieve_batch_explicit_top_k_overrides_dynamic_default():
+    svc = object.__new__(RetrievalService)
+    calls = []
+
+    async def _require_dataset_access(user, dataset_id, required="viewer"):
+        return {"dataset_id": dataset_id}
+
+    async def _retrieve(**kwargs):
+        calls.append(kwargs)
+        return [], {}
+
+    svc._ks = SimpleNamespace(require_dataset_access=_require_dataset_access)
+    svc._retrieve_queries = _retrieve
+
+    _, meta = await RetrievalService.retrieve_batch(
+        svc,
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        queries=["one", "two", "three"],
+        top_k=4,
+    )
+
+    assert calls[0]["top_k"] == 4
+    assert meta["final_top_k"] == 4
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .retrieval import text_to_sparse_vector
+
 logger = logging.getLogger(__name__)
+
+_EMPTY_SPARSE_INDEX = 0
 
 try:
     from qdrant_client.async_qdrant_client import AsyncQdrantClient
@@ -86,6 +90,8 @@ class VectorStore:
         self.max_retries = max(1, int(max_retries or 1))
         self.retry_base_delay = float(retry_base_delay or 0.5)
         self._collection_dims: dict[str, int] = {}  # Cache: collection_name → dimension
+        self._sparse_collections: set[str] = set()
+        self._sparse_readiness: dict[str, bool] = {}
         self._client = AsyncQdrantClient(
             url=url,
             api_key=api_key,
@@ -141,6 +147,8 @@ class VectorStore:
         if not collection_name:
             return
         self._collection_dims.pop(collection_name, None)
+        self._sparse_collections.discard(collection_name)
+        self._sparse_readiness.pop(collection_name, None)
         await self._call(lambda: self._client.delete_collection(collection_name=collection_name))
 
     async def ensure_collection(
@@ -162,6 +170,7 @@ class VectorStore:
             info = await self._call(lambda: self._client.get_collection(desired))
             current_size = int(info.config.params.vectors.size)  # type: ignore[attr-defined]
             if current_size == int(dimension):
+                await self.ensure_sparse_vectors(desired)
                 return desired
         except Exception:
             info = None
@@ -197,6 +206,8 @@ class VectorStore:
                 ),
             )
         )
+        self._sparse_collections.add(actual)
+        self._sparse_readiness[actual] = True
 
         # Payload indexes for fast filtering.
         payload_indexes: tuple[tuple[str, qmodels.PayloadSchemaType], ...] = (
@@ -230,6 +241,8 @@ class VectorStore:
             info = await self._call(lambda: self._client.get_collection(collection_name))
             sparse_cfg = getattr(info.config.params, "sparse_vectors", None) or {}
             if "bm25" in sparse_cfg:
+                self._sparse_collections.add(collection_name)
+                self._sparse_readiness.pop(collection_name, None)
                 return False
             await self._call(
                 lambda: self._client.update_collection(
@@ -241,6 +254,8 @@ class VectorStore:
                     },
                 )
             )
+            self._sparse_collections.add(collection_name)
+            self._sparse_readiness.pop(collection_name, None)
             logger.info("Added BM25 sparse vector config to collection %s", collection_name)
             return True
         except Exception as e:
@@ -258,43 +273,106 @@ class VectorStore:
         sparse_limit: int = 100,
         tenant_id: str | None = None,
         document_id: str | None = None,
+        source_type: str | None = None,
+        language: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
         with_payload: bool = True,
+        rrf_k: int = 60,
     ) -> list[VectorSearchHit]:
         """Native Qdrant hybrid search: Prefetch(dense+BM25) → RRF fusion."""
-        conditions = []
-        if tenant_id:
-            conditions.append(
-                qmodels.FieldCondition(
-                    key="tenant_id", match=qmodels.MatchValue(value=tenant_id),
-                )
-            )
-        if document_id:
-            conditions.append(
-                qmodels.FieldCondition(
-                    key="document_id", match=qmodels.MatchValue(value=document_id),
-                )
-            )
-        flt = qmodels.Filter(must=conditions) if conditions else None
+        return await self.hybrid_search_multi_native(
+            collection_name=collection_name,
+            routes=[
+                {
+                    "query_vector": query_vector,
+                    "sparse_indices": sparse_indices,
+                    "sparse_values": sparse_values,
+                    "dense_limit": dense_limit,
+                    "sparse_limit": sparse_limit,
+                    "document_id": document_id,
+                    "source_type": source_type,
+                    "language": language,
+                    "metadata_filter": metadata_filter,
+                }
+            ],
+            top_k=top_k,
+            tenant_id=tenant_id,
+            with_payload=with_payload,
+            rrf_k=rrf_k,
+        )
 
-        prefetch = [
-            qmodels.Prefetch(query=query_vector, limit=dense_limit, filter=flt),
-        ]
-        if sparse_indices:
-            prefetch.append(
-                qmodels.Prefetch(
-                    query=qmodels.SparseVector(indices=sparse_indices, values=sparse_values),
-                    using="bm25",
-                    limit=sparse_limit,
-                    filter=flt,
-                ),
+    async def hybrid_search_multi_native(
+        self,
+        collection_name: str,
+        routes: list[dict[str, Any]],
+        top_k: int,
+        tenant_id: str | None = None,
+        with_payload: bool = True,
+        rrf_k: int = 60,
+    ) -> list[VectorSearchHit]:
+        """Fuse every dense and sparse query route in one Qdrant RRF request."""
+        prefetch = []
+        for route in routes:
+            conditions = []
+            for key, value in (
+                ("tenant_id", tenant_id),
+                ("document_id", route.get("document_id")),
+                ("source_type", route.get("source_type")),
+                ("language", route.get("language")),
+            ):
+                if value:
+                    conditions.append(
+                        qmodels.FieldCondition(
+                            key=key,
+                            match=qmodels.MatchValue(value=value),
+                        )
+                    )
+            for key, value in (route.get("metadata_filter") or {}).items():
+                if isinstance(value, (str, int, bool)):
+                    conditions.append(
+                        qmodels.FieldCondition(
+                            key=f"metadata.{key}",
+                            match=qmodels.MatchValue(value=value),
+                        )
+                    )
+            flt = qmodels.Filter(must=conditions) if conditions else None
+
+            query_vector = route.get("query_vector")
+            if query_vector:
+                prefetch.append(
+                    qmodels.Prefetch(
+                        query=query_vector,
+                        limit=max(int(route.get("dense_limit") or 1), 1),
+                        filter=flt,
+                    )
+                )
+            sparse_indices = list(route.get("sparse_indices") or [])
+            if sparse_indices:
+                prefetch.append(
+                    qmodels.Prefetch(
+                        query=qmodels.SparseVector(
+                            indices=sparse_indices,
+                            values=list(route.get("sparse_values") or []),
+                        ),
+                        using="bm25",
+                        limit=max(int(route.get("sparse_limit") or 1), 1),
+                        filter=flt,
+                    )
+                )
+
+        if len(prefetch) < 2:
+            raise VectorStoreError("native RRF requires at least two prefetch queries")
+        if not await self._is_sparse_ready(collection_name):
+            raise VectorStoreError(
+                f"collection '{collection_name}' requires sparse-vector backfill"
             )
 
         resp = await self._call(
             lambda: self._client.query_points(
                 collection_name=collection_name,
                 prefetch=prefetch,
-                query=qmodels.FusionQuery(fusion=qmodels.Fusion.RRF),
-                limit=int(top_k),
+                query=qmodels.RrfQuery(rrf=qmodels.Rrf(k=max(int(rrf_k), 1))),
+                limit=max(int(top_k), 1),
                 with_payload=with_payload,
             )
         )
@@ -302,10 +380,39 @@ class VectorStore:
         hits = list(getattr(resp, "points", None) or [])
         return [
             VectorSearchHit(
-                point_id=str(p.id), score=float(p.score), payload=dict(p.payload or {}),
+                point_id=str(p.id),
+                score=float(p.score),
+                payload=dict(p.payload or {}),
             )
             for p in hits
         ]
+
+    async def _is_sparse_ready(self, collection_name: str) -> bool:
+        """Check once per process that every stored point has a BM25 vector."""
+        cached = self._sparse_readiness.get(collection_name)
+        if cached is not None:
+            return cached
+
+        total_result = await self._call(
+            lambda: self._client.count(collection_name=collection_name, exact=True)
+        )
+        total_count = int(getattr(total_result, "count", 0) or 0)
+        if total_count == 0:
+            self._sparse_readiness[collection_name] = True
+            return True
+
+        sparse_result = await self._call(
+            lambda: self._client.count(
+                collection_name=collection_name,
+                count_filter=qmodels.Filter(
+                    must=[qmodels.HasVectorCondition(has_vector="bm25")]
+                ),
+                exact=True,
+            )
+        )
+        is_ready = int(getattr(sparse_result, "count", 0) or 0) == total_count
+        self._sparse_readiness[collection_name] = is_ready
+        return is_ready
 
     async def sparse_search(
         self,
@@ -372,8 +479,45 @@ class VectorStore:
     async def upsert(self, collection_name: str, points: Sequence[qmodels.PointStruct]) -> None:
         if not points:
             return
+        if (
+            collection_name not in self._sparse_collections
+            or collection_name not in self._collection_dims
+        ):
+            try:
+                info = await self._call(lambda: self._client.get_collection(collection_name))
+                sparse_cfg = getattr(info.config.params, "sparse_vectors", None) or {}
+                if "bm25" in sparse_cfg:
+                    self._sparse_collections.add(collection_name)
+                vectors_cfg = getattr(info.config.params, "vectors", None)
+                if getattr(vectors_cfg, "size", None) is not None:
+                    self._collection_dims[collection_name] = int(vectors_cfg.size)
+            except Exception:
+                pass
+
+        prepared_points = list(points)
+        if collection_name in self._sparse_collections:
+            prepared_points = []
+            for point in points:
+                vector = point.vector
+                payload = dict(point.payload or {})
+                indices, values = text_to_sparse_vector(str(payload.get("text") or ""))
+                if not indices:
+                    indices, values = [_EMPTY_SPARSE_INDEX], [1.0]
+                if isinstance(vector, list):
+                    vector = {"": vector}
+                elif isinstance(vector, dict):
+                    vector = dict(vector)
+                else:
+                    prepared_points.append(point)
+                    continue
+                vector.setdefault(
+                    "bm25",
+                    qmodels.SparseVector(indices=indices, values=values),
+                )
+                prepared_points.append(point.model_copy(update={"vector": vector}))
+
         # Validate vector dimensions match collection
-        first_vec = points[0].vector
+        first_vec = prepared_points[0].vector
         if isinstance(first_vec, list):
             vec_dim = len(first_vec)
         elif isinstance(first_vec, dict):
@@ -407,8 +551,9 @@ class VectorStore:
                     pass
 
         await self._call(
-            lambda: self._client.upsert(collection_name=collection_name, points=list(points))
+            lambda: self._client.upsert(collection_name=collection_name, points=prepared_points)
         )
+        self._sparse_readiness.pop(collection_name, None)
 
     async def delete_points(
         self,
