@@ -1,14 +1,11 @@
-
-import logoUrl from "@/assets/logo.png";
-
 export function Logo({ collapsed }: { collapsed: boolean }) {
     return (
         <div className="flex items-center gap-3 select-none group">
             <div className="relative flex items-center justify-center w-9 h-9">
                 <img
-                    src={logoUrl}
+                    src="/ai-gateway-logo.png"
                     alt="AI Platform Logo"
-                    className="w-full h-full object-contain drop-shadow-md transition-transform duration-500 group-hover:scale-105"
+                    className="w-full h-full object-contain transition-transform duration-500 group-hover:scale-105"
                 />
             </div>
 
