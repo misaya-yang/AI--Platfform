@@ -84,7 +84,7 @@ async def test_multi_native_rrf_uses_one_request_with_all_prefetches(monkeypatch
         async def close(self):
             return None
 
-    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
 
     vs = VectorStore(url="http://localhost:6333")
     await vs.hybrid_search_multi_native(
@@ -134,7 +134,7 @@ async def test_multi_native_rrf_requires_sparse_backfill(monkeypatch):
         async def close(self):
             return None
 
-    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
 
     vs = VectorStore(url="http://localhost:6333")
     with pytest.raises(vector_store.VectorStoreError, match="sparse-vector backfill"):
@@ -175,7 +175,7 @@ async def test_upsert_adds_sparse_vector_when_collection_supports_it(monkeypatch
         async def close(self):
             return None
 
-    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **_kwargs: DummyClient())
 
     vs = VectorStore(url="http://localhost:6333")
     collection = "kb_ds_2"
