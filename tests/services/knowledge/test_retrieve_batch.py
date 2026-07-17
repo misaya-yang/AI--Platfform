@@ -182,36 +182,50 @@ class FakeNativeHybridVectorStore(FakeHybridVectorStore):
     async def hybrid_search_multi_native(self, **kwargs):
         self.native_calls.append(kwargs)
         return [
-            SimpleNamespace(
-                point_id="shared",
-                score=0.9,
-                payload={
-                    "segment_id": "shared",
-                    "document_id": "doc-shared",
-                    "text": "shared answer",
-                    "metadata": {"kind": "shared"},
-                },
-            ),
-            SimpleNamespace(
-                point_id="dense-rewrite",
-                score=0.8,
-                payload={
-                    "segment_id": "dense-rewrite",
-                    "document_id": "doc-dense-rewrite",
-                    "text": "rewrite dense exclusive answer",
-                    "metadata": {"kind": "dense", "tags": ["rewrite"]},
-                },
-            ),
-            SimpleNamespace(
-                point_id="lexical-original",
-                score=0.7,
-                payload={
-                    "segment_id": "lexical-original",
-                    "document_id": "doc-lexical-original",
-                    "text": "original lexical candidate",
-                    "metadata": {"kind": "lexical"},
-                },
-            ),
+            [
+                SimpleNamespace(
+                    point_id="shared",
+                    score=0.6,
+                    payload={
+                        "segment_id": "shared",
+                        "document_id": "doc-shared",
+                        "text": "shared answer",
+                        "metadata": {"kind": "shared"},
+                    },
+                ),
+                SimpleNamespace(
+                    point_id="lexical-original",
+                    score=0.55,
+                    payload={
+                        "segment_id": "lexical-original",
+                        "document_id": "doc-lexical-original",
+                        "text": "original lexical candidate",
+                        "metadata": {"kind": "lexical"},
+                    },
+                ),
+            ],
+            [
+                SimpleNamespace(
+                    point_id="shared",
+                    score=0.9,
+                    payload={
+                        "segment_id": "shared",
+                        "document_id": "doc-shared",
+                        "text": "shared answer",
+                        "metadata": {"kind": "shared"},
+                    },
+                ),
+                SimpleNamespace(
+                    point_id="dense-rewrite",
+                    score=0.8,
+                    payload={
+                        "segment_id": "dense-rewrite",
+                        "document_id": "doc-dense-rewrite",
+                        "text": "rewrite dense exclusive answer",
+                        "metadata": {"kind": "dense", "tags": ["rewrite"]},
+                    },
+                ),
+            ],
         ]
 
     async def search(self, **kwargs):
@@ -416,7 +430,7 @@ async def test_rerank_order_is_not_mixed_with_fusion_scores(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retrieve_batch_runs_one_global_rrf_rerank_and_mmr(monkeypatch):
+async def test_retrieve_batch_runs_per_query_rrf_then_one_global_rerank_and_mmr(monkeypatch):
     probe = RecallProbe()
     svc, database, vector_store = _make_hybrid_service(probe)
     rrf_calls = []
@@ -491,9 +505,13 @@ async def test_retrieve_batch_runs_one_global_rrf_rerank_and_mmr(monkeypatch):
     assert probe.access_calls == 1
     assert len(database.calls) == 2
     assert len(vector_store.calls) == 2
-    assert len(rrf_calls) == len(rerank_calls) == len(mmr_calls) == 1
-    assert len(rrf_calls[0]) == 4
-    assert sum("shared" in ranked_ids for ranked_ids in rrf_calls[0].values()) == 4
+    assert len(rrf_calls) == 2
+    assert len(rerank_calls) == len(mmr_calls) == 1
+    assert all(len(ranked_lists) == 2 for ranked_lists in rrf_calls)
+    assert all(
+        sum("shared" in ranked_ids for ranked_ids in ranked_lists.values()) == 2
+        for ranked_lists in rrf_calls
+    )
     assert rerank_calls[0]["query"] == "original full question"
     assert vector_store.retrieve_vectors_calls == 1
     assert "dense-rewrite" in result_ids
@@ -501,10 +519,14 @@ async def test_retrieve_batch_runs_one_global_rrf_rerank_and_mmr(monkeypatch):
     assert meta["total_results"] == len(results)
     assert meta["max_parallel"] == 4
     assert batch_results[0]["meta"]["rrf_ranked_list_count"] == 4
+    assert batch_results[0]["meta"]["rrf_query_count"] == 2
+    assert batch_results[0]["meta"]["cross_query_fusion"] == "max"
+    shared = next(result for result in results if result["segment_id"] == "shared")
+    assert shared["metadata"]["_rrf_score_raw"] == round(2 / 61, 6)
 
 
 @pytest.mark.asyncio
-async def test_retrieve_batch_uses_one_native_rrf_rerank_and_mmr(monkeypatch):
+async def test_retrieve_batch_uses_one_native_batch_then_one_global_rerank_and_mmr(monkeypatch):
     probe = RecallProbe()
     svc, database, _ = _make_hybrid_service(probe)
     vector_store = FakeNativeHybridVectorStore(probe)
@@ -577,8 +599,13 @@ async def test_retrieve_batch_uses_one_native_rrf_rerank_and_mmr(monkeypatch):
     assert pipeline_meta["native_hybrid"] is True
     assert pipeline_meta["native_prefetch_count"] == 4
     assert pipeline_meta["rrf_ranked_list_count"] == 4
+    assert pipeline_meta["rrf_query_count"] == 2
+    assert pipeline_meta["cross_query_fusion"] == "max"
+    assert pipeline_meta["native_batch_request_count"] == 1
     assert pipeline_meta["fusion_applied_by"] == "qdrant"
     assert [item["metadata"]["global_rank"] for item in results] == [1, 2]
+    assert results[0]["segment_id"] == "shared"
+    assert results[0]["metadata"]["_rrf_score_raw"] == 0.9
     assert len(results) == meta["total_results"] == 2
 
 

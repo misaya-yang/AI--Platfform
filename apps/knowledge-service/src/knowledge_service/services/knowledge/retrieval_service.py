@@ -614,8 +614,8 @@ class RetrievalService:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
             ranked_lists: dict[str, list[str]] = {}
-            for index, ((hits, raw_count), query_text) in enumerate(
-                zip(results, dense_queries, strict=False)
+            for (hits, raw_count), query_text in zip(
+                results, dense_queries, strict=False
             ):
                 total_raw += raw_count
                 ranked_ids: list[str] = []
@@ -635,7 +635,7 @@ class RetrievalService:
                             "score": score,
                             "point_id": h.get("point_id"),
                         }
-                ranked_lists[f"dense:{index}:{query_text}"] = ranked_ids
+                ranked_lists[query_text] = ranked_ids
 
             dense_hits = list(merged.values())
             dense_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
@@ -649,8 +649,8 @@ class RetrievalService:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
             ranked_lists: dict[str, list[str]] = {}
-            for index, ((hits, raw_count), query_text) in enumerate(
-                zip(results, bm25_queries, strict=False)
+            for (hits, raw_count), query_text in zip(
+                results, bm25_queries, strict=False
             ):
                 total_raw += raw_count
                 ranked_ids: list[str] = []
@@ -667,7 +667,7 @@ class RetrievalService:
                         merged[seg_id].get("bm25_score") or 0.0
                     ):
                         merged[seg_id] = h
-                ranked_lists[f"bm25:{index}:{query_text}"] = ranked_ids
+                ranked_lists[query_text] = ranked_ids
 
             bm25_hits = list(merged.values())
             bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
@@ -836,12 +836,13 @@ class RetrievalService:
                 time.perf_counter() - dense_prepare_started
             ) * 1000
 
-        # Fast path: all query routes become one Qdrant request with 2Q prefetches.
+        # Fast path: one Qdrant batch request, with one dense+sparse RRF per query.
         native_hybrid_used = False
         native_hybrid_error: str | None = None
         native_prefetch_count = 0
+        native_rrf_count = 0
         native_rrf_ms = 0.0
-        native_hits: list[Any] = []
+        native_result_sets: list[list[Any]] = []
         native_hybrid_enabled = bool(retrieval_defaults.get("native_hybrid", True))
         if (
             native_hybrid_enabled
@@ -885,15 +886,20 @@ class RetrievalService:
             if native_routes:
                 native_started = time.perf_counter()
                 try:
-                    native_hits = await self.vector_store.hybrid_search_multi_native(
+                    native_result_sets = await self.vector_store.hybrid_search_multi_native(
                         collection_name=collection,
                         routes=native_routes,
                         top_k=candidate_k,
                         with_payload=True,
                         rrf_k=rrf_k_value,
                     )
+                    if len(native_result_sets) != len(native_routes):
+                        raise RuntimeError(
+                            "Qdrant native batch returned an unexpected result count"
+                        )
                     native_hybrid_used = True
                     native_prefetch_count = len(native_routes) * 2
+                    native_rrf_count = len(native_routes)
                 except Exception as exc:
                     native_hybrid_error = str(exc)
                     logger.warning("Native hybrid search failed, falling back: %s", exc)
@@ -997,35 +1003,45 @@ class RetrievalService:
             )
 
         if native_hybrid_used:
+            for hits in native_result_sets:
+                for hit in hits:
+                    payload = dict(getattr(hit, "payload", None) or {})
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        continue
+                    seg_id = str(
+                        payload.get("segment_id")
+                        or getattr(hit, "point_id", "")
+                        or ""
+                    )
+                    if not seg_id:
+                        continue
+                    upsert_candidate(
+                        seg_id,
+                        str(payload.get("document_id") or ""),
+                        text,
+                        payload,
+                        source="qdrant_rrf",
+                    )
+                    score = float(getattr(hit, "score", 0.0) or 0.0)
+                    candidate = candidates[seg_id]
+                    current_score = candidate.get("_rrf_score_raw")
+                    if current_score is None or score > float(current_score):
+                        candidate["_rrf_score_raw"] = score
+
             native_score_max = max(
-                (float(getattr(hit, "score", 0.0) or 0.0) for hit in native_hits),
+                (
+                    float(candidate.get("_rrf_score_raw") or 0.0)
+                    for candidate in candidates.values()
+                ),
                 default=1.0,
             ) or 1.0
-            for global_rank, hit in enumerate(native_hits, 1):
-                payload = dict(getattr(hit, "payload", None) or {})
-                text = str(payload.get("text") or "").strip()
-                if not text:
-                    continue
-                seg_id = str(
-                    payload.get("segment_id") or getattr(hit, "point_id", "") or ""
-                )
-                if not seg_id:
-                    continue
-                upsert_candidate(
-                    seg_id,
-                    str(payload.get("document_id") or ""),
-                    text,
-                    payload,
-                    source="qdrant_rrf",
-                )
-                score = float(getattr(hit, "score", 0.0) or 0.0)
+            for candidate in candidates.values():
+                score = float(candidate.get("_rrf_score_raw") or 0.0)
                 normalized_score = score / native_score_max
-                candidate = candidates[seg_id]
-                candidate["_rrf_score_raw"] = score
                 candidate["_rrf_score"] = normalized_score
                 candidate["_fusion_score"] = normalized_score
                 candidate["_final_score"] = normalized_score
-                candidate["_global_rank"] = global_rank
 
         # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
         # Build score dicts for normalization
@@ -1075,21 +1091,44 @@ class RetrievalService:
             cand["_term_ratio"] = match_info.get("term_ratio", 0.0)
 
         # --- Stage 3: Fusion (combine dense and BM25 scores) ---
-        rrf_scores = None
+        rrf_scores: dict[str, float] | None = None
         rrf_max = 1.0
-        rrf_ranked_lists = {**dense_ranked_lists, **bm25_ranked_lists}
+        rrf_query_count = 0
+        rrf_ranked_lists = {
+            **{
+                f"dense:{query_text}": ranked_ids
+                for query_text, ranked_ids in dense_ranked_lists.items()
+            },
+            **{
+                f"bm25:{query_text}": ranked_ids
+                for query_text, ranked_ids in bm25_ranked_lists.items()
+            },
+        }
         use_rrf = not native_hybrid_used and effective_fusion_method == "rrf" and (
             effective_mode == "hybrid"
             or len(rrf_ranked_lists) > 1
         )
         if use_rrf:
-            # RRF uses equal weights to properly interleave ranked lists.
-            # Unequal weights cause one source to dominate all positions.
-            rrf_scores = reciprocal_rank_fusion(
-                rrf_ranked_lists,
-                k=rrf_k_value,
-                weights=dict.fromkeys(rrf_ranked_lists, 1.0),
-            )
+            rrf_scores = {}
+            for query_text in queries_to_run:
+                query_ranked_lists = {
+                    source: ranked_lists[query_text]
+                    for source, ranked_lists in (
+                        ("dense", dense_ranked_lists),
+                        ("bm25", bm25_ranked_lists),
+                    )
+                    if ranked_lists.get(query_text)
+                }
+                if not query_ranked_lists:
+                    continue
+                query_scores = reciprocal_rank_fusion(
+                    query_ranked_lists,
+                    k=rrf_k_value,
+                    weights=dict.fromkeys(query_ranked_lists, 1.0),
+                )
+                rrf_query_count += 1
+                for cid, score in query_scores.items():
+                    rrf_scores[cid] = max(rrf_scores.get(cid, 0.0), score)
             rrf_max = max(rrf_scores.values()) if rrf_scores else 1.0
 
         weighted_dense_weight = None
@@ -1106,7 +1145,9 @@ class RetrievalService:
             bm25_norm = cand.get("_bm25_score_norm")
 
             if use_rrf:
-                rrf_score = float((rrf_scores or {}).get(cid, 0.0)) / (rrf_max or 1.0)
+                rrf_score_raw = float((rrf_scores or {}).get(cid, 0.0))
+                rrf_score = rrf_score_raw / (rrf_max or 1.0)
+                cand["_rrf_score_raw"] = rrf_score_raw
                 cand["_rrf_score"] = rrf_score
                 cand["_fusion_score"] = rrf_score
 
@@ -1122,7 +1163,9 @@ class RetrievalService:
                 # Hybrid mode: fuse scores
                 if effective_fusion_method == "rrf":
                     # RRF fusion
-                    rrf_score = float((rrf_scores or {}).get(cid, 0.0)) / (rrf_max or 1.0)
+                    rrf_score_raw = float((rrf_scores or {}).get(cid, 0.0))
+                    rrf_score = rrf_score_raw / (rrf_max or 1.0)
+                    cand["_rrf_score_raw"] = rrf_score_raw
                     cand["_rrf_score"] = rrf_score
                     cand["_fusion_score"] = rrf_score
                 else:
@@ -1157,6 +1200,9 @@ class RetrievalService:
             stage_timings["filter_ms"] = (time.perf_counter() - filter_started) * 1000
         metadata_filter_removed_count = metadata_filter_original_count - len(ranked)
         ranked = ranked[:candidate_k]
+        if native_hybrid_used:
+            for global_rank, candidate in enumerate(ranked, 1):
+                candidate["_global_rank"] = global_rank
 
         meta: dict[str, Any] = {
             "dataset_id": dataset_id,
@@ -1201,8 +1247,15 @@ class RetrievalService:
             "rrf_ranked_list_count": native_prefetch_count
             if native_hybrid_used
             else (len(rrf_ranked_lists) if use_rrf else 0),
+            "rrf_query_count": native_rrf_count
+            if native_hybrid_used
+            else rrf_query_count,
+            "cross_query_fusion": "max"
+            if effective_fusion_method == "rrf" and len(queries_to_run) > 1
+            else None,
             "native_hybrid": native_hybrid_used,
             "native_prefetch_count": native_prefetch_count,
+            "native_batch_request_count": 1 if native_hybrid_used else 0,
             "native_rrf_ms": round(native_rrf_ms, 2),
             "fusion_applied_by": "qdrant" if native_hybrid_used else "python",
             # Post-processing config
@@ -1236,8 +1289,8 @@ class RetrievalService:
         # Log pipeline stages with details
         if native_hybrid_used:
             meta["pipeline_stages"].append(
-                f"Qdrant native RRF: {len(native_hits)} candidates from "
-                f"{native_prefetch_count} prefetches"
+                f"Qdrant native batch: {sum(len(hits) for hits in native_result_sets)} "
+                f"route hits from {native_prefetch_count} prefetches"
             )
         elif effective_mode in {"dense", "hybrid"}:
             meta["pipeline_stages"].append(
@@ -1253,14 +1306,18 @@ class RetrievalService:
             )
         meta["pipeline_stages"].append(f"Merged candidates: {len(candidates)}")
         if native_hybrid_used:
-            meta["pipeline_stages"].append(f"Fusion (qdrant rrf): k={rrf_k_value}")
-        elif effective_mode == "hybrid":
             meta["pipeline_stages"].append(
-                f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}"
+                f"Fusion (qdrant rrf): queries={native_rrf_count}, "
+                f"cross_query=max, k={rrf_k_value}"
             )
         elif use_rrf:
             meta["pipeline_stages"].append(
-                f"Fusion (rrf): ranked_lists={len(rrf_ranked_lists)}"
+                f"Fusion (rrf): queries={rrf_query_count}, "
+                f"ranked_lists={len(rrf_ranked_lists)}, cross_query=max"
+            )
+        elif effective_mode == "hybrid":
+            meta["pipeline_stages"].append(
+                f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}"
             )
         if filters_vary_by_query:
             meta["pipeline_stages"].append("Per-query filters applied during candidate recall")

@@ -280,7 +280,7 @@ class VectorStore:
         rrf_k: int = 60,
     ) -> list[VectorSearchHit]:
         """Native Qdrant hybrid search: Prefetch(dense+BM25) → RRF fusion."""
-        return await self.hybrid_search_multi_native(
+        result_sets = await self.hybrid_search_multi_native(
             collection_name=collection_name,
             routes=[
                 {
@@ -300,6 +300,7 @@ class VectorStore:
             with_payload=with_payload,
             rrf_k=rrf_k,
         )
+        return result_sets[0] if result_sets else []
 
     async def hybrid_search_multi_native(
         self,
@@ -309,10 +310,11 @@ class VectorStore:
         tenant_id: str | None = None,
         with_payload: bool = True,
         rrf_k: int = 60,
-    ) -> list[VectorSearchHit]:
-        """Fuse every dense and sparse query route in one Qdrant RRF request."""
-        prefetch = []
+    ) -> list[list[VectorSearchHit]]:
+        """Run one dense+sparse RRF query per route in one Qdrant batch request."""
+        requests = []
         for route in routes:
+            prefetch = []
             conditions = []
             for key, value in (
                 ("tenant_id", tenant_id),
@@ -360,31 +362,43 @@ class VectorStore:
                     )
                 )
 
-        if len(prefetch) < 2:
-            raise VectorStoreError("native RRF requires at least two prefetch queries")
+            if len(prefetch) < 2:
+                raise VectorStoreError(
+                    "native RRF requires dense and sparse prefetches for every query"
+                )
+            requests.append(
+                qmodels.QueryRequest(
+                    prefetch=prefetch,
+                    query=qmodels.RrfQuery(rrf=qmodels.Rrf(k=max(int(rrf_k), 1))),
+                    limit=max(int(top_k), 1),
+                    with_payload=with_payload,
+                )
+            )
+
+        if not requests:
+            return []
         if not await self._is_sparse_ready(collection_name):
             raise VectorStoreError(
                 f"collection '{collection_name}' requires sparse-vector backfill"
             )
 
-        resp = await self._call(
-            lambda: self._client.query_points(
+        responses = await self._call(
+            lambda: self._client.query_batch_points(
                 collection_name=collection_name,
-                prefetch=prefetch,
-                query=qmodels.RrfQuery(rrf=qmodels.Rrf(k=max(int(rrf_k), 1))),
-                limit=max(int(top_k), 1),
-                with_payload=with_payload,
+                requests=requests,
             )
         )
 
-        hits = list(getattr(resp, "points", None) or [])
         return [
-            VectorSearchHit(
-                point_id=str(p.id),
-                score=float(p.score),
-                payload=dict(p.payload or {}),
-            )
-            for p in hits
+            [
+                VectorSearchHit(
+                    point_id=str(point.id),
+                    score=float(point.score),
+                    payload=dict(point.payload or {}),
+                )
+                for point in (getattr(response, "points", None) or [])
+            ]
+            for response in responses
         ]
 
     async def _is_sparse_ready(self, collection_name: str) -> bool:

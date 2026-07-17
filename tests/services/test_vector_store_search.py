@@ -68,7 +68,7 @@ async def test_search_pushes_nested_metadata_filters(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_multi_native_rrf_uses_one_request_with_all_prefetches(monkeypatch):
+async def test_multi_native_rrf_uses_one_batch_request_with_per_query_fusion(monkeypatch):
     captured = {}
     count_calls = []
 
@@ -77,9 +77,9 @@ async def test_multi_native_rrf_uses_one_request_with_all_prefetches(monkeypatch
             count_calls.append(kwargs)
             return SimpleNamespace(count=3)
 
-        async def query_points(self, **kwargs):
+        async def query_batch_points(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(points=[])
+            return [SimpleNamespace(points=[]), SimpleNamespace(points=[])]
 
         async def close(self):
             return None
@@ -110,11 +110,18 @@ async def test_multi_native_rrf_uses_one_request_with_all_prefetches(monkeypatch
         rrf_k=60,
     )
 
-    assert len(captured["prefetch"]) == 4
-    assert [prefetch.limit for prefetch in captured["prefetch"]] == [12, 13, 14, 15]
-    assert captured["query"].rrf.k == 60
-    assert captured["limit"] == 60
-    assert captured["prefetch"][0].filter.must[0].key == "metadata.madhab"
+    requests = captured["requests"]
+    assert len(requests) == 2
+    assert [len(request.prefetch) for request in requests] == [2, 2]
+    assert [prefetch.limit for request in requests for prefetch in request.prefetch] == [
+        12,
+        13,
+        14,
+        15,
+    ]
+    assert [request.query.rrf.k for request in requests] == [60, 60]
+    assert [request.limit for request in requests] == [60, 60]
+    assert requests[0].prefetch[0].filter.must[0].key == "metadata.madhab"
     assert len(count_calls) == 2
 
 
@@ -127,7 +134,7 @@ async def test_multi_native_rrf_requires_sparse_backfill(monkeypatch):
             count_filter = kwargs.get("count_filter")
             return SimpleNamespace(count=0 if count_filter else 3)
 
-        async def query_points(self, **_kwargs):
+        async def query_batch_points(self, **_kwargs):
             nonlocal query_called
             query_called = True
 
