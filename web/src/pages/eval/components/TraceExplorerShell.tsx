@@ -34,6 +34,9 @@ interface TraceExplorerShellProps {
   hasCapturedFamilyTraces: boolean;
   traces: AgentTraceSummary[];
   traceTotal: number;
+  traceOffset: number;
+  tracePageSize: number;
+  onTracePageChange: (page: number) => void;
   filters: AssistantTraceFilters;
   setFilters: Dispatch<SetStateAction<AssistantTraceFilters>>;
   traceListCopy: TraceListCopy;
@@ -75,6 +78,9 @@ export function TraceExplorerShell({
   hasCapturedFamilyTraces,
   traces,
   traceTotal,
+  traceOffset,
+  tracePageSize,
+  onTracePageChange,
   filters,
   setFilters,
   traceListCopy,
@@ -231,6 +237,9 @@ export function TraceExplorerShell({
           <AssistantTraceList
             traces={traces}
             total={traceTotal}
+            offset={traceOffset}
+            pageSize={tracePageSize}
+            onPageChange={onTracePageChange}
             filters={filters}
             setFilters={setFilters}
             title={traceListCopy.title}

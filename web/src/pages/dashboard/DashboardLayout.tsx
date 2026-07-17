@@ -246,7 +246,9 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   const health = healthQuery.data || {};
   const healthyCount = services.filter((service) => health[service.service_id]?.status === "healthy").length;
   const availability = services.length > 0 ? (healthyCount / services.length) * 100 : 0;
-  const errorRate = Math.max(0, 100 - (summaryQuery.data?.success_rate ?? 100));
+  const errorRate = summaryQuery.data
+    ? Math.max(0, 100 - summaryQuery.data.success_rate)
+    : null;
   const traces = tracesQuery.data || [];
   const failedTraceCount = traces.filter((trace) => trace.status === "error").length;
   const slowTraceCount = traces.filter((trace) => trace.sample_reason === "slow_request" || trace.request_total_duration_ms > 5000).length;
@@ -282,8 +284,8 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
       },
       {
         label: t("dashboard.serviceHealth.errorRate", "错误率"),
-        value: `${errorRate.toFixed(2)}%`,
-        tone: errorRate > 5 ? "critical" : errorRate > 1 ? "warn" : "ok",
+        value: errorRate === null ? "—" : `${errorRate.toFixed(2)}%`,
+        tone: errorRate === null ? "neutral" : errorRate > 5 ? "critical" : errorRate > 1 ? "warn" : "ok",
       },
       {
         label: t("dashboard.ops.services", "服务总数"),
@@ -297,7 +299,11 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
       },
     ],
     reliability: [
-      { label: "SLO", value: "99.5%", tone: "neutral" },
+      {
+        label: "SLO",
+        value: t("dashboard.reliability.sloNotConfigured", "Not configured"),
+        tone: "neutral",
+      },
       {
         label: t("metrics.successRate", "成功率"),
         value: summaryQuery.data ? `${successRate.toFixed(1)}%` : "—",
@@ -315,8 +321,8 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
       },
     ],
     governance: [
-      { label: t("dashboard.cost.month", "本月"), value: formatCost(monthCostQuery.data?.total_cost_usd || 0), tone: "neutral" },
-      { label: t("dashboard.cost.today", "今日"), value: formatCost(todayCostQuery.data?.total_cost_usd || 0), tone: "ok" },
+      { label: t("dashboard.cost.month", "本月"), value: monthCostQuery.data ? formatCost(monthCostQuery.data.total_cost_usd) : "—", tone: "neutral" },
+      { label: t("dashboard.cost.today", "今日"), value: todayCostQuery.data ? formatCost(todayCostQuery.data.total_cost_usd) : "—", tone: "ok" },
       {
         label: t("dashboard.governance.quotaRisk", "配额风险"),
         value: String(quotaRiskCount),
@@ -324,7 +330,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
       },
       {
         label: t("metrics.totalTokens", "Token 消耗"),
-        value: summaryQuery.data?.total_tokens ? `${Math.round(summaryQuery.data.total_tokens / 1000)}K` : "0",
+        value: summaryQuery.data ? `${Math.round(summaryQuery.data.total_tokens / 1000)}K` : "—",
         tone: "neutral",
       },
     ],
@@ -337,8 +343,9 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
   };
 
   return (
-    <div style={{ minHeight: "100%" }}>
+    <div className="dashboard-workspace" style={{ minHeight: "100%" }}>
       <div
+        className="dashboard-workspace-header"
         style={{
           borderRadius: usesExternalTabs ? 0 : LAYOUT.CARD_RADIUS,
           border: usesExternalTabs ? "none" : `1px solid ${colors.borderSoft}`,
@@ -398,7 +405,7 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <div className="dashboard-workspace-signals" style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {workspaceSignals[activeWorkspace].map((signal) => {
               const tone = toneColors[signal.tone];
               return (
@@ -510,8 +517,8 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
             <div
               key={`${activeWorkspace}-${slot.type}`}
               style={{
-                minHeight: slot.minHeight,
-                height: slot.minHeight,
+                minHeight: useSingleColumn ? Math.min(slot.minHeight, 300) : slot.minHeight,
+                height: useSingleColumn ? "auto" : slot.minHeight,
                 minWidth: 0,
                 gridColumn: useSingleColumn
                   ? "auto"
@@ -527,6 +534,22 @@ export function DashboardLayout({ width = 1200, forceWorkspace }: DashboardLayou
           );
         })}
       </div>
+      <style>{`
+        @media (max-width: 1099px) {
+          .dashboard-workspace-header > div {
+            align-items: flex-start !important;
+          }
+          .dashboard-workspace-signals {
+            width: 100%;
+            display: grid !important;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            justify-content: stretch !important;
+          }
+          .dashboard-workspace-signals > div {
+            min-width: 0 !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }

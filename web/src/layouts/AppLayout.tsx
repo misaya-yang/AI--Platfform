@@ -10,6 +10,7 @@ import {
   Bot,
   ChartLine,
   ListTodo,
+  ClipboardCheck,
   Users,
   Settings,
   PanelLeftClose,
@@ -59,7 +60,8 @@ const navItems: NavItem[] = [
   { key: "/playground", labelKey: "nav.playground", icon: Zap, permission: "conversation:playground:access" },
   { key: "/assistant", labelKey: "nav.assistant", icon: Bot, permission: "conversation:playground:access" },
   { key: "/eval", labelKey: "nav.eval", icon: ChartLine, permission: "console:eval:view" },
-  { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: null },
+  { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: "console:dashboard:view" },
+  { key: "/exams", labelKey: "nav.exams", icon: ClipboardCheck, permission: "console:dashboard:view" },
   { key: "/users", labelKey: "nav.users", icon: Users, permission: "user:list" },
   { key: "/settings", labelKey: "nav.settings", icon: Settings, permission: "console:settings:view" },
 ];
@@ -98,6 +100,12 @@ function getPageChrome(pathname: string) {
       subtitleFallback: "Review assistant, LangGraph proxy, and RAG traces with bounded previews and human scoring.",
     },
     tasks: { titleKey: "nav.tasks", titleFallback: "Tasks" },
+    confluence: {
+      titleKey: "confluence.pageTitle",
+      titleFallback: "Confluence Integration",
+      subtitleKey: "confluence.pageDesc",
+      subtitleFallback: "Manage Confluence connections and space syncing",
+    },
     users: { titleKey: "nav.users", titleFallback: "Users" },
     settings: { titleKey: "nav.settings", titleFallback: "Settings" },
     exams: { titleKey: "nav.exams", titleFallback: "Exams" },
@@ -209,7 +217,7 @@ export function AppLayout() {
   }, [floatingSidebarOpen]);
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ minHeight: '100dvh' }}>
       {floatingSidebarOpen && (
         <button
           type="button"
@@ -223,7 +231,7 @@ export function AppLayout() {
         collapsible collapsed={collapsed} onCollapse={setCollapsed} trigger={null}
         width={SIDER_WIDTH} collapsedWidth={isMobile ? 0 : 64}
         style={{
-          position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 100,
+          position: 'fixed', left: isMobile ? siderOffset : 0, top: 0, bottom: 0, zIndex: 40,
           borderRight: '1px solid hsl(var(--border))',
           background: 'hsl(var(--sidebar-bg))',
           transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
@@ -276,7 +284,7 @@ export function AppLayout() {
                         </span>
                       )}
                       {collapsed && (
-                        <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
+                        <div className="absolute left-full ml-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded-md shadow-lg opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 group-focus-visible:opacity-100 group-focus-visible:scale-100 transition-all duration-100 pointer-events-none whitespace-nowrap z-50 border border-border/50">
                           {t(item.labelKey)}
                         </div>
                       )}
@@ -292,6 +300,7 @@ export function AppLayout() {
               continuous rather than split. */}
           <div className="px-2.5 py-3 border-t border-border/60 flex flex-col gap-[3px]">
             <button
+              type="button"
               onClick={toggleDarkMode}
               aria-label={darkMode ? t("theme.mode.light") : t("theme.mode.dark")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
@@ -313,6 +322,7 @@ export function AppLayout() {
               )}
             </button>
             <button
+              type="button"
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? t("nav.expandSidebar", "Expand") : t("nav.collapseSidebar")}
               className={`app-nav-link flex items-center rounded-lg transition-colors duration-140 ${
@@ -330,7 +340,7 @@ export function AppLayout() {
         </div>
       </Sider>
 
-      <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100vh' }}>
+      <Layout style={{ marginLeft: contentMarginLeft, transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)', background: 'transparent', minHeight: '100dvh' }}>
         {/* Header */}
         <Header style={{
           padding: isMobile ? '0 10px' : '0 16px',
@@ -338,35 +348,40 @@ export function AppLayout() {
           backdropFilter: 'blur(12px)',
           borderBottom: '1px solid hsl(var(--border))',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 12, position: 'relative', zIndex: 50, height: HEADER_HEIGHT,
+          gap: 12, position: 'relative', zIndex: 30, height: HEADER_HEIGHT,
           lineHeight: 'normal',
         }}>
           <div className="flex min-w-0 flex-1 items-center gap-3">
             {isMobile && (
-              <button onClick={() => setCollapsed(p => !p)} className="h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
+              <button type="button" onClick={() => setCollapsed(p => !p)} className="h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground" aria-label={t("nav.toggleSidebar", "Toggle sidebar")}>
                 <Menu size={18} />
               </button>
             )}
             <div className="app-header-title min-w-0">
-              <div className="app-header-title-text truncate">{pageTitle}</div>
+              <h1 className="app-header-title-text truncate">{pageTitle}</h1>
               {pageSubtitle && (
-                <div className="app-header-subtitle truncate">{pageSubtitle}</div>
+                <p className="app-header-subtitle truncate">{pageSubtitle}</p>
               )}
             </div>
           </div>
           <Dropdown menu={{ items: userMenuItems, onClick: handleUserMenuClick }} trigger={['click']}>
-            <div className="flex shrink-0 items-center gap-2 px-1.5 py-1 rounded-md cursor-pointer hover:bg-muted/50 transition-colors">
+            <button
+              type="button"
+              aria-label={t("user.openMenu", "Open user menu")}
+              aria-haspopup="menu"
+              className="flex shrink-0 items-center gap-2 rounded-md border-0 bg-transparent px-1.5 py-1 text-foreground transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+            >
               <div className="w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-semibold text-primary bg-primary/10 border border-primary/15">
                 {userInitials}
               </div>
               <Text className="hidden sm:inline" style={{ fontSize: 13, fontWeight: 500 }}>
                 {user?.display_name || user?.user_id || t('common.user')}
               </Text>
-            </div>
+            </button>
           </Dropdown>
         </Header>
 
-        <Content style={{ padding: isMobile ? '8px' : '12px 18px 18px', minHeight: `calc(100vh - ${HEADER_HEIGHT}px)`, overflow: 'auto' }}>
+        <Content style={{ padding: isMobile ? '8px' : '12px 18px 18px', minHeight: `calc(100dvh - ${HEADER_HEIGHT}px)`, overflow: 'auto' }}>
           <div className="page-transition"><Outlet /></div>
         </Content>
       </Layout>
@@ -386,7 +401,7 @@ export function AppLayout() {
           top: 0;
           right: 0;
           bottom: 0;
-          z-index: 90;
+          z-index: 35;
           padding: 0;
           border: 0;
           background: transparent;

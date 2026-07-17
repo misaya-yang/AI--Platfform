@@ -535,6 +535,7 @@ export function useChatSession() {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const sendInFlightRef = useRef(false);
   const lastStreamConfigRef = useRef<{
     config: SessionConfig;
     selectedDatasets: string[];
@@ -849,6 +850,13 @@ export function useChatSession() {
     if (isResume && !resumeTarget) {
       return;
     }
+    if (sendInFlightRef.current || abortControllerRef.current) {
+      return;
+    }
+    if (!isResume && !messageContent.trim() && attachments.length === 0) {
+      return;
+    }
+    sendInFlightRef.current = true;
 
     // 1. Setup UI for new message
     const userMessage: ChatMessageType = {
@@ -2469,6 +2477,7 @@ export function useChatSession() {
       }
       setIsStreaming(false);
       abortControllerRef.current = null;
+      sendInFlightRef.current = false;
     }
   }, [activeSessionId, messages, setActiveSessionId, setAssistantLocalTitles, t, workingMemory]);
 

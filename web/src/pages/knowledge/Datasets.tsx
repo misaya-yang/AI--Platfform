@@ -36,7 +36,6 @@ import {
   CopyOutlined,
   CheckOutlined,
   FolderOpenOutlined,
-  CloudUploadOutlined,
   NodeIndexOutlined,
 } from "@ant-design/icons";
 
@@ -90,17 +89,8 @@ function getKBTypeLabelKey(kbType?: string) {
 
 // 获取知识库类型的颜色
 function getKBTypeColor(kbType?: string) {
-  switch (kbType) {
-    case "data":
-      return { bg: "#e6f7e6", color: "#52c41a" };
-    case "image":
-      return { bg: "#f3e8ff", color: "#9333ea" };
-    case "audio_video":
-      return { bg: "#fff7e6", color: "#fa8c16" };
-    case "document":
-    default:
-      return { bg: "#e6f4ff", color: "#1677ff" };
-  }
+  void kbType;
+  return { bg: colors.primary[50], color: colors.primary[600] };
 }
 
 // 知识库卡片组件 - 优化设计
@@ -122,12 +112,16 @@ function DatasetCard({
   const { darkMode } = useAppStore();
   const { t } = useTranslation();
 
-  const copyId = (e: React.MouseEvent) => {
+  const copyId = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    copyToClipboard(dataset.dataset_id);
-    setCopied(true);
-    message.success(t("knowledge.datasets.idCopied"));
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await copyToClipboard(dataset.dataset_id);
+      setCopied(true);
+      message.success(t("knowledge.datasets.idCopied"));
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      message.error(t("knowledge.datasets.copyFailed", "Failed to copy the knowledge base ID"));
+    }
   };
 
   const menuItems: MenuProps["items"] = [
@@ -175,6 +169,14 @@ function DatasetCard({
     <Card
       hoverable
       onClick={onViewDetail}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onViewDetail();
+        }
+      }}
+      role="link"
+      tabIndex={0}
       style={{
         borderRadius: 12,
         border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
@@ -186,14 +188,6 @@ function DatasetCard({
         body: { padding: 0 },
       }}
     >
-      {/* 顶部彩色条 */}
-      <div
-        style={{
-          height: 4,
-          background: kbTypeColor.color,
-        }}
-      />
-
       <div style={{ padding: "16px 20px" }}>
         {/* 头部：类型标签 + 更多操作 */}
         <div
@@ -223,7 +217,9 @@ function DatasetCard({
             trigger={["click"]}
             placement="bottomRight"
           >
-            <div
+            <button
+              type="button"
+              aria-label={t("common.actions")}
               onClick={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
               style={{
@@ -235,6 +231,7 @@ function DatasetCard({
                 justifyContent: "center",
                 cursor: "pointer",
                 background: "transparent",
+                border: 0,
                 transition: "background 0.2s",
               }}
               onMouseEnter={(e) => {
@@ -247,7 +244,7 @@ function DatasetCard({
               }}
             >
               <MoreOutlined style={{ fontSize: 14, color: colors.neutral[400] }} />
-            </div>
+            </button>
           </Dropdown>
         </div>
 
@@ -339,16 +336,18 @@ function DatasetCard({
               {dataset.dataset_id.slice(0, 10)}...
             </Text>
             <Tooltip title={copied ? t("knowledge.datasets.copied") : t("knowledge.datasets.copyId")}>
-              <span
-                onClick={copyId}
-                style={{ cursor: "pointer", display: "flex" }}
+              <button
+                type="button"
+                onClick={(event) => void copyId(event)}
+                aria-label={copied ? t("knowledge.datasets.copied") : t("knowledge.datasets.copyId")}
+                style={{ cursor: "pointer", display: "flex", padding: 2, border: 0, background: "transparent" }}
               >
                 {copied ? (
                   <CheckOutlined style={{ fontSize: 11, color: colors.primary[500] }} />
                 ) : (
                   <CopyOutlined style={{ fontSize: 11, color: colors.neutral[400] }} />
                 )}
-              </span>
+              </button>
             </Tooltip>
           </div>
           <Tag
@@ -472,7 +471,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
         {t("knowledge.datasets.emptyDesc")}
       </Paragraph>
 
-      <Space size={12}>
+      <Space size={12} wrap style={{ justifyContent: "center" }}>
         <Button
           type="primary"
           size="large"
@@ -485,17 +484,6 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
           }}
         >
           {t("knowledge.datasets.create")}
-        </Button>
-        <Button
-          size="large"
-          icon={<CloudUploadOutlined />}
-          style={{
-            borderRadius: 6,
-            height: 40,
-            paddingInline: 20,
-          }}
-        >
-          {t("knowledge.datasets.import")}
         </Button>
       </Space>
     </div>
@@ -666,7 +654,7 @@ export function KnowledgeDatasetsPage() {
   };
 
   return (
-    <div style={{ maxWidth: 1400, margin: "0 auto", paddingTop: 12 }}>
+    <div className="knowledge-datasets-page ui-page" style={{ maxWidth: 1400, margin: "0 auto", paddingTop: 12 }}>
       {/* 页面标题区 */}
       <div style={{ marginBottom: 12 }}>
         <div
@@ -686,20 +674,22 @@ export function KnowledgeDatasetsPage() {
             >
               {t("knowledge.datasets.refresh")}
             </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => nav("/knowledge/create")}
-              style={{ borderRadius: 6 }}
-            >
-              {t("knowledge.datasets.create")}
-            </Button>
+            {datasets.length > 0 && (
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => nav("/knowledge/create")}
+                style={{ borderRadius: 6 }}
+              >
+                {t("knowledge.datasets.create")}
+              </Button>
+            )}
           </Space>
         </div>
       </div>
 
       {/* 统计卡片 */}
-      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+      <Row className="knowledge-stats-row" gutter={[16, 16]} style={{ marginBottom: 24 }}>
         <Col xs={24} sm={8}>
           <StatCard
             title={t("knowledge.datasets.totalKB")}
@@ -750,6 +740,7 @@ export function KnowledgeDatasetsPage() {
         >
           {/* 左侧：搜索框 */}
           <Input
+            className="knowledge-search-input"
             placeholder={t("knowledge.datasets.searchPlaceholder")}
             prefix={<SearchOutlined style={{ color: colors.neutral[400] }} />}
             value={searchQuery}
@@ -762,26 +753,28 @@ export function KnowledgeDatasetsPage() {
           />
 
           {/* 右侧：类型筛选 */}
-          <Segmented
-            value={typeFilter}
-            onChange={(value) => setTypeFilter(value as string)}
-            options={typeOptions.map((opt) => ({
-              value: opt.value,
-              label: (
-                <Space size={6}>
-                  {opt.icon}
-                  <span>{t(opt.labelKey)}</span>
-                </Space>
-              ),
-            }))}
-            style={{
-              background: darkMode
-                ? colors.neutral[700]
-                : colors.neutral[100],
-              borderRadius: 6,
-              padding: 2,
-            }}
-          />
+          <div className="knowledge-type-rail ui-tabs-rail">
+            <Segmented
+              value={typeFilter}
+              onChange={(value) => setTypeFilter(value as string)}
+              options={typeOptions.map((opt) => ({
+                value: opt.value,
+                label: (
+                  <Space size={6}>
+                    {opt.icon}
+                    <span>{t(opt.labelKey)}</span>
+                  </Space>
+                ),
+              }))}
+              style={{
+                background: darkMode
+                  ? colors.neutral[700]
+                  : colors.neutral[100],
+                borderRadius: 6,
+                padding: 2,
+              }}
+            />
+          </div>
         </div>
       </Card>
 
@@ -792,6 +785,18 @@ export function KnowledgeDatasetsPage() {
           <div style={{ marginTop: 16 }}>
             <Text type="secondary">{t("knowledge.datasets.loading")}</Text>
           </div>
+        </div>
+      ) : datasetsQuery.isError ? (
+        <div className="ui-empty-state" role="alert">
+          <Title level={4} style={{ margin: 0 }}>
+            {t("knowledge.datasets.loadFailed", "Couldn't load knowledge bases")}
+          </Title>
+          <Paragraph type="secondary" style={{ margin: 0 }}>
+            {t("knowledge.datasets.loadFailedDesc", "Check the connection and try again.")}
+          </Paragraph>
+          <Button type="primary" onClick={() => void datasetsQuery.refetch()}>
+            {t("common.retry", "Retry")}
+          </Button>
         </div>
       ) : datasets.length === 0 ? (
         <EmptyState onCreateClick={() => nav("/knowledge/create")} />
@@ -888,6 +893,38 @@ export function KnowledgeDatasetsPage() {
           </div>
         </div>
       </Modal>
+      <style>{`
+        .knowledge-type-rail .ant-segmented-group {
+          width: max-content;
+        }
+        @media (max-width: 640px) {
+          .knowledge-datasets-page {
+            padding-top: 4px !important;
+          }
+          .knowledge-stats-row {
+            display: grid !important;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-inline: 0 !important;
+            margin-bottom: 16px !important;
+          }
+          .knowledge-stats-row > .ant-col {
+            max-width: none !important;
+            width: auto !important;
+            flex: none !important;
+            padding: 0 !important;
+          }
+          .knowledge-stats-row > .ant-col:first-child {
+            grid-column: 1 / -1;
+          }
+          .knowledge-search-input {
+            width: 100% !important;
+          }
+          .knowledge-type-rail {
+            width: 100%;
+          }
+        }
+      `}</style>
     </div>
   );
 }

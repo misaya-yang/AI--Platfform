@@ -9,8 +9,8 @@
  * and incorrect states all use neutral / semantic tokens.
  */
 
-import { useCallback } from "react";
-import { motion } from "framer-motion";
+import { useCallback, useMemo } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { QuizQuestionData } from "../../types";
@@ -36,12 +36,13 @@ export function QuizQuestion({
   result,
 }: QuizQuestionProps) {
   const qType = question.question_type || "mc_single";
+  const shouldReduceMotion = useReducedMotion();
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 8 }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: shouldReduceMotion ? 0 : 0.15, ease: [0.16, 1, 0.3, 1] }}
       className="space-y-3.5"
     >
       <p className="text-[14px] font-medium text-[hsl(var(--assistant-text-primary))] leading-relaxed">
@@ -73,9 +74,9 @@ export function QuizQuestion({
 
       {result && result.explanation && (
         <motion.div
-          initial={{ opacity: 0, height: 0 }}
+          initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
-          transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+          transition={{ duration: shouldReduceMotion ? 0 : 0.15, ease: [0.16, 1, 0.3, 1] }}
           className="rounded-md bg-[hsl(var(--assistant-surface-soft))] border border-[hsl(var(--assistant-border))] px-3.5 py-2.5"
         >
           <p className="text-[11px] font-mono uppercase tracking-wider text-[hsl(var(--assistant-text-tertiary))] mb-1">
@@ -110,10 +111,14 @@ function OptionList({
   result?: QuizQuestionProps["result"];
 }) {
   const isMulti = questionType === "mc_multi";
-  const selectedSet = new Set(
-    isMulti
-      ? selectedAnswer.split(",").filter(Boolean).map((l) => l.trim().toUpperCase())
-      : selectedAnswer ? [selectedAnswer.toUpperCase()] : [],
+  const selectedSet = useMemo(
+    () =>
+      new Set(
+        isMulti
+          ? selectedAnswer.split(",").filter(Boolean).map((l) => l.trim().toUpperCase())
+          : selectedAnswer ? [selectedAnswer.toUpperCase()] : [],
+      ),
+    [isMulti, selectedAnswer],
   );
 
   const handleClick = useCallback(

@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import {
   ArrowLeftOutlined,
@@ -28,7 +27,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAuthStore } from "@/store/useAuthStore";
-import { useAppStore } from "@/store/useAppStore";
 import {
   getUser,
   updateUser,
@@ -38,47 +36,43 @@ import {
 import { listServices } from "@/api/gateway";
 import type { UserResponse, RoleResponse, PermissionResponse } from "@/api/users";
 import type { ServiceDefinition } from "@/types/gateway";
-import { colors } from "@/theme/themeConfig";
 
 const buildDepartmentOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
-  { value: "cs", label: t("user.departments.cs"), color: "#10b981" },
-  { value: "sales", label: t("user.departments.sales"), color: "#f59e0b" },
-  { value: "tech", label: t("user.departments.tech"), color: "#3b82f6" },
-  { value: "admin", label: t("user.departments.admin"), color: "#c9a84c" },
+  { value: "cs", label: t("user.departments.cs") },
+  { value: "sales", label: t("user.departments.sales") },
+  { value: "tech", label: t("user.departments.tech") },
+  { value: "admin", label: t("user.departments.admin") },
 ];
 
 const buildStatusOptions = (t: (key: string, options?: Record<string, unknown>) => string) => [
-  { value: "active", label: t("users.status.active"), color: "#10b981" },
-  { value: "disabled", label: t("users.status.disabled"), color: "#ef4444" },
+  { value: "active", label: t("users.status.active") },
+  { value: "disabled", label: t("users.status.disabled") },
 ];
 
 type PermissionCategoryMeta = {
-  icon: string;
-  color: string;
   label: string;
 };
 
 const buildCategoryMeta = (
   t: (key: string, options?: Record<string, unknown>) => string
 ): Record<string, PermissionCategoryMeta> => ({
-  console: { icon: "🖥️", color: "#3b82f6", label: t("users.permissions.categories.console") },
-  conversation: { icon: "💬", color: "#10b981", label: t("users.permissions.categories.conversation") },
-  service: { icon: "🧭", color: "#6366f1", label: "服务" },
-  knowledge: { icon: "📚", color: "#f59e0b", label: t("users.permissions.categories.knowledge") },
-  user: { icon: "👤", color: "#c9a84c", label: t("users.permissions.categories.user") },
-  role: { icon: "🔐", color: "#ec4899", label: t("users.permissions.categories.role") },
-  admin: { icon: "⚙️", color: "#ef4444", label: t("users.permissions.categories.admin") },
+  console: { label: t("users.permissions.categories.console") },
+  conversation: { label: t("users.permissions.categories.conversation") },
+  service: { label: t("users.permissions.categories.service") },
+  knowledge: { label: t("users.permissions.categories.knowledge") },
+  user: { label: t("users.permissions.categories.user") },
+  role: { label: t("users.permissions.categories.role") },
+  admin: { label: t("users.permissions.categories.admin") },
 });
 
 export function UserEditPage() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { userId } = useParams<{ userId: string }>();
   const navigate = useNavigate();
   const { hasPermission } = useAuthStore();
-  const { darkMode } = useAppStore();
-  const departmentOptions = useMemo(() => buildDepartmentOptions(t), [t, i18n.language]);
-  const statusOptions = useMemo(() => buildStatusOptions(t), [t, i18n.language]);
-  const categoryMeta = useMemo(() => buildCategoryMeta(t), [t, i18n.language]);
+  const departmentOptions = useMemo(() => buildDepartmentOptions(t), [t]);
+  const statusOptions = useMemo(() => buildStatusOptions(t), [t]);
+  const categoryMeta = useMemo(() => buildCategoryMeta(t), [t]);
 
   // Data states
   const [user, setUser] = useState<UserResponse | null>(null);
@@ -152,7 +146,7 @@ export function UserEditPage() {
     };
 
     loadData();
-  }, [userId, canViewRoles, canViewServices]);
+  }, [userId, canViewRoles, canViewServices, t]);
 
   // Track changes
   useEffect(() => {
@@ -269,7 +263,12 @@ export function UserEditPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
+      <div
+        className="flex min-h-[400px] items-center justify-center"
+        role="status"
+        aria-live="polite"
+        aria-label={t("common.loading")}
+      >
         <Spin size="large" />
       </div>
     );
@@ -277,9 +276,12 @@ export function UserEditPage() {
 
   if (error || !user) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
-        <ExclamationCircleOutlined style={{ fontSize: 48, color: '#ff4d4f' }} />
-        <p className="text-lg text-muted-foreground">{error || t("users.edit.notFound")}</p>
+      <div
+        className="flex min-h-[400px] flex-col items-center justify-center gap-4 px-4 text-center"
+        role="alert"
+      >
+        <ExclamationCircleOutlined className="text-4xl text-destructive" aria-hidden="true" />
+        <p className="text-base text-muted-foreground">{error || t("users.edit.notFound")}</p>
         <Button variant="outline" onClick={() => navigate("/users")}>
           {t("users.edit.backToList")}
         </Button>
@@ -291,145 +293,118 @@ export function UserEditPage() {
   const statusOpt = statusOptions.find((s) => s.value === user.status);
 
   return (
-    <div className="user-edit-page pb-24">
+    <div className="pb-28 sm:pb-24">
       {/* Breadcrumb */}
-      <div className="flex items-center gap-2 mb-6 text-sm">
+      <nav className="mb-4 flex items-center gap-2 text-sm" aria-label="Breadcrumb">
         <Link
           to="/users"
-          className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+          className="flex items-center gap-1 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none"
         >
-          <ArrowLeftOutlined />
+          <ArrowLeftOutlined aria-hidden="true" />
           <span>{t("users.title")}</span>
         </Link>
-        <span className="text-muted-foreground">/</span>
+        <span className="text-muted-foreground" aria-hidden="true">/</span>
         <span className="text-foreground font-medium">{t("users.editUser")}</span>
-      </div>
+      </nav>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6">
+      <header className="mb-5">
+        <h1 className="text-xl font-semibold tracking-tight">{t("users.editUser")}</h1>
+        <p className="mt-1 break-all text-sm text-muted-foreground">{user.email}</p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[280px_minmax(0,1fr)] xl:gap-6">
         {/* Left sidebar - User profile card */}
-        <div className="space-y-4">
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="user-profile-card rounded-2xl p-6"
-            style={{
-              background: darkMode
-                ? `linear-gradient(145deg, ${colors.neutral[800]}, ${colors.neutral[900]})`
-                : "linear-gradient(145deg, #ffffff, #f8fafc)",
-              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-              boxShadow: darkMode
-                ? "0 4px 24px rgba(0,0,0,0.3)"
-                : "0 4px 24px rgba(0,0,0,0.06)",
-            }}
-          >
-            {/* Avatar */}
-            <div className="flex flex-col items-center mb-6">
-              <div
-                className="w-20 h-20 rounded-2xl flex items-center justify-center mb-4"
-                style={{
-                  background: `linear-gradient(135deg, ${colors.primary[400]}, #22d3ee)`,
-                  boxShadow: `0 8px 24px ${colors.primary[500]}40`,
-                }}
-              >
-                <UserOutlined style={{ fontSize: 36, color: "#fff" }} />
+        <aside>
+          <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="user-profile-heading">
+            <div className="flex items-center gap-3 border-b pb-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border bg-muted text-foreground">
+                <UserOutlined className="text-xl" aria-hidden="true" />
               </div>
-              <h2 className="text-xl font-semibold">{user.display_name || user.email}</h2>
-              <p className="text-sm text-muted-foreground">{user.email}</p>
+              <div className="min-w-0">
+                <h2 id="user-profile-heading" className="break-words text-base font-semibold">
+                  {user.display_name || user.email}
+                </h2>
+                <p className="break-all text-xs text-muted-foreground">{user.email}</p>
+              </div>
             </div>
 
             {/* User info */}
-            <div className="space-y-4">
-              <div className="flex items-center gap-3 p-3 rounded-xl" style={{
-                background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
-              }}>
-                <MailOutlined style={{ color: colors.primary[500] }} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">{t("users.fields.email")}</p>
-                  <p className="text-sm font-medium truncate">{user.email}</p>
+            <dl className="divide-y">
+              <div className="flex items-start gap-3 py-3">
+                <MailOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <dt className="text-xs text-muted-foreground">{t("users.fields.email")}</dt>
+                  <dd className="break-all text-sm font-medium">{user.email}</dd>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 p-3 rounded-xl" style={{
-                background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
-              }}>
-                <TeamOutlined style={{ color: dept?.color || colors.neutral[500] }} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">{t("users.fields.department")}</p>
-                  <p className="text-sm font-medium">{dept?.label || t("common.notSet")}</p>
+              <div className="flex items-start gap-3 py-3">
+                <TeamOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <dt className="text-xs text-muted-foreground">{t("users.fields.department")}</dt>
+                  <dd className="text-sm font-medium">{dept?.label || t("common.notSet")}</dd>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 p-3 rounded-xl" style={{
-                background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
-              }}>
-                <SafetyCertificateOutlined style={{ color: statusOpt?.color }} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">{t("users.fields.status")}</p>
+              <div className="flex items-start gap-3 py-3">
+                <SafetyCertificateOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <dt className="text-xs text-muted-foreground">{t("users.fields.status")}</dt>
+                  <dd>
                   <Badge
-                    variant={user.status === "active" ? "default" : "destructive"}
-                    className="mt-1"
+                    variant="outline"
+                    className={user.status === "active"
+                      ? "mt-1 border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                      : "mt-1 border-destructive/30 bg-destructive/10 text-destructive"}
                   >
                     {statusOpt?.label}
                   </Badge>
+                  </dd>
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 p-3 rounded-xl" style={{
-                background: darkMode ? "rgba(255,255,255,0.03)" : "rgba(0,0,0,0.02)",
-              }}>
-                <KeyOutlined style={{ color: "#a855f7" }} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">{t("users.fields.roles")}</p>
-                  <div className="flex flex-wrap gap-1 mt-1">
+              <div className="flex items-start gap-3 py-3">
+                <KeyOutlined className="mt-0.5 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <dt className="text-xs text-muted-foreground">{t("users.fields.roles")}</dt>
+                  <dd className="mt-1 flex flex-wrap gap-1">
                     {user.roles.map((role) => (
-                      <Badge key={role} variant="secondary" className="text-xs">
+                      <Badge key={role} variant="outline" className="bg-muted/50 text-xs text-foreground">
                         {role}
                       </Badge>
                     ))}
-                  </div>
+                  </dd>
                 </div>
               </div>
-            </div>
+            </dl>
 
             {/* Timestamps */}
-            <div className="mt-6 pt-4 border-t text-xs text-muted-foreground space-y-1" style={{
-              borderColor: darkMode ? colors.neutral[700] : colors.neutral[200],
-            }}>
+            <div className="border-t pt-3 text-xs text-muted-foreground space-y-1">
               <p>{t("users.fields.createdAt")}: {user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</p>
               <p>{t("users.fields.lastLogin")}: {user.last_login_at ? new Date(user.last_login_at).toLocaleString() : t("common.never")}</p>
             </div>
-          </motion.div>
-        </div>
+          </section>
+        </aside>
 
         {/* Right content - Edit cards */}
-        <div className="space-y-6">
+        <main className="min-w-0 space-y-4 sm:space-y-5">
           {/* Basic info card */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="edit-card rounded-2xl p-6"
-            style={{
-              background: darkMode ? colors.neutral[800] : "#ffffff",
-              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-            }}
-          >
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: `${colors.primary[500]}15`,
-              }}>
-                <UserOutlined style={{ fontSize: 18, color: colors.primary[500] }} />
+          <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="basic-info-heading">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted">
+                <UserOutlined className="text-base text-muted-foreground" aria-hidden="true" />
               </div>
-              <div>
-                <h3 className="font-semibold">{t("users.edit.basicInfo.title")}</h3>
+              <div className="min-w-0">
+                <h2 id="basic-info-heading" className="font-semibold">{t("users.edit.basicInfo.title")}</h2>
                 <p className="text-xs text-muted-foreground">{t("users.edit.basicInfo.desc")}</p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label>{t("users.fields.displayName")}</Label>
+                <Label htmlFor="user-edit-display-name">{t("users.fields.displayName")}</Label>
                 <Input
+                  id="user-edit-display-name"
                   value={formDisplayName}
                   onChange={(e) => setFormDisplayName(e.target.value)}
                   placeholder={t("users.edit.displayNamePlaceholder")}
@@ -438,9 +413,9 @@ export function UserEditPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>{t("users.fields.department")}</Label>
+                <Label htmlFor="user-edit-department">{t("users.fields.department")}</Label>
                 <Select value={formDepartment} onValueChange={setFormDepartment} disabled={!canEdit}>
-                  <SelectTrigger>
+                  <SelectTrigger id="user-edit-department">
                     <SelectValue placeholder={t("users.edit.departmentPlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
@@ -454,9 +429,9 @@ export function UserEditPage() {
               </div>
 
               <div className="space-y-2">
-                <Label>{t("users.fields.status")}</Label>
+                <Label htmlFor="user-edit-status">{t("users.fields.status")}</Label>
                 <Select value={formStatus} onValueChange={setFormStatus} disabled={!canEdit}>
-                  <SelectTrigger>
+                  <SelectTrigger id="user-edit-status">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -469,66 +444,45 @@ export function UserEditPage() {
                 </Select>
               </div>
             </div>
-          </motion.div>
+          </section>
 
           {/* Roles card */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.2 }}
-            className="edit-card rounded-2xl p-6"
-            style={{
-              background: darkMode ? colors.neutral[800] : "#ffffff",
-              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-            }}
-          >
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: "#a855f715",
-              }}>
-                <SafetyCertificateOutlined style={{ fontSize: 18, color: "#a855f7" }} />
+          <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="roles-heading">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted">
+                <SafetyCertificateOutlined className="text-base text-muted-foreground" aria-hidden="true" />
               </div>
-              <div>
-                <h3 className="font-semibold">{t("users.edit.roles.title")}</h3>
+              <div className="min-w-0">
+                <h2 id="roles-heading" className="font-semibold">{t("users.edit.roles.title")}</h2>
                 <p className="text-xs text-muted-foreground">{t("users.edit.roles.desc")}</p>
               </div>
             </div>
 
             {canViewRoles ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 {roles.map((role) => {
                   const isSelected = formRoles.includes(role.role_name);
                   return (
-                    <motion.div
+                    <label
                       key={role.role_name}
-                      whileHover={{ scale: 1.01 }}
-                      whileTap={{ scale: 0.99 }}
-                      onClick={() => {
-                        if (!canEdit) return;
-                        if (isSelected) {
-                          setFormRoles(formRoles.filter((r) => r !== role.role_name));
-                        } else {
-                          setFormRoles([...formRoles, role.role_name]);
-                        }
-                      }}
-                      className="role-card p-4 rounded-xl cursor-pointer transition-all"
-                      style={{
-                        background: isSelected
-                          ? darkMode
-                            ? `${colors.primary[500]}20`
-                            : `${colors.primary[500]}10`
-                          : darkMode
-                          ? "rgba(255,255,255,0.03)"
-                          : "rgba(0,0,0,0.02)",
-                        border: `2px solid ${isSelected ? colors.primary[500] : "transparent"}`,
-                        opacity: canEdit ? 1 : 0.6,
-                      }}
+                      htmlFor={`user-edit-role-${role.role_name}`}
+                      className={`rounded-lg border p-3 transition-colors motion-reduce:transition-none sm:p-4 ${
+                        isSelected ? "border-primary bg-primary/5" : "hover:bg-muted/40"
+                      } ${canEdit ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                     >
                       <div className="flex items-start gap-3">
                         <Checkbox
+                          id={`user-edit-role-${role.role_name}`}
                           checked={isSelected}
                           disabled={!canEdit}
                           className="mt-0.5"
+                          onCheckedChange={(checked) => {
+                            if (checked === true) {
+                              setFormRoles([...formRoles, role.role_name]);
+                            } else {
+                              setFormRoles(formRoles.filter((item) => item !== role.role_name));
+                            }
+                          }}
                         />
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
@@ -545,81 +499,64 @@ export function UserEditPage() {
                           </p>
                         </div>
                       </div>
-                    </motion.div>
+                    </label>
                   );
                 })}
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">{t("users.edit.roles.noAccess")}</p>
             )}
-          </motion.div>
+          </section>
 
           {/* Service access policy card */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.25 }}
-            className="edit-card rounded-2xl p-6"
-            style={{
-              background: darkMode ? colors.neutral[800] : "#ffffff",
-              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-            }}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: "#6366f115",
-              }}>
-                <TeamOutlined style={{ fontSize: 18, color: "#6366f1" }} />
+          <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="service-access-heading">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted">
+                <TeamOutlined className="text-base text-muted-foreground" aria-hidden="true" />
               </div>
-              <div>
-                <h3 className="font-semibold">Agent 服务访问</h3>
+              <div className="min-w-0">
+                <h2 id="service-access-heading" className="font-semibold">{t("users.edit.serviceAccess.title")}</h2>
                 <p className="text-xs text-muted-foreground">
-                  为该用户配置服务白名单和拒绝名单，API 与 Playground 共用同一策略
+                  {t("users.edit.serviceAccess.desc")}
                 </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div className="mb-4 grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label>访问模式</Label>
+                <Label htmlFor="user-edit-service-access-mode">{t("users.edit.serviceAccess.mode")}</Label>
                 <Select
                   value={serviceAccessMode}
                   onValueChange={(value) => setServiceAccessMode(value as "all" | "allowlist")}
                   disabled={!canEdit || !canViewServices}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="user-edit-service-access-mode">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">全部服务（可叠加拒绝名单）</SelectItem>
-                    <SelectItem value="allowlist">仅白名单服务</SelectItem>
+                    <SelectItem value="all">{t("users.edit.serviceAccess.allServices")}</SelectItem>
+                    <SelectItem value="allowlist">{t("users.edit.serviceAccess.allowlistOnly")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>策略说明</Label>
-                <div
-                  className="rounded-lg px-3 py-2 text-xs"
-                  style={{
-                    background: darkMode ? "rgba(99, 102, 241, 0.14)" : "rgba(99, 102, 241, 0.08)",
-                    color: darkMode ? "#c7d2fe" : "#3730a3",
-                  }}
-                >
+                <span className="text-sm font-medium">{t("users.edit.serviceAccess.policy")}</span>
+                <div className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
                   {serviceAccessMode === "allowlist"
-                    ? "当前为白名单模式：仅“允许”勾选的服务可调用；拒绝名单优先级更高。"
-                    : "当前为全量模式：默认可调用所有服务；可通过拒绝名单精确禁用。"}
+                    ? t("users.edit.serviceAccess.allowlistPolicy")
+                    : t("users.edit.serviceAccess.allPolicy")}
                 </div>
               </div>
             </div>
 
             {!canViewServices ? (
-              <div className="text-sm text-muted-foreground">当前账号无权读取服务列表</div>
+              <div className="text-sm text-muted-foreground">{t("users.edit.serviceAccess.noAccess")}</div>
             ) : servicesLoading ? (
-              <div className="text-sm text-muted-foreground">加载服务列表中...</div>
+              <div className="text-sm text-muted-foreground">{t("users.edit.serviceAccess.loading")}</div>
             ) : services.length === 0 ? (
-              <div className="text-sm text-muted-foreground">暂无可配置服务</div>
+              <div className="text-sm text-muted-foreground">{t("users.edit.serviceAccess.empty")}</div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                 {services.map((svc) => {
                   const serviceId = svc.service_id;
                   const inAllowlist = formAllowedServices.includes(serviceId);
@@ -628,11 +565,7 @@ export function UserEditPage() {
                   return (
                     <div
                       key={serviceId}
-                      className="rounded-xl px-3 py-3"
-                      style={{
-                        border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-                        background: darkMode ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.01)",
-                      }}
+                      className="rounded-lg border bg-background/50 px-3 py-3"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
@@ -644,21 +577,29 @@ export function UserEditPage() {
                         </Badge>
                       </div>
                       <div className="mt-3 flex items-center gap-4 text-xs">
-                        <label className="inline-flex items-center gap-2">
+                        <label
+                          htmlFor={`allow-service-${serviceId}`}
+                          className={`inline-flex items-center gap-2 ${allowDisabled ? "cursor-not-allowed" : "cursor-pointer"}`}
+                        >
                           <Checkbox
+                            id={`allow-service-${serviceId}`}
                             checked={inAllowlist}
                             disabled={allowDisabled}
                             onCheckedChange={() => toggleAllowedService(serviceId)}
                           />
-                          <span className={allowDisabled ? "text-muted-foreground" : ""}>允许</span>
+                          <span className={allowDisabled ? "text-muted-foreground" : ""}>{t("users.edit.serviceAccess.allow")}</span>
                         </label>
-                        <label className="inline-flex items-center gap-2">
+                        <label
+                          htmlFor={`deny-service-${serviceId}`}
+                          className={`inline-flex items-center gap-2 ${canEdit ? "cursor-pointer" : "cursor-not-allowed"}`}
+                        >
                           <Checkbox
+                            id={`deny-service-${serviceId}`}
                             checked={inDenylist}
                             disabled={!canEdit}
                             onCheckedChange={() => toggleDeniedService(serviceId)}
                           />
-                          <span style={{ color: inDenylist ? "#ef4444" : undefined }}>拒绝</span>
+                          <span className={inDenylist ? "text-destructive" : undefined}>{t("users.edit.serviceAccess.deny")}</span>
                         </label>
                       </div>
                     </div>
@@ -666,59 +607,43 @@ export function UserEditPage() {
                 })}
               </div>
             )}
-          </motion.div>
+          </section>
 
           {/* Extra permissions card */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.35 }}
-            className="edit-card rounded-2xl p-6"
-            style={{
-              background: darkMode ? colors.neutral[800] : "#ffffff",
-              border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-            }}
-          >
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{
-                background: "#06b6d415",
-              }}>
-                <KeyOutlined style={{ fontSize: 18, color: "#06b6d4" }} />
+          <section className="rounded-xl border bg-card p-4 sm:p-5" aria-labelledby="extra-permissions-heading">
+            <div className="mb-2 flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted">
+                <KeyOutlined className="text-base text-muted-foreground" aria-hidden="true" />
               </div>
-              <div>
-                <h3 className="font-semibold">{t("users.edit.extraPermissions.title")}</h3>
+              <div className="min-w-0">
+                <h2 id="extra-permissions-heading" className="font-semibold">{t("users.edit.extraPermissions.title")}</h2>
                 <p className="text-xs text-muted-foreground">{t("users.edit.extraPermissions.desc")}</p>
               </div>
             </div>
 
-            <div className="mb-4 p-3 rounded-lg text-xs" style={{
-              background: darkMode ? "rgba(59, 130, 246, 0.1)" : "rgba(59, 130, 246, 0.05)",
-              color: colors.primary[darkMode ? 400 : 600],
-            }}>
+            <div className="mb-4 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
               <strong>{t("users.edit.extraPermissions.tipLabel")}:</strong> {t("users.edit.extraPermissions.tipText")}
             </div>
 
-            {canViewRoles ? (
+            {canViewRoles && Object.keys(permissionsByCategory).length > 0 ? (
               <div className="space-y-2">
                 {Object.entries(permissionsByCategory).map(([category, perms]) => {
-                  const meta = categoryMeta[category] || { icon: "📋", color: "#6b7280", label: category };
+                  const meta = categoryMeta[category] || { label: category };
                   const isExpanded = expandedCategories.has(category);
                   const selectedInCategory = perms.filter((p) => formExtraPermissions.includes(p.permission_code)).length;
 
                   return (
-                    <div key={category} className="permission-category rounded-xl overflow-hidden" style={{
-                      border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-                    }}>
+                    <div key={category} className="overflow-hidden rounded-lg border">
                       {/* Category header */}
-                      <div
+                      <button
+                        type="button"
+                        id={`permission-category-trigger-${category}`}
+                        aria-expanded={isExpanded}
+                        aria-controls={`permission-category-panel-${category}`}
                         onClick={() => toggleCategory(category)}
-                        className="flex items-center justify-between p-4 cursor-pointer transition-colors"
-                        style={{
-                          background: darkMode ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.01)",
-                        }}
+                        className="flex w-full items-center justify-between gap-3 bg-muted/20 p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40 motion-reduce:transition-none sm:p-4"
                       >
-                        <div className="flex items-center gap-3">
-                          <span className="text-lg">{meta.icon}</span>
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
                           <span className="font-medium">{meta.label}</span>
                           <span className="text-xs text-muted-foreground">
                             ({t("users.edit.extraPermissions.categoryCount", { count: perms.length })})
@@ -729,25 +654,21 @@ export function UserEditPage() {
                             </Badge>
                           )}
                         </div>
-                        <motion.div
-                          animate={{ rotate: isExpanded ? 0 : -90 }}
-                          transition={{ duration: 0.2 }}
-                        >
-                          <DownOutlined style={{ fontSize: 12, color: colors.neutral[500] }} />
-                        </motion.div>
-                      </div>
+                        <DownOutlined
+                          className={`shrink-0 text-xs text-muted-foreground transition-transform motion-reduce:transition-none ${isExpanded ? "" : "-rotate-90"}`}
+                          aria-hidden="true"
+                        />
+                      </button>
 
                       {/* Category content */}
-                      <AnimatePresence>
-                        {isExpanded && (
-                          <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: "auto", opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            transition={{ duration: 0.2 }}
-                            style={{ overflow: "hidden" }}
-                          >
-                            <div className="p-4 pt-0 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {isExpanded && (
+                        <div
+                          id={`permission-category-panel-${category}`}
+                          role="region"
+                          aria-labelledby={`permission-category-trigger-${category}`}
+                          className="border-t p-3 sm:p-4"
+                        >
+                          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                               {perms.map((perm) => {
                                 const fromRole = rolePermissions.has(perm.permission_code);
                                 const isSelected = formExtraPermissions.includes(perm.permission_code);
@@ -763,31 +684,25 @@ export function UserEditPage() {
                                       </div>
                                     }
                                   >
-                                    <div
-                                      onClick={() => {
-                                        if (!canEdit || fromRole) return;
-                                        if (isSelected) {
-                                          setFormExtraPermissions(
-                                            formExtraPermissions.filter((p) => p !== perm.permission_code)
-                                          );
-                                        } else {
-                                          setFormExtraPermissions([...formExtraPermissions, perm.permission_code]);
-                                        }
-                                      }}
-                                      className="flex items-center gap-2 p-2 rounded-lg transition-colors"
-                                      style={{
-                                        background: isSelected
-                                          ? darkMode
-                                            ? "#06b6d420"
-                                            : "#06b6d410"
-                                          : "transparent",
-                                        opacity: fromRole ? 0.5 : 1,
-                                        cursor: canEdit && !fromRole ? "pointer" : "default",
-                                      }}
+                                    <label
+                                      htmlFor={`user-extra-permission-${perm.permission_code}`}
+                                      className={`flex items-center gap-2 rounded-lg p-2 transition-colors motion-reduce:transition-none ${
+                                        isSelected ? "bg-primary/5" : "hover:bg-muted/40"
+                                      } ${canEdit && !fromRole ? "cursor-pointer" : "cursor-default opacity-60"}`}
                                     >
                                       <Checkbox
+                                        id={`user-extra-permission-${perm.permission_code}`}
                                         checked={isSelected || fromRole}
                                         disabled={!canEdit || fromRole}
+                                        onCheckedChange={(checked) => {
+                                          if (checked === true) {
+                                            setFormExtraPermissions([...formExtraPermissions, perm.permission_code]);
+                                          } else {
+                                            setFormExtraPermissions(
+                                              formExtraPermissions.filter((item) => item !== perm.permission_code)
+                                            );
+                                          }
+                                        }}
                                       />
                                       <div className="flex-1 min-w-0">
                                         <p className="text-sm font-medium truncate">
@@ -799,117 +714,79 @@ export function UserEditPage() {
                                           {t("users.edit.extraPermissions.roleBadge")}
                                         </Badge>
                                       )}
-                                    </div>
+                                    </label>
                                   </Tooltip>
                                 );
                               })}
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
+            ) : canViewRoles ? (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                {t("users.edit.extraPermissions.empty")}
+              </p>
             ) : (
               <p className="text-sm text-muted-foreground">{t("users.edit.extraPermissions.noAccess")}</p>
             )}
-          </motion.div>
-        </div>
+          </section>
+        </main>
       </div>
 
       {/* Fixed bottom save bar */}
-      <AnimatePresence>
-        {hasChanges && (
-          <motion.div
-            initial={{ y: 100, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: 100, opacity: 0 }}
-            className="fixed bottom-0 left-0 right-0 z-50"
-            style={{
-              marginLeft: "inherit",
-            }}
-          >
-            <div
-              className="mx-auto max-w-4xl px-6 py-4 rounded-t-2xl flex items-center justify-between gap-4"
-              style={{
-                background: darkMode
-                  ? `rgba(${parseInt(colors.neutral[900].slice(1, 3), 16)}, ${parseInt(colors.neutral[900].slice(3, 5), 16)}, ${parseInt(colors.neutral[900].slice(5, 7), 16)}, 0.95)`
-                  : "rgba(255, 255, 255, 0.95)",
-                backdropFilter: "blur(12px)",
-                boxShadow: "0 -4px 24px rgba(0,0,0,0.1)",
-                border: `1px solid ${darkMode ? colors.neutral[700] : colors.neutral[200]}`,
-                borderBottom: "none",
-              }}
-            >
-              <div className="flex items-center gap-2 text-sm">
-                <ExclamationCircleOutlined style={{ color: "#f97316" }} />
-                <span>{t("users.edit.unsavedChanges")}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    if (user) {
-                      setFormDisplayName(user.display_name || "");
-                      setFormDepartment(user.department || "");
-                      setFormStatus(user.status);
-                      setFormRoles(user.roles);
-                      setFormExtraPermissions(user.extra_permissions || []);
-                      setServiceAccessMode(user.service_access_mode || "all");
-                      setFormAllowedServices(user.allowed_services || []);
-                      setFormDeniedServices(user.denied_services || []);
-                    }
-                  }}
-                >
-                  {t("common.reset")}
-                </Button>
-                <Button
-                  onClick={handleSave}
-                  disabled={isSaving}
-                  className="min-w-[100px]"
-                  style={{
-                    background: `linear-gradient(135deg, ${colors.primary[500]}, #06b6d4)`,
-                  }}
-                >
-                  {isSaving ? (
-                    <>
-                      <LoadingOutlined className="mr-2" />
-                      {t("common.saving")}
-                    </>
-                  ) : (
-                    <>
-                      <CheckOutlined className="mr-2" />
-                      {t("users.edit.saveChanges")}
-                    </>
-                  )}
-                </Button>
-              </div>
+      {hasChanges && (
+        <div
+          className="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-3 pb-3 sm:px-6 sm:pb-4"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="pointer-events-auto mx-auto flex max-w-3xl flex-col gap-3 rounded-xl border bg-card p-3 shadow-lg sm:flex-row sm:items-center sm:justify-between sm:p-4">
+            <div className="flex items-center gap-2 text-sm">
+              <ExclamationCircleOutlined className="text-amber-600 dark:text-amber-400" aria-hidden="true" />
+              <span>{t("users.edit.unsavedChanges")}</span>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <style>{`
-        .user-edit-page {
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-        }
-
-        .role-card:hover {
-          transform: translateY(-1px);
-        }
-
-        .permission-category:hover {
-          border-color: ${colors.primary[500]}50 !important;
-        }
-
-        .line-clamp-2 {
-          display: -webkit-box;
-          -webkit-line-clamp: 2;
-          -webkit-box-orient: vertical;
-          overflow: hidden;
-        }
-      `}</style>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (user) {
+                    setFormDisplayName(user.display_name || "");
+                    setFormDepartment(user.department || "");
+                    setFormStatus(user.status);
+                    setFormRoles(user.roles);
+                    setFormExtraPermissions(user.extra_permissions || []);
+                    setServiceAccessMode(user.service_access_mode || "all");
+                    setFormAllowedServices(user.allowed_services || []);
+                    setFormDeniedServices(user.denied_services || []);
+                  }
+                }}
+              >
+                {t("common.reset")}
+              </Button>
+              <Button
+                onClick={handleSave}
+                disabled={isSaving || !canEdit}
+                className="min-w-[100px]"
+              >
+                {isSaving ? (
+                  <>
+                    <LoadingOutlined className="mr-2" aria-hidden="true" />
+                    {t("common.saving")}
+                  </>
+                ) : (
+                  <>
+                    <CheckOutlined className="mr-2" aria-hidden="true" />
+                    {t("users.edit.saveChanges")}
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

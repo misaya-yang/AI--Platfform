@@ -5,7 +5,7 @@
  * Shows Confluence bindings and allows adding new ones.
  */
 
-import { useState, useMemo } from "react";
+import { useCallback, useEffect, useState, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -36,6 +36,18 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
   const selectedBindingId = searchParams.get("binding");
   const [showAddDialog, setShowAddDialog] = useState(false);
 
+  const setBindingView = useCallback((bindingId?: string) => {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", "sources");
+    nextParams.set("source", "confluence");
+    if (bindingId) {
+      nextParams.set("binding", bindingId);
+    } else {
+      nextParams.delete("binding");
+    }
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   // Fetch all bindings for this dataset
   const {
     data: bindings = [],
@@ -61,24 +73,27 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
 
   // Handle viewing pages of a binding
   const handleViewPages = (bindingId: string) => {
-    setSearchParams({ tab: "sync", binding: bindingId });
+    setBindingView(bindingId);
   };
 
   // Handle going back from pages panel
   const handleBackFromPages = () => {
-    setSearchParams({ tab: "sync" });
+    setBindingView();
   };
+
+  const selectedBinding = selectedBindingId
+    ? bindings.find((binding) => binding.binding_id === selectedBindingId)
+    : undefined;
+
+  useEffect(() => {
+    if (selectedBindingId && !selectedBinding && !loadingBindings) {
+      setBindingView();
+    }
+  }, [loadingBindings, selectedBinding, selectedBindingId, setBindingView]);
 
   // If a binding is selected, show its pages panel
   if (selectedBindingId) {
-    const selectedBinding = bindings.find(
-      (b) => b.binding_id === selectedBindingId
-    );
-
-    // Handle case where binding was deleted or doesn't exist
     if (!selectedBinding && !loadingBindings) {
-      // Clear invalid binding ID from URL
-      setSearchParams({ tab: "sync" });
       return null;
     }
 
@@ -108,11 +123,11 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
       <SyncOverviewCards bindings={bindings} />
 
       {/* Confluence Sync Section */}
-      <Card className="p-6">
-        <div className="flex items-center justify-between mb-6">
+      <Card className="p-4 sm:p-6">
+        <div className="flex flex-col gap-4 mb-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
-              <Cloud className="h-5 w-5 text-blue-500" />
+            <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/15 flex items-center justify-center">
+              <Cloud className="h-5 w-5 text-primary" />
             </div>
             <div>
               <h3 className="font-semibold">{t("knowledge.sync.confluenceSync")}</h3>
@@ -121,7 +136,7 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -130,7 +145,7 @@ export function SyncSourcesTab({ datasetId }: SyncSourcesTabProps) {
               <RefreshCcw className="h-4 w-4 mr-1.5" />
               {t("knowledge.sync.refresh")}
             </Button>
-            <Button onClick={() => setShowAddDialog(true)}>
+            <Button variant="primary" onClick={() => setShowAddDialog(true)}>
               <Plus className="h-4 w-4 mr-1.5" />
               {t("knowledge.sync.addBinding")}
             </Button>
@@ -185,14 +200,14 @@ function EmptySyncState({ onAdd }: { onAdd: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="text-center py-12">
-      <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center">
-        <Cloud className="h-8 w-8 text-blue-500" />
+      <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-primary/10 border border-primary/15 flex items-center justify-center">
+        <Cloud className="h-8 w-8 text-primary" />
       </div>
       <h3 className="font-semibold text-lg mb-2">{t("knowledge.sync.noConfluenceSync")}</h3>
       <p className="text-muted-foreground mb-6 max-w-md mx-auto">
         {t("knowledge.sync.noConfluenceSyncDesc")}
       </p>
-      <Button onClick={onAdd}>
+      <Button variant="primary" onClick={onAdd}>
         <Plus className="h-4 w-4 mr-1.5" />
         {t("knowledge.sync.addConfluenceBinding")}
       </Button>

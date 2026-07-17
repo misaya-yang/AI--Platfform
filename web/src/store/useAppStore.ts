@@ -47,7 +47,7 @@ export const useAppStore = create<AppState>()(
       setSelectedServiceId: (id) => set({ selectedServiceId: id }),
       activeSessionId: undefined,
       setActiveSessionId: (id) => set({ activeSessionId: id }),
-      playgroundSidebarOpen: true,
+      playgroundSidebarOpen: false,
       setPlaygroundSidebarOpen: (open) => set({ playgroundSidebarOpen: open }),
       localTitles: {},
       setLocalTitles: (updater) => 
@@ -58,7 +58,7 @@ export const useAppStore = create<AppState>()(
       // Assistant (AI助手) - 完全独立的状态
       assistantActiveSessionId: undefined,
       setAssistantActiveSessionId: (id) => set({ assistantActiveSessionId: id }),
-      assistantSidebarOpen: true,
+      assistantSidebarOpen: false,
       setAssistantSidebarOpen: (open) => set({ assistantSidebarOpen: open }),
       assistantLocalTitles: {},
       setAssistantLocalTitles: (updater) =>
@@ -120,11 +120,11 @@ export const useAppStore = create<AppState>()(
             playgroundSidebarOpen:
               typeof state.playgroundSidebarOpen === "boolean"
                 ? state.playgroundSidebarOpen
-                : true,
+                : false,
             assistantSidebarOpen:
               typeof state.assistantSidebarOpen === "boolean"
                 ? state.assistantSidebarOpen
-                : true,
+                : false,
           } as AppState;
         }
         return state as AppState;

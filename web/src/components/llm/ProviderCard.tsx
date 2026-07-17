@@ -88,7 +88,7 @@ export function ProviderCard({
   return (
     <Card
       className={cn(
-        "relative overflow-hidden group transition-all duration-300 border bg-card hover:shadow-md hover:border-primary/40",
+        "relative overflow-hidden group border bg-card transition-colors duration-200 hover:border-primary/30 hover:bg-muted/10",
         !provider.is_enabled && "opacity-75 grayscale-[0.5] bg-muted/30"
       )}
     >
@@ -143,8 +143,8 @@ export function ProviderCard({
             </div>
           </div>
 
-          {/* Actions — visible on hover */}
-          <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+          {/* Actions stay reachable on touch and become visible on keyboard focus. */}
+          <div className="flex shrink-0 items-center gap-1 opacity-100 transition-opacity duration-150 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100 [@media(hover:none)]:opacity-100">
             <Button
               variant="ghost"
               size="icon"
@@ -152,6 +152,7 @@ export function ProviderCard({
               disabled={syncingModels}
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted"
               title={t("providers.actions.syncModels", "Sync models")}
+              aria-label={t("providers.actions.syncModels", "Sync models")}
             >
               <RefreshCw className={cn("h-4 w-4", syncingModels && "animate-spin")} />
             </Button>
@@ -162,6 +163,7 @@ export function ProviderCard({
               disabled={testing || !runtimeReady}
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted"
               title={t("common.test", "Test")}
+              aria-label={t("common.test", "Test")}
             >
               {testing ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -175,6 +177,7 @@ export function ProviderCard({
               className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted"
               onClick={onEdit}
               title={t("common.configure", "Configure")}
+              aria-label={t("common.configure", "Configure")}
             >
               <Settings className="h-4 w-4" />
             </Button>
@@ -184,6 +187,7 @@ export function ProviderCard({
               onClick={onDelete}
               className="h-8 w-8 text-muted-foreground hover:text-destructive hover:bg-red-50 dark:hover:bg-red-950/20"
               title={t("common.delete", "Delete")}
+              aria-label={t("common.delete", "Delete")}
             >
               <Trash2 className="h-4 w-4" />
             </Button>

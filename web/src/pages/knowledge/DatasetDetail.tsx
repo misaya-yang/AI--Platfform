@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
@@ -110,9 +110,40 @@ import { toast } from "@/hooks/use-toast";
 import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentList } from "@/pages/knowledge/detail/SegmentList";
 import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
-import { SyncSourcesTab } from "@/pages/knowledge/sync/SyncSourcesTab";
-import { ConfluenceBindingManager } from "./components/ConfluenceBindingManager";
 import { SourcesTab } from "@/pages/knowledge/sources";
+
+type DatasetMainTab =
+  | "documents"
+  | "retrieval"
+  | "qa"
+  | "sources"
+  | "settings"
+  | "permissions";
+
+const DATASET_MAIN_TABS: DatasetMainTab[] = [
+  "documents",
+  "retrieval",
+  "qa",
+  "sources",
+  "settings",
+  "permissions",
+];
+
+const FILE_TYPE_CATEGORIES = {
+  document: ["pdf", "doc", "docx", "txt", "md", "html", "rtf"],
+  data: ["xls", "xlsx", "csv", "json", "xml"],
+  image: ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"],
+} as const;
+
+function getDatasetMainTab(searchParams: URLSearchParams): DatasetMainTab {
+  const requestedTab = searchParams.get("tab");
+  if (requestedTab === "sync" || requestedTab === "confluence") {
+    return "sources";
+  }
+  return DATASET_MAIN_TABS.includes(requestedTab as DatasetMainTab)
+    ? (requestedTab as DatasetMainTab)
+    : "documents";
+}
 
 type QAChatMessage = {
   id: string;
@@ -156,7 +187,7 @@ export function KnowledgeDatasetDetailPage() {
 
   const dsQuery = useDataset(datasetId);
   const docsQuery = useDocuments(datasetId);
-  const docs = docsQuery.data || [];
+  const docs = useMemo(() => docsQuery.data ?? [], [docsQuery.data]);
 
   const [selectedDocId, setSelectedDocId] = useState<string | undefined>(undefined);
   const selectedDoc = useMemo(
@@ -168,11 +199,34 @@ export function KnowledgeDatasetDetailPage() {
   const segmentsQuery = useSegments(datasetId, selectedDocId, segmentSearch);
   const segments = segmentsQuery.data || [];
 
-  const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get("tab") as "documents" | "retrieval" | "qa" | "sources" | "confluence" | "settings" | "permissions" | null;
-  const [mainTab, setMainTab] = useState<"documents" | "retrieval" | "qa" | "sources" | "confluence" | "settings" | "permissions">(
-    initialTab && ["documents", "retrieval", "qa", "sources", "confluence", "settings", "permissions"].includes(initialTab) ? initialTab : "documents"
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [mainTab, setMainTab] = useState<DatasetMainTab>(() =>
+    getDatasetMainTab(searchParams)
   );
+
+  useEffect(() => {
+    const requestedTab = searchParams.get("tab");
+    const nextTab = getDatasetMainTab(searchParams);
+    setMainTab((currentTab) => currentTab === nextTab ? currentTab : nextTab);
+
+    if (requestedTab === "sync" || requestedTab === "confluence") {
+      const normalizedParams = new URLSearchParams(searchParams);
+      normalizedParams.set("tab", "sources");
+      normalizedParams.set("source", "confluence");
+      setSearchParams(normalizedParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  function handleMainTabChange(tab: DatasetMainTab) {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", tab);
+    if (tab !== "sources") {
+      nextParams.delete("source");
+      nextParams.delete("binding");
+    }
+    setMainTab(tab);
+    setSearchParams(nextParams, { replace: true });
+  }
 
   // Upload state
   const [uploading, setUploading] = useState(false);
@@ -358,13 +412,6 @@ export function KnowledgeDatasetDetailPage() {
     }
   };
 
-  // File type categories for filtering
-  const FILE_TYPE_CATEGORIES = {
-    document: ["pdf", "doc", "docx", "txt", "md", "html", "rtf"],
-    data: ["xls", "xlsx", "csv", "json", "xml"],
-    image: ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"],
-  };
-
   // Filter documents by status, content type, format, and search term
   const filteredDocs = useMemo(() => {
     let result = docs;
@@ -431,17 +478,11 @@ export function KnowledgeDatasetDetailPage() {
   }, [dsQuery.data]);
 
   useEffect(() => {
-    if (mainTab === "settings" && datasetId && !datasetConfig) {
-      loadConfig();
-    }
-  }, [mainTab, datasetId]);
-
-  useEffect(() => {
     if (!qaAutoScroll) return;
     qaChatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [qaMessages, qaLoading, qaAutoScroll]);
 
-  async function loadConfig() {
+  const loadConfig = useCallback(async () => {
     if (!datasetId) return;
     setConfigLoading(true);
     try {
@@ -488,7 +529,13 @@ export function KnowledgeDatasetDetailPage() {
     } finally {
       setConfigLoading(false);
     }
-  }
+  }, [datasetId]);
+
+  useEffect(() => {
+    if (mainTab === "settings" && datasetId && !datasetConfig) {
+      void loadConfig();
+    }
+  }, [datasetConfig, datasetId, loadConfig, mainTab]);
 
   async function handleSaveConfig() {
     if (!datasetId) return;
@@ -1235,8 +1282,6 @@ export function KnowledgeDatasetDetailPage() {
     retrieval: "border-primary text-primary bg-primary/10",
     qa: "border-primary text-primary bg-primary/10",
     sources: "border-primary text-primary bg-primary/10",
-    confluence: "border-primary text-primary bg-primary/10",
-    sync: "border-primary text-primary bg-primary/10",
     settings: "border-primary text-primary bg-primary/10",
     permissions: "border-primary text-primary bg-primary/10",
   } as const;
@@ -1246,32 +1291,30 @@ export function KnowledgeDatasetDetailPage() {
     retrieval: "text-primary",
     qa: "text-primary",
     sources: "text-primary",
-    confluence: "text-primary",
-    sync: "text-primary",
     settings: "text-primary",
     permissions: "text-primary",
   } as const;
 
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-full bg-background">
       {/* 顶部导航栏 */}
       <div className="bg-card border-b border-border sticky top-0 z-20">
-        <div className="max-w-[1600px] mx-auto px-6">
-          <div className="flex items-center justify-between h-14">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6">
+          <div className="flex min-h-14 items-center justify-between gap-3 py-2">
             {/* 左侧：面包屑导航 */}
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
                 onClick={() => nav("/knowledge")}
-                className="text-primary hover:text-primary/90 font-medium text-sm flex items-center gap-1"
+                className="shrink-0 text-primary hover:text-primary/90 font-medium text-sm flex items-center gap-1"
               >
                 <ArrowLeft className="h-4 w-4" />
-                {t("knowledge.detail.knowledgeBase")}
+                <span className="hidden sm:inline">{t("knowledge.detail.knowledgeBase")}</span>
               </button>
-              <span className="text-muted-foreground/70">/</span>
-              <span className="font-semibold text-foreground">{dataset?.name || t("knowledge.detail.loading")}</span>
+              <span className="hidden text-muted-foreground/70 sm:inline">/</span>
+              <span className="truncate font-semibold text-foreground">{dataset?.name || t("knowledge.detail.loading")}</span>
               {dataset?.visibility && (
-                <Badge variant="outline" className="text-xs bg-muted/40 text-muted-foreground border-border flex items-center gap-1">
+                <Badge variant="outline" className="hidden text-xs bg-muted/40 text-muted-foreground border-border sm:flex items-center gap-1">
                   {visibilityIcons[dataset.visibility]}
                   <span>{dataset.visibility === "private" ? t("knowledge.detail.visPrivate") : dataset.visibility === "tenant" ? t("knowledge.detail.visTenant") : t("knowledge.detail.visPublic")}</span>
                 </Badge>
@@ -1279,7 +1322,7 @@ export function KnowledgeDatasetDetailPage() {
             </div>
 
             {/* 右侧：操作按钮 */}
-            <div className="flex items-center gap-3">
+            <div className="flex shrink-0 items-center gap-2 sm:gap-3">
               <Button
                 variant="outline"
                 size="icon"
@@ -1294,9 +1337,9 @@ export function KnowledgeDatasetDetailPage() {
               </Button>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button className="bg-primary hover:bg-primary/90 text-white">
+                  <Button variant="primary">
                     <Edit3 className="h-4 w-4 mr-1.5" />
-                    {t("knowledge.detail.edit")}
+                    <span className="hidden sm:inline">{t("knowledge.detail.edit")}</span>
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
@@ -1321,21 +1364,22 @@ export function KnowledgeDatasetDetailPage() {
           </div>
 
           {/* Tabs */}
-          <div className="flex items-center gap-1 -mb-px mt-1">
+          <div className="ui-tabs-rail -mb-px mt-1" role="tablist" aria-label={t("knowledge.detail.knowledgeBase")}>
             {[
               { key: "documents", label: t("knowledge.detail.tabDocuments"), icon: FileText },
               { key: "retrieval", label: t("knowledge.detail.tabRetrieval"), icon: Search },
               { key: "qa", label: t("knowledge.detail.tabQA"), icon: MessageSquare },
               { key: "sources", label: t("knowledge.detail.tabSources"), icon: Cloud },
-              { key: "confluence", label: "Confluence", icon: ExternalLink },
               { key: "settings", label: t("knowledge.detail.tabSettings"), icon: Sliders },
               { key: "permissions", label: t("knowledge.detail.tabPermissions"), icon: Lock },
             ].map((tab) => (
               <button
                 key={tab.key}
-                onClick={() => setMainTab(tab.key as typeof mainTab)}
+                role="tab"
+                aria-selected={mainTab === tab.key}
+                onClick={() => handleMainTabChange(tab.key as DatasetMainTab)}
                 className={`
-                  group flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-all duration-200
+                  group flex shrink-0 items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors duration-200 sm:px-5 sm:py-3.5
                   ${mainTab === tab.key
                     ? tabStyles[tab.key as keyof typeof tabStyles]
                     : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/40"
@@ -1352,12 +1396,27 @@ export function KnowledgeDatasetDetailPage() {
       </div>
 
       {/* 主内容区 */}
-      <div className="max-w-[1600px] mx-auto px-6 py-6">
+      <div className="max-w-[1600px] mx-auto px-4 py-4 sm:px-6 sm:py-6">
+        {(dsQuery.isError || docsQuery.isError) && (
+          <div role="alert" className="mb-4 flex flex-col gap-3 rounded-xl border border-destructive/25 bg-destructive/5 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+            <span>{t("common.loadFailed", { defaultValue: "Unable to load the latest knowledge base data." })}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void dsQuery.refetch();
+                void docsQuery.refetch();
+              }}
+            >
+              {t("common.retry", { defaultValue: "Retry" })}
+            </Button>
+          </div>
+        )}
         {/* 文档管理 Tab */}
         {mainTab === "documents" && (
           <div className="space-y-4">
             {/* 内容类型子Tab - 圆角药丸风格 */}
-            <div className="inline-flex bg-muted/50 rounded-full p-1">
+            <div className="ui-tabs-rail w-full rounded-full bg-muted/50 p-1 sm:w-auto">
               {[
                 { key: "all" as const, label: t("knowledge.detail.contentTypeAll"), icon: LayoutList, count: contentTypeCounts.all },
                 { key: "document" as const, label: t("knowledge.detail.contentTypeDocument"), icon: FileText, count: contentTypeCounts.document },
@@ -1387,8 +1446,8 @@ export function KnowledgeDatasetDetailPage() {
             </div>
 
             {/* 工具栏 - 阿里云风格 */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="grid grid-cols-[112px_minmax(0,1fr)] items-center gap-2 sm:flex sm:gap-3">
                 {/* 筛选下拉 */}
                 <Select value={searchField} onValueChange={(v) => setSearchField(v as "name" | "id")}>
                   <SelectTrigger className="w-28 bg-card h-9">
@@ -1406,13 +1465,13 @@ export function KnowledgeDatasetDetailPage() {
                     placeholder={searchField === "name" ? t("knowledge.detail.searchNamePlaceholder") : t("knowledge.detail.searchIdPlaceholder")}
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-64 h-9 bg-card pr-8"
+                    className="h-9 w-full bg-card pr-8 sm:w-64"
                   />
                   <Search className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground/70" />
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}>
                   <SelectTrigger className="w-28 bg-card h-9">
                     <SelectValue placeholder={t("knowledge.detail.allStatus")} />
@@ -1444,9 +1503,6 @@ export function KnowledgeDatasetDetailPage() {
                   onClick={() => qc.invalidateQueries({ queryKey: ["kb-documents", datasetId] })}
                 >
                   <RefreshCcw className={`h-4 w-4 ${docsQuery.isFetching ? "animate-spin" : ""}`} />
-                </Button>
-                <Button variant="outline" className="h-9 bg-card">
-                  {t("knowledge.detail.metaInfo")}
                 </Button>
                 {/* 批量操作下拉菜单 */}
                 <DropdownMenu>
@@ -1579,7 +1635,7 @@ export function KnowledgeDatasetDetailPage() {
             {/* 文档列表 - 表格形式 */}
             <Card className="p-0 overflow-hidden border-border">
               {/* 表头 */}
-              <div className="flex items-center px-5 py-3 bg-muted/40 border-b border-border text-sm font-medium text-muted-foreground">
+              <div className="hidden items-center px-5 py-3 bg-muted/40 border-b border-border text-sm font-medium text-muted-foreground sm:flex">
                 {batchMode && (
                   <div className="mr-3 flex items-center">
                     <Checkbox
@@ -3395,29 +3451,17 @@ for chunk in results.get("chunks", []):
 
         {/* 数据来源 Tab */}
         {mainTab === "sources" && datasetId && (
-          <div className="space-y-6">
-            {/* Source cards */}
-            <SourcesTab
-              datasetId={datasetId}
-              onUploadClick={() => fileRef.current?.click()}
-              onUrlClick={() => setUrlDialogOpen(true)}
-              documentStats={{
-                total: docs.length,
-                uploaded: docs.filter(d => !d.source_type || d.source_type === 'upload').length,
-                fromUrl: docs.filter(d => d.source_type === 'url').length,
-                fromConfluence: docs.filter(d => d.source_type === 'confluence').length,
-              }}
-            />
-            {/* Full Confluence management section */}
-            <div id="confluence-section">
-              <SyncSourcesTab datasetId={datasetId} />
-            </div>
-          </div>
-        )}
-
-        {/* Confluence Tab */}
-        {mainTab === "confluence" && datasetId && (
-          <ConfluenceBindingManager datasetId={datasetId} />
+          <SourcesTab
+            datasetId={datasetId}
+            onUploadClick={() => fileRef.current?.click()}
+            onUrlClick={() => setUrlDialogOpen(true)}
+            documentStats={{
+              total: docs.length,
+              uploaded: docs.filter(d => !d.source_type || d.source_type === 'upload').length,
+              fromUrl: docs.filter(d => d.source_type === 'url').length,
+              fromConfluence: docs.filter(d => d.source_type === 'confluence').length,
+            }}
+          />
         )}
 
         {/* 权限 Tab */}
@@ -3437,7 +3481,7 @@ for chunk in results.get("chunks", []):
                   {t("knowledge.detail.accessPermissionHint")}
                 </p>
 
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   {[
                     { id: "private", name: t("knowledge.detail.permPrivate"), desc: t("knowledge.detail.permPrivateDesc"), icon: Lock },
                     { id: "tenant", name: t("knowledge.detail.permTenant"), desc: t("knowledge.detail.permTenantDesc"), icon: Users },

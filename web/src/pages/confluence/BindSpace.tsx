@@ -542,22 +542,23 @@ export default function BindSpacePage() {
   }
 
   return (
-    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
+    <div className="min-h-full bg-background">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
-        <div className="max-w-4xl mx-auto px-6">
+      <div className="sticky top-0 z-20 border-b border-border bg-card">
+        <div className="mx-auto max-w-4xl px-4 sm:px-6">
           <div className="flex items-center h-16 gap-4">
             <Button
               variant="ghost"
               size="icon"
+              aria-label={t("common.back")}
               onClick={() => navigate("/confluence")}
               className="h-9 w-9"
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-cyan-500 to-teal-500 flex items-center justify-center">
-                <Link2 className="h-5 w-5 text-white" />
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/15 bg-primary/10">
+                <Link2 className="h-5 w-5 text-primary" />
               </div>
               <div>
                 <h1 className="text-lg font-semibold text-foreground">{t("confluence.bind.title")}</h1>
@@ -571,7 +572,7 @@ export default function BindSpacePage() {
       </div>
 
       {/* Content */}
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
         <StepIndicator currentStep={currentStep} steps={steps} />
 
         {/* Step 0: Select Dataset */}
@@ -958,7 +959,7 @@ export default function BindSpacePage() {
         )}
 
         {/* Navigation */}
-        <div className="flex items-center justify-between mt-8">
+        <div className="mt-8 flex flex-wrap items-center justify-between gap-3">
           <Button
             variant="ghost"
             onClick={() => {
@@ -976,9 +977,10 @@ export default function BindSpacePage() {
           <div className="flex items-center gap-3">
             {currentStep === 2 ? (
               <Button
+                variant="primary"
                 onClick={handleCreate}
                 disabled={createBindingMutation.isPending}
-                className="bg-linear-to-r from-cyan-500 to-teal-500 hover:from-cyan-600 hover:to-teal-600 text-white border-0 min-w-[140px]"
+                className="min-w-[140px]"
               >
                 {createBindingMutation.isPending ? (
                   <>
@@ -994,9 +996,9 @@ export default function BindSpacePage() {
               </Button>
             ) : (
               <Button
+                variant="primary"
                 onClick={() => setCurrentStep((prev) => prev + 1)}
                 disabled={!canProceed()}
-                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
               >
                 {t("common.next")}
                 <ChevronRight className="h-4 w-4 ml-1" />

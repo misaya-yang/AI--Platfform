@@ -600,6 +600,82 @@ test("assistant disables sending when no models are available", async ({ page })
   expect(streamHits).toBe(0);
 });
 
+test("assistant ignores empty and duplicate same-tick Enter submissions", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-send-guard-user",
+    email: "assistant-send-guard@example.com",
+    display_name: "Assistant Send Guard",
+  });
+  let streamHits = 0;
+  await installAssistantHarness(page, async (route) => {
+    streamHits += 1;
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: toSseBody([
+        { event_type: "text_delta", data: "Guarded response" },
+        { event_type: "done", data: { duration_ms: 10 } },
+      ]),
+    });
+  });
+
+  await page.goto("/assistant");
+  const composer = page.locator(`#${ASSISTANT_COMPOSER_ID}`);
+  await expect(composer).toBeEnabled();
+
+  await composer.press("Enter");
+  expect(streamHits).toBe(0);
+
+  await composer.fill("send once");
+  await composer.evaluate((element) => {
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+
+  await expect.poll(() => streamHits).toBe(1);
+  await expect(page.getByText("send once", { exact: true })).toHaveCount(1);
+});
+
+test("assistant mobile history uses a bounded overlay sheet", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-mobile-history-user",
+    email: "assistant-mobile-history@example.com",
+    display_name: "Assistant Mobile History",
+  });
+  const session = buildMockAssistantSession("mobile-history-session", {
+    title: "Mobile history conversation",
+  });
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+      });
+    },
+    { preloadedSessions: [session] },
+  );
+
+  await page.goto("/assistant");
+  const historyToggle = page.getByRole("button", { name: /show history/i });
+  await expect(historyToggle).toBeVisible();
+  await historyToggle.click();
+
+  const historySheet = page.getByRole("dialog", { name: /history/i });
+  await expect(historySheet).toBeVisible();
+  const bounds = await historySheet.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.width).toBeLessThanOrEqual(390);
+  expect(bounds!.width).toBeGreaterThan(300);
+
+  await page.keyboard.press("Escape");
+  await expect(historySheet).toBeHidden();
+});
+
 test("assistant emits stream telemetry lifecycle on mocked stream", async ({ page }) => {
   await installAssistantHarness(page, async (route) => {
     const body = toSseBody([
@@ -947,6 +1023,32 @@ test("playground stream path keeps a11y and performance budget", async ({ page }
 
   await expect(page.locator('[role="log"]')).toBeVisible();
   await assertInpBudget(page);
+});
+
+test("playground mobile history uses a bounded overlay sheet", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-playground-mobile-history-user",
+    email: "playground-mobile-history@example.com",
+    display_name: "Playground Mobile History",
+  });
+  await installPlaygroundHarness(page);
+
+  await page.goto("/playground");
+  const historyToggle = page.getByRole("button", { name: /show history/i });
+  await expect(historyToggle).toBeVisible();
+  await historyToggle.click();
+
+  const historySheet = page.getByRole("dialog", { name: /history/i });
+  await expect(historySheet).toBeVisible();
+  const bounds = await historySheet.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.width).toBeLessThanOrEqual(390);
+  expect(bounds!.width).toBeGreaterThan(300);
+
+  await page.keyboard.press("Escape");
+  await expect(historySheet).toBeHidden();
 });
 
 test("playground handles mocked stream with tool call lifecycle", async ({ page }) => {

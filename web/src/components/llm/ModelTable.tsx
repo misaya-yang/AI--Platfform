@@ -171,6 +171,8 @@ export function ModelTable({
                     size="icon"
                     className="h-8 w-8 text-muted-foreground/50 hover:text-destructive hover:bg-destructive/10 transition-colors"
                     onClick={() => onDelete?.(model)}
+                    aria-label={t("common.delete")}
+                    title={t("common.delete")}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

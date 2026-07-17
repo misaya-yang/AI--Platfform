@@ -34,7 +34,11 @@ test("assistant restores seeded history and keeps sidebar toggle functional", as
   const { title } = await seedAssistantSession(request);
 
   await ensureAuthenticatedPage(page, "/assistant");
-  await page.getByRole("button", { name: sessionButtonName(title) }).click();
+  const sessionButton = page.getByRole("button", { name: sessionButtonName(title) });
+  if (!(await sessionButton.isVisible())) {
+    await page.getByRole("button", { name: /show history|显示历史/i }).click();
+  }
+  await sessionButton.click();
 
   await expect(page.getByText("History seed question")).toBeVisible();
   await expect(page.getByText("History seed answer")).toBeVisible();

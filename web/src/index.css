@@ -137,6 +137,132 @@
   animation: pageEnter 0.2s var(--ease-out);
 }
 
+@layer components {
+  .ui-page {
+    width: 100%;
+    max-width: 1440px;
+    margin-inline: auto;
+  }
+
+  .ui-page-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .ui-tabs-rail {
+    display: flex;
+    align-items: center;
+  }
+
+  .ui-tabs-rail,
+  .ui-scroll-affordance {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .ui-tabs-rail::-webkit-scrollbar,
+  .ui-scroll-affordance::-webkit-scrollbar {
+    display: none;
+  }
+
+  .ui-summary-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1px;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius-md);
+    background: hsl(var(--border));
+  }
+
+  .ui-summary-strip > * {
+    min-width: 0;
+    background: hsl(var(--card));
+  }
+
+  .ui-empty-state {
+    display: flex;
+    min-height: 260px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 36px 20px;
+    text-align: center;
+  }
+
+  .ui-workspace {
+    min-height: 0;
+    height: calc(100vh - var(--workspace-header-height));
+    height: calc(100dvh - var(--workspace-header-height));
+  }
+
+  .ui-focus-surface:focus-within {
+    border-color: hsl(var(--focus-ring-strong) / 0.55);
+    box-shadow: 0 0 0 3px hsl(var(--focus-ring-strong) / 0.12);
+  }
+}
+
+@media (max-width: 640px) {
+  .ui-tabs-rail,
+  .ui-scroll-affordance {
+    padding-bottom: 4px;
+    scroll-snap-type: x proximity;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+    -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+    mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+  }
+
+  .ui-tabs-rail::-webkit-scrollbar,
+  .ui-scroll-affordance::-webkit-scrollbar {
+    display: block;
+    height: 3px;
+  }
+
+  .ui-tabs-rail > *,
+  .ui-scroll-affordance > * {
+    scroll-snap-align: start;
+  }
+
+  .ui-tabs-rail [role="tab"],
+  .ui-scroll-affordance [role="tab"],
+  .ui-tabs-rail > button {
+    min-height: 40px;
+  }
+
+  .knowledge-type-rail .ant-segmented-item,
+  .knowledge-type-rail .ant-segmented-item-label {
+    min-height: 40px;
+  }
+
+  .knowledge-type-rail .ant-segmented-item-label {
+    line-height: 40px;
+  }
+
+  .ui-page-toolbar {
+    align-items: stretch;
+  }
+
+  .ui-page-toolbar > * {
+    max-width: 100%;
+  }
+
+  .ui-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ui-empty-state {
+    min-height: 220px;
+    padding: 28px 14px;
+  }
+}
+
 /* ═══════════════════════════════════════════
    AI Gateway — professional operations console
    Slate/steel neutrals with restrained amber attention
@@ -329,26 +455,26 @@
 .ant-btn-lg { border-radius: var(--radius-md) !important; }
 .ant-btn-sm { border-radius: var(--radius-sm) !important; }
 
-/* Primary button — tinted bg + colored text */
+/* Primary button — one unmistakable action level */
 .ant-btn-primary:not(.ant-btn-dangerous) {
-  background: hsl(var(--primary) / 0.08) !important;
-  color: hsl(var(--primary)) !important;
-  border: 1px solid hsl(var(--primary) / 0.15) !important;
-  box-shadow: none !important;
+  background: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  border: 1px solid hsl(var(--primary)) !important;
+  box-shadow: 0 1px 2px hsl(var(--foreground) / 0.08) !important;
   font-weight: 500 !important;
 }
 .ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
-  background: hsl(var(--primary) / 0.14) !important;
-  border-color: hsl(var(--primary) / 0.25) !important;
+  background: hsl(var(--primary) / 0.9) !important;
+  border-color: hsl(var(--primary) / 0.9) !important;
 }
 .dark .ant-btn-primary:not(.ant-btn-dangerous) {
-  background: hsl(var(--primary) / 0.12) !important;
-  color: hsl(var(--primary)) !important;
-  border-color: hsl(var(--primary) / 0.22) !important;
+  background: hsl(var(--primary)) !important;
+  color: hsl(var(--primary-foreground)) !important;
+  border-color: hsl(var(--primary)) !important;
 }
 .dark .ant-btn-primary:not(.ant-btn-dangerous):hover:not(:disabled) {
-  background: hsl(var(--primary) / 0.20) !important;
-  border-color: hsl(var(--primary) / 0.35) !important;
+  background: hsl(var(--primary) / 0.9) !important;
+  border-color: hsl(var(--primary) / 0.9) !important;
 }
 /* Danger button */
 .ant-btn-dangerous.ant-btn-primary {

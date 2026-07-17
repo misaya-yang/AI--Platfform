@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { BookOpen, ChevronLeft, ChevronRight, Loader2, Send, User } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { QuizQuestionData, QuizAttemptResult } from "@/pages/assistant/types";
@@ -36,30 +36,44 @@ export function QuizPage() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [result, setResult] = useState<QuizAttemptResult | null>(null);
+  const shouldReduceMotion = useReducedMotion();
 
   // Fetch quiz on mount
   useEffect(() => {
-    if (!shareCode) return;
-
-    // Check if already submitted from this browser
-    const submitted = localStorage.getItem(`quiz_submitted_${shareCode}`);
-    if (submitted) {
-      try {
-        const savedResult = JSON.parse(submitted);
-        setResult(savedResult);
-        setPageState("result");
-        // Still load quiz data for review
-        fetch(`/api/v1/quiz/shared/${shareCode}`)
-          .then((r) => r.ok ? r.json() : null)
-          .then((d) => { if (d) setQuiz(d); })
-          .catch(() => {});
-        return;
-      } catch { /* corrupted localStorage, continue normally */ }
+    if (!shareCode) {
+      setError("Quiz link is invalid.");
+      setPageState("error");
+      return;
     }
 
-    fetch(`/api/v1/quiz/shared/${shareCode}`)
-      .then((resp) => {
+    const controller = new AbortController();
+    let savedResult: QuizAttemptResult | null = null;
+    try {
+      const submitted = localStorage.getItem(`quiz_submitted_${shareCode}`);
+      if (submitted) {
+        const parsed = JSON.parse(submitted) as Partial<QuizAttemptResult>;
+        if (
+          typeof parsed.total_score === "number" &&
+          typeof parsed.correct_count === "number" &&
+          typeof parsed.total_count === "number" &&
+          Array.isArray(parsed.per_question)
+        ) {
+          savedResult = parsed as QuizAttemptResult;
+          setResult(savedResult);
+          setPageState("result");
+        }
+      }
+    } catch {
+      // Ignore unavailable or malformed browser storage and load the quiz normally.
+    }
+
+    async function loadQuiz() {
+      try {
+        const resp = await fetch(`/api/v1/quiz/shared/${shareCode}`, {
+          signal: controller.signal,
+        });
         if (!resp.ok) {
           throw new Error(
             resp.status === 404
@@ -67,16 +81,24 @@ export function QuizPage() {
               : "Failed to load quiz.",
           );
         }
-        return resp.json();
-      })
-      .then((data) => {
+        const data = (await resp.json()) as PublicQuizData;
         setQuiz(data);
-        setPageState("intro");
-      })
-      .catch((e) => {
-        setError(e.message);
+        setError("");
+        setPageState(savedResult ? "result" : "intro");
+      } catch (loadError) {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        if (savedResult) {
+          setError("Quiz details could not be loaded. Showing your saved result.");
+          setPageState("result");
+          return;
+        }
+        setError(loadError instanceof Error ? loadError.message : "Failed to load quiz.");
         setPageState("error");
-      });
+      }
+    }
+
+    void loadQuiz();
+    return () => controller.abort();
   }, [shareCode]);
 
   const handleStart = useCallback(() => {
@@ -96,6 +118,7 @@ export function QuizPage() {
   const handleSubmit = useCallback(async () => {
     if (!quiz || submitting) return;
     setSubmitting(true);
+    setSubmitError("");
     try {
       const resp = await fetch(`/api/v1/quiz/shared/${shareCode}/submit`, {
         method: "POST",
@@ -105,7 +128,13 @@ export function QuizPage() {
           display_name: displayName.trim() || null,
         }),
       });
-      if (!resp.ok) throw new Error("Submit failed");
+      if (!resp.ok) {
+        throw new Error(
+          resp.status === 429
+            ? "This quiz has reached its attempt limit."
+            : "Failed to submit quiz. Please try again.",
+        );
+      }
       const data = await resp.json();
       setResult(data);
       setPageState("result");
@@ -115,8 +144,12 @@ export function QuizPage() {
       } catch {
         // Storage may be unavailable in private or embedded contexts.
       }
-    } catch {
-      setError("Failed to submit quiz. Please try again.");
+    } catch (submitFailure) {
+      setSubmitError(
+        submitFailure instanceof Error
+          ? submitFailure.message
+          : "Failed to submit quiz. Please try again.",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -132,8 +165,11 @@ export function QuizPage() {
   // --- Loading ---
   if (pageState === "loading") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      <div className="flex min-h-dvh items-center justify-center bg-background">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground" role="status">
+          <Loader2 className="h-5 w-5 animate-spin text-primary" aria-hidden="true" />
+          <span>Loading quiz…</span>
+        </div>
       </div>
     );
   }
@@ -141,8 +177,8 @@ export function QuizPage() {
   // --- Error ---
   if (pageState === "error") {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="text-center space-y-4 max-w-md px-6">
+      <div className="flex min-h-dvh items-center justify-center bg-background">
+        <div className="max-w-md space-y-4 px-6 text-center" role="alert">
           <BookOpen className="w-12 h-12 mx-auto text-muted-foreground/40" />
           <h1 className="text-xl font-semibold text-foreground">{error}</h1>
           <p className="text-sm text-muted-foreground">
@@ -153,22 +189,24 @@ export function QuizPage() {
     );
   }
 
-  if (!quiz) return null;
-  const currentQuestion = quiz.questions[currentIndex];
+  if (!quiz && !(pageState === "result" && result)) return null;
+  const currentQuestion = quiz?.questions[currentIndex];
+  const quizTitle = quiz?.title ?? "Quiz result";
+  const questionCount = quiz?.question_count ?? result?.total_count ?? 0;
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-dvh bg-background">
       {/* Header */}
       <header className="sticky top-0 z-10 bg-background/80 backdrop-blur-xs border-b border-border">
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
             <BookOpen className="w-4 h-4 text-primary" />
           </div>
-          <div>
-            <h1 className="text-sm font-semibold text-foreground">{quiz.title}</h1>
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold text-foreground">{quizTitle}</h1>
             <p className="text-xs text-muted-foreground">
-              {quiz.question_count} questions
-              {quiz.difficulty && ` · ${quiz.difficulty}`}
+              {questionCount} questions
+              {quiz?.difficulty && ` · ${quiz.difficulty}`}
             </p>
           </div>
         </div>
@@ -177,12 +215,13 @@ export function QuizPage() {
       <div className="max-w-2xl mx-auto px-4 py-8">
         <AnimatePresence mode="wait">
           {/* --- Intro screen --- */}
-          {pageState === "intro" && (
+          {pageState === "intro" && quiz && (
             <motion.div
               key="intro"
-              initial={{ opacity: 0, y: 20 }}
+              initial={shouldReduceMotion ? false : { opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
+              exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, y: -12 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.2, ease: "easeOut" }}
               className="max-w-md mx-auto text-center space-y-6"
             >
               <div className="w-16 h-16 mx-auto rounded-2xl bg-primary/10 flex items-center justify-center">
@@ -200,8 +239,12 @@ export function QuizPage() {
 
               {quiz.require_name && (
                 <div className="relative max-w-xs mx-auto">
+                  <label htmlFor="quiz-display-name" className="sr-only">
+                    Your name
+                  </label>
                   <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <input
+                    id="quiz-display-name"
                     type="text"
                     placeholder="Your name"
                     value={displayName}
@@ -217,9 +260,9 @@ export function QuizPage() {
                 onClick={handleStart}
                 disabled={quiz.require_name && !displayName.trim()}
                 className={cn(
-                  "inline-flex items-center gap-2 px-8 py-3 rounded-xl text-sm font-medium transition-all",
-                  "bg-primary text-primary-foreground shadow-lg hover:shadow-xl hover:scale-[1.02]",
-                  "disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100",
+                  "inline-flex items-center gap-2 rounded-xl px-8 py-3 text-sm font-medium transition-colors",
+                  "bg-primary text-primary-foreground hover:bg-primary/90",
+                  "disabled:cursor-not-allowed disabled:opacity-50",
                 )}
               >
                 Start Quiz
@@ -229,12 +272,13 @@ export function QuizPage() {
           )}
 
           {/* --- Quiz mode --- */}
-          {pageState === "quiz" && currentQuestion && (
+          {pageState === "quiz" && quiz && currentQuestion && (
             <motion.div
               key={`q-${currentIndex}`}
-              initial={{ opacity: 0, x: 20 }}
+              initial={shouldReduceMotion ? false : { opacity: 0, x: 16 }}
               animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
+              exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, x: -16 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: "easeOut" }}
               className="max-w-lg mx-auto"
             >
               {/* Progress */}
@@ -242,9 +286,19 @@ export function QuizPage() {
                 <span className="text-sm font-medium text-muted-foreground">
                   {currentIndex + 1} / {quiz.question_count}
                 </span>
-                <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-2 flex-1 overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-label="Quiz progress"
+                  aria-valuemin={1}
+                  aria-valuemax={quiz.question_count}
+                  aria-valuenow={currentIndex + 1}
+                >
                   <div
-                    className="h-full rounded-full bg-primary transition-all duration-300"
+                    className={cn(
+                      "h-full rounded-full bg-primary",
+                      shouldReduceMotion ? "transition-none" : "transition-[width] duration-300",
+                    )}
                     style={{
                       width: `${((currentIndex + 1) / quiz.question_count) * 100}%`,
                     }}
@@ -257,6 +311,12 @@ export function QuizPage() {
                 selectedAnswer={selectedAnswers[currentQuestion.id]}
                 onSelect={handleSelect}
               />
+
+              {submitError && (
+                <p className="mt-5 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive" role="alert">
+                  {submitError}
+                </p>
+              )}
 
               {/* Navigation */}
               <div className="flex items-center justify-between mt-8">
@@ -286,7 +346,7 @@ export function QuizPage() {
                     disabled={!allAnswered || submitting}
                     onClick={handleSubmit}
                     className={cn(
-                      "inline-flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-medium transition-all",
+                      "inline-flex items-center gap-1.5 rounded-xl px-5 py-2 text-sm font-medium transition-colors",
                       "bg-primary text-primary-foreground",
                       "disabled:opacity-50 disabled:cursor-not-allowed",
                     )}
@@ -307,10 +367,16 @@ export function QuizPage() {
           {pageState === "result" && result && (
             <motion.div
               key="result"
-              initial={{ opacity: 0, scale: 0.95 }}
+              initial={shouldReduceMotion ? false : { opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: shouldReduceMotion ? 0 : 0.18, ease: "easeOut" }}
               className="max-w-lg mx-auto"
             >
+              {error && (
+                <p className="mb-5 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100" role="status">
+                  {error}
+                </p>
+              )}
               <QuizResult result={result} />
 
               <div className="mt-6 text-center">

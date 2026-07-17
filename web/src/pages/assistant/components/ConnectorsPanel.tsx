@@ -159,7 +159,7 @@ export default function ConnectorsPanel({ open, onClose, onCountChange }: Connec
             <h2 className="text-lg font-semibold">连接器</h2>
             <p className="text-sm text-zinc-500">连接第三方数据源，AI 可搜索和引用其中内容</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">
+          <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 transition" aria-label="关闭连接器面板">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
             </svg>

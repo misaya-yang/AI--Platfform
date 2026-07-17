@@ -131,16 +131,13 @@ function ConnectionCard({
   const status = statusConfig[connection.status];
 
   return (
-    <Card className="group relative overflow-hidden border-border/60 hover:border-primary/30 transition-all duration-300 hover:shadow-lg hover:shadow-primary/5">
-      {/* Top accent bar */}
-      <div className="absolute top-0 left-0 right-0 h-1 bg-linear-to-r from-blue-500 via-cyan-500 to-teal-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-
+    <Card variant="interactive" className="group relative overflow-hidden">
       <div className="p-5">
-        <div className="flex items-start justify-between">
-          <div className="flex items-start gap-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-4">
             {/* Icon */}
-            <div className="w-12 h-12 rounded-xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center group-hover:scale-105 transition-transform">
-              <Cloud className="h-6 w-6 text-blue-500" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/15 bg-primary/10">
+              <Cloud className="h-6 w-6 text-primary" />
             </div>
 
             {/* Info */}
@@ -175,7 +172,12 @@ function ConnectionCard({
           {/* Actions */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t("common.more", { defaultValue: "More actions" })}
+                className="h-8 w-8 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+              >
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -343,8 +345,8 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
-      <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 flex items-center justify-center mb-6">
-        <Cloud className="h-10 w-10 text-blue-500/60" />
+      <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-primary/15 bg-primary/10">
+        <Cloud className="h-10 w-10 text-primary/70" />
       </div>
       <h3 className="text-lg font-semibold text-foreground mb-2">
         {t("confluence.noConnections")}
@@ -352,7 +354,7 @@ function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
       <p className="text-sm text-muted-foreground max-w-sm mb-6">
         {t("confluence.noConnectionsDesc")}
       </p>
-      <Button onClick={onCreateClick} className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0">
+      <Button variant="primary" onClick={onCreateClick}>
         <Plus className="h-4 w-4 mr-1.5" />
         {t("confluence.newConnection")}
       </Button>
@@ -463,18 +465,18 @@ export default function ConnectionListPage() {
   const selectedConnection = connections.find((c) => c.connection_id === deleteConnectionId);
 
   return (
-    <div className="min-h-screen bg-linear-to-b from-background to-muted/20">
+    <div className="min-h-full bg-background">
       {/* Header */}
-      <div className="bg-card/80 backdrop-blur-xs border-b border-border/50 sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto px-6">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-linear-to-br from-blue-500 to-cyan-500 flex items-center justify-center">
-                <Cloud className="h-5 w-5 text-white" />
+      <div className="sticky top-0 z-20 border-b border-border bg-card">
+        <div className="mx-auto max-w-6xl px-4 sm:px-6">
+          <div className="flex min-h-16 items-center justify-between gap-3 py-2">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-primary/15 bg-primary/10">
+                <Cloud className="h-5 w-5 text-primary" />
               </div>
-              <div>
-                <h1 className="text-lg font-semibold text-foreground">{t("confluence.title")}</h1>
-                <p className="text-xs text-muted-foreground">{t("confluence.subtitle")}</p>
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-semibold text-foreground">{t("confluence.title")}</h1>
+                <p className="hidden truncate text-xs text-muted-foreground sm:block">{t("confluence.subtitle")}</p>
               </div>
             </div>
 
@@ -482,25 +484,30 @@ export default function ConnectionListPage() {
               <Button
                 variant="outline"
                 size="icon"
+                aria-label={t("common.refresh", { defaultValue: "Refresh" })}
                 onClick={handleRefresh}
-                className="h-9 w-9"
+                className="h-10 w-10 sm:h-9 sm:w-9"
               >
                 <RefreshCcw className={`h-4 w-4 ${loadingConnections ? "animate-spin" : ""}`} />
               </Button>
-              <Button
-                onClick={() => navigate("/confluence/connections/new")}
-                className="bg-linear-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white border-0"
-              >
-                <Plus className="h-4 w-4 mr-1.5" />
-                {t("confluence.newConnection")}
-              </Button>
+              {connections.length > 0 && (
+                <Button
+                  variant="primary"
+                  onClick={() => navigate("/confluence/connections/new")}
+                  className="shrink-0"
+                >
+                  <Plus className="h-4 w-4 mr-1.5" />
+                  <span className="hidden sm:inline">{t("confluence.newConnection")}</span>
+                  <span className="sm:hidden">{t("common.new", { defaultValue: "New" })}</span>
+                </Button>
+              )}
             </div>
           </div>
         </div>
       </div>
 
       {/* Content */}
-      <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
+      <div className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:space-y-8 sm:px-6 sm:py-8">
         {/* Search */}
         {connections.length > 0 && (
           <div className="relative max-w-md">

@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { CheckCircle2, Clock, RefreshCw, Users, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listAttempts, type QuizAttemptSummary } from "@/api/quiz";
@@ -28,9 +28,14 @@ interface QuizResultProps {
 /**
  * Runs a 0 → target counter over ~300ms (ease-out cubic). Single-shot per mount.
  */
-function useCountUp(target: number, durationMs = 300) {
-  const [value, setValue] = useState(0);
+function useCountUp(target: number, durationMs = 300, reduceMotion = false) {
+  const [value, setValue] = useState(reduceMotion ? target : 0);
   useEffect(() => {
+    if (reduceMotion) {
+      setValue(target);
+      return;
+    }
+    setValue(0);
     let raf = 0;
     const start = performance.now();
     const tick = (now: number) => {
@@ -42,8 +47,7 @@ function useCountUp(target: number, durationMs = 300) {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [durationMs, reduceMotion, target]);
   return value;
 }
 
@@ -55,13 +59,14 @@ export function QuizResult({
   onReviewIncorrect,
 }: QuizResultProps) {
   const { t } = useTranslation();
+  const shouldReduceMotion = useReducedMotion();
   const pct = Math.round(result.total_score * 100);
   const [showHistory, setShowHistory] = useState(false);
   const [attempts, setAttempts] = useState<QuizAttemptSummary[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
-  const animatedPct = useCountUp(pct, 300);
-  const animatedCorrect = useCountUp(result.correct_count, 300);
+  const animatedPct = useCountUp(pct, 300, Boolean(shouldReduceMotion));
+  const animatedCorrect = useCountUp(result.correct_count, 300, Boolean(shouldReduceMotion));
   const incorrectCount = result.per_question.filter((pq) => !pq.correct).length;
 
   const fetchHistory = useCallback(async () => {
@@ -80,9 +85,9 @@ export function QuizResult({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
+      initial={shouldReduceMotion ? false : { opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: shouldReduceMotion ? 0 : 0.15, ease: [0.16, 1, 0.3, 1] }}
       className="space-y-5"
     >
       {/* Score counter — large tabular numeral, centered, no chrome */}
@@ -185,9 +190,9 @@ export function QuizResult({
       {/* Attempts history */}
       {showHistory && attempts.length > 0 && (
         <motion.div
-          initial={{ opacity: 0, height: 0 }}
+          initial={shouldReduceMotion ? false : { opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: "auto" }}
-          transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+          transition={{ duration: shouldReduceMotion ? 0 : 0.15, ease: [0.16, 1, 0.3, 1] }}
           className="rounded-[10px] border border-[hsl(var(--assistant-border))] overflow-hidden"
         >
           <div className="px-3.5 py-2 border-b border-[hsl(var(--assistant-border))]">

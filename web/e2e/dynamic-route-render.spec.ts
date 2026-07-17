@@ -261,4 +261,49 @@ test.describe("dynamic route render smoke", () => {
 
     assertNoRuntimeFailures();
   });
+
+  test("keeps a cached quiz result visible when quiz metadata is unavailable", async ({
+    page,
+  }) => {
+    const cachedResult = {
+      attempt_id: "cached-attempt",
+      total_score: 0.5,
+      correct_count: 1,
+      total_count: 2,
+      per_question: [
+        {
+          question_num: 1,
+          question_id: "cached-question-1",
+          correct: true,
+          user_answer: "A",
+          correct_answer: "A",
+        },
+        {
+          question_num: 2,
+          question_id: "cached-question-2",
+          correct: false,
+          user_answer: "A",
+          correct_answer: "B",
+        },
+      ],
+    };
+    await page.addInitScript((result) => {
+      localStorage.setItem("quiz_submitted_cached-quiz", JSON.stringify(result));
+    }, cachedResult);
+    await page.route("**/api/v1/quiz/shared/cached-quiz", async (route) => {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "temporarily unavailable" }),
+      });
+    });
+
+    await page.goto("/quiz/cached-quiz", { waitUntil: "domcontentloaded" });
+
+    await expect(page.getByRole("heading", { name: "Quiz result" })).toBeVisible();
+    await expect(
+      page.getByText("Quiz details could not be loaded. Showing your saved result."),
+    ).toBeVisible();
+    await expect(page.getByText("50")).toBeVisible();
+  });
 });

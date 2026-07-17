@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { DashboardProvider, useDashboardContext } from "./DashboardContext";
 import { DashboardLayout } from "./DashboardLayout";
 import { useAppStore } from "@/store/useAppStore";
-import { FONT_FAMILY, LAYOUT, getColors } from "./styles";
+import { FONT_FAMILY, getColors } from "./styles";
 import { Select, DatePicker, Segmented } from "antd";
 import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
@@ -51,9 +51,9 @@ function DashboardContent() {
   const { darkMode } = useAppStore();
   const c = getColors(darkMode);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [containerWidth, setContainerWidth] = useState(1200);
+  const [containerWidth, setContainerWidth] = useState(0);
   const [activeTab, setActiveTab] = useState<DashTab>(loadTab);
-  const effectiveWidth = Math.max(containerWidth || LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH, LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH);
+  const effectiveWidth = containerWidth || 1200;
 
   const {
     dateRange, granularity, source, serviceId, userId, refreshInterval, lastRefresh,
@@ -117,7 +117,7 @@ function DashboardContent() {
         overscrollBehaviorX: "contain",
       }}
     >
-      <div className="dashboard-scroll-surface" style={{ minWidth: LAYOUT.DASHBOARD_MIN_CONTENT_WIDTH, width: "100%" }}>
+      <div className="dashboard-scroll-surface" style={{ minWidth: 0, width: "100%" }}>
 
         {/* ── Command header ── */}
         <div style={{
@@ -126,7 +126,7 @@ function DashboardContent() {
           gap: 10,
           padding: "2px 0 0",
         }}>
-          <div style={{
+          <div className="dashboard-command-row" style={{
             display: "flex",
             alignItems: "center",
             gap: 10,
@@ -138,13 +138,13 @@ function DashboardContent() {
               size="middle"
               value={activeTab}
               onChange={(value) => handleTabChange(value as DashTab)}
-              className="dash-tabs"
+              className="dash-tabs ui-scroll-affordance"
               options={tabs.map((tab) => ({ value: tab.key, label: tab.label }))}
             />
 
-            <div style={{ flex: 1, minWidth: 12 }} />
+            <div className="dashboard-command-spacer" style={{ flex: 1, minWidth: 12 }} />
 
-            <div style={{
+            <div className="dashboard-refresh-stamp" style={{
               display: "flex", alignItems: "center", gap: 6,
               padding: "5px 10px", borderRadius: 8,
               background: c.cardBg, border: `1px solid ${c.borderSoft}`,
@@ -156,7 +156,7 @@ function DashboardContent() {
           </div>
 
           {/* ── Filter bar ── */}
-          <div style={{
+          <div className="dashboard-filter-bar" style={{
             display: "flex", alignItems: "center", gap: 10,
             flexWrap: "wrap",
             minWidth: 0,
@@ -211,7 +211,7 @@ function DashboardContent() {
               style={{ width: 96 }}
               className="dash-filter-select"
             />
-            <div style={{ flex: 1, minWidth: 16 }} />
+            <div className="dashboard-filter-spacer" style={{ flex: 1, minWidth: 16 }} />
             <Select
               size="middle"
               value={refreshInterval}
@@ -323,6 +323,56 @@ function DashboardContent() {
         .dash-tabs .ant-segmented-group {
           width: max-content;
           min-width: 100%;
+        }
+
+        @media (max-width: 767px) {
+          .dash-icon-btn {
+            width: 40px;
+            height: 40px;
+          }
+          .dash-tabs .ant-segmented-item,
+          .dash-tabs .ant-segmented-item-label {
+            min-height: 40px;
+          }
+          .dash-tabs .ant-segmented-item-label {
+            line-height: 40px;
+          }
+          .dashboard-scroll-shell {
+            overflow-x: hidden !important;
+          }
+          .dashboard-command-row {
+            align-items: stretch !important;
+            gap: 8px !important;
+          }
+          .dashboard-command-spacer {
+            display: none;
+          }
+          .dashboard-refresh-stamp {
+            width: 100%;
+            justify-content: flex-start;
+          }
+          .dashboard-filter-bar {
+            display: grid !important;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px !important;
+          }
+          .dashboard-filter-spacer {
+            display: none;
+          }
+          .dashboard-filter-bar .dash-filter-select,
+          .dashboard-filter-bar .dash-filter-range {
+            width: 100% !important;
+            min-width: 0 !important;
+            flex: 1 1 auto !important;
+          }
+          .dashboard-filter-bar .dash-filter-range {
+            grid-column: 1 / -1;
+          }
+          .dashboard-filter-bar .dash-icon-btn {
+            width: 100%;
+            border: 1px solid ${c.borderSoft};
+            background: ${c.cardBg};
+          }
         }
       `}</style>
     </div>

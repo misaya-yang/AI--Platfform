@@ -66,29 +66,59 @@ export function SharePage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!shareId) return;
+    if (!shareId) {
+      setError("Conversation link is invalid");
+      setLoading(false);
+      return;
+    }
 
-    fetch(`/api/v1/assistant/shares/${shareId}`)
-      .then((resp) => {
-        if (resp.ok) return resp.json().then((d: ConversationShareData) => setConvShare(d));
-        throw new Error(resp.status === 404 ? "Conversation not found or expired" : "Failed to load");
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+    const controller = new AbortController();
+    async function loadShare() {
+      try {
+        const resp = await fetch(`/api/v1/assistant/shares/${shareId}`, {
+          signal: controller.signal,
+        });
+        if (!resp.ok) {
+          throw new Error(
+            resp.status === 404
+              ? "Conversation not found or expired"
+              : "Failed to load shared conversation",
+          );
+        }
+        const data = (await resp.json()) as ConversationShareData;
+        setConvShare(data);
+        setError(null);
+      } catch (loadError) {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Failed to load shared conversation",
+        );
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }
+
+    void loadShare();
+    return () => controller.abort();
   }, [shareId]);
 
   if (loading) {
     return (
-      <div className="assistant-v2 min-h-screen flex items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
-        <div className="h-6 w-6 rounded-full border-2 border-[hsl(var(--assistant-border))] border-t-[hsl(var(--assistant-accent))] animate-spin" />
+      <div className="assistant-v2 flex min-h-dvh items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
+        <div className="flex items-center gap-3 text-[13px] text-[hsl(var(--assistant-text-secondary))]" role="status">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[hsl(var(--assistant-border))] border-t-[hsl(var(--assistant-accent))]" aria-hidden="true" />
+          <span>Loading shared conversation…</span>
+        </div>
       </div>
     );
   }
 
   if (error || !convShare) {
     return (
-      <div className="assistant-v2 min-h-screen flex items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
-        <div className="text-center space-y-3 max-w-md px-6">
+      <div className="assistant-v2 flex min-h-dvh items-center justify-center bg-[hsl(var(--assistant-canvas-bg))]">
+        <div className="max-w-md space-y-3 px-6 text-center" role="alert">
           <h1 className="text-[18px] font-semibold text-[hsl(var(--assistant-text-primary))]">
             {error || "Conversation not found"}
           </h1>
@@ -113,11 +143,11 @@ export function SharePage() {
     };
 
     return (
-      <div className="assistant-v2 min-h-screen bg-[hsl(var(--assistant-canvas-bg))] text-[hsl(var(--assistant-text-primary))]">
+      <div className="assistant-v2 min-h-dvh bg-[hsl(var(--assistant-canvas-bg))] text-[hsl(var(--assistant-text-primary))]">
         {/* Header */}
         <header className="sticky top-0 z-10 bg-[hsl(var(--assistant-canvas-bg)/0.85)] backdrop-blur-xs border-b border-[hsl(var(--assistant-border))]">
-          <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
+          <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-4 py-3">
+            <div className="flex min-w-0 items-center gap-2.5">
               <div className="w-7 h-7 rounded-full bg-[hsl(var(--assistant-surface-bg))] border border-[hsl(var(--assistant-border))] flex items-center justify-center">
                 <svg
                   className="w-3.5 h-3.5 text-[hsl(var(--assistant-text-secondary))]"
@@ -128,8 +158,8 @@ export function SharePage() {
                   <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm0 14a6 6 0 110-12 6 6 0 010 12z" />
                 </svg>
               </div>
-              <div>
-                <h1 className="text-[13px] font-medium text-[hsl(var(--assistant-text-primary))]">
+              <div className="min-w-0">
+                <h1 className="truncate text-[13px] font-medium text-[hsl(var(--assistant-text-primary))]">
                   AI Assistant{snapshot.model_id ? ` · ${snapshot.model_id}` : ""}
                 </h1>
                 <p className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))] mt-0.5">
@@ -139,7 +169,7 @@ export function SharePage() {
                 </p>
               </div>
             </div>
-            <time className="text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
+            <time className="shrink-0 text-[11px] font-mono text-[hsl(var(--assistant-text-tertiary))]">
               {new Date(created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
             </time>
           </div>
