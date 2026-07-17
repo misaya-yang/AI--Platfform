@@ -961,13 +961,14 @@ async def retrieve_batch(
     svc: KnowledgeService = Depends(get_knowledge_service),
     user: UserContext = Depends(get_user_context),
 ):
-    """Batch retrieval endpoint - parallel retrieval with multiple queries.
+    """Multi-query retrieval with one global ranking pipeline.
 
     Supports two formats:
     - queries: List of queries ["query1", "query2", "query3"]
     - query: Comma-separated queries "query1,query2,query3"
 
-    Returns results grouped by query with execution time metrics.
+    The first query is the original rerank query. Rewrites only expand recall;
+    the response contains one globally fused Top-K result group.
     """
     try:
         # Parse queries from either format

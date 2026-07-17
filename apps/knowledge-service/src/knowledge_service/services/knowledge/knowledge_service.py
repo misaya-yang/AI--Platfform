@@ -526,7 +526,11 @@ class KnowledgeService:
             return candidates
         filtered: list[dict[str, Any]] = []
         for c in candidates:
-            meta = _ensure_dict(c.get("metadata"))
+            outer_meta = _ensure_dict(c.get("metadata"))
+            meta = {
+                **_ensure_dict(outer_meta.get("metadata")),
+                **outer_meta,
+            }
             if source_type and str(meta.get("source_type")) != str(source_type):
                 continue
             if language and str(meta.get("language")) != str(language):

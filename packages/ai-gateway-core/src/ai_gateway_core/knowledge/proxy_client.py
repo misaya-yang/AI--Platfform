@@ -76,7 +76,10 @@ class ProxyRetrieveResult:
     segment_id: str | None = None
     document_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    content_type: str = "text"
     image_url: str | None = None
+    vlm_description: str | None = None
+    associated_images: tuple = ()
 
 
 class KBProxyClient:
@@ -203,7 +206,7 @@ class KBProxyClient:
         top_k: int = 5,
         mode: str = "hybrid",
         score_threshold: float = 0.0,
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> tuple[list[ProxyRetrieveResult], dict[str, Any]]:
         """Retrieve chunks from KB microservice.
 
@@ -216,6 +219,50 @@ class KBProxyClient:
         }
         if score_threshold > 0:
             payload["score_threshold"] = score_threshold
+        supported_fields = {
+            "document_id",
+            "dense_weight",
+            "bm25_weight",
+            "fusion_method",
+            "alpha",
+            "vector_top_k",
+            "keyword_top_k",
+            "candidate_top_k",
+            "keyword_candidate_k",
+            "fusion",
+            "rrf_k",
+            "rrf_weights",
+            "rerank",
+            "rerank_model",
+            "rerank_top_n",
+            "mmr",
+            "mmr_lambda",
+            "mmr_threshold",
+            "include_images",
+            "include_associated_images",
+            "multimodal_rerank",
+            "content_type_filter",
+            "image_search_enabled",
+            "vlm_rerank_weight",
+            "image_boost",
+            "image_score_threshold",
+            "use_separate_thresholds",
+            "source_type_filter",
+            "language_filter",
+            "metadata_filter",
+            "hierarchical",
+            "hierarchical_strategy",
+            "l1_top_k",
+            "l2_top_k",
+            "include_context",
+        }
+        payload.update(
+            {
+                key: value
+                for key, value in kwargs.items()
+                if key in supported_fields and value is not None
+            }
+        )
 
         try:
             data = await self._get_service_client().request_json(
@@ -235,7 +282,10 @@ class KBProxyClient:
                     segment_id=r.get("segment_id"),
                     document_id=r.get("document_id"),
                     metadata=r.get("metadata", {}),
+                    content_type=r.get("content_type", "text"),
                     image_url=r.get("image_url"),
+                    vlm_description=r.get("vlm_description"),
+                    associated_images=tuple(r.get("associated_images") or ()),
                 ))
 
             return results, meta
@@ -246,6 +296,51 @@ class KBProxyClient:
         except Exception as e:
             logger.warning(f"KB retrieve error for {dataset_id}: {e}")
             return [], {"error": str(e)}
+
+    async def retrieve_with_images(
+        self,
+        user: Any,
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
+        include_images: bool = True,
+        content_type_filter: str | None = None,
+        multimodal_rerank: bool = False,
+        **kwargs: Any,
+    ) -> tuple[list[ProxyRetrieveResult], dict[str, Any]]:
+        """Explicit multimodal wrapper over the shared retrieve endpoint."""
+        kwargs.update(
+            {
+                "include_images": include_images,
+                "include_associated_images": include_images,
+                "content_type_filter": content_type_filter,
+                "multimodal_rerank": multimodal_rerank,
+            }
+        )
+        return await self.retrieve(user, dataset_id, query, top_k=top_k, **kwargs)
+
+    async def retrieve_with_images_v2(
+        self,
+        user: Any,
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
+        intent: str = "general",
+        vlm_rerank: bool = True,
+        include_images: bool = True,
+        **kwargs: Any,
+    ) -> tuple[list[ProxyRetrieveResult], dict[str, Any]]:
+        """Intent-compatible wrapper for assistant-service callers."""
+        include_images = include_images and intent != "find_document"
+        return await self.retrieve_with_images(
+            user,
+            dataset_id,
+            query,
+            top_k=top_k,
+            include_images=include_images,
+            multimodal_rerank=vlm_rerank and include_images,
+            **kwargs,
+        )
 
     async def require_dataset_access(self, user: Any, dataset_id: str, required: str = "viewer") -> dict:
         """Check dataset access — delegates to KB service.

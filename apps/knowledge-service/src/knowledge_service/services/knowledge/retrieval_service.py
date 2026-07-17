@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -25,9 +26,7 @@ from .retrieval import (
     compute_language_weights,
     compute_text_match_score,
     cosine_similarity,
-    detect_language,
     mmr_select,
-    query_to_sparse_vector,
     reciprocal_rank_fusion,
     tokenize,
 )
@@ -100,6 +99,67 @@ class RetrievalService:
         dataset_id: str,
         query: str,
         top_k: int = 5,
+        mode: str = "hybrid",
+        document_id: str | None = None,
+        dense_weight: float | None = None,
+        bm25_weight: float | None = None,
+        fusion_method: str | None = None,
+        rrf_k: int | None = None,
+        alpha: float | None = None,
+        score_threshold: float | None = None,
+        vector_top_k: int | None = None,
+        keyword_top_k: int | None = None,
+        candidate_top_k: int | None = None,
+        keyword_candidate_k: int | None = None,
+        fusion: str | None = None,
+        rrf_weights: dict[str, float] | None = None,
+        rerank: bool | None = None,
+        rerank_model: str | None = None,
+        rerank_top_n: int | None = None,
+        mmr: bool | None = None,
+        mmr_lambda: float | None = None,
+        mmr_threshold: float | None = None,
+        source_type_filter: str | None = None,
+        language_filter: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> tuple[list[RetrieveResult], dict[str, Any]]:
+        """Run the existing single-query retrieval contract."""
+        return await self._retrieve_queries(
+            user=user,
+            dataset_id=dataset_id,
+            query=query,
+            top_k=top_k,
+            mode=mode,
+            document_id=document_id,
+            dense_weight=dense_weight,
+            bm25_weight=bm25_weight,
+            fusion_method=fusion_method,
+            rrf_k=rrf_k,
+            alpha=alpha,
+            score_threshold=score_threshold,
+            vector_top_k=vector_top_k,
+            keyword_top_k=keyword_top_k,
+            candidate_top_k=candidate_top_k,
+            keyword_candidate_k=keyword_candidate_k,
+            fusion=fusion,
+            rrf_weights=rrf_weights,
+            rerank=rerank,
+            rerank_model=rerank_model,
+            rerank_top_n=rerank_top_n,
+            mmr=mmr,
+            mmr_lambda=mmr_lambda,
+            mmr_threshold=mmr_threshold,
+            source_type_filter=source_type_filter,
+            language_filter=language_filter,
+            metadata_filter=metadata_filter,
+        )
+
+    async def _retrieve_queries(
+        self,
+        user: UserContext,
+        dataset_id: str,
+        query: str,
+        top_k: int = 5,
         mode: str = "hybrid",  # "dense" | "bm25" | "hybrid"
         document_id: str | None = None,
         # Fusion parameters
@@ -126,12 +186,43 @@ class RetrievalService:
         source_type_filter: str | None = None,
         language_filter: str | None = None,
         metadata_filter: dict[str, Any] | None = None,
+        # Internal batch-retrieval inputs. Public callers keep using ``query``.
+        _query_specs: list[dict[str, Any]] | None = None,
+        _recall_max_parallel: int | None = None,
+        _dataset: dict[str, Any] | None = None,
     ) -> tuple[list[RetrieveResult], dict[str, Any]]:
-        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        retrieval_started = time.perf_counter()
+        stage_timings = {
+            "dense_prepare_ms": 0.0,
+            "dense_search_ms": 0.0,
+            "bm25_search_ms": 0.0,
+            "filter_ms": 0.0,
+            "rerank_ms": 0.0,
+            "mmr_ms": 0.0,
+        }
+        dataset = (
+            _dataset
+            if _dataset is not None
+            else await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        )
 
         q = (query or "").strip()
         if not q:
             raise ValidationFailedError("query is required")
+
+        query_specs: list[dict[str, Any]] = []
+        seen_queries: set[str] = set()
+        for item in _query_specs or [{"query": q}]:
+            query_text = str(item.get("query") or "").strip()
+            if not query_text or query_text in seen_queries:
+                continue
+            seen_queries.add(query_text)
+            query_specs.append({**item, "query": query_text})
+        if q not in seen_queries:
+            query_specs.insert(0, {"query": q})
+        is_multi_query = len(query_specs) > 1
+        query_spec_by_text = {str(item["query"]): item for item in query_specs}
+        recall_errors: dict[str, dict[str, str]] = {}
 
         # Dataset-level defaults (Dify-like): index_config.retrieval.* can define
         # default retrieval behavior per dataset.
@@ -151,24 +242,27 @@ class RetrievalService:
             ) = fusion = None
             rerank = rerank_model = rerank_top_n = None
             mmr = mmr_lambda = mmr_threshold = None
+            for query_spec in query_specs:
+                for key in (
+                    "mode",
+                    "vector_top_k",
+                    "keyword_top_k",
+                    "keyword_candidate_k",
+                ):
+                    query_spec.pop(key, None)
 
         # Mode: dense, bm25, or hybrid
-        effective_mode = str(mode or retrieval_defaults.get("mode") or "hybrid").lower()
-        # Normalize mode names
-        if effective_mode in ("keyword", "bm25"):
-            effective_mode = "bm25"
-        elif effective_mode in ("vector", "dense"):
-            effective_mode = "dense"
-        elif effective_mode == "hybrid":
-            effective_mode = "hybrid"
-        else:
+        def _normalize_mode(value: Any) -> str:
+            normalized = str(value or "hybrid").lower()
+            if normalized in ("keyword", "bm25"):
+                return "bm25"
+            if normalized in ("vector", "dense"):
+                return "dense"
+            if normalized == "hybrid":
+                return normalized
             raise ValidationFailedError("mode must be dense|bm25|hybrid")
 
-        if dataset.get("needs_reindex") and effective_mode in {"dense", "hybrid"}:
-            raise ValidationFailedError(
-                "Dataset embeddings were migrated and require re-indexing before vector retrieval. "
-                "Please re-index this dataset (or use mode='bm25' temporarily)."
-            )
+        effective_mode = _normalize_mode(mode or retrieval_defaults.get("mode") or "hybrid")
 
         # Fusion method and weights (supports nested retrieval.fusion config)
         fusion_config = self._ks._resolve_fusion_config(
@@ -281,9 +375,6 @@ class RetrievalService:
         )
         # Ensure threshold is within valid range (0 = no filtering)
         effective_score_threshold = max(0.0, min(1.0, effective_score_threshold))
-        if not self._ks._should_apply_score_threshold(effective_mode):
-            effective_score_threshold = 0.0
-
         embedding_provider = str(dataset.get("embedding_provider") or "local")
         embedding_model = str(dataset.get("embedding_model") or "hash-384")
         embedding_config = _ensure_dict(dataset.get("embedding_config"))
@@ -293,20 +384,84 @@ class RetrievalService:
         # Check if this is a multimodal dataset - use unified embedding for cross-modal retrieval
         is_multimodal = self._ks._is_multimodal_dataset(dataset)
 
-        queries_to_run: list[str] = [q]
+        queries_to_run = [str(item["query"]) for item in query_specs]
 
         # --- Parallel Dense + BM25 retrieval for better latency ---
-        retrieval_query_concurrency = max(
-            int(getattr(self.settings.knowledge, "retrieval_query_max_concurrency", 3) or 3),
+        configured_query_concurrency = max(
+            int(
+                getattr(self.settings.knowledge, "retrieval_query_max_concurrency", 3)
+                or 3
+            ),
             1,
         )
+        requested_query_concurrency = (
+            int(_recall_max_parallel)
+            if _recall_max_parallel is not None
+            else configured_query_concurrency
+        )
+        retrieval_query_concurrency = min(
+            max(requested_query_concurrency, 1),
+            configured_query_concurrency,
+        )
 
-        dense_queries: list[str] = []
-        bm25_queries: list[str] = []
-        if effective_mode in {"dense", "hybrid"}:
-            dense_queries = queries_to_run
-        if effective_mode in {"bm25", "hybrid"}:
-            bm25_queries = queries_to_run
+        def _query_option(query_text: str, key: str, default: Any) -> Any:
+            value = query_spec_by_text.get(query_text, {}).get(key)
+            return default if value is None else value
+
+        query_filter_configs = [
+            (
+                _query_option(query_text, "source_type_filter", source_type_filter),
+                _query_option(query_text, "language_filter", language_filter),
+                _query_option(query_text, "metadata_filter", metadata_filter),
+            )
+            for query_text in queries_to_run
+        ]
+        filters_vary_by_query = bool(query_filter_configs) and any(
+            config != query_filter_configs[0] for config in query_filter_configs[1:]
+        )
+
+        def _matches_query_filters(query_text: str, payload: dict[str, Any]) -> bool:
+            if not filters_vary_by_query:
+                return True
+            return bool(
+                self._ks._filter_candidates_by_metadata(
+                    [{"metadata": payload}],
+                    _query_option(query_text, "source_type_filter", source_type_filter),
+                    _query_option(query_text, "language_filter", language_filter),
+                    _query_option(query_text, "metadata_filter", metadata_filter),
+                )
+            )
+
+        query_modes = {
+            query_text: _normalize_mode(
+                _query_option(query_text, "mode", effective_mode)
+            )
+            for query_text in queries_to_run
+        }
+        dense_queries = [
+            query_text
+            for query_text in queries_to_run
+            if query_modes[query_text] in {"dense", "hybrid"}
+        ]
+        bm25_queries = [
+            query_text
+            for query_text in queries_to_run
+            if query_modes[query_text] in {"bm25", "hybrid"}
+        ]
+        if dense_queries and bm25_queries:
+            effective_mode = "hybrid"
+        elif dense_queries:
+            effective_mode = "dense"
+        else:
+            effective_mode = "bm25"
+
+        if dataset.get("needs_reindex") and dense_queries:
+            raise ValidationFailedError(
+                "Dataset embeddings were migrated and require re-indexing before vector retrieval. "
+                "Please re-index this dataset (or use mode='bm25' temporarily)."
+            )
+        if not self._ks._should_apply_score_threshold(effective_mode):
+            effective_score_threshold = 0.0
 
         # Precompute query vectors for dense queries (BM25 runs in parallel)
         query_vectors: dict[str, list[float]] = {}
@@ -318,25 +473,30 @@ class RetrievalService:
                 return [], 0
             qvec_local = query_vectors.get(query_text)
             if not qvec_local:
-                if effective_mode == "dense":
+                if effective_mode == "dense" and not is_multi_query:
                     raise ValidationFailedError("dense retrieval requires query embedding")
                 return [], 0
             try:
                 raw_hits = await self.vector_store.search(
                     collection_name=collection,
                     query_vector=qvec_local,
-                    top_k=vector_k,
-                    document_id=document_id,
-                    source_type=source_type_filter,
-                    language=language_filter,
+                    top_k=max(int(_query_option(query_text, "vector_top_k", vector_k)), 1),
+                    document_id=_query_option(query_text, "document_id", document_id),
+                    source_type=_query_option(
+                        query_text, "source_type_filter", source_type_filter
+                    ),
+                    language=_query_option(query_text, "language_filter", language_filter),
                     with_payload=True,
+                    metadata_filter=_query_option(
+                        query_text, "metadata_filter", metadata_filter
+                    ),
                 )
                 raw_count = len(raw_hits)
                 filtered = []
                 for h in raw_hits:
                     payload = dict(h.payload or {})
                     text = str(payload.get("text") or "").strip()
-                    if not text:
+                    if not text or not _matches_query_filters(query_text, payload):
                         continue
                     score = float(getattr(h, "score", 0.0))
                     filtered.append(
@@ -349,87 +509,122 @@ class RetrievalService:
                 return filtered, raw_count
             except Exception as vec_err:
                 logger.warning(f"Dense search failed: {vec_err}")
+                recall_errors.setdefault(query_text, {})["dense"] = str(vec_err)
                 if effective_mode == "dense":
                     raise ValidationFailedError(f"Dense search failed: {vec_err}")
                 return [], 0
 
         async def _bm25_search(query_text: str) -> tuple[list, int]:
-            """BM25 retrieval: Qdrant sparse for candidates -> Python BM25 re-scoring.
+            """BM25 retrieval: PostgreSQL FTS candidates -> Python BM25 re-scoring.
 
-            Uses Qdrant native sparse vectors for fast candidate retrieval,
-            then re-scores with proper BM25 (k1/b document-length normalization)
-            for accurate ranking differentiation.
+            PostgreSQL already maintains a GIN-indexed tsvector for every segment,
+            so lexical retrieval works for existing and newly ingested documents
+            without a separate sparse-vector indexing pass.
             """
             if effective_mode not in {"bm25", "hybrid"}:
                 return [], 0
-            if not collection:
+
+            query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
+            if not query_tokens:
                 return [], 0
 
-            sparse_indices, sparse_values = query_to_sparse_vector(query_text)
-            if not sparse_indices:
-                return [], 0
-
-            # Step 1: Qdrant sparse retrieval for candidates (fast)
-            bm25_pool = min(keyword_pool_k, 80)
+            # Step 1: PostgreSQL GIN FTS retrieval for candidates
+            query_keyword_k = max(
+                int(_query_option(query_text, "keyword_top_k", keyword_k)), 1
+            )
+            query_keyword_pool_k = max(
+                int(
+                    _query_option(
+                        query_text, "keyword_candidate_k", keyword_pool_k
+                    )
+                ),
+                query_keyword_k,
+            )
+            bm25_pool = min(query_keyword_pool_k, 80)
             try:
-                raw_hits = await self.vector_store.sparse_search(
-                    collection_name=collection,
-                    sparse_indices=sparse_indices,
-                    sparse_values=sparse_values,
-                    top_k=bm25_pool,
-                    document_id=document_id,
-                    source_type=source_type_filter,
-                    language=language_filter,
-                    with_payload=True,
+                raw_hits = await self.db.search_segments_text(
+                    dataset_id=dataset_id,
+                    terms=query_tokens,
+                    document_id=_query_option(query_text, "document_id", document_id),
+                    source_type=_query_option(
+                        query_text, "source_type_filter", source_type_filter
+                    ),
+                    language=_query_option(query_text, "language_filter", language_filter),
+                    limit=bm25_pool,
+                    metadata_filter=_query_option(
+                        query_text, "metadata_filter", metadata_filter
+                    ),
                 )
-            except Exception as sparse_err:
-                logger.warning(f"Sparse BM25 search failed: {sparse_err}")
+            except Exception as fts_err:
+                logger.warning(f"PostgreSQL FTS search failed: {fts_err}")
+                recall_errors.setdefault(query_text, {})["bm25"] = str(fts_err)
                 return [], 0
 
             if not raw_hits:
                 return [], 0
 
             # Step 2: Python BM25 re-scoring (accurate doc-length normalization)
-            query_tokens = tokenize(query_text, keep_original=True, remove_stopwords=True)
             valid = []
-            for h in raw_hits:
-                payload = dict(h.payload or {})
-                text = str(payload.get("text") or "").strip()
+            for row in raw_hits:
+                text = str(row.get("text") or "").strip()
                 if text:
-                    valid.append((h, payload, text))
+                    metadata = _ensure_dict(row.get("metadata"))
+                    payload = {
+                        "dataset_id": row.get("dataset_id"),
+                        "document_id": row.get("document_id"),
+                        "segment_id": row.get("segment_id"),
+                        "position": row.get("position"),
+                        "text": text,
+                        "token_count": row.get("token_count"),
+                        "source_type": row.get("source_type", "unknown"),
+                        "language": row.get("language", "en"),
+                        "metadata": metadata,
+                        "citation_text": row.get("citation_text"),
+                        "source_reference": row.get("source_reference"),
+                    }
+                    if _matches_query_filters(query_text, payload):
+                        valid.append((row, payload, text))
 
             doc_tokens = [tokenize(text) for _, _, text in valid]
             scores = bm25_scores(query_tokens, doc_tokens)
 
             hits = []
-            for (h, payload, text), score in zip(valid, scores, strict=False):
-                seg_id = str(payload.get("segment_id") or h.point_id or "")
+            for (row, payload, text), score in zip(valid, scores, strict=False):
+                seg_id = str(payload.get("segment_id") or "")
                 if not seg_id or score <= 0.0:
                     continue
                 hits.append(
                     {
                         "segment_id": seg_id,
-                        "document_id": str(payload.get("document_id") or ""),
+                        "document_id": str(row.get("document_id") or ""),
                         "text": text,
                         "metadata": payload,
                         "bm25_score": float(score),
                     }
                 )
             hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return hits[:keyword_k], len(raw_hits)
+            return hits[:query_keyword_k], len(raw_hits)
 
         def _merge_dense_results(
             results: list[tuple[list, int]],
-        ) -> tuple[list, int]:
+        ) -> tuple[list, int, dict[str, list[str]]]:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
-            for hits, raw_count in results:
+            ranked_lists: dict[str, list[str]] = {}
+            for index, ((hits, raw_count), query_text) in enumerate(
+                zip(results, dense_queries, strict=False)
+            ):
                 total_raw += raw_count
+                ranked_ids: list[str] = []
+                ranked_seen: set[str] = set()
                 for h in hits:
                     payload = dict(h.get("payload") or {})
                     seg_id = str(payload.get("segment_id") or h.get("point_id") or "")
                     if not seg_id:
                         continue
+                    if seg_id not in ranked_seen:
+                        ranked_seen.add(seg_id)
+                        ranked_ids.append(seg_id)
                     score = float(h.get("score") or 0.0)
                     if seg_id not in merged or score > merged[seg_id]["score"]:
                         merged[seg_id] = {
@@ -437,56 +632,105 @@ class RetrievalService:
                             "score": score,
                             "point_id": h.get("point_id"),
                         }
+                ranked_lists[f"dense:{index}:{query_text}"] = ranked_ids
 
-            dense_merge_k = min(vector_k, candidate_k)
             dense_hits = list(merged.values())
             dense_hits.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-            return dense_hits[:dense_merge_k], total_raw
+            if len(results) == 1:
+                dense_hits = dense_hits[: min(vector_k, candidate_k)]
+            return dense_hits, total_raw, ranked_lists
 
         def _merge_bm25_results(
             results: list[tuple[list, int]],
-        ) -> tuple[list, int]:
+        ) -> tuple[list, int, dict[str, list[str]]]:
             total_raw = 0
             merged: dict[str, dict[str, Any]] = {}
-            for hits, raw_count in results:
+            ranked_lists: dict[str, list[str]] = {}
+            for index, ((hits, raw_count), query_text) in enumerate(
+                zip(results, bm25_queries, strict=False)
+            ):
                 total_raw += raw_count
+                ranked_ids: list[str] = []
+                ranked_seen: set[str] = set()
                 for h in hits:
                     seg_id = str(h.get("segment_id") or "")
                     if not seg_id:
                         continue
+                    if seg_id not in ranked_seen:
+                        ranked_seen.add(seg_id)
+                        ranked_ids.append(seg_id)
                     score = float(h.get("bm25_score") or 0.0)
                     if seg_id not in merged or score > float(
                         merged[seg_id].get("bm25_score") or 0.0
                     ):
                         merged[seg_id] = h
+                ranked_lists[f"bm25:{index}:{query_text}"] = ranked_ids
 
-            bm25_merge_k = min(keyword_k, candidate_k)
             bm25_hits = list(merged.values())
             bm25_hits.sort(key=lambda x: x.get("bm25_score", 0.0), reverse=True)
-            return bm25_hits[:bm25_merge_k], total_raw
+            if len(results) == 1:
+                bm25_hits = bm25_hits[: min(keyword_k, candidate_k)]
+            return bm25_hits, total_raw, ranked_lists
 
-        async def _run_dense_multi() -> tuple[list, int]:
+        recall_semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+        embedding_semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+
+        async def _run_dense_multi() -> tuple[list, int, dict[str, list[str]]]:
             if not dense_queries:
-                return [], 0
-            semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+                return [], 0, {}
 
             async def _run(query_text: str) -> tuple[list, int]:
-                async with semaphore:
-                    return await _dense_search(query_text)
+                async with recall_semaphore:
+                    started = time.perf_counter()
+                    try:
+                        return await _dense_search(query_text)
+                    finally:
+                        stage_timings["dense_search_ms"] += (
+                            time.perf_counter() - started
+                        ) * 1000
 
-            results = await asyncio.gather(*[_run(dq) for dq in dense_queries])
+            gathered = await asyncio.gather(
+                *[_run(dq) for dq in dense_queries],
+                return_exceptions=is_multi_query,
+            )
+            results: list[tuple[list, int]] = []
+            for query_text, result in zip(dense_queries, gathered, strict=False):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    recall_errors.setdefault(query_text, {})["dense"] = str(result)
+                    results.append(([], 0))
+                else:
+                    results.append(result)
             return _merge_dense_results(results)
 
-        async def _run_bm25_multi() -> tuple[list, int]:
+        async def _run_bm25_multi() -> tuple[list, int, dict[str, list[str]]]:
             if not bm25_queries:
-                return [], 0
-            semaphore = asyncio.Semaphore(retrieval_query_concurrency)
+                return [], 0, {}
 
             async def _run(query_text: str) -> tuple[list, int]:
-                async with semaphore:
-                    return await _bm25_search(query_text)
+                async with recall_semaphore:
+                    started = time.perf_counter()
+                    try:
+                        return await _bm25_search(query_text)
+                    finally:
+                        stage_timings["bm25_search_ms"] += (
+                            time.perf_counter() - started
+                        ) * 1000
 
-            results = await asyncio.gather(*[_run(bq) for bq in bm25_queries])
+            gathered = await asyncio.gather(
+                *[_run(bq) for bq in bm25_queries],
+                return_exceptions=is_multi_query,
+            )
+            results: list[tuple[list, int]] = []
+            for query_text, result in zip(bm25_queries, gathered, strict=False):
+                if isinstance(result, BaseException):
+                    if isinstance(result, asyncio.CancelledError):
+                        raise result
+                    recall_errors.setdefault(query_text, {})["bm25"] = str(result)
+                    results.append(([], 0))
+                else:
+                    results.append(result)
             return _merge_bm25_results(results)
 
         # Kick off BM25 first (no embeddings needed) while we prepare dense vectors
@@ -499,6 +743,7 @@ class RetrievalService:
 
         qvec: list[float] | None = None
         embedder: BaseEmbedding | None = None
+        dense_prepare_started = time.perf_counter()
         if need_query_vector and dense_queries:
             # Fail-fast health check to avoid long retries when Qdrant is down.
             # In hybrid mode we can degrade to BM25-only; in dense mode we return an explicit error.
@@ -511,8 +756,10 @@ class RetrievalService:
                     f"Vector store unavailable (url={getattr(self.vector_store, 'url', '')})"
                 )
                 logger.warning(dense_disabled_reason)
-                if effective_mode == "dense":
+                if effective_mode == "dense" and not is_multi_query:
                     raise ValidationFailedError(dense_disabled_reason)
+                for query_text in dense_queries:
+                    recall_errors.setdefault(query_text, {})["dense"] = dense_disabled_reason
                 dense_queries = []
                 query_vectors.clear()
                 qvec = None
@@ -537,31 +784,45 @@ class RetrievalService:
                     # Use cached embedder for better performance (connection reuse)
                     embedder = await get_cached_embedder(econf, dimension=dim)
 
-                # Reuse original query vector when available
-                qvec = await embedder.embed_query(q)
-                query_vectors[q] = qvec
+                async def _embed_query(query_text: str) -> list[float]:
+                    async with embedding_semaphore:
+                        return await embedder.embed_query(query_text)
 
-                # Ensure collection exists and matches dimension (when we need vector ops).
-                #
-                # If Qdrant is unavailable, we can still continue with BM25-only results
-                # in HYBRID mode (fail-soft) to keep KB search usable in degraded mode.
-                collection = await self.vector_store.ensure_collection(
-                    dataset_id=dataset_id,
-                    dimension=embedder.dimension,
-                    collection_name=collection or None,
+                embedded = await asyncio.gather(
+                    *[_embed_query(query_text) for query_text in dense_queries],
+                    return_exceptions=is_multi_query,
                 )
+                for query_text, result in zip(dense_queries, embedded, strict=False):
+                    if isinstance(result, BaseException):
+                        if isinstance(result, asyncio.CancelledError):
+                            raise result
+                        recall_errors.setdefault(query_text, {})["dense_prepare"] = str(result)
+                        continue
+                    query_vectors[query_text] = result
+                qvec = query_vectors.get(q)
+                if not query_vectors:
+                    raise ValidationFailedError("dense retrieval requires query embedding")
+
+                # Dataset creation and ingestion already ensure persisted collections.
+                # Keep a compatibility fallback only for legacy rows missing the name.
+                if not collection:
+                    collection = await self.vector_store.ensure_collection(
+                        dataset_id=dataset_id,
+                        dimension=embedder.dimension,
+                    )
                 # Note: Don't close cached embedder - it's reused across requests
 
-                missing = [dq for dq in dense_queries if dq not in query_vectors]
-                if missing:
-                    vecs = await asyncio.gather(*[embedder.embed_query(dq) for dq in missing])
-                    query_vectors.update(dict(zip(missing, vecs, strict=False)))
             except Exception as vec_prep_err:
                 dense_disabled_reason = str(vec_prep_err)
                 logger.warning(f"Vector retrieval preparation failed: {vec_prep_err}")
-                if effective_mode == "dense":
+                if effective_mode == "dense" and not is_multi_query:
                     raise ValidationFailedError(
                         f"Dense retrieval preparation failed: {vec_prep_err}"
+                    )
+
+                for query_text in dense_queries:
+                    recall_errors.setdefault(query_text, {}).setdefault(
+                        "dense_prepare", str(vec_prep_err)
                     )
 
                 # HYBRID mode: degrade to BM25-only (skip vector retrieval path).
@@ -570,18 +831,20 @@ class RetrievalService:
                 qvec = None
                 embedder = None
                 collection = ""
+        if need_query_vector:
+            stage_timings["dense_prepare_ms"] = (
+                time.perf_counter() - dense_prepare_started
+            ) * 1000
 
         # Execute dense (after vectors) and await BM25 concurrently
-        dense_hits, dense_hits_raw_count = await _run_dense_multi()
+        dense_hits, dense_hits_raw_count, dense_ranked_lists = await _run_dense_multi()
         if bm25_task is not None:
-            bm25_hits, bm25_hits_raw_count = await bm25_task
+            bm25_hits, bm25_hits_raw_count, bm25_ranked_lists = await bm25_task
         else:
-            bm25_hits, bm25_hits_raw_count = [], 0
+            bm25_hits, bm25_hits_raw_count, bm25_ranked_lists = [], 0, {}
 
         # --- Merge candidates with clear score tracking ---
         candidates: dict[str, dict[str, Any]] = {}
-        dense_ranked_ids: list[str] = []
-        bm25_ranked_ids: list[str] = []
 
         def upsert_candidate(
             segment_id: str,
@@ -654,7 +917,6 @@ class RetrievalService:
                 source="dense",
                 dense_score=float(h.get("score") or 0.0),
             )
-            dense_ranked_ids.append(seg_id)
 
         # Add BM25 hits
         for h in bm25_hits:
@@ -667,7 +929,6 @@ class RetrievalService:
                 source="bm25",
                 bm25_score=float(h.get("bm25_score") or 0.0),
             )
-            bm25_ranked_ids.append(seg_id)
 
         # --- Stage 2: Normalize scores to [0, 1] using robust normalization ---
         # Build score dicts for normalization
@@ -708,7 +969,7 @@ class RetrievalService:
                 cand["_bm25_score_norm"] = bm25_norm_dict[cid]
 
         # --- Compute text match info (for display only, not scoring) ---
-        for cid, cand in candidates.items():
+        for cand in candidates.values():
             text = str(cand.get("text") or "")
             match_score, match_info = compute_text_match_score(q, text)
             cand["_text_match_score"] = match_score
@@ -719,13 +980,18 @@ class RetrievalService:
         # --- Stage 3: Fusion (combine dense and BM25 scores) ---
         rrf_scores = None
         rrf_max = 1.0
-        if effective_mode == "hybrid" and effective_fusion_method == "rrf":
+        rrf_ranked_lists = {**dense_ranked_lists, **bm25_ranked_lists}
+        use_rrf = effective_fusion_method == "rrf" and (
+            effective_mode == "hybrid"
+            or len(rrf_ranked_lists) > 1
+        )
+        if use_rrf:
             # RRF uses equal weights to properly interleave ranked lists.
             # Unequal weights cause one source to dominate all positions.
             rrf_scores = reciprocal_rank_fusion(
-                {"dense": dense_ranked_ids, "bm25": bm25_ranked_ids},
+                rrf_ranked_lists,
                 k=rrf_k_value,
-                weights={"dense": 1.0, "bm25": 1.0},
+                weights=dict.fromkeys(rrf_ranked_lists, 1.0),
             )
             rrf_max = max(rrf_scores.values()) if rrf_scores else 1.0
 
@@ -740,7 +1006,12 @@ class RetrievalService:
             dense_norm = cand.get("_dense_score_norm")
             bm25_norm = cand.get("_bm25_score_norm")
 
-            if effective_mode == "dense":
+            if use_rrf:
+                rrf_score = float((rrf_scores or {}).get(cid, 0.0)) / (rrf_max or 1.0)
+                cand["_rrf_score"] = rrf_score
+                cand["_fusion_score"] = rrf_score
+
+            elif effective_mode == "dense":
                 # Dense only: use dense score
                 cand["_fusion_score"] = dense_norm if dense_norm is not None else 0.0
 
@@ -778,12 +1049,24 @@ class RetrievalService:
         ranked = sorted(
             candidates.values(), key=lambda c: float(c.get("_final_score") or 0.0), reverse=True
         )
+        metadata_filter_original_count = len(ranked)
+        filter_started = time.perf_counter()
+        if (source_type_filter or language_filter or metadata_filter) and not filters_vary_by_query:
+            ranked = self._ks._filter_candidates_by_metadata(
+                ranked, source_type_filter, language_filter, metadata_filter
+            )
+            stage_timings["filter_ms"] = (time.perf_counter() - filter_started) * 1000
+        metadata_filter_removed_count = metadata_filter_original_count - len(ranked)
         ranked = ranked[:candidate_k]
 
         meta: dict[str, Any] = {
             "dataset_id": dataset_id,
             "mode": effective_mode,
             "top_k": int(top_k),
+            "queries": queries_to_run,
+            "query_count": len(queries_to_run),
+            "query_modes": query_modes,
+            "recall_max_parallel": retrieval_query_concurrency,
             "document_id": document_id,
             "enforce_config": retrieval_enforce,
             # Retrieval counts (for backward compatibility with frontend)
@@ -802,10 +1085,13 @@ class RetrievalService:
             "bm25_top_k": int(keyword_k) if effective_mode in {"bm25", "hybrid"} else None,
             "candidate_top_k": int(candidate_k),
             # Fusion config
-            "fusion_method": effective_fusion_method if effective_mode == "hybrid" else None,
+            "fusion_method": effective_fusion_method
+            if (effective_mode == "hybrid" or use_rrf)
+            else None,
             "dense_weight": effective_dense_weight if effective_mode == "hybrid" else None,
             "bm25_weight": effective_bm25_weight if effective_mode == "hybrid" else None,
             "rrf_k": int(rrf_k_value) if effective_fusion_method == "rrf" else None,
+            "rrf_ranked_list_count": len(rrf_ranked_lists) if use_rrf else 0,
             # Post-processing config
             "rerank": bool(rerank_enabled),
             "rerank_provider": effective_rerank_provider if rerank_enabled else None,
@@ -829,6 +1115,8 @@ class RetrievalService:
         }
         if dense_disabled_reason:
             meta["dense_disabled_reason"] = dense_disabled_reason[:500]
+        if recall_errors:
+            meta["recall_errors"] = recall_errors
 
         # Log pipeline stages with details
         if effective_mode in {"dense", "hybrid"}:
@@ -848,6 +1136,34 @@ class RetrievalService:
             meta["pipeline_stages"].append(
                 f"Fusion ({effective_fusion_method}): dense_w={effective_dense_weight:.2f}, bm25_w={effective_bm25_weight:.2f}"
             )
+        elif use_rrf:
+            meta["pipeline_stages"].append(
+                f"Fusion (rrf): ranked_lists={len(rrf_ranked_lists)}"
+            )
+        if filters_vary_by_query:
+            meta["pipeline_stages"].append("Per-query filters applied during candidate recall")
+            meta["query_filters"] = [
+                {
+                    "query": query_text,
+                    "source_type_filter": config[0],
+                    "language_filter": config[1],
+                    "metadata_filter": config[2],
+                }
+                for query_text, config in zip(
+                    queries_to_run, query_filter_configs, strict=False
+                )
+            ]
+        elif source_type_filter or language_filter or metadata_filter:
+            if metadata_filter_removed_count:
+                meta["pipeline_stages"].append(
+                    f"Metadata filter: filtered {metadata_filter_removed_count} candidates"
+                )
+            if source_type_filter:
+                meta["source_type_filter"] = source_type_filter
+            if language_filter:
+                meta["language_filter"] = language_filter
+            if metadata_filter:
+                meta["metadata_filter"] = dict(metadata_filter)
 
         # Prefetch vectors for MMR in parallel with rerank to reduce latency
         mmr_vectors_task = None
@@ -864,6 +1180,7 @@ class RetrievalService:
 
         # --- Stage 4: Optional rerank ---
         if rerank_enabled and ranked:
+            rerank_started = time.perf_counter()
             try:
                 def _resolve_dashscope_rerank_api_key(
                     include_override: bool = True,
@@ -872,7 +1189,7 @@ class RetrievalService:
                         (rerank_api_key if include_override else None)
                         or getattr(self.settings.knowledge.dashscope, "api_key", None)
                         or os.getenv("DASHSCOPE_API_KEY")
-                        or os.getenv("Aliyun_KEY")
+                        or os.getenv("Aliyun_KEY")  # noqa: SIM112 - legacy env name
                         or os.getenv("ALIYUN_KEY")
                     )
 
@@ -954,17 +1271,10 @@ class RetrievalService:
                         c["_final_score"] = score  # Rerank score becomes final score
                         reranked.append(c)
 
-                # Sort by rerank score, preserving non-reranked candidates as fallback
+                # Preserve reranker order, then append untouched fallback candidates.
                 if reranked:
                     reranked_ids = {id(c) for c in reranked}
-                    for c in ranked:
-                        if id(c) not in reranked_ids:
-                            reranked.append(c)  # Keep original _final_score
-                    ranked = sorted(
-                        reranked,
-                        key=lambda c: float(c.get("_rerank_score") or c.get("_final_score") or 0.0),
-                        reverse=True,
-                    )
+                    ranked = reranked + [c for c in ranked if id(c) not in reranked_ids]
                     meta["pipeline_stages"].append(
                         f"Rerank ({applied_rerank_provider}/{applied_rerank_model}): {len(reranked)} results"
                     )
@@ -973,6 +1283,10 @@ class RetrievalService:
                 meta["rerank_top_n"] = effective_rerank_top_n
             except Exception as exc:
                 meta["rerank_error"] = str(exc)
+            finally:
+                stage_timings["rerank_ms"] = (
+                    time.perf_counter() - rerank_started
+                ) * 1000
 
         # --- Stage 5: Optional MMR diversification ---
         final: list[dict[str, Any]] = ranked
@@ -980,6 +1294,7 @@ class RetrievalService:
             meta["mmr_skipped"] = "candidate_count<=top_k"
             mmr_enabled = False
         if mmr_enabled and ranked:
+            mmr_started = time.perf_counter()
             if not collection:
                 meta["mmr_error"] = "dataset collection_name is missing"
             else:
@@ -1058,14 +1373,12 @@ class RetrievalService:
                     )
                 except Exception as exc:
                     meta["mmr_error"] = str(exc)
+            stage_timings["mmr_ms"] = (time.perf_counter() - mmr_started) * 1000
 
         # --- Build response ---
-        # Final sort by _final_score to ensure correct ordering
-        final_sorted = sorted(
-            final[:top_k] if final else [],
-            key=lambda c: float(c.get("_final_score") or 0.0),
-            reverse=True,
-        )
+        # ``final`` is already ordered by fusion, reranker, or MMR. Do not mix
+        # their incompatible score spaces with another sort.
+        final_sorted = list(final or [])
 
         # Apply score threshold to final results
         if effective_score_threshold > 0.0:
@@ -1080,21 +1393,7 @@ class RetrievalService:
                     f"Score threshold ({effective_score_threshold}): filtered {original_count - len(final_sorted)} low-score results"
                 )
 
-        if source_type_filter or language_filter or metadata_filter:
-            original_count = len(final_sorted)
-            final_sorted = self._ks._filter_candidates_by_metadata(
-                final_sorted, source_type_filter, language_filter, metadata_filter
-            )
-            if len(final_sorted) < original_count:
-                meta["pipeline_stages"].append(
-                    f"Metadata filter: filtered {original_count - len(final_sorted)} results"
-                )
-            if source_type_filter:
-                meta["source_type_filter"] = source_type_filter
-            if language_filter:
-                meta["language_filter"] = language_filter
-            if metadata_filter:
-                meta["metadata_filter"] = dict(metadata_filter)
+        final_sorted = final_sorted[:top_k]
 
         # Normalize final scores for display (keep raw for debugging)
         if final_sorted:
@@ -1252,6 +1551,10 @@ class RetrievalService:
                 )
             )
 
+        stage_timings["total_ms"] = (time.perf_counter() - retrieval_started) * 1000
+        meta["timings_ms"] = {
+            key: round(value, 2) for key, value in stage_timings.items()
+        }
         return results, meta
 
     # ========================================================================
@@ -1285,6 +1588,8 @@ class RetrievalService:
         4. Attaches associated images to text segments
         5. Optionally performs multimodal reranking via VLM
         """
+        _ = image_search_enabled
+
         # Fetch more results if filtering to ensure we get enough after filter
         # Also fetch more if we're applying separate thresholds or boosting
         effective_top_k = (
@@ -1610,6 +1915,9 @@ class RetrievalService:
         retrieval_cache_key = (
             f"{user.user_id}:{dataset_id}:{retrieval_query_fingerprint}:intent={intent}"
         )
+        dataset = await self._ks.require_dataset_access(
+            user, dataset_id, required="viewer"
+        )
         cached_response = await self._ks._get_cached_retrieval(retrieval_cache_key)
         if cached_response is not None:
             cached_results, cached_meta = cached_response
@@ -1618,11 +1926,12 @@ class RetrievalService:
             return cached_results, cached_meta
 
         # Perform base retrieval with expanded top_k
-        results, meta = await self.retrieve(
+        results, meta = await self._retrieve_queries(
             user=user,
             dataset_id=dataset_id,
             query=query,
             top_k=expanded_top_k,
+            _dataset=dataset,
             **retrieve_kwargs,
         )
 
@@ -1898,24 +2207,20 @@ class RetrievalService:
         max_parallel: int = 10,
         dedupe_results: bool = False,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Batch retrieval - parallel retrieval with multiple queries.
+        """Retrieve one global result set from multiple recall queries.
 
         Args:
-            queries: List of queries to retrieve in parallel
-            max_parallel: Maximum concurrent retrievals (default 10)
-            dedupe_results: Remove duplicate segments across queries
+            queries: Original query first, followed by optional rewrites.
+            max_parallel: Maximum concurrent dense/BM25 recall operations.
+            dedupe_results: Retained for compatibility; global dedupe is always enabled.
             ... (same params as retrieve)
 
         Returns:
-            Tuple of (batch_results, meta) where batch_results is a list of
-            {query, results, meta} dicts for each query.
+            Tuple of (batch_results, meta). ``batch_results`` contains one
+            globally fused {query, results, meta} result group.
         """
-        import time
-
+        _ = include_images, include_associated_images
         start_time = time.time()
-
-        # Validate dataset access once
-        await self._ks.require_dataset_access(user, dataset_id, required="viewer")
 
         def _normalize_query_spec(item: Any) -> dict[str, Any] | None:
             if isinstance(item, str):
@@ -1961,109 +2266,109 @@ class RetrievalService:
         if not valid_specs:
             return [], {"error": "No valid queries provided"}
 
-        # Limit concurrency
-        semaphore = asyncio.Semaphore(max_parallel)
+        unique_specs: list[dict[str, Any]] = []
+        seen_queries: set[str] = set()
+        for spec in valid_specs:
+            query_text = str(spec["query"])
+            if query_text in seen_queries:
+                continue
+            seen_queries.add(query_text)
+            unique_specs.append(spec)
 
-        async def _retrieve_single(query_spec: dict[str, Any]) -> dict[str, Any]:
-            query = str(query_spec.get("query") or "").strip()
-            wait_started = time.perf_counter()
-            async with semaphore:
-                queue_wait_ms = (time.perf_counter() - wait_started) * 1000
-                retrieve_started = time.perf_counter()
-                try:
-                    results, meta = await self.retrieve(
-                        user=user,
-                        dataset_id=dataset_id,
-                        query=query,
-                        top_k=top_k,
-                        mode=query_spec.get("mode", mode),
-                        document_id=query_spec.get("document_id", document_id),
-                        dense_weight=query_spec.get("dense_weight", dense_weight),
-                        bm25_weight=query_spec.get("bm25_weight", bm25_weight),
-                        fusion_method=query_spec.get("fusion_method", fusion_method),
-                        alpha=query_spec.get("alpha", alpha),
-                        score_threshold=query_spec.get("score_threshold", score_threshold),
-                        source_type_filter=query_spec.get("source_type_filter", source_type_filter),
-                        language_filter=query_spec.get("language_filter", language_filter),
-                        metadata_filter=query_spec.get("metadata_filter"),
-                        vector_top_k=query_spec.get("vector_top_k", vector_top_k),
-                        keyword_top_k=query_spec.get("keyword_top_k", keyword_top_k),
-                        candidate_top_k=query_spec.get("candidate_top_k", candidate_top_k),
-                        keyword_candidate_k=query_spec.get("keyword_candidate_k", keyword_candidate_k),
-                        fusion=query_spec.get("fusion", fusion),
-                        rrf_k=query_spec.get("rrf_k", rrf_k),
-                        rrf_weights=rrf_weights,
-                        rerank=query_spec.get("rerank", rerank),
-                        rerank_model=query_spec.get("rerank_model", rerank_model),
-                        rerank_top_n=query_spec.get("rerank_top_n", rerank_top_n),
-                        mmr=query_spec.get("mmr", mmr),
-                        mmr_lambda=query_spec.get("mmr_lambda", mmr_lambda),
-                        mmr_threshold=query_spec.get("mmr_threshold", mmr_threshold),
-                    )
-                    retrieve_time_ms = (time.perf_counter() - retrieve_started) * 1000
-                    merged_meta = dict(meta or {})
-                    merged_meta["queue_wait_ms"] = round(queue_wait_ms, 2)
-                    merged_meta["retrieve_time_ms"] = round(retrieve_time_ms, 2)
-                    return {
-                        "query": query,
-                        "results": [
-                            {
-                                "segment_id": r.segment_id,
-                                "document_id": r.document_id,
-                                "score": r.score,
-                                "text": r.text,
-                                "metadata": r.metadata,
-                                "content_type": getattr(r, "content_type", "text"),
-                                "image_url": getattr(r, "image_url", None),
-                                "vlm_description": getattr(r, "vlm_description", None),
-                            }
-                            for r in results
-                        ],
-                        "meta": merged_meta,
-                    }
-                except Exception as e:
-                    logger.warning(f"[retrieve_batch] Query '{query}' failed: {e}")
-                    return {
-                        "query": query,
-                        "results": [],
-                        "meta": {
-                            "error": str(e),
-                            "queue_wait_ms": round(queue_wait_ms, 2),
-                            "retrieve_time_ms": round((time.perf_counter() - retrieve_started) * 1000, 2),
-                        },
-                    }
+        primary_spec = unique_specs[0]
+        primary_query = str(primary_spec["query"])
 
-        # Execute all queries in parallel
-        batch_results = await asyncio.gather(*[_retrieve_single(q) for q in valid_specs])
+        def _primary_option(key: str, default: Any) -> Any:
+            value = primary_spec.get(key)
+            return default if value is None else value
 
-        # Dedupe results if requested
-        if dedupe_results:
-            seen_segment_ids: set = set()
-            for result in batch_results:
-                deduped = []
-                for r in result.get("results", []):
-                    seg_id = r.get("segment_id")
-                    if seg_id and seg_id not in seen_segment_ids:
-                        seen_segment_ids.add(seg_id)
-                        deduped.append(r)
-                result["results"] = deduped
+        dataset = await self._ks.require_dataset_access(user, dataset_id, required="viewer")
+        retrieve_started = time.perf_counter()
+        try:
+            results, pipeline_meta = await self._retrieve_queries(
+                user=user,
+                dataset_id=dataset_id,
+                query=primary_query,
+                top_k=top_k,
+                mode=_primary_option("mode", mode),
+                document_id=document_id,
+                dense_weight=_primary_option("dense_weight", dense_weight),
+                bm25_weight=_primary_option("bm25_weight", bm25_weight),
+                fusion_method=_primary_option("fusion_method", fusion_method),
+                alpha=_primary_option("alpha", alpha),
+                score_threshold=_primary_option("score_threshold", score_threshold),
+                source_type_filter=source_type_filter,
+                language_filter=language_filter,
+                vector_top_k=vector_top_k,
+                keyword_top_k=keyword_top_k,
+                candidate_top_k=_primary_option("candidate_top_k", candidate_top_k),
+                keyword_candidate_k=keyword_candidate_k,
+                fusion=_primary_option("fusion", fusion),
+                rrf_k=_primary_option("rrf_k", rrf_k),
+                rrf_weights=rrf_weights,
+                rerank=_primary_option("rerank", rerank),
+                rerank_model=_primary_option("rerank_model", rerank_model),
+                rerank_top_n=_primary_option("rerank_top_n", rerank_top_n),
+                mmr=_primary_option("mmr", mmr),
+                mmr_lambda=_primary_option("mmr_lambda", mmr_lambda),
+                mmr_threshold=_primary_option("mmr_threshold", mmr_threshold),
+                _query_specs=unique_specs,
+                _recall_max_parallel=max(int(max_parallel), 1),
+                _dataset=dataset,
+            )
+        except Exception as exc:
+            logger.warning("[retrieve_batch] Global retrieval failed: %s", exc)
+            results = []
+            pipeline_meta = {"error": str(exc)}
 
-        # Build metadata
-        execution_time_ms = (time.time() - start_time) * 1000
-        total_results = sum(len(r.get("results", [])) for r in batch_results)
-        queue_waits = [
-            float((item.get("meta") or {}).get("queue_wait_ms", 0.0) or 0.0)
-            for item in batch_results
+        retrieve_time_ms = (time.perf_counter() - retrieve_started) * 1000
+        pipeline_meta = dict(pipeline_meta or {})
+        pipeline_meta.update(
+            {
+                "queries": [str(spec["query"]) for spec in unique_specs],
+                "input_query_count": len(valid_specs),
+                "unique_query_count": len(unique_specs),
+                "duplicate_query_count": len(valid_specs) - len(unique_specs),
+                "queue_wait_ms": 0.0,
+                "retrieve_time_ms": round(retrieve_time_ms, 2),
+            }
+        )
+
+        serialized_results = [
+            {
+                "segment_id": result.segment_id,
+                "document_id": result.document_id,
+                "score": result.score,
+                "text": result.text,
+                "metadata": result.metadata,
+                "content_type": getattr(result, "content_type", "text"),
+                "image_url": getattr(result, "image_url", None),
+                "vlm_description": getattr(result, "vlm_description", None),
+                "associated_images": list(getattr(result, "associated_images", ()) or ()),
+            }
+            for result in results[: max(int(top_k), 1)]
+        ]
+        batch_results = [
+            {
+                "query": primary_query,
+                "results": serialized_results,
+                "meta": pipeline_meta,
+            }
         ]
 
+        execution_time_ms = (time.time() - start_time) * 1000
         meta = {
             "total_queries": len(valid_specs),
-            "total_results": total_results,
+            "unique_queries": len(unique_specs),
+            "total_results": len(serialized_results),
             "execution_time_ms": round(execution_time_ms, 2),
-            "max_parallel": max_parallel,
-            "dedupe_results": dedupe_results,
-            "avg_queue_wait_ms": round(sum(queue_waits) / len(queue_waits), 2) if queue_waits else 0.0,
-            "max_queue_wait_ms": round(max(queue_waits), 2) if queue_waits else 0.0,
+            "max_parallel": int(
+                pipeline_meta.get("recall_max_parallel") or max(int(max_parallel), 1)
+            ),
+            "dedupe_results": True,
+            "dedupe_results_requested": dedupe_results,
+            "avg_queue_wait_ms": 0.0,
+            "max_queue_wait_ms": 0.0,
         }
 
         return batch_results, meta

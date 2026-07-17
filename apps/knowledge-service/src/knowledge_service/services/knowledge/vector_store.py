@@ -466,6 +466,7 @@ class VectorStore:
         with_vectors: bool = False,
         query_filter: qmodels.Filter | None = None,
         score_threshold: float | None = None,
+        metadata_filter: dict[str, Any] | None = None,
     ) -> list[VectorSearchHit]:
         """Search for similar vectors with optional tenant isolation.
 
@@ -481,6 +482,7 @@ class VectorStore:
             with_vectors: Include vectors in results.
             query_filter: Additional Qdrant filter.
             score_threshold: Minimum score threshold.
+            metadata_filter: Exact-match filters under the nested metadata payload.
 
         Returns:
             List of VectorSearchHit results.
@@ -515,6 +517,15 @@ class VectorStore:
                     match=qmodels.MatchValue(value=language),
                 )
             )
+        if metadata_filter:
+            for key, value in metadata_filter.items():
+                if isinstance(value, (str, int, bool)):
+                    conditions.append(
+                        qmodels.FieldCondition(
+                            key=f"metadata.{key}",
+                            match=qmodels.MatchValue(value=value),
+                        )
+                    )
         flt = qmodels.Filter(must=conditions) if conditions else None
         if query_filter is not None:
             if flt is None:

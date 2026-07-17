@@ -215,6 +215,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "ocr_strategy": s.ocr.strategy,
                         "worker_concurrency": s.processing.worker_concurrency,
                         "document_worker_concurrency": s.processing.document_worker_concurrency,
+                        "retrieval_query_max_concurrency": s.processing.retrieval_query_max_concurrency,
+                        "retrieval_cache_ttl_seconds": s.processing.retrieval_cache_ttl_seconds,
                         # Embedding config
                         "text_embedding_dimension": embed.dimension,
                         "text_embedding_batch_size": embed.batch_size,
@@ -238,6 +240,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return getattr(self._s, name)
 
             compat_settings = _SettingsCompat(resolved)
+            logger.info(
+                "knowledge_retrieval_config "
+                f"query_concurrency={compat_settings.knowledge.retrieval_query_max_concurrency} "
+                f"cache_ttl={compat_settings.knowledge.retrieval_cache_ttl_seconds}s"
+            )
 
             # Initialize S3 ImageStorageService for file persistence
             image_storage = None

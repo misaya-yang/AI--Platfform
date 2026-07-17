@@ -18,14 +18,18 @@ from .utils import MULTIMODAL_EMBEDDING_MODELS, is_multimodal_embedding_model
 class KnowledgeClientLike(Protocol):
     """Minimal async contract for KB retrieval used by assistant tools."""
 
-    async def search(
+    async def list_datasets(self, user: Any) -> list[dict[str, Any]]: ...
+
+    async def retrieve(
         self,
+        user: Any,
+        dataset_id: str,
         query: str,
-        *,
-        dataset_id: str | None = None,
         top_k: int = 5,
-        filters: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]: ...
+        mode: str = "hybrid",
+        score_threshold: float = 0.0,
+        **kwargs: Any,
+    ) -> tuple[list[Any], dict[str, Any]]: ...
 
 
 __all__ = [

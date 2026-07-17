@@ -10,6 +10,21 @@ Ensures that:
 from dataclasses import dataclass, field
 from typing import Any
 
+from knowledge_service.api.schemas.knowledge import (
+    BatchRetrieveRequestSchema,
+    RetrieveRequestSchema,
+)
+
+
+def test_text_retrieval_defaults_skip_images():
+    single = RetrieveRequestSchema(query="text query")
+    batch = BatchRetrieveRequestSchema(queries=["text query"])
+
+    assert single.include_images is False
+    assert single.include_associated_images is False
+    assert batch.include_images is False
+    assert batch.include_associated_images is False
+
 
 @dataclass
 class MockRetrieveResult:

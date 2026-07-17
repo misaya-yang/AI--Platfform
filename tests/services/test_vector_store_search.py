@@ -37,3 +37,31 @@ async def test_search_passes_query_filter_and_score_threshold(monkeypatch):
     assert captured["query_filter"] == flt
     assert captured["score_threshold"] == 0.42
     assert captured["limit"] == 7
+
+
+@pytest.mark.asyncio
+async def test_search_pushes_nested_metadata_filters(monkeypatch):
+    captured = {}
+
+    class DummyClient:
+        async def query_points(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(points=[])
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(vector_store, "AsyncQdrantClient", lambda **kwargs: DummyClient())
+
+    vs = VectorStore(url="http://localhost:6333")
+    await vs.search(
+        collection_name="kb_ds_3",
+        query_vector=[0.1, 0.2, 0.3],
+        metadata_filter={"madhab": "hanafi", "authority_rank": 2},
+    )
+
+    conditions = captured["query_filter"].must
+    assert [(condition.key, condition.match.value) for condition in conditions] == [
+        ("metadata.madhab", "hanafi"),
+        ("metadata.authority_rank", 2),
+    ]

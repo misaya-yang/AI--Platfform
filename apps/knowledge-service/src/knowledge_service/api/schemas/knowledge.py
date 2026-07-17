@@ -212,8 +212,8 @@ class RetrieveRequestSchema(BaseModel):
     mmr_threshold: float | None = None
 
     # Multimodal retrieval options
-    include_images: bool = True  # Include image segments in results
-    include_associated_images: bool = True  # Attach associated images to text segments
+    include_images: bool = False  # Include image segments in results
+    include_associated_images: bool = False  # Attach associated images to text segments
     multimodal_rerank: bool = False  # Use VLM for multimodal reranking
     content_type_filter: str | None = None  # Filter by content type: text|image|None (all)
 
@@ -522,20 +522,20 @@ class BatchRetrieveQuerySchema(BaseModel):
 
 
 class BatchRetrieveRequestSchema(BaseModel):
-    """Batch retrieval request - parallel retrieval with multiple queries.
+    """Multi-query retrieval request with one global result set.
 
     Usage:
-    - queries: List of queries to retrieve in parallel
+    - queries: Original query first, followed by recall-only rewrites
     - Or use query with comma-separated queries: "query1,query2,query3"
 
-    Returns results grouped by query.
+    Returns one globally fused result group capped by ``top_k``.
     """
 
     model_config = ConfigDict(extra="allow")
 
     queries: list[str | BatchRetrieveQuerySchema] | None = None  # List of queries for batch retrieval
     query: str | None = None  # Single query or comma-separated queries
-    top_k: int = 5  # Top-k per query
+    top_k: int = 5  # Global final Top-K
     mode: str = "hybrid"
     document_id: str | None = None
 
@@ -565,16 +565,16 @@ class BatchRetrieveRequestSchema(BaseModel):
     mmr_lambda: float | None = None
     mmr_threshold: float | None = None
     # Multimodal options
-    include_images: bool = True
-    include_associated_images: bool = True
+    include_images: bool = False
+    include_associated_images: bool = False
 
     # Batch-specific options
     max_parallel: int = 10  # Max parallel queries (limit concurrency)
-    dedupe_results: bool = False  # Remove duplicate segments across queries
+    dedupe_results: bool = False  # Compatibility flag; global segment dedupe is always applied
 
 
 class BatchRetrieveResultSchema(BaseModel):
-    """Result for a single query in batch retrieval."""
+    """Globally fused result group keyed by the original query."""
 
     query: str
     results: list[dict[str, Any]] = Field(default_factory=list)
@@ -582,7 +582,7 @@ class BatchRetrieveResultSchema(BaseModel):
 
 
 class BatchRetrieveResponseSchema(BaseModel):
-    """Batch retrieval response with results grouped by query."""
+    """Multi-query response containing one globally fused result group."""
 
     batch_results: list[BatchRetrieveResultSchema] = Field(default_factory=list)
     total_queries: int = 0

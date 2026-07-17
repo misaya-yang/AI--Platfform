@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from ai_gateway_core.knowledge import KnowledgeClientLike
 from ai_gateway_core.knowledge.proxy_client import KBProxyClient
 from ai_gateway_core.proxy.request_id_middleware import REQUEST_ID_CTX
 
@@ -62,3 +64,96 @@ def test_kb_proxy_client_reads_timeout_and_pool_limits_from_env(monkeypatch) -> 
     assert client.timeout.write == 6.0
     assert client.timeout.pool == 8.0
     assert client.limits == httpx.Limits(max_connections=25, max_keepalive_connections=9)
+
+
+@pytest.mark.asyncio
+async def test_kb_proxy_client_forwards_supported_retrieval_options() -> None:
+    seen_payload: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(json.loads(request.content))
+        return httpx.Response(200, json={"results": [], "metadata": {}})
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        await client.retrieve(
+            SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal"),
+            "dataset-1",
+            "query",
+            candidate_top_k=40,
+            rerank=False,
+            mmr=True,
+            include_images=False,
+            include_associated_images=False,
+            metadata_filter={"madhab": "hanafi"},
+            ignored_option="not-forwarded",
+        )
+    finally:
+        await client.close()
+
+    assert isinstance(client, KnowledgeClientLike)
+    assert seen_payload == {
+        "query": "query",
+        "top_k": 5,
+        "mode": "hybrid",
+        "candidate_top_k": 40,
+        "rerank": False,
+        "mmr": True,
+        "include_images": False,
+        "include_associated_images": False,
+        "metadata_filter": {"madhab": "hanafi"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_kb_proxy_client_multimodal_wrappers_are_explicit() -> None:
+    seen_payloads: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "text": "diagram",
+                        "score": 0.9,
+                        "content_type": "image",
+                        "image_url": "https://example.test/image.png",
+                        "associated_images": [{"image_segment_id": "img-1"}],
+                    }
+                ],
+                "metadata": {},
+            },
+        )
+
+    client = KBProxyClient(
+        base_url="http://knowledge-service.test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        results, _ = await client.retrieve_with_images(
+            SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal"),
+            "dataset-1",
+            "diagram",
+        )
+        await client.retrieve_with_images_v2(
+            SimpleNamespace(user_id="u1", tenant_id="t1", tier="normal"),
+            "dataset-1",
+            "policy",
+            intent="find_document",
+        )
+    finally:
+        await client.close()
+
+    assert results[0].content_type == "image"
+    assert results[0].associated_images == ({"image_segment_id": "img-1"},)
+    assert seen_payloads[0]["include_images"] is True
+    assert seen_payloads[0]["include_associated_images"] is True
+    assert seen_payloads[1]["include_images"] is False
+    assert seen_payloads[1]["include_associated_images"] is False

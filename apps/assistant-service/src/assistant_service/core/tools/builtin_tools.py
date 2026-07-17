@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -31,6 +32,7 @@ from .tool_registry import (
 
 if TYPE_CHECKING:
     from ai_gateway_core.knowledge import KnowledgeClientLike
+
     from ..memory_service import MemoryService
 
 logger = get_logger(__name__)
@@ -182,10 +184,10 @@ class KBSearchExecutor(ToolExecutor):
                 try:
                     async with fanout_semaphore:
                         # Use retrieve_with_images_v2 for multimodal retrieval with intent support
-                        # Set include_images based on intent (skip images for find_document intent)
-                        include_images = intent != "find_document"
+                        # Text-first by default; only explicit image intent pays multimodal cost.
+                        include_images = intent == "find_image"
                         # Enable VLM reranking for image-focused queries
-                        vlm_rerank = intent in ("general", "find_image")
+                        vlm_rerank = intent == "find_image"
                         if hasattr(self.kb_service, "retrieve_with_images_v2"):
                             results, meta = await self.kb_service.retrieve_with_images_v2(
                                 user=request.user,
@@ -257,7 +259,7 @@ class KBSearchExecutor(ToolExecutor):
                     retrieval_cache_hits += 1
                 dataset_name = meta.get("dataset_name", dataset_id)
                 dataset_chunks: list[dict[str, Any]] = []
-                for r in results:
+                for dataset_rank, r in enumerate(results, start=1):
                     r_meta = r.metadata or {}
                     source_url = (
                         r_meta.get("source_url")
@@ -278,6 +280,8 @@ class KBSearchExecutor(ToolExecutor):
                         "citation_text": citation_text,
                         "source_url": source_url,
                         "metadata": r_meta,
+                        "_dataset_rank": dataset_rank,
+                        "_cross_dataset_rrf_score": 1.0 / (60 + dataset_rank),
                     }
                     all_results.append(item)
                     dataset_chunks.append(item)
@@ -294,8 +298,11 @@ class KBSearchExecutor(ToolExecutor):
                     }
                 )
 
-            # Sort by score and limit
-            all_results.sort(key=lambda x: x["score"], reverse=True)
+            # Dataset-local scores are not comparable. Merge by per-dataset rank.
+            all_results.sort(
+                key=lambda x: float(x["_cross_dataset_rrf_score"]),
+                reverse=True,
+            )
             all_results = all_results[:top_k]
 
             # Format result for LLM consumption

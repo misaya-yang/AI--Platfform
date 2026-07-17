@@ -2311,6 +2311,7 @@ class DatabaseStorage:
         source_type: str | None = None,
         language: str | None = None,
         limit: int = 200,
+        metadata_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Keyword candidate retrieval using PostgreSQL full-text search (GIN index).
 
@@ -2327,7 +2328,13 @@ class DatabaseStorage:
         # Try FTS first (fast GIN index), fall back to ILIKE
         try:
             result = await self._search_segments_fts(
-                dataset_id, cleaned, document_id, source_type, language, limit
+                dataset_id,
+                cleaned,
+                document_id,
+                source_type,
+                language,
+                limit,
+                metadata_filter,
             )
             if result is not None:
                 return result
@@ -2335,7 +2342,13 @@ class DatabaseStorage:
             logger.warning("FTS query failed (%s), falling back to ILIKE for dataset=%s", exc, dataset_id)
 
         return await self._search_segments_ilike(
-            dataset_id, cleaned, document_id, source_type, language, limit
+            dataset_id,
+            cleaned,
+            document_id,
+            source_type,
+            language,
+            limit,
+            metadata_filter,
         )
 
     # Alias for retrieval_service compatibility
@@ -2378,6 +2391,7 @@ class DatabaseStorage:
         source_type: str | None,
         language: str | None,
         limit: int,
+        metadata_filter: dict[str, Any] | None,
     ) -> list[dict[str, Any]] | None:
         """Full-text search using tsvector + GIN index (O(log N)).
 
@@ -2402,6 +2416,10 @@ class DatabaseStorage:
         if language:
             query += f" AND language = ${param_idx}"
             params.append(language)
+            param_idx += 1
+        if metadata_filter:
+            query += f" AND metadata @> ${param_idx}::jsonb"
+            params.append(json.dumps(metadata_filter))
             param_idx += 1
 
         # Build tsquery expression with correct parameter indexing
@@ -2443,6 +2461,7 @@ class DatabaseStorage:
         source_type: str | None,
         language: str | None,
         limit: int,
+        metadata_filter: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
         """Legacy ILIKE fallback for pre-migration databases (O(N) sequential scan)."""
         query = "SELECT * FROM segments WHERE dataset_id = $1"
@@ -2460,6 +2479,10 @@ class DatabaseStorage:
         if language:
             query += f" AND language = ${param_idx}"
             params.append(language)
+            param_idx += 1
+        if metadata_filter:
+            query += f" AND metadata @> ${param_idx}::jsonb"
+            params.append(json.dumps(metadata_filter))
             param_idx += 1
 
         parts = []
