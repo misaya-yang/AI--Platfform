@@ -1,10 +1,16 @@
 # =============================================================================
 # Docker Build & Push to GHCR
 # =============================================================================
-# Triggers on version tags (v*). Builds and pushes three images:
+# Triggers on version tags (v*). Builds every shipped Dockerfile for amd64 and
+# arm64, then publishes matching immutable release tags:
 #   - ghcr.io/<owner>/ai-gateway
 #   - ghcr.io/<owner>/ai-gateway-web
-#   - ghcr.io/<owner>/islamic-content-service
+#   - ghcr.io/<owner>/ai-gateway-assistant-service
+#   - ghcr.io/<owner>/ai-gateway-knowledge-service
+#   - ghcr.io/<owner>/ai-gateway-mcp-docgen-server
+#   - ghcr.io/<owner>/ai-gateway-migrate
+#   - ghcr.io/<owner>/ai-gateway-code-interpreter
+#   - ghcr.io/<owner>/ai-gateway-docgen-sandbox
 # =============================================================================
 
 name: Docker Publish
@@ -33,13 +39,31 @@ jobs:
           - image: ai-gateway-web
             context: ./web
             dockerfile: ./web/Dockerfile
-          - image: islamic-content-service
-            context: ./apps/islamic-content-service
-            dockerfile: ./apps/islamic-content-service/Dockerfile
+          - image: ai-gateway-assistant-service
+            context: .
+            dockerfile: ./apps/assistant-service/Dockerfile
+          - image: ai-gateway-knowledge-service
+            context: .
+            dockerfile: ./apps/knowledge-service/Dockerfile
+          - image: ai-gateway-mcp-docgen-server
+            context: .
+            dockerfile: ./packages/mcp-docgen-server/Dockerfile
+          - image: ai-gateway-migrate
+            context: .
+            dockerfile: ./docker/migrate/Dockerfile
+          - image: ai-gateway-code-interpreter
+            context: ./docker/code-interpreter
+            dockerfile: ./docker/code-interpreter/Dockerfile
+          - image: ai-gateway-docgen-sandbox
+            context: .
+            dockerfile: ./docker/sandbox.Dockerfile
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -58,16 +82,21 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+            type=sha,format=long
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -118,6 +118,7 @@ REDIS_PASSWORD_VALUE="$(copy_env_or_default REDIS_PASSWORD "$(generate_secret)")
 JWT_SECRET_VALUE="$(copy_env_or_default JWT_SECRET "$(generate_secret)")"
 GATEWAY_ASSISTANT_SHARED_SECRET_VALUE="$(copy_env_or_default GATEWAY_ASSISTANT_SHARED_SECRET "$(generate_secret)")"
 DOCGEN_ARTIFACT_SIGN_KEY_VALUE="$(copy_env_or_default DOCGEN_ARTIFACT_SIGN_KEY "$(generate_secret)")"
+DEFAULT_USER_PASSWORD_VALUE="$(copy_env_or_default DEFAULT_USER_PASSWORD "$(generate_secret)")"
 
 choose_embedding_provider() {
     local configured
@@ -131,7 +132,7 @@ choose_embedding_provider() {
     elif [ -n "$(env_value SILICONFLOW_API_KEY)" ]; then
         printf 'siliconflow'
     else
-        printf 'gemini'
+        printf 'dashscope'
     fi
 }
 
@@ -145,32 +146,10 @@ choose_embedding_key() {
         return
     fi
 
-    case "$EMBEDDING_PROVIDER_VALUE" in
-        gemini)
-            if [ -n "$(env_value GEMINI_API_KEY)" ]; then
-                env_value GEMINI_API_KEY
-                return
-            fi
-            if [ -n "$(env_value GOOGLE_API_KEY)" ]; then
-                env_value GOOGLE_API_KEY
-                return
-            fi
-            ;;
-        dashscope)
-            if [ -n "$(env_value DASHSCOPE_API_KEY)" ]; then
-                env_value DASHSCOPE_API_KEY
-                return
-            fi
-            ;;
-        siliconflow)
-            if [ -n "$(env_value SILICONFLOW_API_KEY)" ]; then
-                env_value SILICONFLOW_API_KEY
-                return
-            fi
-            ;;
-    esac
-
-    printf 'change_me_embedding_provider_key'
+    # The default provider-specific key is injected separately. Keeping this
+    # field empty avoids duplicating the same model secret in the generated
+    # file while still allowing a dedicated embedding credential override.
+    printf ''
 }
 
 KB_EMBEDDING_API_KEY_VALUE="$(choose_embedding_key)"
@@ -195,6 +174,9 @@ value_for_key() {
         DOCGEN_ARTIFACT_SIGN_KEY)
             printf '%s' "$DOCGEN_ARTIFACT_SIGN_KEY_VALUE"
             ;;
+        DEFAULT_USER_PASSWORD)
+            printf '%s' "$DEFAULT_USER_PASSWORD_VALUE"
+            ;;
         INTERNAL_COMM_REDIS_URL)
             printf 'redis://:%s@redis:6379/3' "$REDIS_PASSWORD_VALUE"
             ;;
@@ -204,7 +186,7 @@ value_for_key() {
         KB_EMBEDDING_API_KEY)
             printf '%s' "$KB_EMBEDDING_API_KEY_VALUE"
             ;;
-        DASHSCOPE_API_KEY|DASHSCOPE_CHAT_API_KEY|DASHSCOPE_CHAT_BASE_URL|GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_API_BACKEND|GOOGLE_CHAT_BACKEND|VERTEX_API_KEY|VERTEX_CHAT_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|DEEPSEEK_API_KEY|TAVILY_API_KEY|SILICONFLOW_API_KEY|KB_EMBEDDING_MODEL|KB_EMBEDDING_DIMENSION|AUTH_ALLOWED_EMAIL_DOMAIN|DEFAULT_USER_PASSWORD|DOCGEN_LLM_MODEL)
+        DASHSCOPE_API_KEY|DASHSCOPE_CHAT_API_KEY|DASHSCOPE_CHAT_BASE_URL|GOOGLE_API_KEY|GEMINI_API_KEY|GOOGLE_API_BACKEND|GOOGLE_CHAT_BACKEND|VERTEX_API_KEY|VERTEX_CHAT_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|DEEPSEEK_API_KEY|TAVILY_API_KEY|SILICONFLOW_API_KEY|KB_EMBEDDING_MODEL|KB_EMBEDDING_DIMENSION|AUTH_ALLOWED_EMAIL_DOMAIN|DOCGEN_LLM_MODEL|GATEWAY_IMAGE|FRONTEND_IMAGE|ASSISTANT_IMAGE|KNOWLEDGE_IMAGE|DOCGEN_IMAGE|MIGRATE_IMAGE|POSTGRES_MEMORY_LIMIT|REDIS_MEMORY_LIMIT|REDIS_MAXMEMORY|QDRANT_MEMORY_LIMIT|GATEWAY_MEMORY_LIMIT|FRONTEND_MEMORY_LIMIT|KNOWLEDGE_MEMORY_LIMIT|ASSISTANT_MEMORY_LIMIT|DOCGEN_MEMORY_LIMIT|GATEWAY_TASK_WORKER_CONCURRENCY|GATEWAY_KNOWLEDGE__WORKER_CONCURRENCY)
             copy_env_or_default "$key" "$current"
             ;;
         *)
@@ -264,10 +246,10 @@ chmod 600 "$ENV_FILE"
 trap - EXIT
 
 log_success "Created env file: $ENV_FILE"
-log_info "Generated local secrets for: POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY"
+log_info "Generated local secrets for: POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY DEFAULT_USER_PASSWORD"
 
 COPIED_KEYS=""
-for key in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY DASHSCOPE_API_KEY DASHSCOPE_CHAT_API_KEY DASHSCOPE_CHAT_BASE_URL GOOGLE_API_KEY GEMINI_API_KEY GOOGLE_API_BACKEND GOOGLE_CHAT_BACKEND VERTEX_API_KEY VERTEX_CHAT_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY DEEPSEEK_API_KEY TAVILY_API_KEY SILICONFLOW_API_KEY KB_EMBEDDING_PROVIDER KB_EMBEDDING_API_KEY KB_EMBEDDING_MODEL KB_EMBEDDING_DIMENSION AUTH_ALLOWED_EMAIL_DOMAIN DEFAULT_USER_PASSWORD DOCGEN_LLM_MODEL; do
+for key in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET GATEWAY_ASSISTANT_SHARED_SECRET DOCGEN_ARTIFACT_SIGN_KEY DASHSCOPE_API_KEY DASHSCOPE_CHAT_API_KEY DASHSCOPE_CHAT_BASE_URL GOOGLE_API_KEY GEMINI_API_KEY GOOGLE_API_BACKEND GOOGLE_CHAT_BACKEND VERTEX_API_KEY VERTEX_CHAT_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY DEEPSEEK_API_KEY TAVILY_API_KEY SILICONFLOW_API_KEY KB_EMBEDDING_PROVIDER KB_EMBEDDING_API_KEY KB_EMBEDDING_MODEL KB_EMBEDDING_DIMENSION AUTH_ALLOWED_EMAIL_DOMAIN DEFAULT_USER_PASSWORD DOCGEN_LLM_MODEL GATEWAY_IMAGE FRONTEND_IMAGE ASSISTANT_IMAGE KNOWLEDGE_IMAGE DOCGEN_IMAGE MIGRATE_IMAGE; do
     if [ -n "$(env_value "$key")" ]; then
         COPIED_KEYS="${COPIED_KEYS}${COPIED_KEYS:+ }${key}"
     fi
@@ -278,8 +260,27 @@ if [ -n "$COPIED_KEYS" ]; then
     log_info "Copied user-supplied values from the current environment for: $unique_copied_keys"
 fi
 
-if is_placeholder "$KB_EMBEDDING_API_KEY_VALUE"; then
-    log_warn "Set KB_EMBEDDING_API_KEY before running full config validation."
+embedding_key_available=false
+case "$EMBEDDING_PROVIDER_VALUE" in
+    dashscope)
+        if [ -n "$KB_EMBEDDING_API_KEY_VALUE" ] || [ -n "$(env_value DASHSCOPE_API_KEY)" ]; then
+            embedding_key_available=true
+        fi
+        ;;
+    gemini)
+        if [ -n "$KB_EMBEDDING_API_KEY_VALUE" ] || [ -n "$(env_value GEMINI_API_KEY)" ] || [ -n "$(env_value GOOGLE_API_KEY)" ]; then
+            embedding_key_available=true
+        fi
+        ;;
+    siliconflow)
+        if [ -n "$KB_EMBEDDING_API_KEY_VALUE" ] || [ -n "$(env_value SILICONFLOW_API_KEY)" ]; then
+            embedding_key_available=true
+        fi
+        ;;
+esac
+
+if [ "$embedding_key_available" != true ]; then
+    log_warn "Set the selected model provider key before running full config validation."
 fi
 
 if ! grep -Eq '^(DASHSCOPE_CHAT_API_KEY|DASHSCOPE_API_KEY|GOOGLE_API_KEY|GEMINI_API_KEY|VERTEX_API_KEY|VERTEX_CHAT_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|DEEPSEEK_API_KEY)=[^[:space:]]+' "$ENV_FILE"; then

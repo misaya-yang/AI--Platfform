@@ -1,7 +1,9 @@
 # Development override for editing backend services without rebuilding images.
 #
-# Usage after the first image build:
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env up -d gateway assistant-service knowledge-service
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#     -f docker-compose.dev.yml --env-file .env up -d --build \
+#     gateway assistant-service knowledge-service
 #
 # The base compose file remains the production-like quickstart. This override
 # bind-mounts source and runs uvicorn with --reload for local iteration.
@@ -27,5 +29,5 @@ services:
     command:
       ["python", "-m", "uvicorn", "knowledge_service.main:app", "--host", "0.0.0.0", "--port", "8092", "--reload"]
     volumes:
-      - ./apps/knowledge-service/src/knowledge_service:/usr/local/lib/python3.12/site-packages/knowledge_service
-      - ./packages/ai-gateway-core/src/ai_gateway_core:/usr/local/lib/python3.12/site-packages/ai_gateway_core
+      - ./apps/knowledge-service/src/knowledge_service:/opt/venv/lib/python3.12/site-packages/knowledge_service
+      - ./packages/ai-gateway-core/src/ai_gateway_core:/opt/venv/lib/python3.12/site-packages/ai_gateway_core

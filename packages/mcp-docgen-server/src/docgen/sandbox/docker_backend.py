@@ -21,12 +21,14 @@ from typing import Iterable, Optional
 
 from .client import SandboxClient, SandboxResult, SandboxTimeout, SandboxError
 
+DEFAULT_SANDBOX_IMAGE = "ghcr.io/misaya-yang/ai-gateway-docgen-sandbox:2.0.0"
+
 
 class DockerSandbox(SandboxClient):
     def __init__(
         self,
         *,
-        image: str = "ai-gateway/docgen-sandbox:latest",
+        image: str = DEFAULT_SANDBOX_IMAGE,
         docker_bin: str = "docker",
         network: str = "none",
         memory_mb: int = 1024,

@@ -199,6 +199,29 @@ require_non_empty() {
     fi
 }
 
+require_versioned_image() {
+    local key="$1"
+    local default_value="${2:-}"
+    local value
+    value="$(env_value "$key")"
+    value="${value:-$default_value}"
+
+    if is_placeholder "$value"; then
+        fail "$key must be set to a published image reference."
+        return
+    fi
+
+    if [[ "$value" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+        return
+    fi
+
+    if [[ "$value" =~ :v?[0-9]+\.[0-9]+\.[0-9]+([._-][A-Za-z0-9][A-Za-z0-9._-]*)?$ ]]; then
+        return
+    fi
+
+    fail "$key must use a full semantic release tag (for example 2.0.0) or sha256 digest."
+}
+
 require_positive_int() {
     local key="$1"
     local default_value="${2:-}"
@@ -373,6 +396,28 @@ has_any_key() {
         fi
     done
     return 1
+}
+
+validate_embedding_provider_key() {
+    local provider="$1"
+
+    case "$provider" in
+        dashscope)
+            if ! has_any_key KB_EMBEDDING_API_KEY DASHSCOPE_API_KEY; then
+                fail "DashScope embeddings require DASHSCOPE_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+            fi
+            ;;
+        gemini)
+            if ! has_any_key KB_EMBEDDING_API_KEY GEMINI_API_KEY GOOGLE_API_KEY; then
+                fail "Gemini embeddings require GEMINI_API_KEY, GOOGLE_API_KEY, or a dedicated KB_EMBEDDING_API_KEY."
+            fi
+            ;;
+        siliconflow)
+            if ! has_any_key KB_EMBEDDING_API_KEY SILICONFLOW_API_KEY; then
+                fail "SiliconFlow embeddings require SILICONFLOW_API_KEY or a dedicated KB_EMBEDDING_API_KEY."
+            fi
+            ;;
+    esac
 }
 
 validate_ports() {
@@ -623,7 +668,7 @@ validate_config() {
 
     validate_ports
 
-    local embedding_provider="${KB_EMBEDDING_PROVIDER:-gemini}"
+    local embedding_provider="${KB_EMBEDDING_PROVIDER:-dashscope}"
     case "$embedding_provider" in
         gemini|dashscope|siliconflow)
             ;;
@@ -632,8 +677,15 @@ validate_config() {
             ;;
     esac
 
-    require_non_empty KB_EMBEDDING_API_KEY
+    validate_embedding_provider_key "$embedding_provider"
     require_positive_int KB_EMBEDDING_DIMENSION 1024
+
+    require_versioned_image GATEWAY_IMAGE "ghcr.io/misaya-yang/ai-gateway:2.0.0"
+    require_versioned_image FRONTEND_IMAGE "ghcr.io/misaya-yang/ai-gateway-web:2.0.0"
+    require_versioned_image ASSISTANT_IMAGE "ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0"
+    require_versioned_image KNOWLEDGE_IMAGE "ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0"
+    require_versioned_image DOCGEN_IMAGE "ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0"
+    require_versioned_image MIGRATE_IMAGE "ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0"
 
     if ! has_any_key DASHSCOPE_CHAT_API_KEY DASHSCOPE_API_KEY; then
         fail "Set a usable Qwen/DashScope chat API key: DASHSCOPE_CHAT_API_KEY or DASHSCOPE_API_KEY. OpenAI/Google keys are optional fallback keys and do not satisfy this project's default chat readiness gate."
@@ -677,8 +729,13 @@ validate_example_config() {
         MCP_DOCGEN_SERVICE_URL
         DOCGEN_PUBLIC_URL
         DOCGEN_ARTIFACT_SIGN_KEY
+        GATEWAY_IMAGE
+        FRONTEND_IMAGE
+        ASSISTANT_IMAGE
+        KNOWLEDGE_IMAGE
+        DOCGEN_IMAGE
+        MIGRATE_IMAGE
         KB_EMBEDDING_PROVIDER
-        KB_EMBEDDING_API_KEY
         KB_EMBEDDING_MODEL
         KB_EMBEDDING_DIMENSION
         KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
@@ -694,6 +751,7 @@ validate_example_config() {
         OPENAI_API_KEY
         ANTHROPIC_API_KEY
         DEEPSEEK_API_KEY
+        KB_EMBEDDING_API_KEY
     )
     local key
 
@@ -726,7 +784,7 @@ validate_example_config() {
     require_cors_origins KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON
     require_cors_origins ASSISTANT_CORS_ALLOW_ORIGINS_JSON
 
-    local embedding_provider="${KB_EMBEDDING_PROVIDER:-gemini}"
+    local embedding_provider="${KB_EMBEDDING_PROVIDER:-dashscope}"
     case "$embedding_provider" in
         gemini|dashscope|siliconflow)
             ;;
@@ -734,6 +792,10 @@ validate_example_config() {
             fail "KB_EMBEDDING_PROVIDER must be one of: gemini, dashscope, siliconflow."
             ;;
     esac
+
+    for key in GATEWAY_IMAGE FRONTEND_IMAGE ASSISTANT_IMAGE KNOWLEDGE_IMAGE DOCGEN_IMAGE MIGRATE_IMAGE; do
+        require_versioned_image "$key"
+    done
 
     validate_ports
     validate_compose_config

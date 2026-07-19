@@ -1,0 +1,71 @@
+# Source-build override for maintainers and contributors.
+#
+# The base docker-compose.yml intentionally contains no build contexts so a
+# normal open-source quickstart pulls published, versioned images. Include this
+# file explicitly when changing source code:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#     --env-file .env up -d --build
+
+services:
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/migrate/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        NODE_BASE_IMAGE: "${NODE_BASE_IMAGE:-node:22-alpine3.21}"
+        NGINX_BASE_IMAGE: "${NGINX_BASE_IMAGE:-nginx:1.27-alpine}"
+        NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"
+        VITE_API_URL: ""
+        VITE_API_BASE_URL: ""
+        VITE_AUTH_EMAIL_DOMAIN: "${VITE_AUTH_EMAIL_DOMAIN:-${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
+        VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
+
+  knowledge-service:
+    build:
+      context: .
+      dockerfile: apps/knowledge-service/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
+
+  assistant-service:
+    build:
+      context: .
+      dockerfile: apps/assistant-service/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: "${PYTHON_BASE_IMAGE:-python:3.12-slim-bookworm}"
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"
+
+  mcp-docgen-server:
+    build:
+      context: .
+      dockerfile: packages/mcp-docgen-server/Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: "${DOCGEN_PYTHON_BASE_IMAGE:-python:3.13-slim-bookworm}"
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-https://deb.debian.org}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
+        PIP_TRUSTED_HOST: "${PIP_TRUSTED_HOST:-}"

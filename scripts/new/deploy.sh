@@ -10,7 +10,7 @@
 # Options:
 #   --build      Rebuild Docker images
 #   --cn         Use China mirrors (implies --build)
-#   --pull       Pull latest base images before build
+#   --pull       Pull configured versioned images before deploy/build
 #   --infra      Deploy infrastructure only (postgres, redis, qdrant)
 #   --app        Deploy application services only (gateway, frontend, assistant,
 #                knowledge, docgen)
@@ -79,7 +79,16 @@ else
     "$SCRIPT_DIR/validate-env.sh" --env "$ENV_FILE" --config-only
 fi
 
-COMPOSE_CMD=$(get_compose_cmd)
+read -r -a COMPOSE_CMD <<< "$(get_compose_cmd)"
+COMPOSE_FILES=(-f docker-compose.yml)
+if [ "$BUILD" = true ]; then
+    COMPOSE_FILES+=(-f docker-compose.build.yml)
+fi
+
+compose() {
+    "${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" --env-file "$ENV_FILE" "$@"
+}
+
 cd "$PROJECT_ROOT"
 
 INFRA_SERVICES="postgres redis qdrant"
@@ -96,22 +105,28 @@ elif [ "$APP_ONLY" = true ]; then
 fi
 
 # -- Pull base images --------------------------------------------------------
-if [ "$PULL" = true ]; then
-    log_step "Pulling latest base images"
+if [ "$PULL" = true ] && [ "$BUILD" != true ]; then
+    log_step "Pulling configured versioned images"
     # shellcheck disable=SC2086
-    $COMPOSE_CMD --env-file "$ENV_FILE" pull $SERVICES
+    compose pull $SERVICES
 fi
 
 # -- Build if requested ------------------------------------------------------
 if [ "$BUILD" = true ]; then
     log_step "Building Docker images"
-    BUILD_ARGS=""
+    BUILD_ARGS=()
+    if [ "$PULL" = true ]; then
+        BUILD_ARGS+=(--pull)
+    fi
     if [ "$USE_CN_MIRROR" = true ]; then
         log_info "Using China mirrors (PyPI + NPM)"
-        BUILD_ARGS="--build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn --build-arg NPM_REGISTRY=https://registry.npmmirror.com"
+        export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+        export PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+        export NPM_REGISTRY=https://registry.npmmirror.com
+        export DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn
     fi
     # shellcheck disable=SC2086
-    $COMPOSE_CMD --env-file "$ENV_FILE" build $BUILD_ARGS $SERVICES
+    compose build "${BUILD_ARGS[@]}" $SERVICES
 fi
 
 # The shell migration runner is the schema owner. Stop app services first so a
@@ -120,10 +135,10 @@ if [ "$INFRA_ONLY" != true ]; then
     log_step "Stopping application services before migrations"
     if [ "$APP_ONLY" = true ]; then
         # shellcheck disable=SC2086
-        $COMPOSE_CMD --env-file "$ENV_FILE" stop $SERVICES >/dev/null || true
+        compose stop $SERVICES >/dev/null || true
     else
         # shellcheck disable=SC2086
-        $COMPOSE_CMD --env-file "$ENV_FILE" stop $FULL_APP_SERVICES >/dev/null || true
+        compose stop $FULL_APP_SERVICES >/dev/null || true
     fi
 fi
 
@@ -139,7 +154,7 @@ fi
 log_step "Starting services"
 if [ -n "$START_SERVICES" ]; then
     # shellcheck disable=SC2086
-    $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $START_SERVICES
+    compose up -d --remove-orphans $START_SERVICES
 else
     log_info "Application services will start after migrations"
 fi
@@ -166,10 +181,10 @@ if [ "$INFRA_ONLY" != true ]; then
     log_step "Starting application services"
     if [ "$APP_ONLY" = true ]; then
         # shellcheck disable=SC2086
-        $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $SERVICES
+        compose up -d --remove-orphans $SERVICES
     else
         # shellcheck disable=SC2086
-        $COMPOSE_CMD --env-file "$ENV_FILE" up -d --remove-orphans $FULL_APP_SERVICES
+        compose up -d --remove-orphans $FULL_APP_SERVICES
     fi
 fi
 
@@ -190,7 +205,7 @@ fi
 
 # -- Summary -----------------------------------------------------------------
 log_step "Deployment complete"
-$COMPOSE_CMD --env-file "$ENV_FILE" ps
+compose ps
 echo ""
 log_success "AI Gateway is running"
 echo ""

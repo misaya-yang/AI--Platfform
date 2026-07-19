@@ -50,6 +50,9 @@ load_env
 DEV_PG_CONTAINER="${POSTGRES_CONTAINER:-ai-gateway-postgres}"
 DEV_REDIS_CONTAINER="${REDIS_CONTAINER:-ai-gateway-redis}"
 DEV_QDRANT_CONTAINER="${QDRANT_CONTAINER:-ai-gateway-qdrant}"
+DEV_POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
+DEV_REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+DEV_QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}"
 
 # Parse DSN if available, otherwise use env vars
 if [[ "${GATEWAY_DATABASE__DSN:-}" =~ postgresql://([^:]+):([^@]+)@([^:]+):([0-9]+)/(.+) ]]; then
@@ -93,6 +96,7 @@ container_exists()  { docker ps -a --format '{{.Names}}' | grep -q "^$1$"; }
 ensure_container() {
     local name="$1"; shift
     local image="$1"; shift
+    local current_image
     # Remaining args are docker run flags, optionally followed by "--" and
     # the container command. Docker requires the image before the command.
     local run_args=()
@@ -118,6 +122,11 @@ ensure_container() {
     fi
 
     if container_exists "$name"; then
+        current_image="$(docker inspect -f '{{.Config.Image}}' "$name")"
+        if [ "$current_image" != "$image" ]; then
+            log_error "$name uses $current_image but this checkout requires $image. Run --reset explicitly to recreate it."
+            return 1
+        fi
         docker start "$name" >/dev/null
     else
         if [ "${#command_args[@]}" -gt 0 ]; then
@@ -146,17 +155,21 @@ start_containers() {
 
     log_step "Starting dev containers"
 
-    ensure_container "$DEV_PG_CONTAINER" "postgres:16-alpine" \
+    ensure_container "$DEV_PG_CONTAINER" "$DEV_POSTGRES_IMAGE" \
+        --memory "${POSTGRES_MEMORY_LIMIT:-384m}" \
         -e POSTGRES_USER="$PG_USER" \
         -e POSTGRES_PASSWORD="$PG_PASS" \
         -e POSTGRES_DB="$PG_DB" \
         -p "${PG_PORT}:5432"
 
-    ensure_container "$DEV_REDIS_CONTAINER" "redis:7-alpine" \
+    ensure_container "$DEV_REDIS_CONTAINER" "$DEV_REDIS_IMAGE" \
+        --memory "${REDIS_MEMORY_LIMIT:-256m}" \
         -p "${REDIS_DEV_PORT}:6379" \
-        -- redis-server --requirepass "$REDIS_PASS"
+        -- redis-server --requirepass "$REDIS_PASS" \
+            --maxmemory "${REDIS_MAXMEMORY:-192mb}" --maxmemory-policy allkeys-lru
 
-    ensure_container "$DEV_QDRANT_CONTAINER" "qdrant/qdrant:latest" \
+    ensure_container "$DEV_QDRANT_CONTAINER" "$DEV_QDRANT_IMAGE" \
+        --memory "${QDRANT_MEMORY_LIMIT:-384m}" \
         -p "${QDRANT_DEV_PORT}:6333" \
         -p "${QDRANT_GRPC_DEV_PORT}:6334"
 }
@@ -209,6 +222,7 @@ show_status() {
 
 # -- Execute action ----------------------------------------------------------
 require_docker
+assert_compose_owner
 
 case $ACTION in
     stop)

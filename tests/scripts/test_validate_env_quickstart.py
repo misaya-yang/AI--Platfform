@@ -125,9 +125,18 @@ def _run_validate_env(
 def test_validate_env_accepts_documented_local_bootstrap_password(tmp_path: Path) -> None:
     secret = secrets.token_hex(32)
     chat_key = "test-chat-key"
+    env_text = _valid_env_text(
+        secret=secret,
+        chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
+    )
+    env_text = _set_env_value(
+        env_text,
+        "DEFAULT_USER_PASSWORD",
+        "ChangeMe-Admin-2026!",
+    )
     result = _run_validate_env(
         tmp_path,
-        _valid_env_text(secret=secret, chat_assignment=f"DASHSCOPE_API_KEY={chat_key}"),
+        env_text,
         args=["--config-only"],
     )
 
@@ -172,6 +181,33 @@ def test_validate_env_config_still_rejects_committed_example_for_release(
     assert "REDIS_PASSWORD must be set to a non-placeholder secret" in output
     assert "Example configuration validation passed" not in output
     assert "change_me_generate_with_openssl" not in output
+
+
+def test_validate_env_rejects_non_release_application_image_tag(
+    tmp_path: Path,
+) -> None:
+    secret = secrets.token_hex(32)
+    chat_key = "test-chat-key"
+    env_text = _valid_env_text(
+        secret=secret,
+        chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
+    )
+    env_text = _set_env_value(
+        env_text,
+        "GATEWAY_IMAGE",
+        "ghcr.io/misaya-yang/ai-gateway:nightly",
+    )
+
+    result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert (
+        "GATEWAY_IMAGE must use a full semantic release tag "
+        "(for example 2.0.0) or sha256 digest."
+    ) in output
+    assert secret not in output
+    assert chat_key not in output
 
 
 def test_validate_env_example_mode_requires_public_env_shape(tmp_path: Path) -> None:
@@ -416,11 +452,11 @@ def test_validate_env_rejects_localhost_cors_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
         "DOCGEN_PUBLIC_URL",
-        "https://docs.hejaz.com.au",
+        "https://docs.myapp.test",
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -499,21 +535,21 @@ def test_validate_env_rejects_http_cors_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
         "DOCGEN_PUBLIC_URL",
-        "https://docs.hejaz.com.au",
+        "https://docs.myapp.test",
     )
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["http://ai.hejaz.com.au"]',
+        '["http://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["http://ai.hejaz.com.au"]',
+        '["http://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -541,22 +577,22 @@ def test_validate_env_accepts_explicit_https_cors_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
         "DOCGEN_PUBLIC_URL",
-        "https://docs.hejaz.com.au",
+        "https://docs.myapp.test",
     )
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -577,18 +613,18 @@ def test_validate_env_rejects_frontend_auth_domain_mismatch_for_non_local_auth_d
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "example.com")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.hejaz.com.au")
+    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -612,19 +648,19 @@ def test_validate_env_rejects_example_support_email_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(env_text, "VITE_SUPPORT_EMAIL", "admin@example.com")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.hejaz.com.au")
+    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -648,16 +684,16 @@ def test_validate_env_rejects_local_docgen_public_url_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -681,21 +717,21 @@ def test_validate_env_rejects_http_docgen_public_url_for_non_local_auth_domain(
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
     env_text = _set_env_value(
         env_text,
         "DOCGEN_PUBLIC_URL",
-        "http://docs.hejaz.com.au",
+        "http://docs.myapp.test",
     )
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -719,24 +755,24 @@ def test_validate_env_rejects_http_frontend_runtime_url_for_non_local_auth_domai
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.hejaz.com.au")
-    env_text = _set_env_value(env_text, "VITE_API_URL", "http://api.hejaz.com.au")
-    env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "http://api.hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
+    env_text = _set_env_value(env_text, "VITE_API_URL", "http://api.myapp.test")
+    env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "http://api.myapp.test")
     env_text = _set_env_value(
         env_text,
         "VITE_TELEMETRY_ENDPOINT",
-        "http://telemetry.hejaz.com.au/events",
+        "http://telemetry.myapp.test/events",
     )
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -768,8 +804,8 @@ def test_validate_env_rejects_local_frontend_runtime_url_for_non_local_auth_doma
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_URL", "http://localhost:8080")
     env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "https://[::1]:8080")
     env_text = _set_env_value(
@@ -780,12 +816,12 @@ def test_validate_env_rejects_local_frontend_runtime_url_for_non_local_auth_doma
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -821,21 +857,21 @@ def test_validate_env_accepts_same_origin_frontend_runtime_paths_for_non_local_a
         secret=secret,
         chat_assignment=f"DASHSCOPE_API_KEY={chat_key}",
     )
-    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "hejaz.com.au")
-    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.hejaz.com.au")
+    env_text = _set_env_value(env_text, "AUTH_ALLOWED_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "VITE_AUTH_EMAIL_DOMAIN", "myapp.test")
+    env_text = _set_env_value(env_text, "DOCGEN_PUBLIC_URL", "https://docs.myapp.test")
     env_text = _set_env_value(env_text, "VITE_API_URL", "/api")
     env_text = _set_env_value(env_text, "VITE_API_BASE_URL", "/api/v1")
     env_text = _set_env_value(env_text, "VITE_TELEMETRY_ENDPOINT", "/telemetry")
     env_text = _set_env_value(
         env_text,
         "KNOWLEDGE_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
     env_text = _set_env_value(
         env_text,
         "ASSISTANT_CORS_ALLOW_ORIGINS_JSON",
-        '["https://ai.hejaz.com.au"]',
+        '["https://ai.myapp.test"]',
     )
 
     result = _run_validate_env(tmp_path, env_text, args=["--config-only"])
@@ -908,7 +944,8 @@ def test_frontend_builder_matches_ci_toolchain() -> None:
     assert package["engines"]["node"] == "^22.12.0"
     assert package["packageManager"] == "pnpm@10.33.0"
     assert package["devDependencies"]["@types/node"].startswith("^22.")
-    assert "FROM node:22-alpine AS builder" in dockerfile
+    assert "ARG NODE_BASE_IMAGE=node:22-alpine3.21" in dockerfile
+    assert "FROM ${NODE_BASE_IMAGE} AS builder" in dockerfile
     assert "corepack prepare pnpm@10.33.0 --activate" in dockerfile
     assert "npm install -g pnpm@" not in dockerfile
 
@@ -1285,7 +1322,8 @@ def test_deploy_script_accepts_and_forwards_env_file() -> None:
     assert '--env-file "$ENV_FILE"' in script
     assert 'ENV_FILE="$ENV_FILE" "$(dirname "$0")/migrate.sh" --auto' in script
     assert 'validate-env.sh" --env "$ENV_FILE" --runtime' in script
-    assert '$COMPOSE_CMD --env-file "$ENV_FILE" ps' in script
+    assert '"${COMPOSE_CMD[@]}" "${COMPOSE_FILES[@]}" --env-file "$ENV_FILE"' in script
+    assert "compose ps" in script
     assert "\n$COMPOSE_CMD ps\n" not in script
 
 
@@ -1411,8 +1449,10 @@ def test_make_targets_forward_env_file() -> None:
     assert "ENV_FILE ?= .env" in makefile
     assert 'validate-env.sh --env "$(ENV_FILE)" --config-only' in makefile
     assert 'validate-env.sh --env "$(ENV_FILE)" --runtime' in makefile
-    assert '--env-file "$(ENV_FILE)" up -d --build --remove-orphans' in makefile
-    assert 'migrate.sh --env "$(ENV_FILE)" --auto' in makefile
+    assert 'init-env.sh --env "$(ENV_FILE)" --if-missing' in makefile
+    assert 'deploy.sh --env "$(ENV_FILE)" --pull' in makefile
+    assert 'deploy.sh --env "$(ENV_FILE)" --build' in makefile
+    assert "BUILD_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.build.yml" in makefile
     assert '@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/status.sh' in makefile
     assert '@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)"' in makefile
     assert '@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" $(ARGS)' in makefile
@@ -1425,19 +1465,27 @@ def test_make_targets_forward_env_file() -> None:
 
 def test_quickstart_runs_migrations_before_runtime_validation() -> None:
     makefile = Path("Makefile").read_text()
+    deploy = Path("scripts/new/deploy.sh").read_text()
 
-    config_idx = makefile.index('validate-env.sh --env "$(ENV_FILE)" --config-only')
-    compose_up_idx = makefile.index(
-        '--env-file "$(ENV_FILE)" up -d --build --remove-orphans'
+    quickstart = re.search(
+        r"^quickstart:.*?(?=^[a-zA-Z_-]+:)",
+        makefile,
+        flags=re.MULTILINE | re.DOTALL,
     )
-    postgres_wait_idx = makefile.index(
-        'wait_for_healthy "PostgreSQL" "check_postgres_health" 30'
+    assert quickstart
+    assert quickstart.group(0).index("init-env.sh") < quickstart.group(0).index(
+        "deploy.sh"
     )
-    migrate_idx = makefile.index('migrate.sh --env "$(ENV_FILE)" --auto')
-    runtime_idx = makefile.index('validate-env.sh --env "$(ENV_FILE)" --runtime')
+    assert "--pull" in quickstart.group(0)
+    assert "--build" not in quickstart.group(0)
 
-    assert config_idx < compose_up_idx < postgres_wait_idx < migrate_idx < runtime_idx
-    assert 'ENV_FILE="$(ENV_FILE)" bash -c' in makefile
+    config_idx = deploy.index('validate-env.sh" --env "$ENV_FILE" --config-only')
+    infra_up_idx = deploy.index("compose up -d --remove-orphans $START_SERVICES")
+    migrate_idx = deploy.index('migrate.sh" --auto')
+    app_up_idx = deploy.index("compose up -d --remove-orphans $FULL_APP_SERVICES")
+    runtime_idx = deploy.index('validate-env.sh" --env "$ENV_FILE" --runtime')
+
+    assert config_idx < infra_up_idx < migrate_idx < app_up_idx < runtime_idx
 
 
 def test_status_script_uses_selected_env_file_for_compose_ps(tmp_path: Path) -> None:

@@ -1,33 +1,39 @@
+# syntax=docker/dockerfile:1.7
 # =============================================================================
 # AI Gateway Backend - Multi-stage Dockerfile
 # =============================================================================
-# Build: docker build -t ai-gateway:latest .
-# Run:   docker run -p 8080:8080 --env-file .env ai-gateway:latest
+# Build: docker build -t ai-gateway:2.0.0 .
+# Run:   docker run -p 8080:8080 --env-file .env ai-gateway:2.0.0
 #
 # 国内构建（使用镜像源）:
-#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t ai-gateway:latest .
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t ai-gateway:2.0.0 .
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Stage 1: Builder - Install dependencies
 # -----------------------------------------------------------------------------
-FROM python:3.12-slim AS builder
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm
 
-WORKDIR /app
+FROM ${PYTHON_BASE_IMAGE} AS builder
 
-# Build arguments for mirror configuration
-ARG PIP_INDEX_URL=https://pypi.org/simple
-ARG PIP_TRUSTED_HOST=""
+ARG DEBIAN_MIRROR=https://deb.debian.org
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources && \
+    apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+
+# Mirror arguments are deliberately declared after the shared OS/venv layers,
+# so changing package indexes does not invalidate those expensive layers.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=""
+
+WORKDIR /app
 
 # Copy project metadata files needed for installation
 # Note: README.md is required by pyproject.toml for hatchling build
@@ -35,10 +41,11 @@ COPY pyproject.toml README.md ./
 
 # Install dependencies first (better layer caching)
 # Use mirror if specified via build args
-RUN pip install --no-cache-dir --upgrade pip \
+RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
+    pip install --upgrade pip \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} && \
-    pip install --no-cache-dir hatchling \
+    pip install hatchling \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
@@ -49,8 +56,9 @@ COPY src/ ./src/
 # ``ai-gateway-core`` as a dependency with ``{ workspace = true }`` — pip
 # doesn't understand uv workspaces so we install the local package first
 # from its path, then the outer gateway package picks it up as satisfied.
-COPY packages/ ./packages/
-RUN pip install --no-cache-dir ./packages/ai-gateway-core \
+COPY packages/ai-gateway-core/ ./packages/ai-gateway-core/
+RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
+    pip install ./packages/ai-gateway-core \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
@@ -63,10 +71,11 @@ RUN pip install --no-cache-dir ./packages/ai-gateway-core \
 # ModelRegistry replaced by a narrow ``GatewayModelMeta`` DB facade;
 # /generate-image + /image-task proxy to assistant-service). Gate
 # guarding the boundary:
-#   docker run ai-gateway:latest python -c "import assistant_service"
+#   docker run ai-gateway:2.0.0 python -c "import assistant_service"
 #   → ModuleNotFoundError  ✓
 
-RUN pip install --no-cache-dir ".[all]" \
+RUN --mount=type=cache,id=ai-gateway-pip,target=/root/.cache/pip,sharing=locked \
+    pip install ".[all]" \
     --index-url ${PIP_INDEX_URL} \
     ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}}
 
@@ -75,18 +84,28 @@ RUN pip install --no-cache-dir ".[all]" \
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Minimal production image
 # -----------------------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_BASE_IMAGE} AS runtime
+
+ARG APP_VERSION=2.0.0
+ARG VCS_REF=unknown
+ARG DEBIAN_MIRROR=https://deb.debian.org
+LABEL org.opencontainers.image.title="AI Gateway" \
+      org.opencontainers.image.source="https://github.com/misaya-yang/AI--Platfform" \
+      org.opencontainers.image.version="$APP_VERSION" \
+      org.opencontainers.image.revision="$VCS_REF"
 
 WORKDIR /app
 
-# Install runtime dependencies (including PaddleOCR native libs)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install only native libraries used by document and image processing.
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources && \
+    apt-get -o Acquire::Retries=5 update && \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     curl \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /bin/bash appuser
+    && useradd --uid 1000 --create-home --shell /bin/bash appuser
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -117,7 +136,7 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD curl -fsS http://localhost:8080/health || exit 1
 
 # Run the application
 CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]

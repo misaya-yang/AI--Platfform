@@ -2,7 +2,7 @@
 
 AI Gateway is an open-source AI application platform for gateway routing, a general AI assistant, and a knowledge-base service backed by PostgreSQL, Redis, and Qdrant.
 
-The default Docker setup is intended for a local first run: after you fill your own model keys and embedding key, `make quickstart` builds and starts the frontend, gateway, assistant service, knowledge service, document-generation MCP service, PostgreSQL, Redis, and Qdrant, then runs pending database migrations and runtime validation.
+The default Docker setup is intended for a local first run. `make quickstart` generates local infrastructure credentials, pulls versioned `linux/amd64` or `linux/arm64` application images, starts the complete stack, runs pending database migrations, and performs runtime validation. The default Qwen path needs only one user-supplied model secret: `DASHSCOPE_API_KEY`.
 
 ## Services
 
@@ -23,22 +23,35 @@ Prerequisites:
 
 - Docker and Docker Compose
 - `make`
-- At least one chat model API key
-- One embedding model API key for the knowledge base
+- About 4 GiB available to Docker for the complete low-memory profile
+- A DashScope API key for the default Qwen configuration
 
-1. Copy the example environment:
-
-```bash
-cp .env.example .env
-```
-
-2. Generate local secrets and replace every `change_me_*` value:
+1. Export the model key without committing it:
 
 ```bash
-openssl rand -hex 32
+export DASHSCOPE_API_KEY='your-key'
 ```
 
-Never commit your `.env` file. Only `.env.example` is intended to be committed.
+2. Pull the fixed release images and start the complete stack:
+
+```bash
+make quickstart
+```
+
+The initializer creates `.env` with mode `0600` and generates PostgreSQL,
+Redis, JWT, service-HMAC, artifact-signing, and bootstrap-admin secrets without
+printing their values. The same DashScope key is used for Qwen chat,
+`text-embedding-v4`, and document generation unless you explicitly configure a
+dedicated provider key. Never commit `.env`; only `.env.example` is public.
+
+Maintainers who need to test the current checkout instead of published images
+use the explicit source-build path. Builds are serialized by default to reduce
+peak memory:
+
+```bash
+make quickstart-build
+```
+
 If your populated env file lives outside this repository, pass it through
 `ENV_FILE` instead of copying it into the working tree:
 
@@ -48,34 +61,28 @@ make validate ENV_FILE=/path/to/.env
 make status ENV_FILE=/path/to/.env
 ```
 
-Required values:
+Generated automatically for local quickstart:
 
 - `POSTGRES_PASSWORD`
 - `REDIS_PASSWORD`
 - `JWT_SECRET`
 - `GATEWAY_ASSISTANT_SHARED_SECRET`
 - `DOCGEN_ARTIFACT_SIGN_KEY`
-- `AUTH_ALLOWED_EMAIL_DOMAIN`
-- `DEFAULT_USER_PASSWORD` (the example value matches the local bootstrap admin; rotate it before shared or non-local deployments)
-- At least one chat key: `DASHSCOPE_CHAT_API_KEY`, `DASHSCOPE_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `VERTEX_CHAT_API_KEY`, `VERTEX_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`
-- `KB_EMBEDDING_PROVIDER`: `gemini`, `dashscope`, or `siliconflow`
-- `KB_EMBEDDING_API_KEY`
-- `KB_EMBEDDING_MODEL`
-- `KB_EMBEDDING_DIMENSION`
+- `DEFAULT_USER_PASSWORD`
 
-3. Validate configuration before starting:
+Optional overrides remain available for custom providers, dedicated embedding
+credentials, ports, image references, and production scaling. Published image
+references use immutable `2.0.0` tags by default and can be replaced through
+`GATEWAY_IMAGE`, `FRONTEND_IMAGE`, `ASSISTANT_IMAGE`, `KNOWLEDGE_IMAGE`,
+`DOCGEN_IMAGE`, and `MIGRATE_IMAGE`.
+
+3. Validate an existing configuration without starting containers:
 
 ```bash
 make validate-config
 ```
 
-4. Build, start, run pending database migrations, and run runtime validation:
-
-```bash
-make quickstart
-```
-
-5. Open the app:
+4. Open the app:
 
 - Frontend: `http://localhost:8081`
 - API docs: `http://localhost:8080/docs`
@@ -92,8 +99,8 @@ make seed-demo-apply # load the records into the configured local database
 Run `make seed-demo` to preview the seeded routes and scope without writing to
 the database.
 
-The local bootstrap admin is `admin@example.com` with password `ChangeMe-Admin-2026!`.
-The validator allows that documented local bootstrap password but warns about it.
+The local bootstrap admin is `admin@example.com`; its generated password is
+stored only in the local `.env` file and is never logged.
 For non-local deployments, change `AUTH_ALLOWED_EMAIL_DOMAIN`, create your own
 administrator, and rotate the bootstrap password immediately.
 If `VITE_AUTH_EMAIL_DOMAIN` is set, keep it equal to
@@ -132,12 +139,13 @@ The tracked follow-up checklist lives in
 Lower-level deploy, migrate, backup, and setup-dev scripts also accept
 `--env FILE` when called directly.
 
-The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, failed Qdrant/service health checks, and failed gateway metrics scraping. The documented local bootstrap admin password is accepted for quickstart and reported as a warning.
+The validator intentionally does not print secret values. It fails fast on missing keys, placeholder values, weak secrets, moving application-image tags, duplicate ports, invalid embedding provider names, failed compose interpolation, failed authenticated PostgreSQL/Redis checks, failed Qdrant/service health checks, and failed gateway metrics scraping. The legacy documented local bootstrap password remains accepted for backward-compatible local environments and is reported as a warning.
 
 ## Development Without Rebuilding
 
-`make quickstart` builds the Docker images for the first local run. After that,
-backend code changes do not need a full image rebuild during development.
+`make quickstart` uses published images and never builds source. Use
+`make quickstart-build` once when working on this checkout. After that, backend
+code changes do not need a full image rebuild during development.
 
 Use source-mounted app services instead:
 
@@ -146,9 +154,10 @@ make dev-compose
 make dev-compose-logs
 ```
 
-This uses `docker-compose.dev.yml` to bind-mount the gateway, assistant-service,
-knowledge-service, and shared core package source into the existing containers
-and runs the Python services with `uvicorn --reload`. Rebuild only when
+This combines `docker-compose.build.yml` and `docker-compose.dev.yml` to
+bind-mount the gateway, assistant-service, knowledge-service, and shared core
+package source into the containers and runs the Python services with
+`uvicorn --reload`. Rebuild only when
 dependencies, Dockerfiles, or image-level system packages change.
 
 Frontend deployment config is runtime-injected. After the image is built once,

@@ -1,12 +1,14 @@
 # =============================================================================
 # AI Gateway - Production Docker Compose
 # =============================================================================
+# Default usage pulls published, versioned multi-architecture images. Source
+# builds are opt-in through docker-compose.build.yml (or `make quickstart-build`).
 # Usage:
-#   启动所有服务:  docker-compose up -d
-#   仅启动基础设施: docker-compose up -d postgres redis qdrant
-#   查看日志:       docker-compose logs -f gateway
-#   停止所有服务:   docker-compose stop
-#   清理数据卷:     docker-compose down -v
+#   Start all services:  docker compose --env-file .env up -d
+#   Build from source:   docker compose -f docker-compose.yml -f docker-compose.build.yml --env-file .env up -d --build
+#   Infrastructure only: docker compose --env-file .env up -d postgres redis qdrant
+#   View logs:           docker compose --env-file .env logs -f gateway
+#   Stop services:       docker compose --env-file .env stop
 # =============================================================================
 
 name: ai-gateway
@@ -28,7 +30,7 @@ services:
 
   # PostgreSQL - Primary Database
   postgres:
-    image: postgres:16-alpine
+    image: "${POSTGRES_IMAGE:-postgres:16-alpine}"
     container_name: ai-gateway-pg
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -51,10 +53,11 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-384m}"
 
   # Redis - Cache & Session Store
   redis:
-    image: redis:7-alpine
+    image: "${REDIS_IMAGE:-redis:7-alpine}"
     container_name: ai-gateway-redis
     environment:
       # Pass password to container for healthcheck access
@@ -63,7 +66,7 @@ services:
       redis-server
       --appendonly yes
       --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-      --maxmemory 512mb
+      --maxmemory ${REDIS_MAXMEMORY:-192mb}
       --maxmemory-policy allkeys-lru
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
@@ -77,10 +80,11 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    mem_limit: "${REDIS_MEMORY_LIMIT:-256m}"
 
   # Qdrant - Vector Database for Knowledge Base
   qdrant:
-    image: qdrant/qdrant:v1.18.2
+    image: "${QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}"
     container_name: ai-gateway-qdrant
     ports:
       - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
@@ -100,6 +104,7 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    mem_limit: "${QDRANT_MEMORY_LIMIT:-384m}"
 
   # ===========================================================================
   # Migration Job (Phase 6) — opt-in
@@ -117,10 +122,7 @@ services:
   # names, gateway's GATEWAY_DATABASE__AUTO_INIT can be set to false and
   # this job becomes the only schema authority.
   migrate:
-    build:
-      context: .
-      dockerfile: docker/migrate/Dockerfile
-    image: ai-gateway-migrate:${TAG:-latest}
+    image: "${MIGRATE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-migrate:2.0.0}"
     container_name: ai-gateway-migrate
     environment:
       DATABASE_URL: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-gateway}"
@@ -141,7 +143,7 @@ services:
   # operator opts in — prod sends to whatever OTLP endpoint
   # OTEL_EXPORTER_OTLP_ENDPOINT names.
   tempo:
-    image: grafana/tempo:2.5.0
+    image: "${TEMPO_IMAGE:-grafana/tempo:2.5.0}"
     container_name: ai-gateway-tempo
     command: ["-config.file=/etc/tempo.yaml"]
     volumes:
@@ -163,7 +165,7 @@ services:
   # One-shot volume permission initializer. Named volumes hide the permissions
   # baked into the image, so this must run before the non-root gateway process.
   gateway-init:
-    image: postgres:16-alpine
+    image: "${POSTGRES_IMAGE:-postgres:16-alpine}"
     container_name: ai-gateway-init
     user: "0:0"
     command: >
@@ -179,17 +181,14 @@ services:
 
   # AI Gateway Backend
   gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ai-gateway:${TAG:-latest}
+    image: "${GATEWAY_IMAGE:-ghcr.io/misaya-yang/ai-gateway:2.0.0}"
     container_name: ai-gateway-backend
     environment:
       <<: *container-proxy-env
       # Server
       GATEWAY_HOST: "0.0.0.0"
       GATEWAY_PORT: "8080"
-      GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-2}"
+      GATEWAY_TASK_WORKER_CONCURRENCY: "${GATEWAY_TASK_WORKER_CONCURRENCY:-1}"
 
       # Database
       GATEWAY_DATABASE__ENABLED: "true"
@@ -257,6 +256,12 @@ services:
       # value must be set on the assistant-service block. Both sides
       # load it via env_file in prod.
       ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
+      AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
+      AGENT_STUDIO_MANAGEMENT_ENABLED: "${AGENT_STUDIO_MANAGEMENT_ENABLED:-true}"
+      AGENT_STUDIO_PUBLISH_ENABLED: "${AGENT_STUDIO_PUBLISH_ENABLED:-true}"
+      AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
+      AGENT_STUDIO_SKILLS_ENABLED: "${AGENT_STUDIO_SKILLS_ENABLED:-true}"
+      ASSISTANT_E2E_STUB_LLM: "${ASSISTANT_E2E_STUB_LLM:-false}"
       KB_SERVICE_URL: "${KB_SERVICE_URL:-http://knowledge-service:8092}"
       KB_PROXY_CONNECT_TIMEOUT_SECONDS: "${KB_PROXY_CONNECT_TIMEOUT_SECONDS:-5}"
       KB_PROXY_READ_TIMEOUT_SECONDS: "${KB_PROXY_READ_TIMEOUT_SECONDS:-30}"
@@ -330,18 +335,12 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    mem_limit: "${GATEWAY_MEMORY_LIMIT:-512m}"
+    init: true
 
   # AI Gateway Frontend (Web Console)
   frontend:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-      args:
-        VITE_API_URL: ""
-        VITE_API_BASE_URL: ""
-        VITE_AUTH_EMAIL_DOMAIN: "${VITE_AUTH_EMAIL_DOMAIN:-${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
-        VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
-    image: ai-gateway-web:${TAG:-latest}
+    image: "${FRONTEND_IMAGE:-ghcr.io/misaya-yang/ai-gateway-web:2.0.0}"
     container_name: ai-gateway-frontend
     environment:
       VITE_API_URL: "${VITE_API_URL:-}"
@@ -350,6 +349,7 @@ services:
       VITE_SUPPORT_EMAIL: "${VITE_SUPPORT_EMAIL:-admin@${AUTH_ALLOWED_EMAIL_DOMAIN:-example.com}}"
       VITE_TELEMETRY_ENDPOINT: "${VITE_TELEMETRY_ENDPOINT:-}"
       VITE_SSE_DEBUG: "${VITE_SSE_DEBUG:-}"
+      VITE_AGENT_STUDIO_ENABLED: "${VITE_AGENT_STUDIO_ENABLED:-true}"
     ports:
       - "${FRONTEND_PORT:-8081}:80"
     networks:
@@ -363,6 +363,7 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    mem_limit: "${FRONTEND_MEMORY_LIMIT:-128m}"
 
   # ===========================================================================
   # Microservices
@@ -370,12 +371,7 @@ services:
 
   # Knowledge Base Service (KB CRUD + Retrieval)
   knowledge-service:
-    build:
-      # Build from repo root so the Dockerfile can COPY packages/
-      # (shared ai-gateway-core). Matches the assistant-service pattern.
-      context: .
-      dockerfile: apps/knowledge-service/Dockerfile
-    image: knowledge-service:${TAG:-latest}
+    image: "${KNOWLEDGE_IMAGE:-ghcr.io/misaya-yang/ai-gateway-knowledge-service:2.0.0}"
     container_name: ai-gateway-knowledge-service
     environment:
       <<: *container-proxy-env
@@ -386,14 +382,14 @@ services:
       KNOWLEDGE_REDIS__ENABLED: "true"
       KNOWLEDGE_REDIS__URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/2"
       KNOWLEDGE_QDRANT__URL: "http://qdrant:6333"
-      KNOWLEDGE_EMBEDDINGS__PROVIDER: "${KB_EMBEDDING_PROVIDER:-gemini}"
+      KNOWLEDGE_EMBEDDINGS__PROVIDER: "${KB_EMBEDDING_PROVIDER:-dashscope}"
       KNOWLEDGE_EMBEDDINGS__API_KEY: "${KB_EMBEDDING_API_KEY:-}"
       KNOWLEDGE_EMBEDDINGS__GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
       KNOWLEDGE_EMBEDDINGS__DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
       KNOWLEDGE_EMBEDDINGS__SILICONFLOW_API_KEY: "${SILICONFLOW_API_KEY:-}"
-      KNOWLEDGE_EMBEDDINGS__MODEL: "${KB_EMBEDDING_MODEL:-gemini-embedding-2-preview}"
+      KNOWLEDGE_EMBEDDINGS__MODEL: "${KB_EMBEDDING_MODEL:-text-embedding-v4}"
       KNOWLEDGE_EMBEDDINGS__DIMENSION: "${KB_EMBEDDING_DIMENSION:-1024}"
-      KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "${GATEWAY_KNOWLEDGE__WORKER_CONCURRENCY:-2}"
+      KNOWLEDGE_PROCESSING__WORKER_CONCURRENCY: "${GATEWAY_KNOWLEDGE__WORKER_CONCURRENCY:-1}"
       # Storage (S3)
       KNOWLEDGE_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-local}"
       KNOWLEDGE_STORAGE__LOCAL_BASE_PATH: "${KNOWLEDGE_STORAGE__LOCAL_BASE_PATH:-/app/data/files}"
@@ -442,16 +438,15 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+    mem_limit: "${KNOWLEDGE_MEMORY_LIMIT:-512m}"
+    init: true
 
   # ===========================================================================
   # Assistant Service (extracted microservice)
   # ===========================================================================
   assistant-service:
-    build:
-      context: .
-      dockerfile: apps/assistant-service/Dockerfile
     container_name: ai-gateway-assistant-service
-    image: assistant-service:${TAG:-latest}
+    image: "${ASSISTANT_IMAGE:-ghcr.io/misaya-yang/ai-gateway-assistant-service:2.0.0}"
     # Phase 5a: ``expose`` makes port 8093 reachable only on the docker
     # bridge network (other compose services). Public access is not
     # published to the host. See audit Finding H-4 + GATE G5a-6.
@@ -473,6 +468,11 @@ services:
       # gateway-secret middleware lets requests without an HMAC header
       # through; get_user_context still demands X-User-Id/X-Tenant-Id.
       ASSISTANT_APP__ALLOW_ANONYMOUS: "${ASSISTANT_APP__ALLOW_ANONYMOUS:-false}"
+      # Explicit local test transport; disabled by default and never calls a provider.
+      ASSISTANT_E2E_STUB_LLM: "${ASSISTANT_E2E_STUB_LLM:-false}"
+      AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
+      AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
+      AGENT_STUDIO_SKILLS_ENABLED: "${AGENT_STUDIO_SKILLS_ENABLED:-true}"
       # Shared HMAC for gateway↔assistant-service. Both services MUST
       # have the same value; a mismatch yields 401 at the middleware.
       GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
@@ -504,9 +504,24 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
       TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
+      # Same storage contract as Gateway so signed Agent attachment handles
+      # resolve in both local-volume and shared object-storage deployments.
+      GATEWAY_STORAGE__BACKEND: "${GATEWAY_STORAGE__BACKEND:-local}"
+      GATEWAY_STORAGE__LOCAL_BASE_PATH: "${GATEWAY_STORAGE__LOCAL_BASE_PATH:-/app/data/images}"
+      GATEWAY_STORAGE__S3__BUCKET: "${GATEWAY_STORAGE__S3__BUCKET:-${S3_BUCKET:-}}"
+      GATEWAY_STORAGE__S3__REGION: "${GATEWAY_STORAGE__S3__REGION:-us-east-1}"
+      GATEWAY_STORAGE__S3__ACCESS_KEY: "${GATEWAY_STORAGE__S3__ACCESS_KEY:-}"
+      GATEWAY_STORAGE__S3__SECRET_KEY: "${GATEWAY_STORAGE__S3__SECRET_KEY:-}"
+      GATEWAY_STORAGE__S3__ENDPOINT_URL: "${GATEWAY_STORAGE__S3__ENDPOINT_URL:-}"
+      GATEWAY_STORAGE__URL_EXPIRY_SECONDS: "${GATEWAY_STORAGE__URL_EXPIRY_SECONDS:-3600}"
+      GATEWAY_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
+    volumes:
+      - gateway-data:/app/data
     networks:
       - ai-gateway-net
     depends_on:
+      gateway-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -520,6 +535,8 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    mem_limit: "${ASSISTANT_MEMORY_LIMIT:-640m}"
+    init: true
 
   # ---------------------------------------------------------------------------
   # mcp-docgen-server
@@ -528,11 +545,8 @@ services:
   # poppler) don't bloat the gateway image. Reachable only on the internal
   # network — the gateway's MCPClient connects via http://mcp-docgen-server:8765.
   mcp-docgen-server:
-    build:
-      context: .
-      dockerfile: packages/mcp-docgen-server/Dockerfile
     container_name: ai-gateway-mcp-docgen-server
-    image: mcp-docgen-server:${TAG:-latest}
+    image: "${DOCGEN_IMAGE:-ghcr.io/misaya-yang/ai-gateway-mcp-docgen-server:2.0.0}"
     environment:
       <<: *container-proxy-env
       MCP_TRANSPORT: http
@@ -571,6 +585,8 @@ services:
       retries: 3
       start_period: 20s
     restart: unless-stopped
+    mem_limit: "${DOCGEN_MEMORY_LIMIT:-512m}"
+    init: true
 
 # =============================================================================
 # Networks
