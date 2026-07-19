@@ -3,6 +3,8 @@ import { initReactI18next } from "react-i18next";
 
 import evalEnUS from "./locales/eval-en-US.json";
 import evalZhCN from "./locales/eval-zh-CN.json";
+import agentsEnUS from "./locales/agents-en-US.json";
+import agentsZhCN from "./locales/agents-zh-CN.json";
 import zhCN from "./locales/zh-CN.json";
 import enUS from "./locales/en-US.json";
 
@@ -27,10 +29,10 @@ export function resolveAppLocale(input?: string): AppLocale {
 
 const resources = {
   "zh-CN": {
-    translation: { ...zhCN, eval: evalZhCN },
+    translation: { ...zhCN, eval: evalZhCN, agents: agentsZhCN },
   },
   "en-US": {
-    translation: { ...enUS, eval: evalEnUS },
+    translation: { ...enUS, eval: evalEnUS, agents: agentsEnUS },
   },
 };
 

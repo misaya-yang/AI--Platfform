@@ -29,15 +29,17 @@ async function readJson(filePath) {
 
 async function main() {
   const baseDir = path.resolve("src/i18n/locales");
-  const [en, zh, evalEn, evalZh] = await Promise.all([
+  const [en, zh, evalEn, evalZh, agentsEn, agentsZh] = await Promise.all([
     readJson(path.join(baseDir, "en-US.json")),
     readJson(path.join(baseDir, "zh-CN.json")),
     readJson(path.join(baseDir, "eval-en-US.json")),
     readJson(path.join(baseDir, "eval-zh-CN.json")),
+    readJson(path.join(baseDir, "agents-en-US.json")),
+    readJson(path.join(baseDir, "agents-zh-CN.json")),
   ]);
 
-  const enKeys = flatten({ ...en, eval: evalEn });
-  const zhKeys = flatten({ ...zh, eval: evalZh });
+  const enKeys = flatten({ ...en, eval: evalEn, agents: agentsEn });
+  const zhKeys = flatten({ ...zh, eval: evalZh, agents: agentsZh });
 
   const missingInZh = difference(enKeys, zhKeys);
   const missingInEn = difference(zhKeys, enKeys);

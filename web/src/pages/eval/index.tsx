@@ -377,6 +377,7 @@ export function EvalPage() {
   const kbDatasetFilter = searchParams.get("dataset_id") || "";
   const requestedWorkbenchTab = searchParams.get("tab");
   const requestedTraceFamily = searchParams.get("family");
+  const requestedTraceId = searchParams.get("trace_id") || undefined;
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState(
     ["overview", "runs", "traces", "assets", "gates"].includes(requestedWorkbenchTab || "")
       ? requestedWorkbenchTab!
@@ -449,10 +450,14 @@ export function EvalPage() {
       setSelectedTraceId(undefined);
       return;
     }
+    if (requestedTraceId && visibleTraces.some((trace) => trace.trace_id === requestedTraceId)) {
+      setSelectedTraceId(requestedTraceId);
+      return;
+    }
     if (!selectedTraceId || !visibleTraces.some((trace) => trace.trace_id === selectedTraceId)) {
       setSelectedTraceId(visibleTraces[0].trace_id);
     }
-  }, [pinnedTraceId, selectedTraceId, visibleTraces]);
+  }, [pinnedTraceId, requestedTraceId, selectedTraceId, visibleTraces]);
 
   const datasetsQuery = useQuery({
     queryKey: ["eval", "datasets"],

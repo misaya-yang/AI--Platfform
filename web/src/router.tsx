@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "@/layouts/AppLayout";
 import { ProtectedRoute, ForbiddenPage } from "@/components/ProtectedRoute";
 import { NotFoundPage } from "@/components/SystemStatusPage";
+import { isAgentStudioEnabled } from "@/config/runtime";
 
 function lazyNamed<TModule, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -35,6 +36,11 @@ const AssistantPage = lazyNamed(() => import("@/pages/assistant"), "AssistantPag
 const ExamsPage = lazyNamed(() => import("@/pages/exams"), "ExamsPage");
 const ExamDetailPage = lazyNamed(() => import("@/pages/exams/ExamDetailPage"), "ExamDetailPage");
 const EvalPage = lazyNamed(() => import("@/pages/eval"), "EvalPage");
+const AgentListPage = lazyNamed(() => import("@/pages/agents"), "AgentListPage");
+const AgentCreatePage = lazyNamed(() => import("@/pages/agents"), "AgentCreatePage");
+const AgentStudioPage = lazyNamed(() => import("@/pages/agents"), "AgentStudioPage");
+const AgentAnalyticsPage = lazyNamed(() => import("@/pages/agents"), "AgentAnalyticsPage");
+const AgentHostedPage = lazyNamed(() => import("@/pages/agent-public"), "AgentHostedPage");
 const ConfluenceConnectionListPage = lazyNamed(
   () => import("@/pages/confluence"),
   "ConnectionListPage"
@@ -60,6 +66,10 @@ function RouteFallback() {
   );
 }
 
+function AgentStudioFeature({ children }: { children: React.ReactNode }) {
+  return isAgentStudioEnabled() ? <>{children}</> : <NotFoundPage />;
+}
+
 export function AppRouter() {
   return (
     <Suspense fallback={<RouteFallback />}>
@@ -68,6 +78,7 @@ export function AppRouter() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/403" element={<ForbiddenPage />} />
         <Route path="/share/:shareId" element={<SharePage />} />
+        <Route path="/a/:publicId" element={<AgentHostedPage />} />
         <Route path="/quiz/:shareCode" element={<QuizPage />} />
 
         {/* Protected routes - wrapped with single ProtectedRoute at layout level */}
@@ -138,6 +149,22 @@ export function AppRouter() {
                 <AssistantPage />
               </ProtectedRoute>
             }
+          />
+          <Route
+            path="/agents"
+            element={<AgentStudioFeature><AgentListPage /></AgentStudioFeature>}
+          />
+          <Route
+            path="/agents/new"
+            element={<AgentStudioFeature><AgentCreatePage /></AgentStudioFeature>}
+          />
+          <Route
+            path="/agents/:agentId/analytics"
+            element={<AgentStudioFeature><AgentAnalyticsPage /></AgentStudioFeature>}
+          />
+          <Route
+            path="/agents/:agentId/*"
+            element={<AgentStudioFeature><AgentStudioPage /></AgentStudioFeature>}
           />
           <Route
             path="/eval"

@@ -1,17 +1,21 @@
+# syntax=docker/dockerfile:1.7
 # =============================================================================
 # AI Gateway Frontend - Multi-stage Dockerfile
 # =============================================================================
-# Build: docker build -t ai-gateway-web:latest .
-# Run:   docker run -p 80:80 ai-gateway-web:latest
+# Build: docker build -t ai-gateway-web:2.0.0 .
+# Run:   docker run -p 80:80 ai-gateway-web:2.0.0
 #
 # 国内构建（使用镜像源）:
-#   docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t ai-gateway-web:latest .
+#   docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t ai-gateway-web:2.0.0 .
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Stage 1: Builder - Build the React application
 # -----------------------------------------------------------------------------
-FROM node:22-alpine AS builder
+ARG NODE_BASE_IMAGE=node:22-alpine3.21
+ARG NGINX_BASE_IMAGE=nginx:1.27-alpine
+
+FROM ${NODE_BASE_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -51,7 +55,14 @@ RUN pnpm build
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Nginx serving static files
 # -----------------------------------------------------------------------------
-FROM nginx:alpine AS runtime
+FROM ${NGINX_BASE_IMAGE} AS runtime
+
+ARG APP_VERSION=2.0.0
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="AI Gateway Web" \
+      org.opencontainers.image.source="https://github.com/misaya-yang/AI--Platfform" \
+      org.opencontainers.image.version="$APP_VERSION" \
+      org.opencontainers.image.revision="$VCS_REF"
 
 # Copy custom nginx configuration
 COPY nginx.conf /etc/nginx/nginx.conf

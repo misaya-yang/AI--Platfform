@@ -22,6 +22,14 @@ spec:
     - host: {{ .Values.ingress.host }}
       http:
         paths:
+          # Publication-specific Embed document -> gateway dynamic headers
+          - path: /embed/agents
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "ai-gateway.fullname" . }}-gateway
+                port:
+                  number: 8080
           # API routes -> gateway
           - path: /api
             pathType: Prefix

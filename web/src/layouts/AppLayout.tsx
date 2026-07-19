@@ -24,6 +24,7 @@ import {
   Monitor,
   Menu,
   Lock,
+  Boxes,
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -35,6 +36,7 @@ import { PasswordChangeModal } from "@/components/PasswordChangeModal";
 import { ProfileModal } from "@/components/ProfileModal";
 import { Logo } from "@/components/Logo";
 import { languages } from "@/i18n";
+import { isAgentStudioEnabled } from "@/config/runtime";
 
 const { Sider, Content, Header } = Layout;
 const { Text } = Typography;
@@ -59,6 +61,7 @@ const navItems: NavItem[] = [
   { key: "/knowledge", labelKey: "nav.knowledge", icon: BookOpen, permission: "knowledge:dataset:view" },
   { key: "/playground", labelKey: "nav.playground", icon: Zap, permission: "conversation:playground:access" },
   { key: "/assistant", labelKey: "nav.assistant", icon: Bot, permission: "conversation:playground:access" },
+  { key: "/agents", labelKey: "nav.agents", icon: Boxes, permission: null },
   { key: "/eval", labelKey: "nav.eval", icon: ChartLine, permission: "console:eval:view" },
   { key: "/tasks", labelKey: "nav.tasks", icon: ListTodo, permission: "console:dashboard:view" },
   { key: "/exams", labelKey: "nav.exams", icon: ClipboardCheck, permission: "console:dashboard:view" },
@@ -93,6 +96,12 @@ function getPageChrome(pathname: string) {
     },
     playground: { titleKey: "nav.playground", titleFallback: "Playground" },
     assistant: { titleKey: "nav.assistant", titleFallback: "AI Assistant" },
+    agents: {
+      titleKey: "nav.agents",
+      titleFallback: "Agents",
+      subtitleKey: "agents.list.subtitle",
+      subtitleFallback: "Create, configure, test, and publish reusable agents.",
+    },
     eval: {
       titleKey: "eval.title",
       titleFallback: "Eval Console",
@@ -185,7 +194,10 @@ export function AppLayout() {
     return () => window.clearTimeout(timer);
   }, [forcePasswordChange]);
 
-  const filteredNavItems = navItems.filter(item => item.permission === null || hasPermission(item.permission));
+  const filteredNavItems = navItems.filter(item =>
+    (item.key !== "/agents" || isAgentStudioEnabled())
+    && (item.permission === null || hasPermission(item.permission))
+  );
   // model_tester is playground-only — suppress assistant/tasks even when
   // they share the same underlying permission or have no permission gate.
   const userRoles = user?.roles || [];

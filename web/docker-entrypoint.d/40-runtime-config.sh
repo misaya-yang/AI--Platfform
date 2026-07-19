@@ -16,6 +16,7 @@ window.__AI_GATEWAY_RUNTIME_CONFIG__ = {
   authEmailDomain: "$(js_escape "$AUTH_EMAIL_DOMAIN")",
   supportEmail: "$(js_escape "$SUPPORT_EMAIL")",
   telemetryEndpoint: "$(js_escape "${VITE_TELEMETRY_ENDPOINT:-}")",
-  sseDebug: "$(js_escape "${VITE_SSE_DEBUG:-}")"
+  sseDebug: "$(js_escape "${VITE_SSE_DEBUG:-}")",
+  agentStudioEnabled: "$(js_escape "${VITE_AGENT_STUDIO_ENABLED:-true}")"
 };
 EOF

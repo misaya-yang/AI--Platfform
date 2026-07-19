@@ -965,6 +965,7 @@ test.describe("Eval trace console", () => {
   }) => {
     const assertNoRuntimeFailures = watchRuntimeFailures(page);
     const harness = await installEvalHarness(page);
+    page.setDefaultTimeout(15_000);
     await fs.mkdir(".playwright", { recursive: true });
 
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -1107,7 +1108,11 @@ test.describe("Eval trace console", () => {
     await page.screenshot({ path: ".playwright/eval-dark-zh.png", fullPage: true });
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("tab", { name: "Trace" }).click();
+    const mobileTraceTab = page.getByRole("tab", { name: /Trace$/ });
+    await mobileTraceTab.focus();
+    await page.keyboard.press("Enter");
+    await expect(mobileTraceTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: /Trace$/ })).toBeVisible();
     await page.locator(".ant-segmented-item").filter({ hasText: "Assistant" }).click();
     await expect(page.getByRole("heading", { name: "Assistant Trace" })).toBeVisible();
     await expectNoHorizontalOverflow(page);

@@ -12,7 +12,7 @@
     "lint:fix": "eslint . --fix",
     "type-check": "tsc --noEmit",
     "i18n:check": "node scripts/check-i18n-keys.mjs",
-    "e2e:opensource": "playwright test --config playwright.opensource.config.ts e2e/dynamic-route-render.spec.ts e2e/eval-trace.spec.ts",
+    "e2e:opensource": "playwright test --config playwright.opensource.config.ts e2e/dynamic-route-render.spec.ts e2e/eval-trace.spec.ts e2e/agent-studio.spec.ts e2e/agent-publish.spec.ts",
     "e2e": "../scripts/dev/start_e2e_stack.sh test",
     "e2e:headed": "../scripts/dev/start_e2e_stack.sh test --headed"
   },

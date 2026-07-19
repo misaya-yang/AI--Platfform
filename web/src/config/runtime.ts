@@ -5,6 +5,7 @@ type RuntimeConfig = {
   supportEmail?: string;
   telemetryEndpoint?: string;
   sseDebug?: string;
+  agentStudioEnabled?: string;
 };
 
 declare global {
@@ -70,4 +71,14 @@ export function isSseDebugEnabled(): boolean {
   const runtime = readRuntimeConfig();
   const value = firstNonEmpty(runtime.sseDebug, import.meta.env.VITE_SSE_DEBUG);
   return value === "true";
+}
+
+export function isAgentStudioEnabled(): boolean {
+  const runtime = readRuntimeConfig();
+  const value = firstNonEmpty(
+    runtime.agentStudioEnabled,
+    import.meta.env.VITE_AGENT_STUDIO_ENABLED,
+    "true",
+  ).toLowerCase();
+  return !["0", "false", "no", "off"].includes(value);
 }
