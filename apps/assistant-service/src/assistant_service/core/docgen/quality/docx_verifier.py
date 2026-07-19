@@ -18,12 +18,10 @@ import shutil
 import subprocess
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 from lxml import etree
 
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
-
 
 _PLACEHOLDER_RE = re.compile(r"\b(xxxx|lorem ipsum|lorem|ipsum|todo|fixme|placeholder|\[\[|<<)\b", re.IGNORECASE)
 
@@ -88,7 +86,7 @@ class DocxXmlVerifier:
         passed = not any(i.severity == IssueSeverity.CRITICAL for i in issues)
         return CriticReport(passed=passed, issues=issues, backend="docx_xml", note=backend_note)
 
-    def _soffice_sanity_open(self, path: Path) -> Optional[bool]:
+    def _soffice_sanity_open(self, path: Path) -> bool | None:
         if shutil.which("soffice") is None and shutil.which("libreoffice") is None:
             return None
         bin_name = "soffice" if shutil.which("soffice") else "libreoffice"

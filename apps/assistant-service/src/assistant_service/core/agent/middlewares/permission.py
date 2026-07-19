@@ -16,7 +16,8 @@ approval round-trip for `confirm` verdicts is a separate follow-up.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Union
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from ..middleware import ToolVerdict, VerdictKind
 
@@ -29,12 +30,12 @@ if TYPE_CHECKING:
 # A policy is any sync or async callable that returns a ToolVerdict.
 Policy = Callable[
     [str, dict[str, Any], "AgentLoopContext"],
-    Union[ToolVerdict, Awaitable[ToolVerdict]],
+    ToolVerdict | Awaitable[ToolVerdict],
 ]
 
 
 def allow_all(
-    tool_name: str, arguments: dict[str, Any], ctx: "AgentLoopContext"
+    tool_name: str, arguments: dict[str, Any], ctx: AgentLoopContext
 ) -> ToolVerdict:
     """Default policy: permit everything. Keep the default opt-out so adding
     this middleware to the chain never changes behavior until a deployment
@@ -52,7 +53,7 @@ class PermissionMiddleware:
 
     async def on_tool_call(
         self,
-        ctx: "AgentLoopContext",
+        ctx: AgentLoopContext,
         tool_name: str,
         arguments: dict[str, Any],
     ) -> ToolVerdict:

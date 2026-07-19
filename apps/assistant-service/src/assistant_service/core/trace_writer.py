@@ -316,10 +316,19 @@ class AssistantTraceContext:
     started_at: float = field(default_factory=time.time)
     otel_trace_id: str | None = None
     traceparent: str | None = None
+    agent_id: str | None = None
+    agent_version_id: str | None = None
+    agent_draft_revision: int | None = None
+    publication_id: str | None = None
+    channel: str | None = None
+    runtime_fingerprint: str | None = None
+    agent_spec_hash: str | None = None
 
     @classmethod
     def from_agent_context(cls, ctx: Any) -> AssistantTraceContext:
         config = getattr(ctx, "config", None)
+        runtime = getattr(config, "agent_runtime", None)
+        dimensions = runtime.trace_dimensions() if runtime is not None else {}
         run_id = str(getattr(ctx, "run_id", "") or uuid.uuid4())
         traceparent = str(getattr(ctx, "traceparent", "") or "") or None
         otel_trace_id = str(getattr(ctx, "otel_trace_id", "") or "") or None
@@ -342,6 +351,13 @@ class AssistantTraceContext:
             started_at=float(getattr(ctx, "trace_started_at", time.time())),
             otel_trace_id=otel_trace_id,
             traceparent=traceparent,
+            agent_id=dimensions.get("agent_id"),
+            agent_version_id=dimensions.get("agent_version_id"),
+            agent_draft_revision=dimensions.get("agent_draft_revision"),
+            publication_id=dimensions.get("publication_id"),
+            channel=dimensions.get("channel"),
+            runtime_fingerprint=dimensions.get("runtime_fingerprint"),
+            agent_spec_hash=dimensions.get("agent_spec_hash"),
         )
 
     @classmethod
@@ -360,6 +376,7 @@ class AssistantTraceContext:
         transcript_locator: dict[str, Any] | None = None,
         traceparent: str | None = None,
         otel_trace_id: str | None = None,
+        agent_runtime: Any | None = None,
     ) -> AssistantTraceContext:
         resolved_traceparent = str(traceparent or "") or None
         resolved_otel_trace_id = str(otel_trace_id or "") or None
@@ -367,6 +384,9 @@ class AssistantTraceContext:
             parts = resolved_traceparent.split("-")
             if len(parts) >= 2 and parts[1]:
                 resolved_otel_trace_id = parts[1]
+        dimensions = (
+            agent_runtime.trace_dimensions() if agent_runtime is not None else {}
+        )
         return cls(
             trace_id=_trace_uuid(run_id),
             run_id=run_id,
@@ -382,6 +402,13 @@ class AssistantTraceContext:
             started_at=started_at,
             traceparent=resolved_traceparent,
             otel_trace_id=resolved_otel_trace_id,
+            agent_id=dimensions.get("agent_id"),
+            agent_version_id=dimensions.get("agent_version_id"),
+            agent_draft_revision=dimensions.get("agent_draft_revision"),
+            publication_id=dimensions.get("publication_id"),
+            channel=dimensions.get("channel"),
+            runtime_fingerprint=dimensions.get("runtime_fingerprint"),
+            agent_spec_hash=dimensions.get("agent_spec_hash"),
         )
 
 
@@ -923,13 +950,15 @@ class AssistantTraceWriter:
             INSERT INTO agent_traces (
                 trace_id, trace_family, workflow_kind, tenant_id, user_id,
                 session_id, run_id, request_id, otel_trace_id, traceparent,
-                model_id, provider,
+                model_id, provider, agent_id, agent_version_id,
+                agent_draft_revision, publication_id, channel,
+                runtime_fingerprint, agent_spec_hash,
                 status, started_at, input_preview, redaction_state, metadata
             ) VALUES (
                 $1, 'assistant', $2, $3, $4,
                 $5, $6, $7, $8, $9,
-                $10, $11,
-                'running', $12, $13, $14::jsonb, $15::jsonb
+                $10, $11, $12, $13, $14, $15, $16, $17, $18,
+                'running', $19, $20, $21::jsonb, $22::jsonb
             )
             ON CONFLICT (trace_id)
             DO UPDATE SET
@@ -953,7 +982,16 @@ class AssistantTraceWriter:
                 END,
                 redaction_state = agent_traces.redaction_state || EXCLUDED.redaction_state,
                 metadata = agent_traces.metadata || EXCLUDED.metadata,
-                updated_at = NOW();
+                updated_at = NOW()
+            WHERE agent_traces.tenant_id = EXCLUDED.tenant_id
+              AND agent_traces.user_id = EXCLUDED.user_id
+              AND agent_traces.agent_id IS NOT DISTINCT FROM EXCLUDED.agent_id
+              AND agent_traces.agent_version_id IS NOT DISTINCT FROM EXCLUDED.agent_version_id
+              AND agent_traces.agent_draft_revision IS NOT DISTINCT FROM EXCLUDED.agent_draft_revision
+              AND agent_traces.publication_id IS NOT DISTINCT FROM EXCLUDED.publication_id
+              AND agent_traces.channel IS NOT DISTINCT FROM EXCLUDED.channel
+              AND agent_traces.runtime_fingerprint IS NOT DISTINCT FROM EXCLUDED.runtime_fingerprint
+              AND agent_traces.agent_spec_hash IS NOT DISTINCT FROM EXCLUDED.agent_spec_hash;
             """,
             ctx.trace_id,
             ctx.workflow_kind,
@@ -966,6 +1004,13 @@ class AssistantTraceWriter:
             ctx.traceparent,
             ctx.model_id,
             ctx.provider,
+            ctx.agent_id,
+            ctx.agent_version_id,
+            ctx.agent_draft_revision,
+            ctx.publication_id,
+            ctx.channel,
+            ctx.runtime_fingerprint,
+            ctx.agent_spec_hash,
             _utc_from_timestamp(ctx.started_at),
             ctx.input_preview,
             _json_dumps(redaction_state),

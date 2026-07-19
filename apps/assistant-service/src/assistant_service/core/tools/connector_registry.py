@@ -25,13 +25,13 @@ hammering during a multi-iteration agent turn — the same shape used by
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import ToolCallRequest, ToolDefinition
 
 logger = get_logger(__name__)

@@ -17,6 +17,7 @@ import re
 import time
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -111,6 +112,7 @@ class MarkdownToDocxConverter:
             from docx.enum.text import WD_ALIGN_PARAGRAPH
             from docx.shared import Inches, Pt
 
+            _ = Document, WD_ALIGN_PARAGRAPH, Inches, Pt
             self._docx_available = True
         except ImportError:
             self._docx_available = False
@@ -262,6 +264,7 @@ class MarkdownToPdfConverter:
             try:
                 from weasyprint import HTML
 
+                _ = HTML
                 self._available = True
             except ImportError:
                 logger.info("weasyprint not installed, PDF generation disabled")

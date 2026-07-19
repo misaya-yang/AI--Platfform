@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..ir import DocxIR, PptxIR, XlsxIR, PdfIR
 from .base import BaseRenderer, RenderError, RenderResult
 from .docx_renderer import DocxRenderer
+from .pdf_renderer import PdfRenderer
 from .pptx_renderer import PptxRenderer
 from .xlsx_renderer import XlsxRenderer
-from .pdf_renderer import PdfRenderer
 
 
 class RendererDispatcher:

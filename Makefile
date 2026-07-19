@@ -39,24 +39,24 @@ SHELL := /bin/bash
 SCRIPTS := scripts/new
 ENV_FILE ?= .env
 COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
-DEV_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
+BUILD_COMPOSE := $(COMPOSE) -f docker-compose.yml -f docker-compose.build.yml
+DEV_COMPOSE := $(BUILD_COMPOSE) -f docker-compose.dev.yml
+COMPOSE_PARALLEL_LIMIT ?= 1
+export COMPOSE_PARALLEL_LIMIT
 
 .DEFAULT_GOAL := help
 
 # -- Quick Start --------------------------------------------------------------
 
-.PHONY: quickstart validate-config validate-example-config validate seed-demo seed-demo-apply
+.PHONY: quickstart quickstart-build validate-config validate-example-config validate seed-demo seed-demo-apply
 
-quickstart:                 ## 零配置一键部署 (首次使用: 启动+迁移+校验)
-	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
-	@$(COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans
-	@ENV_FILE="$(ENV_FILE)" bash -c 'source "$(SCRIPTS)/common.sh"; load_env; wait_for_healthy "PostgreSQL" "check_postgres_health" 30'
-	@bash $(SCRIPTS)/migrate.sh --env "$(ENV_FILE)" --auto
-	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --runtime
-	@echo ""
-	@echo "AI Gateway is starting..."
-	@ENV_FILE="$(ENV_FILE)" bash -c 'source "$(SCRIPTS)/common.sh"; load_env; echo "  Gateway:  http://localhost:$${GATEWAY_PORT:-8080}"; echo "  Frontend: http://localhost:$${FRONTEND_PORT:-8081}"'
-	@echo "  Run 'make status' to check health."
+quickstart:                 ## 拉取版本化多架构镜像并一键部署 (仅需模型配置)
+	@bash $(SCRIPTS)/init-env.sh --env "$(ENV_FILE)" --if-missing
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --pull
+
+quickstart-build:           ## 维护者从当前源码串行构建并部署
+	@bash $(SCRIPTS)/init-env.sh --env "$(ENV_FILE)" --if-missing
+	@bash $(SCRIPTS)/deploy.sh --env "$(ENV_FILE)" --build
 
 validate:                   ## 校验 .env、Compose 配置和运行时依赖
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --runtime
@@ -152,9 +152,9 @@ dev-reset:                  ## 重置开发环境 (销毁并重建)
 dev-status:                 ## 查看开发环境状态
 	@ENV_FILE="$(ENV_FILE)" bash $(SCRIPTS)/setup-dev.sh --status
 
-dev-compose:                ## 源码挂载启动应用服务 (首次 quickstart/build 后使用)
+dev-compose:                ## 从源码构建并挂载后端服务，启用热重载
 	@bash $(SCRIPTS)/validate-env.sh --env "$(ENV_FILE)" --config-only
-	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --remove-orphans gateway assistant-service knowledge-service frontend
+	@$(DEV_COMPOSE) --env-file "$(ENV_FILE)" up -d --build --remove-orphans gateway assistant-service knowledge-service frontend
 	@echo "Development compose is running with backend source mounts and uvicorn reload."
 
 dev-compose-logs:           ## 查看源码挂载开发服务日志
@@ -162,7 +162,10 @@ dev-compose-logs:           ## 查看源码挂载开发服务日志
 
 # -- Agent Trace / Eval Development Gates ------------------------------------
 
-.PHONY: verify-eval-dev eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+.PHONY: verify-agent-studio verify-eval-dev eval-regression-gate verify-assistant-runtime-dev test-isolation snapshot-assistant-openapi
+
+verify-agent-studio:        ## 运行 AS-00~AS-08 版本化 Agent Studio 整体回归门禁
+	@uv run python scripts/agent_studio_regression.py $(ARGS)
 
 verify-assistant-runtime-dev: ## 运行 Assistant Runtime 离线回归门禁 (AHR-01~AHR-04)
 	@uv run python scripts/assistant_runtime_regression.py gate --no-write

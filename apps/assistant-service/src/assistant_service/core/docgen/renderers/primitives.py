@@ -12,7 +12,6 @@ per-slide state — only the slide geometry constants and a logger.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
@@ -103,7 +102,7 @@ class Primitives:
         v_anchor: str = "top",
         rgb_hex: str = "0F172A",
         font: str = "Calibri",
-        line_spacing: Optional[float] = None,
+        line_spacing: float | None = None,
         tracking_pct: float = 0.0,
     ):
         box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))
@@ -286,6 +285,7 @@ class Primitives:
         dot_size: float = 0.04,
     ) -> None:
         """Low-contrast dot pattern for background texture."""
+        del ctx
         rows = int(height / spacing)
         cols = int(width / spacing)
         for r in range(rows):

@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,

@@ -11,17 +11,13 @@ without soffice, so we flag that as a "cannot_recalc" info issue.
 
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from openpyxl import load_workbook
-from openpyxl.cell.cell import Cell
 
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
-
 
 _ERROR_MARKERS = ("#REF!", "#DIV/0!", "#VALUE!", "#N/A", "#NAME?", "#NULL!", "#NUM!")
 

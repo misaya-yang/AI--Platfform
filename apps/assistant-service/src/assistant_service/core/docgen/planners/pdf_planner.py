@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
 
 from ..ir import HeadingBlock, ParagraphBlock, PdfContent, PdfIR, PdfPage
 from ..ir.pdf import PdfCover
-from .base import BasePlanner, Brief, PlannerResult, metadata_for_brief, parse_markdown_to_blocks, theme_for_brief
+from .base import (
+    BasePlanner,
+    Brief,
+    PlannerResult,
+    metadata_for_brief,
+    parse_markdown_to_blocks,
+    theme_for_brief,
+)
 from .docx_planner import LLMCaller
-
 
 SYSTEM_PROMPT = """You are a technical writer producing a PDF document.
 
@@ -48,7 +53,7 @@ _COVER_KEYWORDS = ("report", "proposal", "plan", "brief", "memo", "review", "whi
 class PdfPlanner(BasePlanner):
     doc_type = "pdf"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(self, llm: LLMCaller | None = None) -> None:
         self._llm = llm
 
     async def plan(self, brief: Brief) -> PlannerResult:

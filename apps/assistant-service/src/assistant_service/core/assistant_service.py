@@ -53,6 +53,10 @@ from ai_gateway_core.storage import (
 from cachetools import TTLCache
 
 from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent, AgentLoopPhase
+from .agent.runtime_context import (
+    AgentRuntimeExecutionContext,
+    assert_session_runtime_pin,
+)
 from .code_executor import CodeExecutorService
 from .content.structured_output import (
     OutputFormat,
@@ -89,6 +93,7 @@ from .rag.scenario_analyzer import (
     create_scenario_analyzer,
 )
 from .tasks.task_planner import TaskPlanner
+from .tool_invoker import CapabilityAllowlist
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .trace_payloads import build_rag_trace_payload as _rag_trace_payload
@@ -221,6 +226,7 @@ class AssistantConfig:
 
     # Knowledge base settings (TTFT-optimized defaults)
     kb_dataset_ids: list[str] = field(default_factory=list)
+    kb_retrieval_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
     kb_mode: RAGMode = RAGMode.AUTO
     kb_top_k: int = 5  # Number of KB results to retrieve
     kb_score_threshold: float = 0.65  # Increased from 0.5 for higher quality results
@@ -237,6 +243,21 @@ class AssistantConfig:
     # System prompt
     system_prompt: str | None = None
     eval_system_prompt_override: str | None = None
+    trusted_agent_instructions: str | None = None
+    trusted_channel_instructions: str | None = None
+    trusted_capability_instructions: str | None = None
+
+    # Verified Agent-only boundary. ``None`` preserves the built-in Assistant;
+    # an explicit allowlist, including empty, can only reduce tool access.
+    capability_allowlist: CapabilityAllowlist | None = None
+    agent_runtime: AgentRuntimeExecutionContext | None = None
+    # Exact signed Skill resource IDs currently map one-to-one to registry
+    # names. ``None`` preserves the built-in Assistant's legacy all-skills
+    # behavior; an explicit set is a non-expanding Agent upper bound.
+    allowed_skill_ids: frozenset[str] | None = None
+    # Exact immutable database versions keyed by stable Skill name.  ``None``
+    # keeps the built-in Assistant and legacy bundled-Skill behavior unchanged.
+    allowed_skill_versions: dict[str, str] | None = None
 
     # Tools (future extension)
     tools_enabled: list[str] = field(default_factory=list)
@@ -438,8 +459,7 @@ def _append_tool_results_block(
     # enlarge the per-message cap for messages carrying this block.
     lines: list[str] = [
         "",
-        f"{PRIOR_TOOL_RESULTS_MARKER} — for your reference only, "
-        f"not shown to the user]",
+        f"{PRIOR_TOOL_RESULTS_MARKER} — for your reference only, not shown to the user]",
     ]
     for entry in tool_results:
         if not isinstance(entry, dict):
@@ -631,6 +651,7 @@ Please use this web search context to inform your response when relevant."""
         # ADR-002: Tenant isolation services
         tenant_tool_policy: Any | None = None,
         tenant_mcp_config: Any | None = None,
+        mcp_runtime: Any | None = None,
         tool_audit: Any | None = None,
         # Bucket-B injection (Phase 4.2). Defaults are NoOp reference impls
         # from ai_gateway_core; the composition root in main.py passes in the
@@ -645,6 +666,7 @@ Please use this web search context to inform your response when relevant."""
         # ADR-002: Tenant isolation
         self.tenant_tool_policy = tenant_tool_policy
         self.tenant_mcp_config = tenant_mcp_config
+        self.mcp_runtime = mcp_runtime
         self.tool_audit = tool_audit
         self.session_manager = session_manager
         self.context_manager = get_context_manager()
@@ -754,6 +776,7 @@ Please use this web search context to inform your response when relevant."""
             tool_invoker=create_tool_invoker(
                 tenant_tool_policy=self.tenant_tool_policy,
                 tenant_mcp_config=self.tenant_mcp_config,
+                mcp_runtime=self.mcp_runtime,
                 tool_audit=self.tool_audit,
             ),
             database=db,
@@ -985,6 +1008,7 @@ Please use this web search context to inform your response when relevant."""
         self,
         user: UserContext,
         session_id: str,
+        agent_runtime: AgentRuntimeExecutionContext | None = None,
     ) -> None:
         """Ensure the assistant session exists before message persistence."""
         if not self.session_manager or not session_id:
@@ -994,9 +1018,19 @@ Please use this web search context to inform your response when relevant."""
         if existing:
             if existing.user_id != user.user_id or existing.tenant_id != user.tenant_id:
                 raise PermissionDeniedError("Session does not belong to current user")
+            if agent_runtime is not None:
+                assert_session_runtime_pin(existing, agent_runtime)
+                return
+            if getattr(existing, "agent_id", None):
+                raise PermissionDeniedError("Session is bound to a different Agent runtime")
             if existing.service_id and existing.service_id != "__builtin_assistant__":
                 raise PermissionDeniedError("Session is bound to a different service")
             return
+
+        if agent_runtime is not None:
+            # Gateway must bind the exact Agent runtime before it signs and
+            # forwards the request. Assistant never claims a legacy session.
+            raise PermissionDeniedError("Agent runtime session is not bound")
 
         try:
             await self.session_manager.create(
@@ -1054,7 +1088,11 @@ Please use this web search context to inform your response when relevant."""
         # ========== LATENCY DEBUG: Track timing for each step ==========
         logger.info(f"[LATENCY] chat_stream started at {start_time}")
 
-        await self._ensure_session_exists(user=user, session_id=session_id)
+        await self._ensure_session_exists(
+            user=user,
+            session_id=session_id,
+            agent_runtime=config.agent_runtime,
+        )
 
         domain_policy, _ = await self._resolve_domain_policy(user, config.kb_dataset_ids)
 
@@ -1252,6 +1290,7 @@ Please use this web search context to inform your response when relevant."""
             ),
             traceparent=config.traceparent,
             otel_trace_id=config.otel_trace_id,
+            agent_runtime=config.agent_runtime,
         )
         trace_sequence_no = 0
         trace_finished = False
@@ -1406,7 +1445,13 @@ Please use this web search context to inform your response when relevant."""
                 "context_snapshot": context_snapshot,
             },
         )
-        await _guard_trace_await(self._ensure_session_exists(user=user, session_id=session_id))
+        await _guard_trace_await(
+            self._ensure_session_exists(
+                user=user,
+                session_id=session_id,
+                agent_runtime=config.agent_runtime,
+            )
+        )
 
         if history is None and self.session_manager:
             try:
@@ -1440,6 +1485,7 @@ Please use this web search context to inform your response when relevant."""
             ),
             traceparent=config.traceparent,
             otel_trace_id=config.otel_trace_id,
+            agent_runtime=config.agent_runtime,
         )
         # Later writes carry the history-aware transcript locator; avoid a second root upsert.
         _refresh_context_snapshot(
@@ -1515,17 +1561,43 @@ Please use this web search context to inform your response when relevant."""
 
         # Retrieve KB context
         retrieved_contexts: list[RetrievedContext] = []
-        if config.kb_mode == RAGMode.AUTO and config.kb_dataset_ids and self.kb_service:
+        auto_dataset_ids = list(config.kb_dataset_ids or [])
+        auto_retrieval_configs: dict[str, dict[str, Any]] | None = None
+        auto_top_k = config.kb_top_k
+        auto_score_threshold = config.kb_score_threshold
+        auto_include_images = config.kb_include_images
+        if config.agent_runtime is not None:
+            auto_retrieval_configs = {
+                dataset_id: dict(dataset_config)
+                for dataset_id, dataset_config in config.kb_retrieval_configs.items()
+                if dataset_config.get("mode") == "auto"
+                and dataset_id in set(config.kb_dataset_ids or [])
+            }
+            auto_dataset_ids = sorted(auto_retrieval_configs)
+            auto_top_k = max(
+                (dataset_config["top_k"] for dataset_config in auto_retrieval_configs.values()),
+                default=config.kb_top_k,
+            )
+            auto_score_threshold = min(
+                (dataset_config["threshold"] for dataset_config in auto_retrieval_configs.values()),
+                default=config.kb_score_threshold,
+            )
+            auto_include_images = any(
+                dataset_config["include_images"]
+                for dataset_config in auto_retrieval_configs.values()
+            )
+        if config.kb_mode == RAGMode.AUTO and auto_dataset_ids and self.kb_service:
             retrieval_started = time.time()
             _record_trace_event(
                 StreamEventType.RAG_RETRIEVAL_STARTED.value,
                 _rag_trace_payload(
                     query=message,
-                    dataset_ids=config.kb_dataset_ids,
-                    top_k=config.kb_top_k,
-                    score_threshold=config.kb_score_threshold,
-                    include_images=config.kb_include_images,
+                    dataset_ids=auto_dataset_ids,
+                    top_k=auto_top_k,
+                    score_threshold=auto_score_threshold,
+                    include_images=auto_include_images,
                     started_at=retrieval_started,
+                    retrieval_configs=auto_retrieval_configs,
                 ),
             )
             try:
@@ -1533,10 +1605,11 @@ Please use this web search context to inform your response when relevant."""
                     self._retrieve_context(
                         user=user,
                         query=message,
-                        dataset_ids=config.kb_dataset_ids,
-                        top_k=config.kb_top_k,
-                        score_threshold=config.kb_score_threshold,
-                        include_images=config.kb_include_images,
+                        dataset_ids=auto_dataset_ids,
+                        top_k=auto_top_k,
+                        score_threshold=auto_score_threshold,
+                        include_images=auto_include_images,
+                        retrieval_configs=auto_retrieval_configs,
                     )
                 )
             except Exception as exc:
@@ -1544,13 +1617,14 @@ Please use this web search context to inform your response when relevant."""
                     StreamEventType.RAG_RETRIEVAL_FAILED.value,
                     _rag_trace_payload(
                         query=message,
-                        dataset_ids=config.kb_dataset_ids,
-                        top_k=config.kb_top_k,
-                        score_threshold=config.kb_score_threshold,
-                        include_images=config.kb_include_images,
+                        dataset_ids=auto_dataset_ids,
+                        top_k=auto_top_k,
+                        score_threshold=auto_score_threshold,
+                        include_images=auto_include_images,
                         started_at=retrieval_started,
                         ended_at=time.time(),
                         error=exc,
+                        retrieval_configs=auto_retrieval_configs,
                     ),
                 )
                 raise
@@ -1558,13 +1632,14 @@ Please use this web search context to inform your response when relevant."""
                 StreamEventType.RAG_RETRIEVAL_COMPLETED.value,
                 _rag_trace_payload(
                     query=message,
-                    dataset_ids=config.kb_dataset_ids,
-                    top_k=config.kb_top_k,
-                    score_threshold=config.kb_score_threshold,
-                    include_images=config.kb_include_images,
+                    dataset_ids=auto_dataset_ids,
+                    top_k=auto_top_k,
+                    score_threshold=auto_score_threshold,
+                    include_images=auto_include_images,
                     started_at=retrieval_started,
                     ended_at=time.time(),
                     contexts=retrieved_contexts,
+                    retrieval_configs=auto_retrieval_configs,
                 ),
             )
             _refresh_context_snapshot(
@@ -1781,25 +1856,47 @@ Please use this web search context to inform your response when relevant."""
         top_k: int,
         score_threshold: float,
         include_images: bool,
+        retrieval_configs: dict[str, dict[str, Any]] | None = None,
     ) -> list[RetrievedContext]:
         """Retrieve context from knowledge bases - PARALLEL retrieval for performance."""
         logger.info(
             f"_retrieve_context called with datasets={dataset_ids}, query='{query[:50]}...'"
         )
 
+        if retrieval_configs is not None and set(retrieval_configs) != set(dataset_ids):
+            raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
+
         async def retrieve_single_dataset(dataset_id: str) -> RetrievedContext | None:
             """Retrieve from a single dataset - designed for parallel execution."""
             start = time.time()
             logger.info(f"Retrieving from dataset '{dataset_id}'")
             try:
+                sealed_config = (
+                    retrieval_configs[dataset_id] if retrieval_configs is not None else None
+                )
+                if sealed_config is not None and sealed_config.get("mode") != "auto":
+                    raise ValueError("AGENT_KNOWLEDGE_CONFIG_INVALID")
+                effective_top_k = (
+                    int(sealed_config["top_k"]) if sealed_config is not None else top_k
+                )
+                effective_threshold = (
+                    float(sealed_config["threshold"])
+                    if sealed_config is not None
+                    else score_threshold
+                )
+                effective_include_images = (
+                    bool(sealed_config["include_images"])
+                    if sealed_config is not None
+                    else include_images
+                )
                 # Use retrieve_with_images if available and requested
-                if include_images and hasattr(self.kb_service, "retrieve_with_images"):
+                if effective_include_images and hasattr(self.kb_service, "retrieve_with_images"):
                     results, meta = await self.kb_service.retrieve_with_images(
                         user=user,
                         dataset_id=dataset_id,
                         query=query,
-                        top_k=top_k,
-                        score_threshold=score_threshold,
+                        top_k=effective_top_k,
+                        score_threshold=effective_threshold,
                         include_images=True,
                         image_boost=3.0,
                         use_separate_thresholds=True,
@@ -1810,8 +1907,8 @@ Please use this web search context to inform your response when relevant."""
                         user=user,
                         dataset_id=dataset_id,
                         query=query,
-                        top_k=top_k,
-                        score_threshold=score_threshold,
+                        top_k=effective_top_k,
+                        score_threshold=effective_threshold,
                     )
 
                 took_ms = (time.time() - start) * 1000
@@ -1920,6 +2017,13 @@ Please use this web search context to inform your response when relevant."""
             max_tokens=config.max_tokens or 4096,
             system_prompt=config.system_prompt,
             eval_system_prompt_override=config.eval_system_prompt_override,
+            trusted_agent_instructions=config.trusted_agent_instructions,
+            trusted_channel_instructions=config.trusted_channel_instructions,
+            trusted_capability_instructions=config.trusted_capability_instructions,
+            capability_allowlist=config.capability_allowlist,
+            agent_runtime=config.agent_runtime,
+            allowed_skill_ids=config.allowed_skill_ids,
+            allowed_skill_versions=config.allowed_skill_versions,
             # Web search preference (True=force, False=AI decides) - passed to prompt
             web_search_enabled=config.web_search_enabled,
             # File attachments (must be processed in AgentLoop streaming-first)
@@ -1932,9 +2036,11 @@ Please use this web search context to inform your response when relevant."""
             enable_memory_loading=config.enable_memory_loading,
             enable_react_loop=config.enable_react_loop,
             kb_dataset_ids=config.kb_dataset_ids,
+            kb_retrieval_configs=config.kb_retrieval_configs,
             kb_mode=getattr(config.kb_mode, "value", str(config.kb_mode)),
             kb_top_k=config.kb_top_k,
             kb_min_relevance=config.kb_score_threshold,
+            kb_include_images=config.kb_include_images,
             max_tool_iterations=5,  # Reasonable limit for tool iterations
             max_concurrent_tools=config.max_parallel_tools,
             execution_profile=config.execution_profile,
@@ -1947,8 +2053,10 @@ Please use this web search context to inform your response when relevant."""
             memory_profile=config.memory_profile,
             # Thinking display: enable for thinking-capable models
             thinking_level=(
-                "enabled" if "qwen3" in (config.model_id or "").lower()
-                else "high" if "gemini-3" in (config.model_id or "").lower()
+                "enabled"
+                if "qwen3" in (config.model_id or "").lower()
+                else "high"
+                if "gemini-3" in (config.model_id or "").lower()
                 else None
             ),
             resume_run_id=config.resume_run_id,
@@ -1959,6 +2067,7 @@ Please use this web search context to inform your response when relevant."""
 
         # Create AgentLoop instance (system_prompt passed via loop_config)
         from .tool_invoker import create_tool_invoker
+
         agent_loop = AgentLoop(
             model_registry=self.model_registry,
             kb_service=self.kb_service,
@@ -1973,6 +2082,7 @@ Please use this web search context to inform your response when relevant."""
             tool_invoker=create_tool_invoker(
                 tenant_tool_policy=self.tenant_tool_policy,
                 tenant_mcp_config=self.tenant_mcp_config,
+                mcp_runtime=self.mcp_runtime,
                 tool_audit=self.tool_audit,
             ),
         )
@@ -2156,7 +2266,6 @@ Please use this web search context to inform your response when relevant."""
             data=data,
             timestamp=event.timestamp,
         )
-
 
     # P2.2: Correction detection patterns
     _CORRECTION_RE = __import__("re").compile(
@@ -2746,6 +2855,7 @@ Please use this web search context to inform your response when relevant."""
         run_id: str,
         tenant_id: str,
         user_id: str,
+        session_id: str | None = None,
         approval_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Validate latest checkpoint and return a non-executing resume plan."""
@@ -2755,6 +2865,7 @@ Please use this web search context to inform your response when relevant."""
             run_id=run_id,
             tenant_id=tenant_id,
             user_id=user_id,
+            session_id=session_id,
             approval_id=approval_id,
         )
 

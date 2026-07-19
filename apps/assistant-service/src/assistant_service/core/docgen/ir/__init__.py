@@ -38,10 +38,10 @@ from .base import (
     Theme,
 )
 from .docx import DocxContent
-from .pptx import PptxContent, PptxSlide, PptxLayout, VisualSpec
-from .xlsx import XlsxContent, XlsxSheet, XlsxCell, XlsxRow, XlsxColumn
 from .pdf import PdfContent, PdfPage
-from .root import AnyIR, DocxIR, PptxIR, XlsxIR, PdfIR, parse_ir
+from .pptx import PptxContent, PptxLayout, PptxSlide, VisualSpec
+from .root import AnyIR, DocxIR, PdfIR, PptxIR, XlsxIR, parse_ir
+from .xlsx import XlsxCell, XlsxColumn, XlsxContent, XlsxRow, XlsxSheet
 
 __all__ = [
     "AnyIR",

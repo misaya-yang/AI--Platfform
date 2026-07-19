@@ -11,12 +11,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
-from .config.settings import Settings
 from ai_gateway_core.logging import get_logger
+
+from .config.settings import Settings
 
 logger = get_logger(__name__)
 
@@ -210,10 +212,21 @@ class Container:
         """创建数据库存储"""
         from .persistence.database import DatabaseStorage
 
+        auto_init = getattr(self.settings.database, "auto_init", False)
+        bootstrap_admin_password_hash = None
+        bootstrap_admin_password = os.environ.get("DEFAULT_USER_PASSWORD", "")
+        if auto_init and bootstrap_admin_password:
+            # Hash in the application process so the plaintext bootstrap
+            # password never crosses the database connection or appears in SQL.
+            from .core.auth.password import hash_password
+
+            bootstrap_admin_password_hash = hash_password(bootstrap_admin_password)
+
         return DatabaseStorage(
             dsn=self.settings.database.dsn,
             enabled=self.settings.database.enabled,
-            auto_init=getattr(self.settings.database, "auto_init", False),
+            auto_init=auto_init,
+            bootstrap_admin_password_hash=bootstrap_admin_password_hash,
             permission_cache_ttl_seconds=getattr(
                 self.settings.database, "permission_cache_ttl_seconds", 60
             ),

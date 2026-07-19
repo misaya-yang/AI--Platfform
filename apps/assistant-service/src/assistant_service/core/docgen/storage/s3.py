@@ -7,12 +7,11 @@ tests and LocalArtifactStore users don't need it installed.
 
 from __future__ import annotations
 
-import io
+import contextlib
 import json
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .base import Artifact, ArtifactStore, ArtifactStoreError, compute_sha256
 
@@ -26,10 +25,10 @@ class S3ArtifactStore(ArtifactStore):
         self,
         *,
         bucket: str,
-        region: Optional[str] = None,
-        endpoint_url: Optional[str] = None,
-        aws_access_key_id: Optional[str] = None,
-        aws_secret_access_key: Optional[str] = None,
+        region: str | None = None,
+        endpoint_url: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
         prefix: str = "docgen",
     ) -> None:
         try:
@@ -60,10 +59,10 @@ class S3ArtifactStore(ArtifactStore):
         session_id: str,
         turn_id: str,
         doc_type: str,
-        critic_score: Optional[float] = None,
-        critic_passed: Optional[bool] = None,
-        thumbnails: Optional[list[Path]] = None,
-        extra: Optional[dict] = None,
+        critic_score: float | None = None,
+        critic_passed: bool | None = None,
+        thumbnails: list[Path] | None = None,
+        extra: dict | None = None,
     ) -> Artifact:
         if not path.is_file():
             raise ArtifactStoreError(f"artifact source missing: {path}")
@@ -110,7 +109,7 @@ class S3ArtifactStore(ArtifactStore):
 
     # -------------------------- get / list / delete
 
-    async def get(self, artifact_id: str, *, tenant_id: str) -> Optional[Artifact]:
+    async def get(self, artifact_id: str, *, tenant_id: str) -> Artifact | None:
         prefix = f"{self._prefix}/{tenant_id}/"
         paginator = self._s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
@@ -142,10 +141,8 @@ class S3ArtifactStore(ArtifactStore):
         for key in (self._key(art), self._key(art, suffix=".meta.json")):
             self._s3.delete_object(Bucket=self._bucket, Key=key)
         for tk in art.thumbnails:
-            try:
+            with contextlib.suppress(Exception):
                 self._s3.delete_object(Bucket=self._bucket, Key=tk)
-            except Exception:
-                pass
         return True
 
     async def download_url(self, artifact_id: str, *, tenant_id: str, ttl_seconds: int = 3600) -> str:

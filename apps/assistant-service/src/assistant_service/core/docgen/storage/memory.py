@@ -6,7 +6,6 @@ import asyncio
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .base import Artifact, ArtifactStore, ArtifactStoreError, compute_sha256
 
@@ -29,10 +28,10 @@ class MemoryArtifactStore(ArtifactStore):
         session_id: str,
         turn_id: str,
         doc_type: str,
-        critic_score: Optional[float] = None,
-        critic_passed: Optional[bool] = None,
-        thumbnails: Optional[list[Path]] = None,
-        extra: Optional[dict] = None,
+        critic_score: float | None = None,
+        critic_passed: bool | None = None,
+        thumbnails: list[Path] | None = None,
+        extra: dict | None = None,
     ) -> Artifact:
         if not path.is_file():
             raise ArtifactStoreError(f"artifact source missing: {path}")
@@ -57,7 +56,7 @@ class MemoryArtifactStore(ArtifactStore):
             self._items[(tenant_id, artifact_id)] = artifact
         return artifact
 
-    async def get(self, artifact_id: str, *, tenant_id: str) -> Optional[Artifact]:
+    async def get(self, artifact_id: str, *, tenant_id: str) -> Artifact | None:
         return self._items.get((tenant_id, artifact_id))
 
     async def download_url(self, artifact_id: str, *, tenant_id: str, ttl_seconds: int = 3600) -> str:
@@ -79,5 +78,5 @@ class MemoryArtifactStore(ArtifactStore):
             return True
         return False
 
-    def _blob(self, artifact_id: str) -> Optional[bytes]:
+    def _blob(self, artifact_id: str) -> bytes | None:
         return self._blobs.get(artifact_id)

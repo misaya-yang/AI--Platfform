@@ -126,6 +126,8 @@ class KBSearchExecutor(ToolExecutor):
         dataset_ids = request.arguments.get("dataset_ids", [])
         top_k = request.arguments.get("top_k", 5)
         score_threshold = request.arguments.get("score_threshold", 0.0)  # No default filtering
+        runtime_configs = (request.metadata or {}).get("kb_retrieval_configs")
+        runtime_configs = runtime_configs if isinstance(runtime_configs, dict) else None
 
         if not query:
             return ToolCallResult(
@@ -170,9 +172,29 @@ class KBSearchExecutor(ToolExecutor):
                     },
                 )
 
-            knowledge_settings = getattr(
-                getattr(self.kb_service, "settings", None), "knowledge", None
-            ) if hasattr(self.kb_service, "settings") else None
+            if runtime_configs is not None:
+                missing_configs = {
+                    str(dataset_id)
+                    for dataset_id in dataset_ids
+                    if str(dataset_id) not in runtime_configs
+                }
+                if missing_configs:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="AGENT_KNOWLEDGE_CONFIG_INVALID",
+                        duration_ms=(time.time() - start_time) * 1000,
+                    )
+                top_k = max(
+                    int(runtime_configs[str(dataset_id)]["top_k"]) for dataset_id in dataset_ids
+                )
+
+            knowledge_settings = (
+                getattr(getattr(self.kb_service, "settings", None), "knowledge", None)
+                if hasattr(self.kb_service, "settings")
+                else None
+            )
             dataset_fanout_concurrency = max(
                 int(getattr(knowledge_settings, "dataset_fanout_max_concurrency", 3) or 3),
                 1,
@@ -182,22 +204,35 @@ class KBSearchExecutor(ToolExecutor):
             async def _search_one_dataset(dataset_id: str) -> dict[str, Any]:
                 ds_start = time.time()
                 try:
+                    sealed_config = (
+                        runtime_configs.get(str(dataset_id), {})
+                        if runtime_configs is not None
+                        else {}
+                    )
+                    if sealed_config.get("mode") == "off":
+                        raise RuntimeError("AGENT_KNOWLEDGE_DISABLED")
+                    effective_top_k = int(sealed_config.get("top_k", top_k))
+                    effective_threshold = float(sealed_config.get("threshold", score_threshold))
                     async with fanout_semaphore:
                         # Use retrieve_with_images_v2 for multimodal retrieval with intent support
                         # Text-first by default; only explicit image intent pays multimodal cost.
-                        include_images = intent == "find_image"
+                        include_images = (
+                            bool(sealed_config.get("include_images"))
+                            if runtime_configs is not None
+                            else intent == "find_image"
+                        ) and intent != "find_document"
                         # Enable VLM reranking for image-focused queries
-                        vlm_rerank = intent == "find_image"
+                        vlm_rerank = intent == "find_image" and include_images
                         if hasattr(self.kb_service, "retrieve_with_images_v2"):
                             results, meta = await self.kb_service.retrieve_with_images_v2(
                                 user=request.user,
                                 dataset_id=dataset_id,
                                 query=query,
-                                top_k=top_k,
+                                top_k=effective_top_k,
                                 intent=intent,
                                 vlm_rerank=vlm_rerank,
                                 include_images=include_images,
-                                score_threshold=score_threshold,
+                                score_threshold=effective_threshold,
                             )
                         else:
                             # Fallback for proxy client (no multimodal support)
@@ -205,13 +240,15 @@ class KBSearchExecutor(ToolExecutor):
                                 user=request.user,
                                 dataset_id=dataset_id,
                                 query=query,
-                                top_k=top_k,
-                                score_threshold=score_threshold,
+                                top_k=effective_top_k,
+                                score_threshold=effective_threshold,
+                                include_images=include_images,
                             )
                     return {
                         "dataset_id": dataset_id,
                         "results": results,
                         "meta": meta,
+                        "retrieval_config": sealed_config,
                         "took_ms": (time.time() - ds_start) * 1000,
                         "error": None,
                     }
@@ -220,6 +257,7 @@ class KBSearchExecutor(ToolExecutor):
                         "dataset_id": dataset_id,
                         "results": [],
                         "meta": {},
+                        "retrieval_config": {},
                         "took_ms": (time.time() - ds_start) * 1000,
                         "error": str(exc),
                     }
@@ -295,6 +333,7 @@ class KBSearchExecutor(ToolExecutor):
                         "took_ms": took_ms,
                         "retrieval_cache_hit": bool(meta.get("retrieval_cache_hit")),
                         "retrieval_query_fingerprint": meta.get("retrieval_query_fingerprint"),
+                        "retrieval_config": dict(outcome.get("retrieval_config") or {}),
                     }
                 )
 
@@ -405,15 +444,9 @@ class KBSearchExecutor(ToolExecutor):
             return f"No relevant results found for query: {query}"
 
         # Surface retrieval quality signal — let the model judge
-        exact_matches = sum(
-            1 for r in results
-            if (r.get("metadata") or {}).get("_exact_match")
-        )
+        exact_matches = sum(1 for r in results if (r.get("metadata") or {}).get("_exact_match"))
         avg_term_ratio = 0.0
-        term_ratios = [
-            float((r.get("metadata") or {}).get("_term_ratio") or 0)
-            for r in results
-        ]
+        term_ratios = [float((r.get("metadata") or {}).get("_term_ratio") or 0) for r in results]
         if term_ratios:
             avg_term_ratio = sum(term_ratios) / len(term_ratios)
 
@@ -436,7 +469,9 @@ class KBSearchExecutor(ToolExecutor):
             citation_line = f"\nCitation: {citation}" if citation else ""
             type_info = f" [{source_type}]" if source_type and source_type != "unknown" else ""
 
-            parts.append(f"\n[{i}] {r['dataset_name']}{type_info} (score: {r['score']:.2f}){source_info}{citation_line}")
+            parts.append(
+                f"\n[{i}] {r['dataset_name']}{type_info} (score: {r['score']:.2f}){source_info}{citation_line}"
+            )
             parts.append(f"{r['content'][:500]}...")
 
         return "\n".join(parts)

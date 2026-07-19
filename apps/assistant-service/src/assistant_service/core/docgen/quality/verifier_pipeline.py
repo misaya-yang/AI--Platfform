@@ -13,15 +13,13 @@ the warnings or retry.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from typing import Optional
 
-from ..ir import DocxIR, PptxIR, XlsxIR, PdfIR
+from ..ir import DocxIR, PdfIR, PptxIR, XlsxIR
 from ..renderers import RendererDispatcher
 from ..renderers.base import RenderResult
 from .docx_verifier import DocxXmlVerifier
-from .types import CriticReport, Issue, IssueCategory, IssueSeverity
+from .types import CriticReport, Issue, IssueCategory
 from .visual_verifier import PptxPdfVisualVerifier, StructuralVisionCritic, VisionCritic
 from .xlsx_verifier import XlsxFormulaVerifier
 
@@ -50,8 +48,8 @@ class VerifierPipeline:
     def __init__(
         self,
         *,
-        critic: Optional[VisionCritic] = None,
-        dispatcher: Optional[RendererDispatcher] = None,
+        critic: VisionCritic | None = None,
+        dispatcher: RendererDispatcher | None = None,
     ) -> None:
         self._dispatcher = dispatcher or RendererDispatcher()
         self._critic = critic or StructuralVisionCritic()
@@ -90,9 +88,9 @@ class VerifierPipeline:
         # --- Round 0: verify what we already have.
         reports = [self.verify(artifact_path, doc_type=doc_type)]
         current_ir = ir
-        current_result: Optional[RenderResult] = None
+        current_result: RenderResult | None = None
 
-        for attempt in range(max_fix_rounds):
+        for _attempt in range(max_fix_rounds):
             last = reports[-1]
             if last.passed:
                 break
@@ -131,7 +129,7 @@ class VerifierPipeline:
         return any(p in lowered for p in self._PLACEHOLDER_PATTERNS)
 
     def _patch_pptx(self, ir: PptxIR, report: CriticReport) -> PptxIR:
-        from ..ir import ParagraphBlock
+        del report
         patched = ir.model_copy(deep=True)
         for slide in patched.content.slides:
             # Slide-level string fields: title / subtitle / stat_value /
@@ -156,6 +154,7 @@ class VerifierPipeline:
         return patched
 
     def _patch_docx(self, ir: DocxIR, report: CriticReport) -> DocxIR:
+        del report
         patched = ir.model_copy(deep=True)
         for block in patched.content.blocks:
             if hasattr(block, "text") and self._looks_like_placeholder(block.text):
@@ -180,6 +179,7 @@ class VerifierPipeline:
         return patched
 
     def _patch_pdf(self, ir: PdfIR, report: CriticReport) -> PdfIR:
+        del report
         patched = ir.model_copy(deep=True)
         for page in patched.content.pages:
             for block in page.blocks:

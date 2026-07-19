@@ -37,6 +37,13 @@ class SkillManifest:
     permissions: list[str] = field(default_factory=list)
     enabled: bool = True
 
+    # Server-owned artifact identity.  Tenant uploads receive these values
+    # only after the database transaction has created an immutable version.
+    skill_id: str | None = None
+    version_id: str | None = None
+    content_hash: str | None = None
+    artifact_type: str = "bundled"
+
     # === Extended (new) ===
     instructions: str = ""              # Full markdown instructions (L2, loaded on demand)
     trigger: TriggerConfig | None = None  # Auto-trigger patterns
@@ -113,6 +120,10 @@ class SkillManifest:
             "tags": self.tags,
             "permissions": self.permissions,
             "enabled": self.enabled,
+            "skill_id": self.skill_id,
+            "version_id": self.version_id,
+            "content_hash": self.content_hash,
+            "artifact_type": self.artifact_type,
             "instructions": self.instructions,
             "trigger": {"patterns": self.trigger.patterns, "auto": self.trigger.auto} if self.trigger else None,
             "config": self.config,

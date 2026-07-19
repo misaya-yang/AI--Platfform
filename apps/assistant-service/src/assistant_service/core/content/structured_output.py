@@ -26,9 +26,8 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import BaseModel, Field, ValidationError
-
 from ai_gateway_core.logging import get_logger
+from pydantic import BaseModel, Field, ValidationError
 
 logger = get_logger(__name__)
 
@@ -323,17 +322,17 @@ class StructuredOutputParser:
                 if field_name in hints:
                     # Try to set a reasonable default
                     hint = hints[field_name]
-                    if hint == str:
+                    if hint is str:
                         fixed[field_name] = ""
-                    elif hint == int:
+                    elif hint is int:
                         fixed[field_name] = 0
-                    elif hint == float:
+                    elif hint is float:
                         fixed[field_name] = 0.0
-                    elif hint == bool:
+                    elif hint is bool:
                         fixed[field_name] = False
-                    elif hint == list or str(hint).startswith("typing.List"):
+                    elif hint is list or str(hint).startswith("typing.List"):
                         fixed[field_name] = []
-                    elif hint == dict or str(hint).startswith("typing.Dict"):
+                    elif hint is dict or str(hint).startswith("typing.Dict"):
                         fixed[field_name] = {}
 
             # Handle type coercion
@@ -513,6 +512,7 @@ class OutputGuardrail:
 
     def _check_hallucination(self, output: str, context: str) -> list[str]:
         """Check for potential hallucination indicators."""
+        del context
         warnings = []
 
         # Phrases that often indicate hallucination

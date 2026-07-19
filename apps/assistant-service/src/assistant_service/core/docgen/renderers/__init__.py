@@ -10,12 +10,12 @@ targeted edits — typically by patching the IR and re-rendering only the
 affected pages / slides.
 """
 
-from .base import BaseRenderer, RenderResult, RenderError
+from .base import BaseRenderer, RenderError, RenderResult
+from .dispatcher import RendererDispatcher
 from .docx_renderer import DocxRenderer
+from .pdf_renderer import PdfRenderer
 from .pptx_renderer import PptxRenderer
 from .xlsx_renderer import XlsxRenderer
-from .pdf_renderer import PdfRenderer
-from .dispatcher import RendererDispatcher
 
 __all__ = [
     "BaseRenderer",

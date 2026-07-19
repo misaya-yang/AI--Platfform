@@ -5,8 +5,8 @@ and sub-resources (editing.md, pptxgenjs.md, etc.) are loaded on demand by
 ``SkillRouter``.
 """
 
-from .models import Skill, SkillFrontmatter, SkillResource
 from .loader import SkillLoader
+from .models import Skill, SkillFrontmatter, SkillResource
 from .registry import SkillRegistry
 from .router import SkillRouter
 

@@ -35,7 +35,6 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from pptx import Presentation
 from pptx.util import Inches
@@ -86,7 +85,7 @@ class PptxRenderer(BaseRenderer):
         ds_name = None
         if ir.metadata.model_extra:
             ds_name = ir.metadata.model_extra.get("design_system")
-        ds: Optional[DesignSystem] = None
+        ds: DesignSystem | None = None
         if ds_name and ds_name in available_systems():
             ds = get_design_system(ds_name)
         if ds is None:
@@ -142,4 +141,5 @@ class PptxRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: PptxIR, critic_findings, out_dir: Path) -> RenderResult:
+        del critic_findings
         return await self.render(ir, out_dir)

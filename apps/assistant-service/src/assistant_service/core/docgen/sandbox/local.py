@@ -14,11 +14,12 @@ image with LibreOffice / Node / etc.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Optional
 
 from .client import SandboxClient, SandboxResult, SandboxTimeout
 
@@ -32,7 +33,7 @@ class LocalSubprocessSandbox(SandboxClient):
         python_executable: str = "python3",
         node_executable: str = "node",
         extra_keep_env: tuple[str, ...] = (),
-        workdir_root: Optional[Path] = None,
+        workdir_root: Path | None = None,
     ) -> None:
         self._python = python_executable
         self._node = node_executable
@@ -48,7 +49,7 @@ class LocalSubprocessSandbox(SandboxClient):
             return Path(tempfile.mkdtemp(prefix="docgen_sb_", dir=root))
         return Path(tempfile.mkdtemp(prefix="docgen_sb_"))
 
-    def _seed_files(self, workdir: Path, files_in: Optional[Iterable[Path]]) -> None:
+    def _seed_files(self, workdir: Path, files_in: Iterable[Path] | None) -> None:
         if not files_in:
             return
         for src in files_in:
@@ -61,7 +62,7 @@ class LocalSubprocessSandbox(SandboxClient):
             else:
                 shutil.copy2(src, dst)
 
-    def _scrub_env(self, extra: Optional[dict[str, str]]) -> dict[str, str]:
+    def _scrub_env(self, extra: dict[str, str] | None) -> dict[str, str]:
         import os
 
         env = {k: os.environ[k] for k in self._keep_env if k in os.environ}
@@ -69,7 +70,7 @@ class LocalSubprocessSandbox(SandboxClient):
             env.update(extra)
         return env
 
-    def _collect_produced(self, workdir: Path, produce: Optional[Iterable[str]]) -> list[Path]:
+    def _collect_produced(self, workdir: Path, produce: Iterable[str] | None) -> list[Path]:
         if not produce:
             return []
         out: list[Path] = []
@@ -84,9 +85,9 @@ class LocalSubprocessSandbox(SandboxClient):
         argv: list[str],
         *,
         timeout: float,
-        files_in: Optional[Iterable[Path]],
-        produce: Optional[Iterable[str]],
-        env: Optional[dict[str, str]],
+        files_in: Iterable[Path] | None,
+        produce: Iterable[str] | None,
+        env: dict[str, str] | None,
     ) -> SandboxResult:
         workdir = self._make_workdir()
         self._seed_files(workdir, files_in)
@@ -103,10 +104,8 @@ class LocalSubprocessSandbox(SandboxClient):
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            try:
+            with contextlib.suppress(Exception):
                 await proc.wait()
-            except Exception:
-                pass
             raise SandboxTimeout(f"sandbox job exceeded {timeout}s (workdir={workdir})") from None
         duration_ms = int((time.perf_counter() - started) * 1000)
         return SandboxResult(
@@ -125,9 +124,9 @@ class LocalSubprocessSandbox(SandboxClient):
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
         return await self._run(
             [self._python, "-c", code],
@@ -142,9 +141,9 @@ class LocalSubprocessSandbox(SandboxClient):
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
         return await self._run(
             [self._node, "-e", code],
@@ -159,9 +158,9 @@ class LocalSubprocessSandbox(SandboxClient):
         cmd: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult:
         return await self._run(
             ["bash", "-lc", cmd],

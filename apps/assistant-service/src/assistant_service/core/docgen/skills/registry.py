@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
 
 from .loader import SkillLoader
 from .models import Skill, SkillFrontmatter
@@ -15,13 +15,13 @@ class _Entry:
     name: str
     root: Path
     frontmatter: SkillFrontmatter
-    resolved: Optional[Skill] = None
+    resolved: Skill | None = None
 
 
 class SkillRegistry:
     """Lazy registry: all frontmatters up front, bodies on demand."""
 
-    def __init__(self, search_paths: Iterable[Path], loader: Optional[SkillLoader] = None) -> None:
+    def __init__(self, search_paths: Iterable[Path], loader: SkillLoader | None = None) -> None:
         self._paths = [Path(p) for p in search_paths]
         self._loader = loader or SkillLoader()
         self._index: dict[str, _Entry] = {}
@@ -47,7 +47,7 @@ class SkillRegistry:
     def frontmatters(self) -> list[SkillFrontmatter]:
         return [e.frontmatter for e in self._index.values()]
 
-    def get(self, name: str) -> Optional[Skill]:
+    def get(self, name: str) -> Skill | None:
         entry = self._index.get(name)
         if entry is None:
             return None

@@ -29,6 +29,13 @@ class AgentTraceSummary(BaseModel):
     session_id: str | None = None
     run_id: str | None = None
     request_id: str | None = None
+    agent_id: str | None = None
+    agent_version_id: str | None = None
+    agent_draft_revision: int | None = None
+    publication_id: str | None = None
+    channel: Literal["preview", "hosted", "embed", "api", "builtin"] | None = None
+    runtime_fingerprint: str | None = None
+    agent_spec_hash: str | None = None
     model_id: str | None = None
     provider: str | None = None
     status: TraceStatus

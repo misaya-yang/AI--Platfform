@@ -147,10 +147,12 @@ class DatabaseStorage:
         pool_max_size: int = int(os.environ.get("DB_POOL_MAX_SIZE", "20")),
         api_key_usage_flush_interval_seconds: int = 2,
         api_key_usage_flush_batch_size: int = 100,
+        bootstrap_admin_password_hash: str | None = None,
     ):
         self.dsn = dsn
         self.enabled = enabled and HAS_ASYNCPG and dsn
         self.auto_init = bool(auto_init)
+        self._bootstrap_admin_password_hash = bootstrap_admin_password_hash or None
         self.schema_path = schema_path or str(
             _SCHEMA_ROOT / "schema.sql"
         )
@@ -379,6 +381,7 @@ class DatabaseStorage:
             await self._auto_apply_assistant_context_metrics_migration()
             await self._auto_apply_tenant_isolation_migration()
             await self._auto_apply_conversation_shares_migration()
+            await self._ensure_bootstrap_admin_password_hash()
 
     async def close(self) -> None:
         """关闭连接池"""
@@ -477,7 +480,19 @@ class DatabaseStorage:
                 """
             )
             permissions_table = await conn.fetchval("SELECT to_regclass('public.permissions')")
-            return password_col is None or permissions_table is None
+            if password_col is None or permissions_table is None:
+                return True
+
+            # schema.sql already contains the account tables, so checking DDL
+            # alone can incorrectly skip migration 005 on a fresh database.
+            # Its seed rows are part of the usable account-system contract.
+            admin_permission = await conn.fetchval(
+                "SELECT 1 FROM permissions WHERE permission_code = 'admin:*' LIMIT 1"
+            )
+            bootstrap_admin = await conn.fetchval(
+                "SELECT 1 FROM users WHERE user_id = 'admin' LIMIT 1"
+            )
+            return admin_permission is None or bootstrap_admin is None
 
     async def _auto_apply_account_permission_migration(self) -> None:
         """Apply account/permission migration when required."""
@@ -501,6 +516,28 @@ class DatabaseStorage:
             raise RuntimeError(f"Migration not found: {migration_path}")
 
         await self.execute_schema(str(migration_path))
+
+    async def _ensure_bootstrap_admin_password_hash(self) -> None:
+        """Initialize the local admin password once without overwriting it.
+
+        The account migration intentionally contains no known password. The
+        open-source quickstart supplies a freshly generated bcrypt hash here;
+        existing admin credentials are preserved on every later startup.
+        """
+        if not self._pool or not self._bootstrap_admin_password_hash:
+            return
+
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE users
+                SET password_hash = $1,
+                    updated_at = NOW()
+                WHERE user_id = 'admin'
+                  AND (password_hash IS NULL OR password_hash = '')
+                """,
+                self._bootstrap_admin_password_hash,
+            )
 
     async def _user_permissions_schema_missing(self) -> bool:
         """Check if user_permissions table is missing."""
@@ -1361,6 +1398,71 @@ class DatabaseStorage:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM sessions WHERE session_id = $1", session_id)
             return self._row_to_dict(row) if row else None
+
+    async def bind_agent_runtime_session(
+        self,
+        *,
+        session_id: str,
+        service_id: str,
+        user_id: str,
+        tenant_id: str,
+        agent_id: str,
+        agent_version_id: str | None,
+        agent_draft_revision: int | None,
+        publication_id: str | None,
+        channel: str,
+        runtime_fingerprint: str,
+        agent_spec_hash: str,
+        expires_at: datetime | None,
+    ) -> dict[str, Any] | None:
+        """Create or verify one immutable session-to-Agent runtime binding."""
+
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO sessions (
+                    session_id, service_id, user_id, tenant_id,
+                    state, history, metadata, config, status, expires_at,
+                    agent_id, agent_version_id, agent_draft_revision,
+                    publication_id, channel, runtime_fingerprint, agent_spec_hash
+                ) VALUES (
+                    $1, $2, $3, $4,
+                    '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                    'active', $5,
+                    $6::uuid, $7::uuid, $8, $9::uuid, $10, $11, $12
+                )
+                ON CONFLICT (session_id) DO UPDATE SET
+                    expires_at = GREATEST(sessions.expires_at, EXCLUDED.expires_at),
+                    updated_at = NOW()
+                WHERE sessions.user_id = EXCLUDED.user_id
+                  AND sessions.tenant_id = EXCLUDED.tenant_id
+                  AND sessions.service_id = EXCLUDED.service_id
+                  AND sessions.status = 'active'
+                  AND sessions.agent_id = EXCLUDED.agent_id
+                  AND sessions.agent_version_id IS NOT DISTINCT FROM EXCLUDED.agent_version_id
+                  AND sessions.agent_draft_revision IS NOT DISTINCT FROM EXCLUDED.agent_draft_revision
+                  AND sessions.publication_id IS NOT DISTINCT FROM EXCLUDED.publication_id
+                  AND sessions.channel = EXCLUDED.channel
+                  AND sessions.runtime_fingerprint = EXCLUDED.runtime_fingerprint
+                  AND sessions.agent_spec_hash = EXCLUDED.agent_spec_hash
+                RETURNING *
+                """,
+                session_id,
+                service_id,
+                user_id,
+                tenant_id,
+                expires_at,
+                agent_id,
+                agent_version_id,
+                agent_draft_revision,
+                publication_id,
+                channel,
+                runtime_fingerprint,
+                agent_spec_hash,
+            )
+        return self._row_to_dict(row) if row else None
 
     async def append_session_message(
         self,

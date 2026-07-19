@@ -38,7 +38,6 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx  # kept for `httpx.TimeoutException` / `httpx.HTTPError` in executor's except clauses
-
 from ai_gateway_core.logging import get_logger
 from ai_gateway_core.security import (
     SafeFetchError,

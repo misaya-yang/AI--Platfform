@@ -132,11 +132,12 @@ class ResponseCapMiddleware:
 
     async def on_tool_result(
         self,
-        ctx: "AgentLoopContext",
+        ctx: AgentLoopContext,
         tool_name: str,
         arguments: dict[str, Any],
         result: Any,
     ) -> Any:
+        del ctx, arguments
         if result is None:
             return None
 

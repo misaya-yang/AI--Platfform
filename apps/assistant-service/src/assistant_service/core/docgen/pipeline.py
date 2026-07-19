@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .planners import (
     Brief,
@@ -65,8 +64,8 @@ class DocgenPipeline:
     def __init__(
         self,
         *,
-        llm: Optional[LLMCaller] = None,
-        critic: Optional[VisionCritic] = None,
+        llm: LLMCaller | None = None,
+        critic: VisionCritic | None = None,
         verify: bool = True,
         max_fix_rounds: int = 2,
     ) -> None:

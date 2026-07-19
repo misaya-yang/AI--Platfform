@@ -14,9 +14,9 @@ Tools read it via `get_task_manager().get_session(session_id)`.
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from ..tasks.task_manager import get_task_manager
 from ..working_memory import TaskStatus
 from .tool_registry import (

@@ -31,3 +31,10 @@ class Session:
     config: dict[str, Any] | None = field(default_factory=dict)
     status: str = "active"
     expires_at: datetime | None = None
+    agent_id: str | None = None
+    agent_version_id: str | None = None
+    agent_draft_revision: int | None = None
+    publication_id: str | None = None
+    channel: str | None = None
+    runtime_fingerprint: str | None = None
+    agent_spec_hash: str | None = None

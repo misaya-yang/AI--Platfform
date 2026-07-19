@@ -19,6 +19,7 @@ import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import UUID
 
 import httpx
 from ai_gateway_core.logging import get_logger
@@ -26,10 +27,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ...core.auth.user_resolver import UserContext
-from ..deps import get_user_context
+from ..deps import AuthContext, get_auth_context, get_user_context
+from ..redacted_validation_route import RedactedValidationRoute
+from ..schemas.mcp import (
+    ConnectorPrincipalCreate,
+    ConnectorPrincipalListResponse,
+    ConnectorPrincipalMutationResponse,
+    ConnectorPrincipalResponse,
+    MCPMutationResponse,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+principal_router = APIRouter(route_class=RedactedValidationRoute)
 OAUTH_STATE_TTL_SECONDS = 600
 OAUTH_STATE_KEY_PREFIX = "oauth:state:"
 
@@ -49,6 +59,122 @@ class ConnectorInfo(BaseModel):
 class ConnectorSearchRequest(BaseModel):
     query: str
     limit: int = 10
+
+
+@principal_router.post(
+    "/{provider}/principals",
+    response_model=ConnectorPrincipalMutationResponse,
+    status_code=201,
+)
+async def create_connector_principal(
+    provider: str,
+    payload: ConnectorPrincipalCreate,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Register an explicit Secret-ref credential principal for Agent runtime."""
+
+    from .mcp import _audit_mutation, _authorize_write, _get_repository, _map_repository_error
+
+    _authorize_write(request, auth, user)
+    if provider != "confluence":
+        raise HTTPException(422, "Only existing V1 Connector types are supported")
+    try:
+        principal = await _get_repository(request).create_connector_principal(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            provider=provider,
+            **payload.model_dump(),
+        )
+    except Exception as exc:
+        _map_repository_error(request, exc)
+        raise
+    audit_ref = await _audit_mutation(
+        request,
+        user,
+        action="create",
+        resource_type="connector_principal",
+        resource_id=str(principal["grant_id"]),
+        summary={
+            "provider": provider,
+            "principal_type": payload.principal_type,
+            "owner_user_id": payload.owner_user_id,
+            "allowed_channels": payload.allowed_channels,
+        },
+    )
+    return ConnectorPrincipalMutationResponse(
+        principal=ConnectorPrincipalResponse.model_validate(principal),
+        request_id=str(getattr(request.state, "request_id", "")),
+        audit_ref=audit_ref,
+    )
+
+
+@principal_router.get(
+    "/{provider}/principals",
+    response_model=ConnectorPrincipalListResponse,
+)
+async def list_connector_principals(
+    provider: str,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    from .mcp import _authorize_read, _get_repository, _map_repository_error
+
+    _authorize_read(request, auth, user)
+    if provider != "confluence":
+        raise HTTPException(422, "Only existing V1 Connector types are supported")
+    try:
+        principals = await _get_repository(request).list_connector_principals(
+            tenant_id=user.tenant_id,
+            provider=provider,
+        )
+    except Exception as exc:
+        _map_repository_error(request, exc)
+        raise
+    rendered = [ConnectorPrincipalResponse.model_validate(item) for item in principals]
+    return ConnectorPrincipalListResponse(principals=rendered, total=len(rendered))
+
+
+@principal_router.delete(
+    "/{provider}/principals/{grant_id}",
+    response_model=MCPMutationResponse,
+)
+async def revoke_connector_principal(
+    provider: str,
+    grant_id: UUID,
+    request: Request,
+    user: UserContext = Depends(get_user_context),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    from .mcp import _audit_mutation, _authorize_write, _get_repository, _map_repository_error
+
+    _authorize_write(request, auth, user)
+    if provider != "confluence":
+        raise HTTPException(422, "Only existing V1 Connector types are supported")
+    try:
+        await _get_repository(request).revoke_connector_principal(
+            tenant_id=user.tenant_id,
+            grant_id=grant_id,
+            user_id=user.user_id,
+        )
+    except Exception as exc:
+        _map_repository_error(request, exc)
+        raise
+    audit_ref = await _audit_mutation(
+        request,
+        user,
+        action="revoke",
+        resource_type="connector_principal",
+        resource_id=grant_id,
+        summary={"provider": provider},
+    )
+    return MCPMutationResponse(
+        status="revoked",
+        request_id=str(getattr(request.state, "request_id", "")),
+        audit_ref=audit_ref,
+    )
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
@@ -125,7 +251,7 @@ async def _store_oauth_state(
     try:
         await _redis_save_json(redis, _oauth_state_key(state), entry, OAUTH_STATE_TTL_SECONDS)
     except Exception as exc:
-        logger.warning("OAuth state store failed: %s", exc)
+        logger.warning("OAuth state store failed")
         raise HTTPException(503, "OAuth state store unavailable") from exc
 
 
@@ -140,7 +266,7 @@ async def _consume_oauth_state(request: Request | None, state: str) -> dict[str,
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("OAuth state consume failed: %s", exc)
+        logger.warning("OAuth state consume failed")
         raise HTTPException(503, "OAuth state store unavailable") from exc
     if not entry:
         raise HTTPException(400, "Invalid or expired state parameter")
@@ -209,7 +335,7 @@ async def _refresh_token_if_needed(db, connector: dict, config: dict) -> str:
             if resp.status_code != 200:
                 await db.execute(
                     "UPDATE user_connectors SET status = 'expired', last_error = $1, updated_at = NOW() WHERE id = $2",
-                    f"Refresh failed: {resp.text[:200]}", connector["id"],
+                    "Refresh failed", connector["id"],
                 )
                 raise HTTPException(401, "Token refresh failed. Please reconnect.")
 
@@ -382,8 +508,12 @@ async def oauth_callback(
         resp = await client.post(config["token_url"], data=token_data, headers=headers)
 
     if resp.status_code != 200:
-        logger.error(f"OAuth token exchange failed for {provider}: {resp.text[:300]}")
-        raise HTTPException(400, f"Token exchange failed: {resp.text[:200]}")
+        logger.error(
+            "OAuth token exchange failed: provider=%s status=%s",
+            provider,
+            resp.status_code,
+        )
+        raise HTTPException(400, "Token exchange failed")
 
     data = resp.json()
     access_token = data.get("access_token")
@@ -570,7 +700,7 @@ async def _search_confluence(token: str, metadata: dict, query: str, limit: int)
         resp = await client.get(url, params={"cql": cql, "limit": limit, "expand": "body.view,space"},
                                 headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"Confluence search failed: {resp.text[:200]}")
+        raise HTTPException(resp.status_code, "Confluence search failed")
 
     data = resp.json()
     results = []
@@ -597,7 +727,7 @@ async def _search_outlook(token: str, query: str, limit: int) -> list[dict]:
     async with httpx.AsyncClient() as client:
         resp = await client.get(url, params=params, headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"Outlook search failed: {resp.text[:200]}")
+        raise HTTPException(resp.status_code, "Outlook search failed")
 
     data = resp.json()
     return [
@@ -619,7 +749,7 @@ async def _search_github(token: str, query: str, limit: int) -> list[dict]:
         resp = await client.get(url, params={"q": query, "per_page": limit},
                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
     if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"GitHub search failed: {resp.text[:200]}")
+        raise HTTPException(resp.status_code, "GitHub search failed")
 
     data = resp.json()
     return [
@@ -641,7 +771,7 @@ async def _search_gmail(token: str, query: str, limit: int) -> list[dict]:
         resp = await client.get(url, params={"q": query, "maxResults": limit},
                                 headers={"Authorization": f"Bearer {token}"})
     if resp.status_code != 200:
-        raise HTTPException(resp.status_code, f"Gmail search failed: {resp.text[:200]}")
+        raise HTTPException(resp.status_code, "Gmail search failed")
 
     messages = resp.json().get("messages", [])
     results = []
@@ -663,3 +793,9 @@ async def _search_gmail(token: str, query: str, limit: int) -> list[dict]:
                 "type": "email",
             })
     return results
+
+
+# Credential-bearing Agent principal routes use a route class that removes
+# Pydantic's echoed input values from validation errors. Existing Connector
+# paths keep their legacy response contract.
+router.include_router(principal_router)

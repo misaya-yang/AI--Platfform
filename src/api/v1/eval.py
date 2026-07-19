@@ -219,6 +219,12 @@ async def list_eval_traces(
     session_id: Annotated[str | None, Query()] = None,
     run_id: Annotated[str | None, Query()] = None,
     request_id: Annotated[str | None, Query()] = None,
+    agent_id: Annotated[str | None, Query()] = None,
+    agent_version_id: Annotated[str | None, Query()] = None,
+    publication_id: Annotated[str | None, Query()] = None,
+    channel: Annotated[
+        str | None, Query(pattern=r"^(preview|hosted|embed|api|builtin)$")
+    ] = None,
     transcript_query: Annotated[str | None, Query(min_length=1, max_length=500)] = None,
     turn_index: Annotated[int | None, Query(ge=1)] = None,
     span_kind: Annotated[str | None, Query()] = None,
@@ -249,6 +255,10 @@ async def list_eval_traces(
         session_id=session_id,
         run_id=run_id,
         request_id=request_id,
+        agent_id=agent_id,
+        agent_version_id=agent_version_id,
+        publication_id=publication_id,
+        channel=channel,
         transcript_query=transcript_query.strip() if transcript_query else None,
         turn_index=turn_index,
         span_kind=span_kind,

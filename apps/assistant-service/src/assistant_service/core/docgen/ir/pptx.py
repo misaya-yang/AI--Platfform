@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,21 +30,21 @@ PptxLayout = Literal[
 
 
 class _ImageSource(BaseModel):
-    path: Optional[str] = None
-    url: Optional[str] = None
+    path: str | None = None
+    url: str | None = None
     alt_text: str
 
 
 class _IconRef(BaseModel):
     name: str
-    color: Optional[HexColor] = None
+    color: HexColor | None = None
     alt_text: str
 
 
 class _ShapeSpec(BaseModel):
     shape: Literal["rect", "circle", "arrow", "callout"] = "rect"
-    fill: Optional[HexColor] = None
-    stroke: Optional[HexColor] = None
+    fill: HexColor | None = None
+    stroke: HexColor | None = None
     alt_text: str
 
 
@@ -52,7 +52,7 @@ class VisualSpec(BaseModel):
     """Visual attached to a slide besides the body blocks."""
 
     kind: Literal["image", "chart", "icon", "shape"]
-    source: Union[_ImageSource, ChartSpec, _IconRef, _ShapeSpec]
+    source: _ImageSource | ChartSpec | _IconRef | _ShapeSpec
 
     @property
     def alt_text(self) -> str:
@@ -62,13 +62,13 @@ class VisualSpec(BaseModel):
 
 class PptxSlide(BaseModel):
     layout: PptxLayout = "title_content"
-    title: Optional[str] = None
-    subtitle: Optional[str] = None
+    title: str | None = None
+    subtitle: str | None = None
     body: list[Block] = Field(default_factory=list)
-    notes: Optional[str] = None
-    visual: Optional[VisualSpec] = None
-    stat_value: Optional[str] = None  # used by ``stat_callout`` layout
-    stat_label: Optional[str] = None
+    notes: str | None = None
+    visual: VisualSpec | None = None
+    stat_value: str | None = None  # used by ``stat_callout`` layout
+    stat_label: str | None = None
 
 
 class PptxContent(BaseModel):

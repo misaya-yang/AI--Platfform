@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tasks.task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
 
@@ -446,7 +447,8 @@ class ToolOrchestrator:
         # Cache lookup for idempotent tools
         cache_key: str | None = None
         if task.tool in self._cacheable_tools:
-            import hashlib, json as _json
+            import hashlib
+            import json as _json
             cache_key = hashlib.md5(
                 f"{task.tool}|{_json.dumps(task.parameters, sort_keys=True, default=str)}".encode()
             ).hexdigest()

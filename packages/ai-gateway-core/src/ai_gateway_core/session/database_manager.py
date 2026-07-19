@@ -89,6 +89,50 @@ class DatabaseSessionManager:
 
         return session
 
+    async def bind_agent_runtime(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        tenant_id: str,
+        agent_id: str,
+        agent_version_id: str | None,
+        agent_draft_revision: int | None,
+        publication_id: str | None,
+        channel: str,
+        runtime_fingerprint: str,
+        agent_spec_hash: str,
+        ttl: int | None = None,
+    ) -> Session:
+        """Atomically create or verify an immutable Agent runtime session pin."""
+
+        ttl_seconds = self.default_session_ttl if ttl is None else int(ttl)
+        expires_at = (
+            datetime.utcnow() + timedelta(seconds=ttl_seconds)
+            if ttl_seconds
+            else None
+        )
+        row = await self.database.bind_agent_runtime_session(
+            session_id=session_id,
+            service_id="__builtin_assistant__",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            agent_version_id=agent_version_id,
+            agent_draft_revision=agent_draft_revision,
+            publication_id=publication_id,
+            channel=channel,
+            runtime_fingerprint=runtime_fingerprint,
+            agent_spec_hash=agent_spec_hash,
+            expires_at=expires_at,
+        )
+        if not row:
+            raise PermissionDeniedError("Session is bound to a different Agent runtime")
+        session = self._dict_to_session(row)
+        await self._remove_from_cache(session_id)
+        await self._cache_session(session)
+        return session
+
     async def get(self, session_id: str) -> Session | None:
         """获取会话"""
         # 尝试从缓存获取
@@ -402,6 +446,13 @@ class DatabaseSessionManager:
             "config": getattr(session, "config", {}) or {},
             "status": getattr(session, "status", "active"),
             "expires_at": session.expires_at,
+            "agent_id": session.agent_id,
+            "agent_version_id": session.agent_version_id,
+            "agent_draft_revision": session.agent_draft_revision,
+            "publication_id": session.publication_id,
+            "channel": session.channel,
+            "runtime_fingerprint": session.runtime_fingerprint,
+            "agent_spec_hash": session.agent_spec_hash,
         }
 
     def _message_to_dict(self, message: SessionMessage) -> dict[str, Any]:
@@ -455,4 +506,31 @@ class DatabaseSessionManager:
             config=data.get("config") or {},
             status=data.get("status", "active"),
             expires_at=expires_at,
+            agent_id=str(data.get("agent_id")) if data.get("agent_id") else None,
+            agent_version_id=(
+                str(data.get("agent_version_id"))
+                if data.get("agent_version_id")
+                else None
+            ),
+            agent_draft_revision=(
+                int(data["agent_draft_revision"])
+                if data.get("agent_draft_revision") is not None
+                else None
+            ),
+            publication_id=(
+                str(data.get("publication_id"))
+                if data.get("publication_id")
+                else None
+            ),
+            channel=str(data.get("channel")) if data.get("channel") else None,
+            runtime_fingerprint=(
+                str(data.get("runtime_fingerprint"))
+                if data.get("runtime_fingerprint")
+                else None
+            ),
+            agent_spec_hash=(
+                str(data.get("agent_spec_hash"))
+                if data.get("agent_spec_hash")
+                else None
+            ),
         )

@@ -8,7 +8,8 @@ Skill Executor — dispatch skill execution by entrypoint type.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .models import SkillManifest
 
@@ -58,6 +59,17 @@ class SkillExecutor:
                 return {"success": False, "error": f"Skill execution failed: {handler_name}"}
 
         elif entrypoint.startswith("md://") or entrypoint.startswith("db://"):
+            if entrypoint.startswith("db://"):
+                expected = (
+                    f"db://{skill.skill_id}/{skill.version_id}"
+                    if skill.skill_id and skill.version_id
+                    else None
+                )
+                if not expected or entrypoint != expected:
+                    return {
+                        "success": False,
+                        "error": "Skill artifact identity is invalid",
+                    }
             # Return instructions — the LLM will follow them in the next turn
             if not skill.instructions:
                 return {

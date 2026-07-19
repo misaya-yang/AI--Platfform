@@ -85,8 +85,8 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
     examples=[
         ToolExample(
             description="Remember user name",
-            input={"key": "user_name", "value": "Misaya", "action": "set"},
-            expected_output="Memory updated: user_name = Misaya",
+            input={"key": "user_name", "value": "Alex", "action": "set"},
+            expected_output="Memory updated: user_name = Alex",
         ),
         ToolExample(
             description="Remember coding preference",
@@ -128,6 +128,15 @@ class UpdateMemoryExecutor(ToolExecutor):
         try:
             profile = self._parse_profile(request.arguments.get("profile"))
             memory_type = self._parse_memory_type(request.arguments.get("memory_type"))
+            metadata = getattr(request, "metadata", None) or {}
+            agent_memory_mode = str(metadata.get("agent_memory_mode") or "")
+            if agent_memory_mode and agent_memory_mode != "user":
+                raise MemoryPolicyError(
+                    "This Agent version does not allow user-memory operations."
+                )
+            memory_user_id = str(
+                metadata.get("memory_principal") or request.user.user_id
+            )
 
             if action == "inspect":
                 return ToolCallResult(
@@ -148,7 +157,7 @@ class UpdateMemoryExecutor(ToolExecutor):
             if action == "delete":
                 await self.memory_service.delete_user_memory(
                     tenant_id=request.user.tenant_id,
-                    user_id=request.user.user_id,
+                    user_id=memory_user_id,
                     key=key,
                 )
                 result_msg = f"Memory deleted: {key}"
@@ -165,7 +174,7 @@ class UpdateMemoryExecutor(ToolExecutor):
                 safe_value, _ = sanitize_memory_value(value)
                 await self.memory_service.set_user_memory(
                     tenant_id=request.user.tenant_id,
-                    user_id=request.user.user_id,
+                    user_id=memory_user_id,
                     key=key,
                     value=safe_value,
                 )

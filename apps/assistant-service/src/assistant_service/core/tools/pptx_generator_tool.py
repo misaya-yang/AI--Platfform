@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -193,6 +194,7 @@ class PPTXGenerator:
             from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
             from pptx.util import Inches, Pt
 
+            _ = Presentation, RGBColor, MSO_ANCHOR, PP_ALIGN, Inches, Pt
             self._pptx_available = True
         except ImportError:
             self._pptx_available = False
@@ -458,6 +460,7 @@ class PPTXGenerator:
 
     def _add_blank_slide(self, prs, theme: ThemeConfig):
         """Add a blank slide."""
+        del theme
         blank_layout = prs.slide_layouts[6]
         prs.slides.add_slide(blank_layout)
 

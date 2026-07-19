@@ -318,7 +318,11 @@ def create_app() -> FastAPI:
     async def security_headers(request, call_next):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        if not request.url.path.startswith("/embed/agents/"):
+            response.headers["X-Frame-Options"] = "DENY"
+        else:
+            if "X-Frame-Options" in response.headers:
+                del response.headers["X-Frame-Options"]
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -342,6 +346,9 @@ def create_app() -> FastAPI:
     # ========== 路由 ==========
 
     app.include_router(api_router, prefix="/api/v1")
+    from .api.v1.agent_public import document_router as agent_embed_document_router
+
+    app.include_router(agent_embed_document_router)
     # Compatibility alias for agents expecting `/v1/...`
     from .api.v1.knowledge import router as knowledge_router
 
@@ -898,6 +905,39 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     app.state.redis = container.redis
     app.state.memory_service = container.memory_service
 
+    # AS-03: Gateway owns tenant MCP CRUD and capability resolution while the
+    # protocol client remains in assistant-service. Both processes share the
+    # same repository contract and every runtime resolution is tenant/caller/
+    # connection/channel/schema scoped.
+    from ai_gateway_core.persistence.repositories.mcp_repository import (
+        DatabaseMCPAgentCapabilityResolver,
+        DatabaseMCPRepository,
+    )
+    from ai_gateway_core.persistence.repositories.agent_resource_resolver import (
+        DatabaseAgentKnowledgeResolver,
+    )
+    from ai_gateway_core.skills import DatabaseSkillArtifactRepository
+
+    mcp_enabled = os.getenv("AGENT_STUDIO_MCP_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    app.state.agent_studio_mcp_enabled = mcp_enabled
+    app.state.mcp_repository = DatabaseMCPRepository(container.database)
+    app.state.skill_artifact_repository = DatabaseSkillArtifactRepository(
+        container.database
+    )
+    app.state.agent_runtime_capability_resolver = DatabaseMCPAgentCapabilityResolver(
+        app.state.mcp_repository,
+        mcp_enabled=mcp_enabled,
+        skill_repository=app.state.skill_artifact_repository,
+    )
+    app.state.agent_runtime_knowledge_resolver = DatabaseAgentKnowledgeResolver(
+        container.database
+    )
+
     # LangGraph 相关
     app.state.langgraph_proxy = container.langgraph_proxy
     app.state.multi_rate_limiter = container.multi_rate_limiter
@@ -952,8 +992,6 @@ def _setup_app_state(app: FastAPI, container: Container) -> None:
     init_pricing_service(container.database)
 
     # Initialize LLM provider and model services
-    import os
-
     from .services.llm import ModelService, ProviderService
 
     encryption_key = os.environ.get("GATEWAY_ENCRYPTION_KEY", "")
@@ -1043,8 +1081,6 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
 
     同时将配置同步到数据库，确保前端可以管理。
     """
-    import os
-
     from ai_gateway_core.config import resolve_dashscope, resolve_google
     from ai_gateway_core.enums import ModelProvider
 
@@ -1053,6 +1089,10 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     # UI expects to see the env-derived providers in ``llm_providers``;
     # that's a DB operation and doesn't need the registry.
     configured_providers: list[str] = []
+    # Exact provider set the separate Assistant process can configure from the
+    # shared startup environment. DB-only provider rows remain useful metadata,
+    # but the current Assistant runtime does not load their encrypted keys.
+    assistant_runtime_providers: set[str] = set()
 
     # 默认 provider 配置定义 — for providers whose endpoint selection is
     # straightforward (single key, single base_url env). DashScope and
@@ -1141,6 +1181,9 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     for provider_id, config in DEFAULT_PROVIDER_CONFIGS.items():
         # Default: read the provider's single API key env + optional base_url env.
         api_key = os.environ.get(config["env_key"], "")
+        # Keep this aligned with assistant-service/main.py. Gateway-only legacy
+        # fallbacks may seed admin metadata, but cannot prove execution readiness.
+        assistant_runtime_key = api_key
         base_url = None
         if config.get("env_base_url"):
             base_url = os.environ.get(config["env_base_url"])
@@ -1155,6 +1198,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         if provider_id == "dashscope":
             resolved_key, resolved_url = resolve_dashscope("chat")
             api_key = resolved_key
+            assistant_runtime_key = resolved_key
             base_url = resolved_url
             if not api_key:
                 knowledge_dashscope = getattr(
@@ -1171,6 +1215,7 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
         if provider_id == "google":
             resolved_key, resolved_url, google_backend = resolve_google("chat")
             api_key = resolved_key
+            assistant_runtime_key = resolved_key
             # Only override base_url when backend actually changed — an
             # explicit DB override (base_url column) would be lost
             # otherwise. AI Studio default matches config["base_url"],
@@ -1185,6 +1230,8 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
             try:
                 ModelProvider(provider_id)  # validate it's a known provider
                 configured_providers.append(provider_id)
+                if assistant_runtime_key:
+                    assistant_runtime_providers.add(provider_id)
                 if provider_id == "google" and google_backend == "vertex":
                     logger.info("Google provider routed to Vertex (env-seeded)")
             except ValueError:
@@ -1300,7 +1347,11 @@ async def _init_assistant_service(app: FastAPI, settings: Settings) -> None:
     provider_service = getattr(app.state, "provider_service", None)
     if model_service and provider_service:
         from .services.llm.gateway_model_meta import GatewayModelMeta
-        app.state.model_meta = GatewayModelMeta(model_service, provider_service)
+        app.state.model_meta = GatewayModelMeta(
+            model_service,
+            provider_service,
+            runtime_configured_providers=assistant_runtime_providers,
+        )
     else:
         app.state.model_meta = None
         logger.warning(

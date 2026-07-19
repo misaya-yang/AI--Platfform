@@ -25,7 +25,6 @@ from openpyxl.utils import get_column_letter
 from ..ir import XlsxCell, XlsxIR, XlsxSheet
 from .base import BaseRenderer, RenderError, RenderResult
 
-
 _ROLE_FONT = {
     "input": "0042A3",      # blue  (hardcoded input)
     "formula": "000000",    # black
@@ -57,6 +56,7 @@ class XlsxRenderer(BaseRenderer):
     format = "xlsx"
 
     def _cell_font(self, c: XlsxCell, header_fill_hex: str | None) -> Font:
+        del header_fill_hex
         hex_color = _ROLE_FONT.get(c.role, "000000")
         if c.font_color is not None:
             hex_color = c.font_color.value
@@ -135,4 +135,5 @@ class XlsxRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: XlsxIR, critic_findings, out_dir: Path) -> RenderResult:
+        del critic_findings
         return await self.render(ir, out_dir)

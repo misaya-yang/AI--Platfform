@@ -259,6 +259,10 @@ class AgentTraceRepository(BaseRepository):
         session_id: str | None = None,
         run_id: str | None = None,
         request_id: str | None = None,
+        agent_id: str | None = None,
+        agent_version_id: str | None = None,
+        publication_id: str | None = None,
+        channel: str | None = None,
         transcript_query: str | None = None,
         turn_index: int | None = None,
         span_kind: str | None = None,
@@ -296,6 +300,18 @@ class AgentTraceRepository(BaseRepository):
         if request_id:
             params.append(request_id)
             filters.append(f"t.request_id = ${len(params)}")
+        if agent_id:
+            params.append(agent_id)
+            filters.append(f"t.agent_id = ${len(params)}::uuid")
+        if agent_version_id:
+            params.append(agent_version_id)
+            filters.append(f"t.agent_version_id = ${len(params)}::uuid")
+        if publication_id:
+            params.append(publication_id)
+            filters.append(f"t.publication_id = ${len(params)}::uuid")
+        if channel:
+            params.append(channel)
+            filters.append(f"t.channel = ${len(params)}")
         if turn_index is not None:
             params.append(str(turn_index))
             filters.append(
@@ -2803,6 +2819,193 @@ class AgentTraceRepository(BaseRepository):
             trace_family=trace_family,
         )
 
+    async def get_agent_operations_summary(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        agent_version_id: str | None = None,
+        publication_id: str | None = None,
+        channel: str | None = None,
+        started_after: Any | None = None,
+        started_before: Any | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate only explicit Agent runtime dimensions, never metadata hints."""
+
+        params: list[Any] = [tenant_id, agent_id]
+        filters = ["tenant_id = $1", "agent_id = $2::uuid"]
+        if agent_version_id:
+            params.append(agent_version_id)
+            filters.append(f"agent_version_id = ${len(params)}::uuid")
+        if publication_id:
+            params.append(publication_id)
+            filters.append(f"publication_id = ${len(params)}::uuid")
+        if channel:
+            params.append(channel)
+            filters.append(f"channel = ${len(params)}")
+        if started_after is not None:
+            params.append(started_after)
+            filters.append(f"started_at >= ${len(params)}")
+        if started_before is not None:
+            params.append(started_before)
+            filters.append(f"started_at <= ${len(params)}")
+        where_clause = " AND ".join(filters)
+        row = await self.fetchrow(
+            f"""
+            WITH filtered_traces AS (
+                SELECT
+                    trace_id, tenant_id, session_id, agent_version_id,
+                    publication_id, channel, status, total_latency_ms,
+                    first_token_latency_ms, total_tokens, total_cost_cents,
+                    created_at
+                FROM agent_traces
+                WHERE {where_clause}
+            ),
+            trace_metrics AS (
+                SELECT
+                    COUNT(*)::int AS total_runs,
+                    COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded_runs,
+                    COUNT(*) FILTER (WHERE status IN ('failed', 'timeout'))::int AS failed_runs,
+                    COUNT(DISTINCT session_id)::int AS sessions,
+                    COALESCE(AVG(total_latency_ms), 0)::int AS avg_latency_ms,
+                    COALESCE(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY total_latency_ms), 0)::int AS p50_latency_ms,
+                    COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_latency_ms), 0)::int AS p95_latency_ms,
+                    COALESCE(AVG(first_token_latency_ms), 0)::int AS avg_ttft_ms,
+                    COALESCE(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY first_token_latency_ms), 0)::int AS p50_ttft_ms,
+                    COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY first_token_latency_ms), 0)::int AS p95_ttft_ms,
+                    COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+                    COALESCE(SUM(total_cost_cents), 0)::bigint AS total_cost_cents,
+                    MIN(created_at) AS oldest_trace_at,
+                    MAX(created_at) AS newest_trace_at
+                FROM filtered_traces
+            ),
+            classified_spans AS (
+                SELECT
+                    s.span_kind,
+                    s.status,
+                    CASE
+                        WHEN COALESCE(
+                            s.attributes->>'retrieval.document_count',
+                            s.attributes#>>'{{retrieval,document_count}}'
+                        ) ~ '^[0-9]+$'
+                        THEN COALESCE(
+                            s.attributes->>'retrieval.document_count',
+                            s.attributes#>>'{{retrieval,document_count}}'
+                        )::int
+                        WHEN jsonb_typeof(COALESCE(
+                            s.attributes->'retrieval.documents',
+                            s.attributes#>'{{retrieval,documents}}'
+                        )) = 'array'
+                        THEN jsonb_array_length(COALESCE(
+                            s.attributes->'retrieval.documents',
+                            s.attributes#>'{{retrieval,documents}}'
+                        ))
+                        ELSE 0
+                    END AS retrieved_document_count
+                FROM agent_trace_spans s
+                INNER JOIN filtered_traces t ON t.trace_id = s.trace_id
+                WHERE s.span_kind IN ('tool_execution', 'retriever')
+            ),
+            span_metrics AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE span_kind = 'tool_execution')::int AS tool_calls,
+                    COUNT(*) FILTER (
+                        WHERE span_kind = 'tool_execution' AND status = 'succeeded'
+                    )::int AS tool_succeeded,
+                    COUNT(*) FILTER (WHERE span_kind = 'retriever')::int AS knowledge_queries,
+                    COUNT(*) FILTER (
+                        WHERE span_kind = 'retriever'
+                          AND status = 'succeeded'
+                          AND retrieved_document_count > 0
+                    )::int AS knowledge_hits
+                FROM classified_spans
+            ),
+            feedback_metrics AS (
+                SELECT
+                    COUNT(*)::int AS feedback_count,
+                    COUNT(*) FILTER (WHERE f.rating = 1)::int AS positive_feedback_count
+                FROM agent_runtime_feedback f
+                WHERE f.tenant_id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM filtered_traces t
+                      WHERE t.tenant_id = f.tenant_id
+                        AND t.agent_version_id = f.agent_version_id
+                        AND t.publication_id = f.publication_id
+                        AND t.channel = f.channel
+                        AND t.session_id = f.session_id
+                  )
+            )
+            SELECT trace_metrics.*, span_metrics.*, feedback_metrics.*
+            FROM trace_metrics
+            CROSS JOIN span_metrics
+            CROSS JOIN feedback_metrics
+            """,
+            *params,
+        )
+        breakdown_rows = await self.fetch(
+            f"""
+            SELECT
+                channel,
+                agent_version_id,
+                publication_id,
+                COUNT(*)::int AS run_count,
+                COUNT(*) FILTER (WHERE status IN ('failed', 'timeout'))::int AS failed_count,
+                COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_latency_ms), 0)::int AS p95_latency_ms,
+                COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+                COALESCE(SUM(total_cost_cents), 0)::bigint AS total_cost_cents
+            FROM agent_traces
+            WHERE {where_clause}
+            GROUP BY channel, agent_version_id, publication_id
+            ORDER BY run_count DESC, channel ASC
+            """,
+            *params,
+        )
+        retention = await self.fetchrow(
+            """
+            SELECT
+                COALESCE(p.trace_retention_days, 90)::int AS trace_retention_days,
+                COALESCE(p.legal_hold, FALSE) AS legal_hold,
+                (
+                    SELECT MAX(r.completed_at)
+                    FROM agent_data_deletion_requests r
+                    WHERE r.tenant_id = $1 AND r.agent_id = $2::uuid
+                      AND r.scope = 'retention' AND r.status = 'completed'
+                ) AS last_retention_cleanup_at
+            FROM agents a
+            LEFT JOIN agent_governance_policies p
+              ON p.tenant_id = a.tenant_id AND p.agent_id = a.agent_id
+            WHERE a.tenant_id = $1 AND a.agent_id = $2::uuid
+            """,
+            tenant_id,
+            agent_id,
+        )
+        result = dict(row or {})
+        total = int(result.get("total_runs") or 0)
+        succeeded = int(result.get("succeeded_runs") or 0)
+        tool_calls = int(result.get("tool_calls") or 0)
+        tool_succeeded = int(result.get("tool_succeeded") or 0)
+        knowledge_queries = int(result.get("knowledge_queries") or 0)
+        knowledge_hits = int(result.get("knowledge_hits") or 0)
+        feedback_count = int(result.get("feedback_count") or 0)
+        positive_feedback = int(result.get("positive_feedback_count") or 0)
+        result["success_rate"] = (succeeded / total) if total else None
+        result["tool_success_rate"] = (
+            tool_succeeded / tool_calls if tool_calls else None
+        )
+        result["knowledge_hit_rate"] = (
+            knowledge_hits / knowledge_queries if knowledge_queries else None
+        )
+        result["feedback_positive_rate"] = (
+            positive_feedback / feedback_count if feedback_count else None
+        )
+        result["breakdown"] = [self._decode_trace_row(item) for item in breakdown_rows]
+        result["retention"] = self._decode_trace_row(retention or {})
+        result["retention_limited"] = bool(
+            (retention or {}).get("last_retention_cleanup_at")
+        )
+        return self._decode_trace_row(result)
+
     async def get_summary(
         self,
         *,
@@ -3014,7 +3217,12 @@ class AgentTraceRepository(BaseRepository):
 
     def _decode_trace_row(self, row: dict[str, Any]) -> dict[str, Any]:
         decoded = dict(row)
-        for key in ("trace_id",):
+        for key in (
+            "trace_id",
+            "agent_id",
+            "agent_version_id",
+            "publication_id",
+        ):
             if decoded.get(key) is not None:
                 decoded[key] = str(decoded[key])
         for key in ("redaction_state", "metadata", "metrics", "privacy"):

@@ -11,11 +11,9 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
 
 from ..ir import (
     BulletBlock,
-    ChartBlock,
     ChartSpec,
     HeadingBlock,
     ParagraphBlock,
@@ -26,13 +24,10 @@ from ..ir import (
     VisualSpec,
 )
 from ..ir.base import DocMetadata
-from pydantic import ValidationError
-
 from .base import (
     BasePlanner,
     Brief,
     PlannerResult,
-    metadata_for_brief,
     normalise_pptx_ir,
     parse_markdown_to_blocks,
     theme_for_brief,
@@ -45,7 +40,6 @@ from .layout_rules import (
     LayoutVarietyRule,
     apply_rules,
 )
-
 
 SYSTEM_PROMPT = """You are a presentation designer producing a slide deck.
 
@@ -84,9 +78,9 @@ class PptxPlanner(BasePlanner):
 
     def __init__(
         self,
-        llm: Optional[LLMCaller] = None,
+        llm: LLMCaller | None = None,
         *,
-        rules: Optional[list[LayoutRule]] = None,
+        rules: list[LayoutRule] | None = None,
     ) -> None:
         self._llm = llm
         self._rules = rules if rules is not None else DEFAULT_RULES
@@ -94,7 +88,7 @@ class PptxPlanner(BasePlanner):
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
         used_llm = False
-        ir: Optional[PptxIR] = None
+        ir: PptxIR | None = None
         if self._llm is not None:
             try:
                 ir = await self._plan_with_llm(brief)
@@ -155,7 +149,7 @@ class PptxPlanner(BasePlanner):
         # Extract top-level headings to use as section titles, and bullets
         # within each section as slide body.
         sections: list[tuple[str, list]] = []
-        current_title: Optional[str] = None
+        current_title: str | None = None
         current_blocks: list = []
         for b in md_blocks:
             if isinstance(b, HeadingBlock) and b.level <= 2:
@@ -178,7 +172,7 @@ class PptxPlanner(BasePlanner):
                 body=[ParagraphBlock(text=brief.goal)],
             ))
         else:
-            for idx, (title, blocks) in enumerate(sections):
+            for _idx, (title, blocks) in enumerate(sections):
                 slide = self._pick_slide_for_section(title, blocks)
                 slides.append(slide)
 
@@ -250,7 +244,7 @@ class PptxPlanner(BasePlanner):
         # Default
         return PptxSlide(layout="title_content", title=title, body=blocks[:6])
 
-    def _looks_like_stat(self, blocks) -> Optional[str]:
+    def _looks_like_stat(self, blocks) -> str | None:
         for b in blocks:
             if isinstance(b, ParagraphBlock):
                 t = b.text.strip()
@@ -259,6 +253,7 @@ class PptxPlanner(BasePlanner):
         return None
 
     def _default_chart_slide(self, brief: Brief) -> PptxSlide:
+        del brief
         spec = ChartSpec(
             chart_type="column",
             categories=["2024", "2025", "2026E"],

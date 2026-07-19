@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class IssueSeverity(str, Enum):
@@ -32,8 +32,8 @@ class Issue:
     category: IssueCategory
     severity: IssueSeverity
     message: str
-    target: Optional[int] = None          # page / slide / row index
-    hint: Optional[str] = None
+    target: int | None = None          # page / slide / row index
+    hint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

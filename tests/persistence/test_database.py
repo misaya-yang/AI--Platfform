@@ -188,6 +188,71 @@ class TestAppendSessionMessage:
         assert result is False
 
 
+class TestBootstrapAdminPassword:
+    """The generated local admin secret is applied once, never overwritten."""
+
+    @pytest.mark.asyncio
+    async def test_sets_only_an_empty_bootstrap_admin_hash(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_conn = AsyncMock()
+        mock_pool = AsyncMock()
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+        db._bootstrap_admin_password_hash = "$2b$12$generated-local-hash"
+
+        await db._ensure_bootstrap_admin_password_hash()
+
+        mock_conn.execute.assert_awaited_once()
+        query, password_hash = mock_conn.execute.await_args.args
+        assert "WHERE user_id = 'admin'" in query
+        assert "password_hash IS NULL OR password_hash = ''" in query
+        assert password_hash == db._bootstrap_admin_password_hash
+
+    @pytest.mark.asyncio
+    async def test_skips_when_no_generated_hash_is_configured(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        db._pool = AsyncMock()
+        db._bootstrap_admin_password_hash = None
+
+        await db._ensure_bootstrap_admin_password_hash()
+
+        db._pool.acquire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_account_migration_detects_missing_seed_rows(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(side_effect=[1, "permissions", None, None])
+        mock_pool = AsyncMock()
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+
+        assert await db._account_permission_schema_missing() is True
+
+    @pytest.mark.asyncio
+    async def test_account_migration_accepts_complete_schema_and_seeds(self):
+        db = DatabaseStorage.__new__(DatabaseStorage)
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(side_effect=[1, "permissions", 1, 1])
+        mock_pool = AsyncMock()
+        mock_pool.acquire = MagicMock(
+            return_value=AsyncMock(
+                __aenter__=AsyncMock(return_value=mock_conn), __aexit__=AsyncMock()
+            )
+        )
+        db._pool = mock_pool
+
+        assert await db._account_permission_schema_missing() is False
+
+
 class TestUpdateSessionPatchFields:
     """测试 session config/metadata 原子 patch 方法"""
 

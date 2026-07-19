@@ -20,7 +20,6 @@ from .structural import (
 )
 from .title import draw_title, draw_title_content
 
-
 LAYOUT_DISPATCH = {
     "title": draw_title,
     "title_content": draw_title_content,

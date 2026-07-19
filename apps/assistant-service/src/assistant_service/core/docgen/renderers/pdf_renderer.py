@@ -16,12 +16,11 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
-from typing import Optional
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, LETTER, LEGAL
+from reportlab.lib.pagesizes import A4, LEGAL, LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm, inch
+from reportlab.lib.units import cm
 from reportlab.platypus import (
     Image,
     ListFlowable,
@@ -47,7 +46,6 @@ from ..ir import (
     TableBlock,
 )
 from .base import BaseRenderer, RenderError, RenderResult
-
 
 _PAGE_SIZES = {"A4": A4, "Letter": LETTER, "Legal": LEGAL}
 
@@ -257,4 +255,5 @@ class PdfRenderer(BaseRenderer):
         )
 
     async def fix(self, ir: PdfIR, critic_findings, out_dir: Path) -> RenderResult:
+        del critic_findings
         return await self.render(ir, out_dir)

@@ -244,6 +244,7 @@ class ResumeRequest(BaseModel):
     """Optional approval binding for resume preparation."""
 
     approval_id: str | None = None
+    session_id: str | None = None
 
 
 class ResumeResponse(BaseModel):
@@ -384,6 +385,16 @@ async def chat(
     inside the assistant-service container.
     """
     from ..deps import enforce_rate_limit
+    from ._assistant_proxy import reject_client_agent_forgery
+
+    try:
+        raw_body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        raw_body = {}
+    reject_client_agent_forgery(
+        request,
+        raw_body if isinstance(raw_body, dict) else {},
+    )
     await enforce_rate_limit(request, user, operation="assistant_chat")
 
     # Model-permission authz. assistant-service enforces tenant-scoped
@@ -434,6 +445,13 @@ async def chat_stream(
         body_json = json.loads(body_bytes) if body_bytes else {}
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    from ._assistant_proxy import reject_client_agent_forgery
+
+    reject_client_agent_forgery(
+        request,
+        body_json if isinstance(body_json, dict) else {},
+    )
 
     # Authz 1: model must be allowed for this user. Done at the edge so
     # 403 comes back without a proxy round-trip. DB-backed

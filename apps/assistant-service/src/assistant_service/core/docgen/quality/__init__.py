@@ -18,12 +18,14 @@ missing ``soffice`` / pdftoppm we degrade to a local-structural pass —
 the pipeline should still work on a laptop without LibreOffice.
 """
 
+from .docx_verifier import DocxXmlVerifier
 from .types import (
     CriticReport,
     Issue,
-    IssueSeverity,
     IssueCategory,
+    IssueSeverity,
 )
+from .verifier_pipeline import VerifierPipeline
 from .visual_verifier import (
     FreshContextVisionCritic,
     PptxPdfVisualVerifier,
@@ -32,8 +34,6 @@ from .visual_verifier import (
     default_vision_critic,
 )
 from .xlsx_verifier import XlsxFormulaVerifier
-from .docx_verifier import DocxXmlVerifier
-from .verifier_pipeline import VerifierPipeline
 
 __all__ = [
     "CriticReport",

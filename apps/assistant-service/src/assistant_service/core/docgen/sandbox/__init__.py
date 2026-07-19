@@ -12,12 +12,12 @@ Both implement :class:`SandboxClient`.
 
 from .client import (
     SandboxClient,
-    SandboxResult,
     SandboxError,
+    SandboxResult,
     SandboxTimeout,
 )
-from .local import LocalSubprocessSandbox
 from .docker_backend import DockerSandbox
+from .local import LocalSubprocessSandbox
 
 __all__ = [
     "SandboxClient",

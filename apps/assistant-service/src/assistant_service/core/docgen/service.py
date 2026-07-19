@@ -13,9 +13,9 @@ whatever backends they need and call :meth:`generate` / :meth:`stream`.
 from __future__ import annotations
 
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator, Optional
 
 from .pipeline import DocgenEvent, DocgenPipeline, DocgenResult
 from .planners import Brief
@@ -24,8 +24,7 @@ from .quality import VisionCritic
 from .skills import SkillRegistry, SkillRouter
 from .skills.router import Intent
 from .storage import Artifact, ArtifactStore, LocalArtifactStore
-from .templates import Template, TemplateRegistry, default_registry
-
+from .templates import TemplateRegistry, default_registry
 
 _DEFAULT_SKILL_PATHS = (
     Path(__file__).resolve().parents[1] / "skills",
@@ -56,22 +55,22 @@ class GenerateRequest:
     title: str
     goal: str
     locale: str = "en-US"
-    body_markdown: Optional[str] = None
-    template_name: Optional[str] = None        # if set, theme is derived from template
-    palette_name: Optional[str] = None
-    font_pair_name: Optional[str] = None
-    style_hints: Optional[dict] = None
+    body_markdown: str | None = None
+    template_name: str | None = None        # if set, theme is derived from template
+    palette_name: str | None = None
+    font_pair_name: str | None = None
+    style_hints: dict | None = None
 
 
 class DocgenService:
     def __init__(
         self,
         *,
-        artifact_store: Optional[ArtifactStore] = None,
-        llm: Optional[LLMCaller] = None,
-        critic: Optional[VisionCritic] = None,
-        templates: Optional[TemplateRegistry] = None,
-        skill_paths: Optional[list[Path]] = None,
+        artifact_store: ArtifactStore | None = None,
+        llm: LLMCaller | None = None,
+        critic: VisionCritic | None = None,
+        templates: TemplateRegistry | None = None,
+        skill_paths: list[Path] | None = None,
         verify: bool = True,
         max_fix_rounds: int = 2,
     ) -> None:
@@ -90,7 +89,7 @@ class DocgenService:
         """Text block to inject into the parent agent's system prompt."""
         return self._skill_router.system_prompt_stub()
 
-    def expand_skill(self, doc_type: str, *, resources: Optional[list[str]] = None) -> str:
+    def expand_skill(self, doc_type: str, *, resources: list[str] | None = None) -> str:
         skill = self._skill_router.select(Intent(doc_type=doc_type))
         if skill is None:
             return ""
@@ -117,7 +116,7 @@ class DocgenService:
         brief = self._brief_from_request(req)
         with tempfile.TemporaryDirectory(prefix="docgen_") as tmp:
             out_dir = Path(tmp)
-            last_path: Optional[Path] = None
+            last_path: Path | None = None
             passed = True
             async for event in self._pipeline.run_streaming(brief, out_dir):
                 if event.event == "render":

@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
-
 from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -70,7 +69,7 @@ class DoubaoImageGenerator:
             "1280*720": "2560x1440",
             "1280x720": "2560x1440",
         }
-        normalized_size = size_map.get(size or "", None)
+        normalized_size = size_map.get(size or "")
         if not normalized_size:
             normalized_size = size.replace("*", "x") if size else "2048x2048"
             # Check pixel count, upscale if too small

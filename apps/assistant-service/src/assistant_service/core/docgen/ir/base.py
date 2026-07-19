@@ -13,7 +13,7 @@ Design notes:
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -54,17 +54,17 @@ class DocMetadata(BaseModel):
     model_config = {"extra": "allow"}
 
     title: str
-    subtitle: Optional[str] = None
-    author: Optional[str] = None
+    subtitle: str | None = None
+    author: str | None = None
     locale: str = "en-US"  # BCP-47
     page_size: Literal["A4", "Letter", "Widescreen16x9", "Standard4x3"] = "A4"
-    created_at: Optional[str] = None
+    created_at: str | None = None
 
 
 _DEFAULT_PALETTE_HEX = ("0F172A", "3B82F6", "F1F5F9", "E2E8F0", "F59E0B")
 
 
-def _default_palette() -> list["HexColor"]:
+def _default_palette() -> list[HexColor]:
     return [HexColor(value=h) for h in _DEFAULT_PALETTE_HEX]
 
 
@@ -87,14 +87,14 @@ class Theme(BaseModel):
 
 
 class _BlockBase(BaseModel):
-    id: Optional[str] = None
+    id: str | None = None
 
 
 class ParagraphBlock(_BlockBase):
     kind: Literal["paragraph"] = "paragraph"
     text: str
     align: Literal["left", "center", "right", "justify"] = "left"
-    font: Optional[FontSpec] = None
+    font: FontSpec | None = None
 
 
 class HeadingBlock(_BlockBase):
@@ -114,20 +114,20 @@ class BulletBlock(_BlockBase):
 class QuoteBlock(_BlockBase):
     kind: Literal["quote"] = "quote"
     text: str
-    author: Optional[str] = None
+    author: str | None = None
 
 
 class CodeBlock(_BlockBase):
     kind: Literal["code"] = "code"
     code: str
-    language: Optional[str] = None
+    language: str | None = None
 
 
 class TableCell(BaseModel):
     text: str
     bold: bool = False
     align: Literal["left", "center", "right"] = "left"
-    background: Optional[HexColor] = None
+    background: HexColor | None = None
 
 
 class TableRow(BaseModel):
@@ -138,8 +138,8 @@ class TableRow(BaseModel):
 class TableBlock(_BlockBase):
     kind: Literal["table"] = "table"
     rows: list[TableRow]
-    column_widths_dxa: Optional[list[int]] = None  # SKILL: use DXA, never %.
-    caption: Optional[str] = None
+    column_widths_dxa: list[int] | None = None  # SKILL: use DXA, never %.
+    caption: str | None = None
 
     @field_validator("rows")
     @classmethod
@@ -152,17 +152,17 @@ class TableBlock(_BlockBase):
 class ImageBlock(_BlockBase):
     kind: Literal["image"] = "image"
     # The planner never ships bytes inline — it references a path or a URL.
-    source_path: Optional[str] = None
-    source_url: Optional[str] = None
+    source_path: str | None = None
+    source_url: str | None = None
     alt_text: str  # SKILL: a11y mandatory.
-    width_pt: Optional[float] = None
-    height_pt: Optional[float] = None
+    width_pt: float | None = None
+    height_pt: float | None = None
 
 
 class IconBlock(_BlockBase):
     kind: Literal["icon"] = "icon"
     name: str
-    color: Optional[HexColor] = None
+    color: HexColor | None = None
     size_pt: float = 16.0
     alt_text: str
 
@@ -184,23 +184,13 @@ class ChartSpec(BaseModel):
 class ChartBlock(_BlockBase):
     kind: Literal["chart"] = "chart"
     spec: ChartSpec
-    title: Optional[str] = None
+    title: str | None = None
     alt_text: str
 
 
 # Discriminated union — pydantic will pick the concrete type from ``kind``.
 Block = Annotated[
-    Union[
-        ParagraphBlock,
-        HeadingBlock,
-        BulletBlock,
-        QuoteBlock,
-        CodeBlock,
-        TableBlock,
-        ImageBlock,
-        IconBlock,
-        ChartBlock,
-    ],
+    ParagraphBlock | HeadingBlock | BulletBlock | QuoteBlock | CodeBlock | TableBlock | ImageBlock | IconBlock | ChartBlock,
     Field(discriminator="kind"),
 ]
 

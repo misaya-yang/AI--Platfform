@@ -107,7 +107,7 @@ class MCPManager:
         async def executor(request: Any) -> Any:
             from ..tools.tool_registry import ToolCallResult
             args = getattr(request, "arguments", None) or getattr(request, "tool_args", {}) or {}
-            result = await client.call_tool(mcp_tool.name, args)
+            result = await client.call_tool(mcp_tool.upstream_name, args)
             text_parts: list[str] = []
             # File-producing MCP tools return ``type:"resource"`` content with
             # a uri/name/mimeType. We surface these through ToolCallResult.

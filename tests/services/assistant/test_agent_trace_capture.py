@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from assistant_service.core.agent.runtime_context import AgentRuntimeExecutionContext
 from assistant_service.core.assistant_service import AssistantConfig, AssistantService, RAGMode
+from assistant_service.core.gateway.execution_gateway import AssistantExecutionGateway
 from assistant_service.core.trace_writer import AssistantTraceContext, AssistantTraceWriter
 
 
@@ -225,6 +227,29 @@ def _trace_ctx(
     )
 
 
+def _agent_runtime_ctx(
+    *,
+    agent_id: str = "11111111-1111-4111-8111-111111111111",
+    version_id: str = "22222222-2222-4222-8222-222222222222",
+) -> AgentRuntimeExecutionContext:
+    return AgentRuntimeExecutionContext(
+        tenant_id="tenant-a",
+        caller_principal="user-a",
+        agent_id=agent_id,
+        agent_version_id=version_id,
+        agent_draft_revision=None,
+        publication_id="33333333-3333-4333-8333-333333333333",
+        channel="api",
+        session_id="session-a",
+        runtime_fingerprint=f"sha256:{agent_id}:{version_id}",
+        agent_spec_hash="sha256:spec",
+        prompt_hash="sha256:prompt",
+        tool_schema_hash="sha256:tools",
+        skills_hash="sha256:skills",
+        knowledge_revision_hash="sha256:knowledge",
+    )
+
+
 def _json_args_containing(db: RecordingDB, key: str) -> list[dict[str, Any]]:
     docs: list[dict[str, Any]] = []
     for _query, args in db.calls:
@@ -288,6 +313,402 @@ async def test_trace_writer_persists_root_span_events_and_terminal_conflict() ->
     assert runtime["trace_writer_health"]["redacted_writes"] == 1
     assert runtime["redaction_state"]["payloads"] == "redacted_truncated"
     assert writer.telemetry_snapshot()["pending_writes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_root_persists_explicit_runtime_dimensions() -> None:
+    db = RecordingDB()
+    writer = AssistantTraceWriter(db, write_timeout_s=1.0)
+    runtime = _agent_runtime_ctx()
+    ctx = AssistantTraceContext.from_chat_request(
+        run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        request_id="request-agent",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        message="hello",
+        model_id="qwen3.7-plus",
+        provider="dashscope",
+        started_at=time.time(),
+        agent_runtime=runtime,
+    )
+
+    assert writer.start_trace(ctx)
+    await writer.drain(timeout_s=1.0)
+
+    root_calls = [call for call in db.calls if "INSERT INTO agent_traces" in call[0]]
+    assert len(root_calls) == 1
+    query, args = root_calls[0]
+    for column in (
+        "agent_id",
+        "agent_version_id",
+        "publication_id",
+        "channel",
+        "runtime_fingerprint",
+        "agent_spec_hash",
+    ):
+        assert column in query
+    assert runtime.agent_id in args
+    assert runtime.agent_version_id in args
+    assert runtime.publication_id in args
+    assert runtime.runtime_fingerprint in args
+    assert ctx.agent_id == runtime.agent_id
+    assert "owner-only Agent prompt text" not in db.serialized_calls()
+
+
+@pytest.mark.asyncio
+async def test_run_checkpoint_and_resume_are_pinned_to_agent_runtime() -> None:
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=None,
+        enabled=True,
+    )
+    runtime = _agent_runtime_ctx()
+    dimensions = runtime.trace_dimensions()
+    run_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    await gateway.start_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        engine="agent_loop",
+        execution_profile="safe",
+        memory_mode="strict",
+        os_agent_enabled=False,
+        request_preview="hello",
+        agent_runtime=dimensions,
+    )
+    checkpoint = await gateway.save_run_checkpoint(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        phase="tool_call_pending",
+        agent_runtime=dimensions,
+    )
+    run = await gateway.get_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+
+    assert run is not None
+    assert run["agent_id"] == runtime.agent_id
+    assert run["agent_version_id"] == runtime.agent_version_id
+    assert checkpoint["runtime_fingerprint"] == runtime.runtime_fingerprint
+
+    other = _agent_runtime_ctx(
+        agent_id="44444444-4444-4444-8444-444444444444",
+        version_id="55555555-5555-4555-8555-555555555555",
+    )
+    resume = await gateway.prepare_run_resume(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        agent_runtime=other.trace_dimensions(),
+    )
+    assert resume is not None
+    assert resume["status"] == "blocked"
+    assert resume["reason"] == "run_agent_runtime_mismatch"
+
+    with pytest.raises(PermissionError, match="different Agent runtime"):
+        await gateway.start_run(
+            run_id=run_id,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            engine="agent_loop",
+            execution_profile="safe",
+            memory_mode="strict",
+            os_agent_enabled=False,
+            request_preview="forged",
+            agent_runtime=other.trace_dimensions(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_run_resume_rejects_missing_or_cross_session_context() -> None:
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=None,
+        enabled=True,
+    )
+    runtime = _agent_runtime_ctx()
+    dimensions = runtime.trace_dimensions()
+    run_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+    await gateway.start_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        engine="agent_loop",
+        execution_profile="safe",
+        memory_mode="strict",
+        os_agent_enabled=False,
+        request_preview="hello",
+        agent_runtime=dimensions,
+    )
+    await gateway.save_run_checkpoint(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        phase="tool_call_pending",
+        agent_runtime=dimensions,
+    )
+
+    missing = await gateway.prepare_run_resume(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        agent_runtime=dimensions,
+    )
+    cross_session = await gateway.prepare_run_resume(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-b",
+        agent_runtime=dimensions,
+    )
+    same_session = await gateway.prepare_run_resume(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        agent_runtime=dimensions,
+    )
+
+    assert missing is not None
+    assert missing["status"] == "blocked"
+    assert missing["reason"] == "run_session_required"
+    assert cross_session is not None
+    assert cross_session["status"] == "blocked"
+    assert cross_session["reason"] == "run_session_mismatch"
+    assert same_session is not None
+    assert same_session["status"] == "ready"
+    assert same_session["checkpoint"]["session_id"] == "session-a"
+
+
+@pytest.mark.asyncio
+async def test_agent_run_resume_rejects_checkpoint_session_drift() -> None:
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=None,
+        enabled=True,
+    )
+    runtime = _agent_runtime_ctx()
+    dimensions = runtime.trace_dimensions()
+    run_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+    await gateway.start_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        engine="agent_loop",
+        execution_profile="safe",
+        memory_mode="strict",
+        os_agent_enabled=False,
+        request_preview="hello",
+        agent_runtime=dimensions,
+    )
+    await gateway.save_run_checkpoint(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-b",
+        phase="tool_call_pending",
+        agent_runtime=dimensions,
+    )
+
+    resume = await gateway.prepare_run_resume(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        agent_runtime=dimensions,
+    )
+
+    assert resume is not None
+    assert resume["status"] == "blocked"
+    assert resume["reason"] == "checkpoint_session_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_conflicting_session_cannot_finalize_existing_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from assistant_service.core.agent import agent_loop as agent_loop_module
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=None,
+        enabled=True,
+    )
+    runtime = _agent_runtime_ctx()
+    dimensions = runtime.trace_dimensions()
+    run_id = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    await gateway.start_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        engine="agent_loop",
+        execution_profile="safe",
+        memory_mode="strict",
+        os_agent_enabled=False,
+        request_preview="correct session",
+        agent_runtime=dimensions,
+    )
+    baseline_checkpoint = await gateway.save_run_checkpoint(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        phase="run_started",
+        agent_runtime=dimensions,
+    )
+
+    original_context = agent_loop_module.AgentLoopContext
+
+    def _fixed_run_context(**kwargs: Any) -> Any:
+        return original_context(**kwargs, run_id=run_id)
+
+    monkeypatch.setattr(agent_loop_module, "AgentLoopContext", _fixed_run_context)
+    loop = AgentLoop(
+        model_registry=FakeModelRegistry(),
+        execution_gateway=gateway,
+    )
+
+    with pytest.raises(PermissionError, match="different session"):
+        async for _event in loop.execute(
+            session_id="session-b",
+            user=MockUserContext(),  # type: ignore[arg-type]
+            message="conflicting caller",
+            config=AgentLoopConfig(
+                model_id="test",
+                max_tool_iterations=1,
+                agent_runtime=runtime,
+            ),
+            history=[],
+        ):
+            pass
+
+    with pytest.raises(PermissionError, match="different session"):
+        await gateway.finish_run(
+            run_id=run_id,
+            status="failed",
+            usage={"output_tokens": 999},
+            error="wrong session",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-b",
+            agent_runtime=dimensions,
+        )
+    with pytest.raises(PermissionError, match="different Agent runtime"):
+        await gateway.finish_run(
+            run_id=run_id,
+            status="failed",
+            error="wrong Agent",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            agent_runtime=_agent_runtime_ctx(
+                agent_id="44444444-4444-4444-8444-444444444444",
+                version_id="55555555-5555-4555-8555-555555555555",
+            ).trace_dimensions(),
+        )
+    with pytest.raises(PermissionError, match="requires tenant, user, session"):
+        await gateway.finish_run(
+            run_id=run_id,
+            status="failed",
+            error="missing runtime",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+        )
+    with pytest.raises(PermissionError, match="requires tenant, user, session"):
+        await gateway.finish_run(
+            run_id=run_id,
+            status="failed",
+            error="missing session",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            agent_runtime=dimensions,
+        )
+
+    persisted = await gateway.get_run(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+    checkpoint = await gateway.get_run_checkpoint(
+        run_id=run_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+    assert persisted is not None
+    assert persisted["session_id"] == "session-a"
+    assert persisted["status"] == "running"
+    assert persisted["error"] is None
+    assert persisted["usage"] == {}
+    assert persisted["finished_at"] is None
+    assert checkpoint is not None
+    assert checkpoint["checkpoint_id"] == baseline_checkpoint["checkpoint_id"]
+    assert len(gateway._checkpoints[run_id]) == 1  # AUDIT-OK: isolation assertion
+
+
+@pytest.mark.asyncio
+async def test_finish_run_sql_is_bound_to_session_and_agent_runtime() -> None:
+    database = RecordingDB()
+    gateway = AssistantExecutionGateway(
+        tool_invoker=object(),  # type: ignore[arg-type]
+        database=database,
+        enabled=True,
+    )
+    dimensions = _agent_runtime_ctx().trace_dimensions()
+
+    await gateway.finish_run(
+        run_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+        status="succeeded",
+        usage={"output_tokens": 5},
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        agent_runtime=dimensions,
+    )
+
+    query, args = database.calls[-1]
+    assert "tenant_id =" in query
+    assert "user_id =" in query
+    assert "session_id =" in query
+    for column in (
+        "agent_id",
+        "agent_version_id",
+        "agent_draft_revision",
+        "publication_id",
+        "channel",
+        "runtime_fingerprint",
+        "agent_spec_hash",
+    ):
+        assert f"{column} IS NOT DISTINCT FROM" in query
+    assert "session-a" in args
+    assert dimensions["agent_id"] in args
+    assert dimensions["agent_version_id"] in args
+    assert dimensions["publication_id"] in args
+    assert dimensions["runtime_fingerprint"] in args
+    assert dimensions["agent_spec_hash"] in args
+
+    await gateway.finish_run(
+        run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        status="succeeded",
+    )
+    legacy_query, _legacy_args = database.calls[-1]
+    assert "agent_id IS NULL" in legacy_query
 
 
 @pytest.mark.asyncio

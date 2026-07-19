@@ -24,6 +24,7 @@ class DomainPolicy:
         return ""
 
     def precheck_query(self, query: str) -> PolicyDecision | None:
+        del query
         return None
 
     def precheck_context(
@@ -31,12 +32,14 @@ class DomainPolicy:
         query: str,
         contexts: Iterable[dict[str, Any]],
     ) -> PolicyDecision | None:
+        del query, contexts
         return None
 
     def sanitize_answer(self, text: str) -> str:
         return text
 
     def validate_answer(self, text: str) -> list[str]:
+        del text
         return []
 
     def build_repair_instructions(self, issues: Iterable[str]) -> str:
@@ -47,4 +50,5 @@ class DomainPolicyResolver:
     """Default no-op resolver for generic assistant deployments."""
 
     def resolve(self, datasets: Iterable[dict[str, Any]]) -> DomainPolicy | None:
+        del datasets
         return None

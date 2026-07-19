@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -17,8 +16,8 @@ class SkillFrontmatter(BaseModel):
 
     name: str
     description: str
-    license: Optional[str] = None
-    version: Optional[str] = "1.0"
+    license: str | None = None
+    version: str | None = "1.0"
 
 
 class SkillResource(BaseModel):
@@ -37,9 +36,9 @@ class Skill(BaseModel):
 
     frontmatter: SkillFrontmatter
     body_path: Path
-    body: Optional[str] = None
+    body: str | None = None
     resources: list[SkillResource] = Field(default_factory=list)
-    scripts_dir: Optional[Path] = None
+    scripts_dir: Path | None = None
     root: Path
 
     model_config = {"arbitrary_types_allowed": True}
@@ -52,7 +51,7 @@ class Skill(BaseModel):
     def description(self) -> str:
         return self.frontmatter.description
 
-    def resource_by_name(self, name: str) -> Optional[SkillResource]:
+    def resource_by_name(self, name: str) -> SkillResource | None:
         for r in self.resources:
             if r.name == name:
                 return r

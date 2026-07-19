@@ -44,8 +44,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from ai_gateway_core.logging import get_logger
 from ai_gateway_core.enums import StreamEventType
+from ai_gateway_core.logging import get_logger
 
 logger = get_logger(__name__)
 

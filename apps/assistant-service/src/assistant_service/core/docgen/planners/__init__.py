@@ -12,11 +12,11 @@ The hard contract: planners never hand raw OOXML or PDF bytes to anyone.
 They emit ``DocxIR / PptxIR / XlsxIR / PdfIR`` and nothing else.
 """
 
-from .base import Brief, PlannerError, PlannerResult, BasePlanner
+from .base import BasePlanner, Brief, PlannerError, PlannerResult
 from .docx_planner import DocxPlanner
+from .pdf_planner import PdfPlanner
 from .pptx_planner import PptxPlanner
 from .xlsx_planner import XlsxPlanner
-from .pdf_planner import PdfPlanner
 
 __all__ = [
     "Brief",

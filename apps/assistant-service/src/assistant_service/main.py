@@ -27,11 +27,7 @@ from .config import get_settings
 # single-line JSON; dev → human-readable "simple". LOG_FORMAT env wins.
 _log_format = os.environ.get("LOG_FORMAT")
 if not _log_format:
-    _log_format = (
-        "json"
-        if os.environ.get("ENVIRONMENT", "").lower() == "production"
-        else "simple"
-    )
+    _log_format = "json" if os.environ.get("ENVIRONMENT", "").lower() == "production" else "simple"
 configure_structured_logging(
     level="INFO",
     format_type=_log_format,
@@ -50,6 +46,23 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _configure_agent_runtime_resource_policies(app: FastAPI, database):
+    """Wire the real DB-backed policy services used by Agent runtime mapping."""
+
+    app.state.agent_runtime_resource_policy = None
+    if database is None:
+        return None
+
+    from .core.tools.tenant_tool_policy import (
+        AgentRuntimeResourcePolicyService,
+        TenantToolPolicyService,
+    )
+
+    tenant_tool_policy = TenantToolPolicyService(database)
+    app.state.agent_runtime_resource_policy = AgentRuntimeResourcePolicyService(database)
+    return tenant_tool_policy
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -61,6 +74,7 @@ async def lifespan(app: FastAPI):
     # Idempotent: a duplicate call is a debug-log no-op. Endpoint comes
     # from OTEL_EXPORTER_OTLP_ENDPOINT env; unset → in-process spans only.
     from ai_gateway_core.tracing import init_tracing
+
     init_tracing("assistant-service")
 
     # ── Graceful drain — install SIGTERM/SIGINT handlers so the orchestrator's
@@ -69,6 +83,7 @@ async def lifespan(app: FastAPI):
     # is registered after the FastAPI() instance is built (see below — placed
     # BEFORE CORSMiddleware so the 503 short-circuit fires first).
     from ai_gateway_core.proxy.drain import DRAIN, install_signal_handlers
+
     install_signal_handlers(asyncio.get_running_loop())
 
     # Mandatory init failures (DB, Redis when REQUIRE_REDIS is set) raise
@@ -83,6 +98,7 @@ async def lifespan(app: FastAPI):
     db_dsn = os.getenv("DATABASE_URL", settings.database.dsn)
     try:
         from ai_gateway_core.persistence import DatabaseStorage
+
         database = DatabaseStorage(db_dsn, enabled=True, auto_init=False)
         await database.connect()
         app.state.database = database
@@ -97,6 +113,8 @@ async def lifespan(app: FastAPI):
             ) from e
         logger.warning(f"Database init failed (running without DB): {e}")
 
+    tenant_tool_policy = _configure_agent_runtime_resource_policies(app, database)
+
     # ── Redis ──
     redis_client = None
     redis_storage = None  # RedisStorage wrapper for shared session cache
@@ -104,6 +122,7 @@ async def lifespan(app: FastAPI):
     if redis_url and settings.redis.enabled:
         try:
             import redis.asyncio as aioredis
+
             redis_client = aioredis.from_url(redis_url, decode_responses=True)
             await redis_client.ping()
             app.state.redis = redis_client
@@ -116,6 +135,7 @@ async def lifespan(app: FastAPI):
             # dict, leaving the gateway's Redis cache stale (incident
             # 2026-04-28: chat sessions appearing empty after AS reload).
             from ai_gateway_core.persistence import RedisStorage
+
             redis_storage = RedisStorage(url=redis_url, enabled=True)
             await redis_storage.connect()
             app.state.redis_storage = redis_storage
@@ -134,6 +154,7 @@ async def lifespan(app: FastAPI):
     from ai_gateway_core.config import resolve_dashscope, resolve_google
 
     from .core.models.model_registry import ModelProvider, ModelRegistry
+
     model_registry = ModelRegistry()
 
     # Provider config must mirror gateway's (src/main.py). When the gateway
@@ -198,18 +219,21 @@ async def lifespan(app: FastAPI):
     if database and getattr(database, "_pool", None):
         try:
             from .core.models.model_registry import ModelInfo
+
             async with database._pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT model_id, display_name, provider_id, context_window, max_output_tokens "
                     "FROM llm_models WHERE tenant_id = $1 AND is_enabled = true "
-                    "ORDER BY sort_order ASC, model_id ASC", "default",
+                    "ORDER BY sort_order ASC, model_id ASC",
+                    "default",
                 )
                 if rows:
                     model_registry._models.clear()
                     for r in rows:
                         with suppress(ValueError):
                             model_registry._models[r["model_id"]] = ModelInfo(
-                                id=r["model_id"], provider=ModelProvider(r["provider_id"]),
+                                id=r["model_id"],
+                                provider=ModelProvider(r["provider_id"]),
                                 name=r["display_name"] or r["model_id"],
                                 context_window=r["context_window"] or 32000,
                                 max_output_tokens=r["max_output_tokens"] or 4096,
@@ -220,11 +244,54 @@ async def lifespan(app: FastAPI):
 
     app.state.model_registry = model_registry
 
+    # ── Tenant MCP registry/runtime ──
+    mcp_runtime = None
+    mcp_repository = None
+    mcp_secret_resolver = None
+    mcp_enabled = os.getenv("AGENT_STUDIO_MCP_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    app.state.agent_studio_mcp_enabled = mcp_enabled
+    if database and mcp_enabled:
+        try:
+            from ai_gateway_core.persistence.repositories.mcp_repository import (
+                DatabaseMCPRepository,
+            )
+
+            from .core.mcp.runtime import (
+                ConfiguredEnvironmentSecretResolver,
+                MCPDiscoveryService,
+                MCPRuntimeService,
+            )
+
+            mcp_repository = DatabaseMCPRepository(database)
+            mcp_secret_resolver = ConfiguredEnvironmentSecretResolver.from_env()
+            mcp_runtime = MCPRuntimeService(
+                repository=mcp_repository,
+                secret_resolver=mcp_secret_resolver,
+            )
+            app.state.mcp_repository = mcp_repository
+            app.state.mcp_runtime = mcp_runtime
+            app.state.mcp_discovery_service = MCPDiscoveryService(
+                secret_resolver=mcp_secret_resolver,
+            )
+            logger.info("Tenant MCP registry/runtime initialized")
+        except Exception as e:
+            # MCP is optional for the built-in Assistant. Agent-bound MCP will
+            # remain absent and fail closed until this adapter is available.
+            logger.warning("Tenant MCP runtime init failed: %s", e)
+    elif not mcp_enabled:
+        logger.info("Tenant MCP registry/runtime disabled by feature flag")
+
     # ── KB Proxy ──
     kb_proxy = None
     kb_url = os.getenv("KB_SERVICE_URL", settings.kb.url)
     try:
         from ai_gateway_core.knowledge import KBProxyClient
+
         kb_proxy = KBProxyClient(base_url=kb_url)
         logger.info(f"KB proxy → {kb_url}")
     except Exception as e:
@@ -235,6 +302,7 @@ async def lifespan(app: FastAPI):
     if database:
         try:
             from .core.memory_service import MemoryService
+
             memory_service = MemoryService(database)
         except Exception as e:
             logger.warning(f"Memory service init failed: {e}")
@@ -244,6 +312,7 @@ async def lifespan(app: FastAPI):
     if database:
         try:
             from ai_gateway_core.session import DatabaseSessionManager
+
             session_manager = DatabaseSessionManager(database, redis=redis_storage)
         except Exception as e:
             logger.warning(f"Session manager init failed: {e}")
@@ -261,7 +330,8 @@ async def lifespan(app: FastAPI):
 
     register_builtin_tools(
         kb_service=kb_proxy,
-        memory_service=memory_service, database=database,
+        memory_service=memory_service,
+        database=database,
     )
     register_document_generation_tool()
     with suppress(Exception):
@@ -271,11 +341,13 @@ async def lifespan(app: FastAPI):
     # ── Todo tools (Phase 5) — always on; exposes the per-session
     # WorkingMemory to the model for long-horizon task tracking.
     from .core.tools.todo_tools import register_todo_tools
+
     register_todo_tools()
 
     # ── Context management tool — always on; lets the model (or a user
     # /compact slash command) explicitly request history compression.
     from .core.tools.context_tools import register_context_tools
+
     register_context_tools()
 
     # ── Primitive tools (Phase 4) — env-gated opt-in ──
@@ -285,6 +357,7 @@ async def lifespan(app: FastAPI):
     # unchanged.
     if os.environ.get("ASSISTANT_ENABLE_PRIMITIVES", "").lower() in {"1", "true", "yes"}:
         from .core.tools.primitives import register_primitive_tools
+
         register_primitive_tools()
         logger.info("Primitive tools enabled (fs_read/fs_write/fs_glob/fs_grep)")
 
@@ -300,6 +373,7 @@ async def lifespan(app: FastAPI):
         get_artifact_storage,
         get_file_storage,
         init_artifact_storage,
+        init_file_storage,
     )
 
     from .core import AssistantService
@@ -318,6 +392,7 @@ async def lifespan(app: FastAPI):
 
             storage_config = StorageConfig.from_env()
             init_artifact_storage(storage_config, database)
+            init_file_storage(storage_config)
             logger.info(f"Artifact storage initialized (backend={storage_config.backend.value})")
         except Exception as e:
             logger.warning(f"Artifact storage init failed: {e}")
@@ -326,9 +401,18 @@ async def lifespan(app: FastAPI):
     try:
         file_storage = get_file_storage()
     except RuntimeError as e:
-        logger.warning(f"File storage not configurable — falling back to NoOp: {e}")
-        from ai_gateway_core.storage import NoOpFileStorage
-        file_storage = NoOpFileStorage()
+        try:
+            from ai_gateway_core.storage.image_storage import StorageConfig
+
+            file_storage = init_file_storage(StorageConfig.from_env())
+            logger.info(
+                f"File storage initialized (backend={file_storage.config.backend.value})"
+            )
+        except Exception:
+            logger.warning(f"File storage not configurable — falling back to NoOp: {e}")
+            from ai_gateway_core.storage import NoOpFileStorage
+
+            file_storage = NoOpFileStorage()
 
     assistant_service = AssistantService(
         model_registry=model_registry,
@@ -342,6 +426,8 @@ async def lifespan(app: FastAPI):
         realtime_metrics=realtime_metrics,
         artifact_storage=artifact_storage,
         file_storage=file_storage,
+        mcp_runtime=mcp_runtime,
+        tenant_tool_policy=tenant_tool_policy,
     )
     app.state.assistant_service = assistant_service
     app.state.session_manager = session_manager
@@ -361,18 +447,21 @@ async def lifespan(app: FastAPI):
         try:
             from .core.tools.confluence_tool import register_confluence_tools
 
-            register_confluence_tools(database=database)
+            register_confluence_tools(
+                database=database,
+                credential_repository=mcp_repository,
+                secret_resolver=mcp_secret_resolver,
+            )
             # Sanity count with a single retry — the DB pool may still be
             # warming up when startup fires. If both attempts return 0,
             # we WARN loudly so ops can tell "nobody has connected yet"
             # apart from "the DB is broken".
             import asyncio as _asyncio
+
             count = -1
             for attempt in (1, 2):
                 try:
-                    rows = await database.list_confluence_connections(
-                        status="active", limit=500
-                    )
+                    rows = await database.list_confluence_connections(status="active", limit=500)
                     count = len(rows)
                     if count > 0 or attempt == 2:
                         break
@@ -439,8 +528,10 @@ app = FastAPI(
 _origins = settings.cors.allow_origins
 _credentials = "*" not in _origins
 if not _credentials:
-    logger.warning("CORS wildcard origin detected — credentials disabled. "
-                   "Set ASSISTANT_CORS__ALLOW_ORIGINS to explicit origins.")
+    logger.warning(
+        "CORS wildcard origin detected — credentials disabled. "
+        "Set ASSISTANT_CORS__ALLOW_ORIGINS to explicit origins."
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
@@ -563,14 +654,10 @@ async def health_ready():
         "startup": "ready" if getattr(app.state, "_ready", False) else "starting",
         "drain": "draining" if DRAIN.draining else "accepting",
         "database": (
-            "healthy"
-            if getattr(app.state, "database", None) is not None
-            else "not_configured"
+            "healthy" if getattr(app.state, "database", None) is not None else "not_configured"
         ),
         "kb_proxy": (
-            "configured"
-            if getattr(app.state, "kb_proxy", None) is not None
-            else "not_configured"
+            "configured" if getattr(app.state, "kb_proxy", None) is not None else "not_configured"
         ),
     }
     return JSONResponse(
@@ -590,6 +677,7 @@ async def security_headers(request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
 
 # ── Register API routes ──
 from .api.router import router as api_router  # noqa: E402

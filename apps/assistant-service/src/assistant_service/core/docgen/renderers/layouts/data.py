@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pptx.chart.data import CategoryChartData
 from pptx.util import Inches
 
@@ -26,7 +24,7 @@ def draw_chart(prs, slide, ir: PptxIR, s: PptxSlide, ctx, index: int, prims):
         rgb_hex=c.ink_primary, font=ctx.ds.font_display,
     )
 
-    spec: Optional[ChartSpec] = None
+    spec: ChartSpec | None = None
     if s.visual and isinstance(s.visual.source, ChartSpec):
         spec = s.visual.source
     else:
@@ -83,7 +81,7 @@ def draw_comparison_table(prs, slide, ir: PptxIR, s: PptxSlide, ctx, index: int,
         line_spacing=1.1,
     )
 
-    tbl: Optional[TableBlock] = None
+    tbl: TableBlock | None = None
     for b in s.body or []:
         if isinstance(b, TableBlock):
             tbl = b

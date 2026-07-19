@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
 # Canonical message injected when we short-circuit a duplicate KB call.
 # Worded to steer the model toward answering with what it already has.
 KB_REUSE_MESSAGE = (

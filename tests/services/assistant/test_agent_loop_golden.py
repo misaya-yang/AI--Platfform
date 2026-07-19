@@ -16,6 +16,9 @@ in the same PR (or roll back).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 # Skip when the tokenizer used by ContextEngine is unavailable on the test host.
@@ -136,6 +139,7 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "max_tokens",
         # KB
         "kb_dataset_ids",
+        "kb_retrieval_configs",
         "kb_mode",
         "kb_top_k",
         "kb_score_threshold",
@@ -147,6 +151,14 @@ EXPECTED_ASSISTANT_CONFIG_FIELDS: frozenset[str] = frozenset(
         # Files / prompt / tools
         "file_paths",
         "system_prompt",
+        "eval_system_prompt_override",
+        "trusted_agent_instructions",
+        "trusted_channel_instructions",
+        "trusted_capability_instructions",
+        "capability_allowlist",
+        "agent_runtime",
+        "allowed_skill_ids",
+        "allowed_skill_versions",
         "tools_enabled",
         # Output validation
         "output_max_length",
@@ -217,9 +229,11 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "enable_rag_metrics",
         "enable_memory_loading",
         "kb_dataset_ids",
+        "kb_retrieval_configs",
         "kb_mode",
         "kb_top_k",
         "kb_min_relevance",
+        "kb_include_images",
         "kb_max_queries",
         "kb_results_per_query",
         "kb_max_content_length",
@@ -243,6 +257,14 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "error_base_delay",
         "error_max_delay",
         "system_prompt",
+        "eval_system_prompt_override",
+        "trusted_agent_instructions",
+        "trusted_channel_instructions",
+        "trusted_capability_instructions",
+        "capability_allowlist",
+        "agent_runtime",
+        "allowed_skill_ids",
+        "allowed_skill_versions",
         "execution_profile",
         "memory_mode",
         "os_agent_enabled",
@@ -340,3 +362,29 @@ def test_event_payload_contracts_documented() -> None:
         f"EXPECTED_EVENT_DATA_KEYS references unknown event types {unknown}. "
         "Either add them to StreamEventType or remove from the contract."
     )
+
+
+def test_as02_offline_golden_artifact_covers_required_runtime_cases() -> None:
+    artifact = Path("reports/agent-studio/as-02-golden-results.json")
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    cases = {case["case_id"]: case for case in payload["cases"]}
+    required = {
+        "normal-response",
+        "no-tool-agent",
+        "kb-tool-trace",
+        "prompt-injection",
+        "permission-denial",
+        "resource-unavailable",
+    }
+
+    assert payload["schema_version"] == "agent-studio-as02-golden/v1"
+    assert payload["execution_mode"] == "offline-deterministic"
+    assert payload["provider_calls"] == 0
+    assert set(cases) == required
+    assert all(case["status"] == "passed" for case in cases.values())
+    assert all(case["evidence_tests"] for case in cases.values())
+    for case in cases.values():
+        for node_id in case["evidence_tests"]:
+            test_path, test_name = node_id.split("::", maxsplit=1)
+            source = Path(test_path).read_text(encoding="utf-8")
+            assert f"def {test_name}(" in source

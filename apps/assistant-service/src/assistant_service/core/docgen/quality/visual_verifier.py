@@ -21,7 +21,7 @@ import base64
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .types import CriticReport, Issue, IssueCategory, IssueSeverity
 
@@ -66,6 +66,7 @@ class FreshContextVisionCritic(VisionCritic):
         self._model = model
 
     def review(self, doc_type: str, images: list[Path], context: dict) -> list[Issue]:
+        del doc_type, context
         client = self._client_factory()  # fresh!
         blocks = [{"type": "text", "text": CRITIC_SYSTEM_PROMPT}]
         for idx, img in enumerate(images):
@@ -121,7 +122,7 @@ _CATEGORY = {c.value: c for c in IssueCategory}
 _SEVERITY = {s.value: s for s in IssueSeverity}
 
 
-def default_vision_critic() -> "VisionCritic":
+def default_vision_critic() -> VisionCritic:
     """Return the production vision critic.
 
     If ``ANTHROPIC_API_KEY`` is set AND the ``anthropic`` SDK is importable,
@@ -155,6 +156,7 @@ class StructuralVisionCritic(VisionCritic):
     """Deterministic critic for tests — no vision, no LLM."""
 
     def review(self, doc_type: str, images: list[Path], context: dict) -> list[Issue]:
+        del images
         issues: list[Issue] = []
         if doc_type == "pptx":
             issues.extend(self._review_pptx(context))
@@ -230,7 +232,7 @@ class PptxPdfVisualVerifier:
 
     name = "visual"
 
-    def __init__(self, critic: Optional[VisionCritic] = None) -> None:
+    def __init__(self, critic: VisionCritic | None = None) -> None:
         self._critic = critic or StructuralVisionCritic()
 
     def verify(self, path: Path, *, doc_type: str) -> CriticReport:
@@ -259,7 +261,7 @@ class PptxPdfVisualVerifier:
 
     # ------------------------------------------------------------------ helpers
 
-    def _pptx_to_pdf(self, path: Path) -> Optional[Path]:
+    def _pptx_to_pdf(self, path: Path) -> Path | None:
         if not (shutil.which("soffice") or shutil.which("libreoffice")):
             return None
         bin_name = "soffice" if shutil.which("soffice") else "libreoffice"

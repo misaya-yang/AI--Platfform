@@ -32,6 +32,7 @@ class ApprovalRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     approval_id: str | None = None
+    session_id: str | None = None
 
 
 @router.get("/runs/{run_id}")
@@ -68,6 +69,7 @@ async def prepare_run_resume(
         run_id=run_id,
         tenant_id=user.tenant_id,
         user_id=user.user_id,
+        session_id=body.session_id if body else None,
         approval_id=body.approval_id if body else None,
     )
     if not resume:

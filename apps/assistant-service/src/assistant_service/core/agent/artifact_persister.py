@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
-from ai_gateway_core.enums import StreamEventType
+
 from ..artifacts import persist_output_files
 
 logger = get_logger(__name__)

@@ -43,7 +43,7 @@ def accept_changes(
     if not input_path.exists():
         return None, f"Error: Input file not found: {input_file}"
 
-    if not input_path.suffix.lower() == ".docx":
+    if input_path.suffix.lower() != ".docx":
         return None, f"Error: Input file is not a DOCX file: {input_file}"
 
     try:

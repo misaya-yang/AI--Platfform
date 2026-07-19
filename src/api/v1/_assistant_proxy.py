@@ -19,7 +19,7 @@ from ai_gateway_core.proxy import (
     ServiceProxy,
     ServiceProxyConfig,
 )
-from fastapi import Request
+from fastapi import HTTPException, Request
 from starlette.responses import Response
 
 from ...core.auth.user_resolver import UserContext
@@ -40,6 +40,46 @@ _INJECTED_IDENTITY_HEADERS: Final = frozenset(
     }
 )
 _CLIENT_SUPPLIED_APP_IDENTITY_HEADERS: Final = frozenset({"x-app-user-id", "x-app-tenant-id"})
+_RESERVED_AGENT_FIELDS: Final = frozenset(
+    {
+        "agent_id",
+        "agent_version_id",
+        "draft_revision",
+        "publication_id",
+        "channel",
+        "resolved_snapshot",
+        "runtime_envelope",
+        "snapshot_hash",
+        "spec_hash",
+        "runtime_fingerprint",
+    }
+)
+
+
+def reject_client_agent_forgery(
+    request: Request,
+    body: dict[str, object] | None = None,
+) -> None:
+    """Reject reserved Agent fields/headers on every browser-facing route."""
+
+    if any(name.lower().startswith("x-agent-") for name in request.headers):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "AGENT_RUNTIME_FIELD_FORBIDDEN",
+                "message": "Client-supplied Agent runtime headers are forbidden",
+            },
+        )
+    forbidden = sorted(_RESERVED_AGENT_FIELDS.intersection(body or {}))
+    if forbidden:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "AGENT_RUNTIME_FIELD_FORBIDDEN",
+                "message": "Client-supplied Agent runtime fields are forbidden",
+                "fields": forbidden,
+            },
+        )
 
 
 def _build_signer() -> GatewaySecret | None:

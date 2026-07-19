@@ -9,9 +9,9 @@ runtime via :meth:`TemplateRegistry.register`.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal
 
-from .ir import FontSpec, HexColor, Theme
+from .ir import Theme
 from .style_guide import FONT_PAIRS, PALETTES, theme_from
 
 
@@ -29,7 +29,7 @@ class Template:
     palette_name: str
     font_pair_name: str
     accent_style: Literal["none", "underline", "left_bar"] = "none"
-    header_text: Optional[str] = None
+    header_text: str | None = None
     cover_treatment: Literal["minimal", "full", "none"] = "minimal"
 
     def theme(self) -> Theme:
@@ -74,14 +74,14 @@ class TemplateRegistry:
         self._builtins = dict(_BUILTINS)
         self._tenant: dict[tuple[str, str], Template] = {}  # (tenant_id, name) → Template
 
-    def get(self, name: str, *, tenant_id: Optional[str] = None) -> Template:
+    def get(self, name: str, *, tenant_id: str | None = None) -> Template:
         if tenant_id is not None and (tenant_id, name) in self._tenant:
             return self._tenant[(tenant_id, name)]
         if name in self._builtins:
             return self._builtins[name]
         raise KeyError(f"unknown template: {name!r}")
 
-    def list(self, *, tenant_id: Optional[str] = None) -> list[Template]:
+    def list(self, *, tenant_id: str | None = None) -> list[Template]:
         out = list(self._builtins.values())
         if tenant_id is not None:
             out.extend([t for (tid, _), t in self._tenant.items() if tid == tenant_id])

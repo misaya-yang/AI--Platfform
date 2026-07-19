@@ -6,7 +6,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -43,8 +42,12 @@ def load_mcp_config(path: str | None = None) -> list[MCPServerConfig]:
     for srv in servers:
         if not isinstance(srv, dict) or not srv.get("name"):
             continue
-        # Fix: api_key=None must not become "None" string
+        # Static config is platform-managed compatibility only. Credential
+        # values must still come from an environment placeholder; a literal
+        # would otherwise become committed plaintext configuration.
         raw_key = srv.get("api_key")
+        if raw_key and not re.fullmatch(r"\$\{\w+\}", str(raw_key)):
+            raise ValueError("MCP api_key must use a ${ENV_VAR} reference")
         api_key = _resolve_env_vars(str(raw_key)) if raw_key else None
         if api_key == "":
             api_key = None
@@ -53,13 +56,17 @@ def load_mcp_config(path: str | None = None) -> list[MCPServerConfig]:
             name=srv["name"],
             url=_resolve_env_vars(str(srv.get("url", ""))),
             api_key=api_key,
-            transport=srv.get("transport", "http"),
+            transport="streamable_http",
             timeout=float(srv.get("timeout", 30.0)),
             enabled=srv.get("enabled", True),
             description=srv.get("description", ""),
             allowed_tools=srv.get("allowed_tools"),
             blocked_tools=srv.get("blocked_tools"),
             max_concurrent=int(srv.get("max_concurrent", 10)),
+            response_limit_bytes=int(srv.get("response_limit_bytes", 1048576)),
+            platform_managed=True,
+            allow_localhost=True,
+            allow_private_network=True,
         ))
 
     logger.info(f"Loaded {len(configs)} MCP server configs from {config_path}")

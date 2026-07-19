@@ -36,11 +36,11 @@ from .agent.agui_protocol import (
     create_agui_emitter,
 )
 from .assistant_service import AssistantConfig, AssistantService, RAGEvaluation
-from .quality.cache_optimizer import (
-    CacheBreakpoint,
-    CacheConfig,
-    CacheMetrics,
-    ContextCacheOptimizer,
+from .client import (
+    AssistantClientProtocol,
+    InProcessAssistantClient,
+    RemoteAssistantClient,
+    create_assistant_client,
 )
 from .content.content_generator import (
     ContentOutline,
@@ -50,6 +50,60 @@ from .content.content_generator import (
     GenerationPhase,
     StreamEvent,
     create_content_generator,
+)
+from .content.streaming_writer import (
+    DEFAULT_VERIFICATION_TRIGGERS,
+    StreamChunk,
+    StreamingWriter,
+    create_streaming_writer,
+)
+from .content.structured_output import (
+    AnswerWithCitations,
+    ClassificationResult,
+    ExtractedEntities,
+    FactCheckResult,
+    OutputFormat,
+    OutputGuardrail,
+    StepByStepAnswer,
+    StructuredOutputParser,
+    StructuredOutputResult,
+    create_json_prompt,
+    parse_structured_output,
+    validate_output,
+)
+from .files.document_parser import DocumentParseError, DocumentParser, parse_document
+from .files.file_processor import (
+    FileProcessError,
+    FileProcessor,
+    ImageContent,
+    ProcessedFiles,
+    create_file_processor,
+)
+from .gateway import (
+    AssistantExecutionGateway,
+    AssistantPolicyEngine,
+    AssistantRequestRouter,
+    RoutedAssistantRequest,
+    ToolPolicyDecision,
+)
+from .models.model_registry import ModelInfo, ModelProvider, ModelRegistry
+from .quality.cache_optimizer import (
+    CacheBreakpoint,
+    CacheConfig,
+    CacheMetrics,
+    ContextCacheOptimizer,
+)
+from .quality.guardrails import (
+    BANNED_PHRASES,
+    QUALITY_THRESHOLDS,
+    TOOL_CONSTRAINTS,
+    DocumentType,
+    IssueSeverity,
+    QualityGuardrails,
+    QualityIssue,
+    ToolCallValidation,
+    ToolConstraintValidator,
+    ValidationResult,
 )
 from .rag.context_metrics import (
     CacheMetrics as KVCacheMetrics,  # Renamed to avoid conflict with cache_optimizer.CacheMetrics
@@ -65,27 +119,6 @@ from .rag.context_metrics import (
     get_context_metrics_collector,
     init_context_metrics_collector,
 )
-from .files.document_parser import DocumentParseError, DocumentParser, parse_document
-from .files.file_processor import (
-    FileProcessError,
-    FileProcessor,
-    ImageContent,
-    ProcessedFiles,
-    create_file_processor,
-)
-from .quality.guardrails import (
-    BANNED_PHRASES,
-    QUALITY_THRESHOLDS,
-    TOOL_CONSTRAINTS,
-    DocumentType,
-    IssueSeverity,
-    QualityGuardrails,
-    QualityIssue,
-    ToolCallValidation,
-    ToolConstraintValidator,
-    ValidationResult,
-)
-from .models.model_registry import ModelInfo, ModelProvider, ModelRegistry
 
 # Query Intent Analyzer (Self-RAG style adaptive retrieval)
 from .rag.query_intent_analyzer import (
@@ -108,26 +141,6 @@ from .rag.rag_metrics import (
     get_rag_evaluator,
     get_rag_metrics_collector,
 )
-from .content.streaming_writer import (
-    DEFAULT_VERIFICATION_TRIGGERS,
-    StreamChunk,
-    StreamingWriter,
-    create_streaming_writer,
-)
-from .content.structured_output import (
-    AnswerWithCitations,
-    ClassificationResult,
-    ExtractedEntities,
-    FactCheckResult,
-    OutputFormat,
-    OutputGuardrail,
-    StepByStepAnswer,
-    StructuredOutputParser,
-    StructuredOutputResult,
-    create_json_prompt,
-    parse_structured_output,
-    validate_output,
-)
 from .tasks.task_manager import (
     SessionResources,
     TaskContext,
@@ -145,24 +158,15 @@ from .tool_invoker import (
     ToolInvoker,
     create_tool_invoker,
 )
-from .client import (
-    AssistantClientProtocol,
-    InProcessAssistantClient,
-    RemoteAssistantClient,
-    create_assistant_client,
-)
-from .gateway import (
-    AssistantExecutionGateway,
-    AssistantPolicyEngine,
-    AssistantRequestRouter,
-    RoutedAssistantRequest,
-    ToolPolicyDecision,
-)
 
 __all__ = [
     "AssistantService",
     "AssistantConfig",
     "RAGEvaluation",
+    "AssistantClientProtocol",
+    "InProcessAssistantClient",
+    "RemoteAssistantClient",
+    "create_assistant_client",
     "ModelRegistry",
     "ModelProvider",
     "ModelInfo",

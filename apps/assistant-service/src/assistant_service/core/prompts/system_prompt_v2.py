@@ -43,14 +43,6 @@ References:
 
 from typing import Any
 
-# Sentinel inserted into `build_system_prompt_v2`'s output between the
-# cacheable static prefix and the tenant/scenario-dependent tail. Callers
-# that support multi-block prompt caching (Anthropic) split on this marker
-# and attach `cache_control` to both blocks so the static prefix hits across
-# all tenants even when the tail varies. Callers that don't (OpenAI-compat
-# / DashScope) strip it with `.replace(..., "")`.
-CACHE_SPLIT_MARKER = "<<<ANTHROPIC_CACHE_SPLIT>>>"
-
 from .agent_freedom import (
     AGENT_FREEDOM,
     get_agent_freedom,
@@ -65,6 +57,14 @@ from .guardrails import (
     get_guardrails_for_scenario,
     get_minimal_guardrails,
 )
+
+# Sentinel inserted into `build_system_prompt_v2`'s output between the
+# cacheable static prefix and the tenant/scenario-dependent tail. Callers
+# that support multi-block prompt caching (Anthropic) split on this marker
+# and attach `cache_control` to both blocks so the static prefix hits across
+# all tenants even when the tail varies. Callers that don't (OpenAI-compat
+# / DashScope) strip it with `.replace(..., "")`.
+CACHE_SPLIT_MARKER = "<<<ANTHROPIC_CACHE_SPLIT>>>"
 
 # =============================================================================
 # Core System Prompt Sections (Static - High KV-Cache Potential)
@@ -1161,7 +1161,8 @@ def get_time_context_block() -> str:
     real current date — the model's training cutoff lag (Jan 2026) is not
     a reason to doubt the system clock.
     """
-    from datetime import datetime as _dt, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
     _now = _dt.now()
     _yesterday = _now - _td(days=1)
     _two_days_ago = _now - _td(days=2)

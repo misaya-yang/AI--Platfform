@@ -277,6 +277,17 @@ class TestAssistantE2EStub:
         assert remember == "已记住"
         assert recall == "你的名字是小明，你来自悉尼-abc。"
 
+    def test_e2e_stub_returns_deterministic_generic_response(self, monkeypatch):
+        from assistant_service.api.routes import chat as chat_routes
+
+        monkeypatch.setenv("ASSISTANT_E2E_STUB_LLM", "1")
+        response = chat_routes._build_e2e_memory_stub_response(
+            chat_routes.ChatRequest(message="ping"),
+            MockUserContext(user_id="user-a", tenant_id="tenant-a"),
+        )
+
+        assert response == "E2E stub response"
+
 
 class TestAssistantServiceChatStream:
     """Tests for chat_stream functionality."""

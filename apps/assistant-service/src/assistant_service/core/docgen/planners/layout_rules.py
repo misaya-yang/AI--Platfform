@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from ..ir import (
     BulletBlock,
@@ -56,7 +55,7 @@ def _split_levels(text: str) -> list[str]:
         n = m.group(1)
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[start:end].strip(". ：:—-— ")
+        body = re.sub(r"^[. ：:—-]+|[. ：:—-]+$", "", text[start:end])
         if body:
             out.append(f"L{n}: {body}")
     return out
@@ -70,6 +69,7 @@ class ComparisonTableRule(LayoutRule):
     _TITLE_KEYS = ("maturity", "comparison", "levels", "tiers", "matrix")
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         return [self._rewrite(s) for s in slides]
 
     def _rewrite(self, s: PptxSlide) -> PptxSlide:
@@ -113,6 +113,7 @@ class PullQuoteCardRule(LayoutRule):
     name = "pull_quote_card"
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         out = []
         for s in slides:
             if s.layout == "title":
@@ -131,7 +132,7 @@ _UNIT_RE = re.compile(r"[%xX×kKMm]|pp|bp|PRs")
 _NUMBER_RE = re.compile(r"(?:^|\s)(−?-?\d{1,5}(?:,\d{3})*(?:\.\d+)?\s*(?:%|x|×|PRs|bp|k|K|M|pp)?)(?:\s|$|[.,])")
 
 
-def extract_big_number(text: str) -> Optional[str]:
+def extract_big_number(text: str) -> str | None:
     """Extract the first 'big' number — 2+ digits or explicit unit suffix.
 
     Excludes 4-digit years (1900-2099) unless the number carries a unit.
@@ -167,6 +168,7 @@ class BigStatRule(LayoutRule):
     )
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         return [self._rewrite(s) for s in slides]
 
     def _rewrite(self, s: PptxSlide) -> PptxSlide:
@@ -236,6 +238,7 @@ class LayoutVarietyRule(LayoutRule):
     name = "layout_variety"
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         if len(slides) <= 2:
             return list(slides)
         prev = slides[0].layout
@@ -300,11 +303,12 @@ class SectionDividerRule(LayoutRule):
     name = "section_divider"
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         if not slides:
             return list(slides)
-        layer_idx: Optional[int] = None
-        maturity_idx: Optional[int] = None
-        close_idx: Optional[int] = None
+        layer_idx: int | None = None
+        maturity_idx: int | None = None
+        close_idx: int | None = None
         for i, s in enumerate(slides):
             title = s.title or ""
             t_low = title.lower()
@@ -360,6 +364,7 @@ class DarkCardInterleaveRule(LayoutRule):
     })
 
     def apply(self, slides: list[PptxSlide], brief: Brief) -> list[PptxSlide]:
+        del brief
         eligible = [i for i, s in enumerate(slides) if s.layout not in self._SKIP]
         flip: set[int] = set()
         for k in (1, 4, 7):
@@ -448,7 +453,7 @@ DEFAULT_RULES: list[LayoutRule] = [
 def apply_rules(
     slides: list[PptxSlide],
     brief: Brief,
-    rules: Optional[list[LayoutRule]] = None,
+    rules: list[LayoutRule] | None = None,
 ) -> list[PptxSlide]:
     """Run each rule in order. Each rule returns a new list."""
     if rules is None:

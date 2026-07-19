@@ -88,7 +88,7 @@ def test_skills_upload_rejects_user_without_skill_write_permission() -> None:
 
 
 def test_mcp_inventory_rejects_user_without_mcp_read_permission() -> None:
-    client = _client(mcp_routes.router)
+    client = _client(mcp_routes.legacy_router)
 
     assert client.get("/assistant/mcp/servers").status_code == 403
     assert client.get("/assistant/mcp/tools").status_code == 403

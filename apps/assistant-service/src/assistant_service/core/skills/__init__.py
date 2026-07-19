@@ -8,10 +8,10 @@ Extends the runtime skills system with:
 - Built-in skills (skill_create, etc.)
 """
 
-from .parser import parse_skill_md
-from .executor import SkillExecutor, register_builtin
-from .tool_bridge import SkillToolBridge
 from .builtin.skill_create import SKILL_CREATE_MANIFEST, handle_skill_create
+from .executor import SkillExecutor, register_builtin
+from .parser import parse_skill_md
+from .tool_bridge import SkillToolBridge
 
 # Register builtin handlers
 register_builtin("skill_create", handle_skill_create)

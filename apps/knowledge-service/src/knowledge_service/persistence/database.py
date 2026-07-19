@@ -1642,7 +1642,9 @@ class DatabaseStorage:
             await conn.execute(
                 """
                 UPDATE datasets
-                SET needs_reindex = false, updated_at = NOW()
+                SET needs_reindex = false,
+                    content_revision = content_revision + 1,
+                    updated_at = NOW()
                 WHERE dataset_id = $1
                 """,
                 dataset_id,

@@ -39,13 +39,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json as _json
 import time
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
@@ -61,6 +63,53 @@ logger = get_logger(__name__)
 # =============================================================================
 # Data Classes
 # =============================================================================
+
+
+@dataclass(frozen=True)
+class CapabilityAllowlist:
+    """Hard upper bound for tool capabilities available to one Agent run.
+
+    The absence of this object preserves the legacy built-in Assistant tool
+    surface. An explicit object, including one with no names, may only reduce
+    that surface. Tenant, permission, health, and connector checks can further
+    reduce it; they can never add a name that is absent here.
+    """
+
+    tool_names: frozenset[str] = field(default_factory=frozenset)
+    bindings: Mapping[str, dict[str, Any]] = field(default_factory=dict, compare=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.tool_names, str):
+            raise TypeError("tool_names must be a collection of complete tool names")
+        object.__setattr__(
+            self,
+            "tool_names",
+            frozenset(str(name) for name in self.tool_names),
+        )
+        object.__setattr__(
+            self,
+            "bindings",
+            MappingProxyType(
+                {
+                    str(name): copy.deepcopy(binding)
+                    for name, binding in dict(self.bindings or {}).items()
+                    if str(name) in self.tool_names and isinstance(binding, dict)
+                }
+            ),
+        )
+
+    def allows(self, tool_name: str) -> bool:
+        return tool_name in self.tool_names
+
+    def binding(self, tool_name: str) -> dict[str, Any] | None:
+        value = self.bindings.get(tool_name)
+        return copy.deepcopy(value) if value is not None else None
+
+    def filter_definitions(
+        self,
+        tools: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        return [tool for tool in tools if self.allows(tool.name)]
 
 
 @dataclass
@@ -111,6 +160,21 @@ class ToolInvocationContext:
     # User context - required for tools that need user permissions (e.g., KB search)
     user: UserContextLike | None = None
 
+    # Agent capability boundary. ``None`` preserves legacy Assistant behavior;
+    # an explicit allowlist (including empty) can only reduce visible/invokable
+    # tools and is enforced again immediately before invocation.
+    capability_allowlist: CapabilityAllowlist | None = None
+
+    # Per-run tools (for example exact tenant Skill versions) live outside the
+    # process-global registry.  The field is deliberately omitted from
+    # ``to_dict`` so definitions, executors, and instruction content cannot
+    # enter traces/checkpoints through context serialization.
+    runtime_tool_registry: Any | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
     # Metadata for logging and analytics
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -129,6 +193,11 @@ class ToolInvocationContext:
             "policy_profile": self.policy_profile,
             "os_agent_enabled": self.os_agent_enabled,
             "kb_dataset_ids": self.kb_dataset_ids,
+            "capability_allowlist": (
+                None
+                if self.capability_allowlist is None
+                else sorted(self.capability_allowlist.tool_names)
+            ),
             "metadata": self.metadata,
         }
 
@@ -315,6 +384,7 @@ class RegistryToolInvoker(ToolInvoker):
         metrics_collector: Callable[[str, float, bool], None] | None = None,
         tenant_tool_policy: Any | None = None,
         tenant_mcp_config: Any | None = None,
+        mcp_runtime: Any | None = None,
         tool_audit: Any | None = None,
     ):
         """
@@ -335,6 +405,7 @@ class RegistryToolInvoker(ToolInvoker):
         self.metrics_collector = metrics_collector
         self.tenant_tool_policy = tenant_tool_policy
         self.tenant_mcp_config = tenant_mcp_config
+        self.mcp_runtime = mcp_runtime
         self.tool_audit = tool_audit
 
         # ADR-003 Phase 3: Per-session tool result cache
@@ -343,9 +414,7 @@ class RegistryToolInvoker(ToolInvoker):
         self._cache_ttl = 300  # 5 minutes
         self._cache_max_size = 200
         # Only idempotent tools are cacheable
-        self._cacheable_prefixes = (
-            "search_knowledge_base",
-        )
+        self._cacheable_prefixes = ("search_knowledge_base",)
 
     @staticmethod
     def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -435,6 +504,14 @@ class RegistryToolInvoker(ToolInvoker):
 
         start_time = time.time()
         call_id = str(uuid.uuid4())
+        runtime_registry = context.runtime_tool_registry
+        runtime_definition = (
+            runtime_registry.get_tool(tool_name) if runtime_registry is not None else None
+        )
+        execution_registry = (
+            runtime_registry if runtime_definition is not None else self.tool_registry
+        )
+        tool_definition = runtime_definition or self.tool_registry.get_tool(tool_name)
 
         # Check cancellation before starting
         if cancel_event and cancel_event.is_set():
@@ -445,55 +522,123 @@ class RegistryToolInvoker(ToolInvoker):
                 error="Cancelled before execution",
             )
 
+        if context.capability_allowlist is not None and not context.capability_allowlist.allows(
+            tool_name
+        ):
+            logger.warning(
+                "Agent capability allowlist denied: tool=%s tenant=%s",
+                tool_name,
+                context.tenant_id,
+            )
+            return await self._deny_tool_call(
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                context=context,
+                error=f"Tool '{tool_name}' is not available to this Agent.",
+                start_time=start_time,
+            )
+
+        capability_binding = (
+            context.capability_allowlist.binding(tool_name)
+            if context.capability_allowlist is not None
+            else None
+        )
+        binding_type = str((capability_binding or {}).get("type") or "")
+        connector_authorization: dict[str, Any] | None = None
+        if binding_type == "connector":
+            if self.mcp_runtime is None:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="Connector capability is unavailable.",
+                    start_time=start_time,
+                )
+            try:
+                connector_authorization = await self.mcp_runtime.authorize_connector_binding(
+                    tool_name=tool_name,
+                    binding=capability_binding,
+                    context=context,
+                )
+            except Exception:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="Connector capability is unavailable.",
+                    start_time=start_time,
+                )
+        effective_arguments = arguments
+        if context.capability_allowlist is not None and tool_name == "search_knowledge_base":
+            allowed_dataset_ids = frozenset(str(value) for value in context.kb_dataset_ids)
+            requested_dataset_ids = arguments.get("dataset_ids")
+            if not allowed_dataset_ids:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="Knowledge base search is not available to this Agent.",
+                    start_time=start_time,
+                )
+            if requested_dataset_ids:
+                if not isinstance(requested_dataset_ids, (list, tuple, set)):
+                    return await self._deny_tool_call(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        context=context,
+                        error="Knowledge dataset is not available to this Agent.",
+                        start_time=start_time,
+                    )
+                requested = frozenset(str(value) for value in requested_dataset_ids)
+                if not requested.issubset(allowed_dataset_ids):
+                    return await self._deny_tool_call(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        context=context,
+                        error="Knowledge dataset is not available to this Agent.",
+                        start_time=start_time,
+                    )
+                effective_arguments = {
+                    **arguments,
+                    "dataset_ids": sorted(requested),
+                }
+            else:
+                effective_arguments = {
+                    **arguments,
+                    "dataset_ids": sorted(allowed_dataset_ids),
+                }
+
         # ADR-003 Phase 3: Check result cache for idempotent tools
         cache_key = None
+        cached = None
+        cache_scope = context.scope_id or context.session_id
         if self._is_cacheable(tool_name):
-            # Include kb_dataset_ids in cache key for KB search (auto-injected later)
-            cache_args = arguments
-            if tool_name == "search_knowledge_base" and not arguments.get("dataset_ids") and context.kb_dataset_ids:
-                cache_args = {**arguments, "dataset_ids": context.kb_dataset_ids}
+            cache_args = effective_arguments
+            if tool_name == "search_knowledge_base":
+                cache_args = {
+                    **effective_arguments,
+                    "dataset_ids": effective_arguments.get("dataset_ids") or context.kb_dataset_ids,
+                    "_sealed_retrieval_configs": (
+                        (context.metadata or {}).get("kb_retrieval_configs") or {}
+                    ),
+                }
             cache_key = self._cache_key(tool_name, cache_args)
-            cached = self._cache_get(context.session_id, cache_key)
-            if cached is not None:
-                logger.info(f"Cache hit: tool={tool_name} session={context.session_id[:12]}")
-                # Return a copy with fresh call_id
-                cached_copy = ToolCallResult(
-                    call_id=call_id,
-                    tool_name=cached.tool_name,
-                    success=cached.success,
-                    result=cached.result,
-                    error=cached.error,
-                    duration_ms=0,
-                    metadata={**cached.metadata, "cache_hit": True},
-                    output_files=cached.output_files,
-                )
-                # Audit cache hit
-                if self.tool_audit:
-                    try:
-                        from .audit.tool_audit import ToolAuditEntry
-                        entry = ToolAuditEntry(
-                            tenant_id=context.tenant_id,
-                            user_id=context.user_id,
-                            session_id=context.session_id,
-                            request_id=context.request_id,
-                            tool_type=self.tool_audit.classify_tool_type(tool_name),
-                            tool_name=tool_name,
-                            input_summary=self.tool_audit.summarize_input(arguments),
-                            output_status="cache_hit",
-                            latency_ms=0,
-                        )
-                        _t = asyncio.create_task(self.tool_audit.log(entry))
-                        _t.add_done_callback(lambda t: None if not t.exception() else None)
-                    except Exception:
-                        pass
-                return cached_copy
+            cached = self._cache_get(cache_scope, cache_key)
 
         # Enforce tenant tool policy (blocked tools / MCP access)
         if self.tenant_tool_policy and context.tenant_id:
             try:
                 policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
                 if tool_name in policy.blocked_tools:
-                    logger.warning(f"Tenant policy denied: tool={tool_name} tenant={context.tenant_id}")
+                    logger.warning(
+                        f"Tenant policy denied: tool={tool_name} tenant={context.tenant_id}"
+                    )
                     return ToolCallResult(
                         call_id=call_id,
                         tool_name=tool_name,
@@ -501,32 +646,56 @@ class RegistryToolInvoker(ToolInvoker):
                         error=f"Tool '{tool_name}' is not available for this tenant.",
                     )
                 if policy.allowed_tools and tool_name not in policy.allowed_tools:
-                    logger.warning(f"Tenant policy denied (not in whitelist): tool={tool_name} tenant={context.tenant_id}")
+                    logger.warning(
+                        f"Tenant policy denied (not in whitelist): tool={tool_name} tenant={context.tenant_id}"
+                    )
                     return ToolCallResult(
                         call_id=call_id,
                         tool_name=tool_name,
                         success=False,
                         error=f"Tool '{tool_name}' is not available for this tenant.",
                     )
-                if policy.allowed_categories:
-                    tool_def = self.tool_registry.get_tool(tool_name)
-                    if tool_def and tool_def.category.value not in policy.allowed_categories:
-                        logger.warning(f"Tenant policy denied (category): tool={tool_name} cat={tool_def.category.value} tenant={context.tenant_id}")
-                        return ToolCallResult(
-                            call_id=call_id,
-                            tool_name=tool_name,
-                            success=False,
-                            error=f"Tool '{tool_name}' category is not allowed for this tenant.",
-                        )
+                if (
+                    policy.allowed_categories
+                    and tool_definition
+                    and tool_definition.category.value not in policy.allowed_categories
+                ):
+                    logger.warning(
+                        "Tenant policy denied (category): tool=%s cat=%s tenant=%s",
+                        tool_name,
+                        tool_definition.category.value,
+                        context.tenant_id,
+                    )
+                    return ToolCallResult(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error=f"Tool '{tool_name}' category is not allowed for this tenant.",
+                    )
             except Exception as e:
-                logger.warning(f"Tenant policy check failed (allowing): {e}")
+                logger.warning(f"Tenant policy check failed (denying): {e}")
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error=f"Tool '{tool_name}' is not available for this tenant.",
+                    start_time=start_time,
+                )
 
-        if self.tenant_mcp_config and context.tenant_id and tool_name.startswith("mcp_"):
+        if (
+            self.tenant_mcp_config
+            and context.tenant_id
+            and tool_name.startswith("mcp_")
+            and binding_type != "mcp"
+        ):
             try:
                 mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
                 allowed_prefixes = tuple(f"mcp_{s}__" for s in mcp_config.allowed_servers)
                 if not mcp_config.allowed_servers or not tool_name.startswith(allowed_prefixes):
-                    logger.warning(f"MCP policy denied: tool={tool_name} tenant={context.tenant_id}")
+                    logger.warning(
+                        f"MCP policy denied: tool={tool_name} tenant={context.tenant_id}"
+                    )
                     return await self._deny_tool_call(
                         call_id=call_id,
                         tool_name=tool_name,
@@ -546,6 +715,42 @@ class RegistryToolInvoker(ToolInvoker):
                     start_time=start_time,
                 )
 
+        # Authorization is deliberately evaluated before a cache hit can be
+        # returned. A stale cached result must not bypass a newly denied or
+        # currently unavailable tenant/MCP policy.
+        if cached is not None:
+            logger.info(f"Cache hit: tool={tool_name} session={context.session_id[:12]}")
+            cached_copy = ToolCallResult(
+                call_id=call_id,
+                tool_name=cached.tool_name,
+                success=cached.success,
+                result=cached.result,
+                error=cached.error,
+                duration_ms=0,
+                metadata={**cached.metadata, "cache_hit": True},
+                output_files=cached.output_files,
+            )
+            if self.tool_audit:
+                try:
+                    from .audit.tool_audit import ToolAuditEntry
+
+                    entry = ToolAuditEntry(
+                        tenant_id=context.tenant_id,
+                        user_id=context.user_id,
+                        session_id=context.session_id,
+                        request_id=context.request_id,
+                        tool_type=self.tool_audit.classify_tool_type(tool_name),
+                        tool_name=tool_name,
+                        input_summary=self.tool_audit.summarize_input(arguments),
+                        output_status="cache_hit",
+                        latency_ms=0,
+                    )
+                    _t = asyncio.create_task(self.tool_audit.log(entry))
+                    _t.add_done_callback(lambda t: None if not t.exception() else None)
+                except Exception:
+                    pass
+            return cached_copy
+
         # Check rate limit
         if self.rate_limiter and self.rate_limiter(context.tenant_id, tool_name):
             logger.warning(f"Rate limited: tool={tool_name} tenant={context.tenant_id}")
@@ -558,7 +763,7 @@ class RegistryToolInvoker(ToolInvoker):
 
         # Auto-inject kb_dataset_ids for KB search tool if not provided
         # This fixes the issue where LLM calls the tool without knowing which datasets to search
-        final_arguments = arguments.copy()
+        final_arguments = effective_arguments.copy()
         if (
             tool_name == "search_knowledge_base"
             and not final_arguments.get("dataset_ids")
@@ -585,23 +790,53 @@ class RegistryToolInvoker(ToolInvoker):
                 "scope_id": context.scope_id,
                 "policy_profile": context.policy_profile,
                 "kb_dataset_ids": context.kb_dataset_ids,
+                **(
+                    {
+                        "connector_principal": {
+                            "grant_id": str(connector_authorization.get("grant_id") or ""),
+                            "provider": str(connector_authorization.get("provider") or ""),
+                            "principal_type": str(
+                                connector_authorization.get("principal_type") or ""
+                            ),
+                            "channel": str((context.metadata or {}).get("channel") or ""),
+                        }
+                    }
+                    if connector_authorization is not None
+                    else {}
+                ),
             },
         )
 
         # Use tool-specific timeout if defined (e.g. quiz generation needs 120s)
-        from .tools.tool_registry import get_tool_registry
         effective_timeout = context.timeout_ms
-        tool_def = get_tool_registry().get_tool(tool_name)
-        if tool_def and tool_def.timeout_seconds * 1000 > effective_timeout:
-            effective_timeout = tool_def.timeout_seconds * 1000
+        if tool_definition and tool_definition.timeout_seconds * 1000 > effective_timeout:
+            effective_timeout = tool_definition.timeout_seconds * 1000
 
         # Execute with timeout, retry, and cancellation support
-        result = await self._execute_with_retry(
-            request=request,
-            timeout_ms=effective_timeout,
-            max_retries=context.max_retries,
-            cancel_event=cancel_event,
-        )
+        if binding_type == "mcp":
+            if self.mcp_runtime is None or capability_binding is None:
+                result = ToolCallResult(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    success=False,
+                    error="MCP capability is unavailable.",
+                )
+            else:
+                result = await self.mcp_runtime.invoke(
+                    tool_name=tool_name,
+                    arguments=final_arguments,
+                    binding=capability_binding,
+                    context=context,
+                    call_id=call_id,
+                )
+        else:
+            result = await self._execute_with_retry(
+                request=request,
+                timeout_ms=effective_timeout,
+                max_retries=context.max_retries,
+                cancel_event=cancel_event,
+                tool_registry=execution_registry,
+            )
 
         # Record metrics
         duration_ms = (time.time() - start_time) * 1000
@@ -615,6 +850,7 @@ class RegistryToolInvoker(ToolInvoker):
         if self.tool_audit:
             try:
                 from .audit.tool_audit import ToolAuditEntry
+
                 entry = ToolAuditEntry(
                     tenant_id=context.tenant_id,
                     user_id=context.user_id,
@@ -629,16 +865,18 @@ class RegistryToolInvoker(ToolInvoker):
                 )
                 task = asyncio.create_task(self.tool_audit.log(entry))
                 task.add_done_callback(
-                    lambda t: logger.debug(f"Audit write error: {t.exception()}")
-                    if not t.cancelled() and t.exception()
-                    else None
+                    lambda t: (
+                        logger.debug(f"Audit write error: {t.exception()}")
+                        if not t.cancelled() and t.exception()
+                        else None
+                    )
                 )
             except Exception as e:
                 logger.debug(f"Audit log failed: {e}")
 
         # ADR-003 Phase 3: Cache successful results for idempotent tools
         if cache_key and result.success:
-            self._cache_put(context.session_id, cache_key, result)
+            self._cache_put(cache_scope, cache_key, result)
 
         return result
 
@@ -648,6 +886,7 @@ class RegistryToolInvoker(ToolInvoker):
         timeout_ms: int,
         max_retries: int,
         cancel_event: asyncio.Event | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> ToolCallResult:
         """
         Execute with timeout, retry, and cancellation support.
@@ -665,6 +904,7 @@ class RegistryToolInvoker(ToolInvoker):
         from .tools.tool_registry import ToolCallResult
 
         last_error: str | None = None
+        execution_registry = tool_registry or self.tool_registry
 
         for attempt in range(max_retries + 1):
             # Check cancellation before each attempt
@@ -678,7 +918,7 @@ class RegistryToolInvoker(ToolInvoker):
 
             try:
                 # Create execution task
-                execution_task = asyncio.create_task(self.tool_registry.execute(request))
+                execution_task = asyncio.create_task(execution_registry.execute(request))
 
                 # If we have a cancel event, race between execution and cancellation
                 if cancel_event:
@@ -880,7 +1120,9 @@ class RegistryToolInvoker(ToolInvoker):
         context: ToolInvocationContext,
     ) -> list[str]:
         """Get list of tool names available for this context."""
-        tools = self.tool_registry.list_tools(user=context.user)
+        tools = self._context_tools(context)
+        if context.capability_allowlist is not None:
+            tools = context.capability_allowlist.filter_definitions(tools)
         return [t.name for t in tools]
 
     def get_tool_definitions(
@@ -889,10 +1131,25 @@ class RegistryToolInvoker(ToolInvoker):
         tool_names: list[str] | None = None,
     ) -> list[ToolDefinition]:
         """Get tool definitions for schema generation."""
-        tools = self.tool_registry.list_tools(user=context.user)
+        tools = self._context_tools(context)
         if tool_names:
             tools = [t for t in tools if t.name in tool_names]
+        if context.capability_allowlist is not None:
+            tools = context.capability_allowlist.filter_definitions(tools)
         return tools
+
+    def _context_tools(
+        self,
+        context: ToolInvocationContext,
+    ) -> list[ToolDefinition]:
+        """Merge global platform tools with this run's isolated tool overlay."""
+
+        merged = {tool.name: tool for tool in self.tool_registry.list_tools(user=context.user)}
+        runtime_registry = context.runtime_tool_registry
+        if runtime_registry is not None:
+            for tool in runtime_registry.list_tools(user=context.user):
+                merged[tool.name] = tool
+        return list(merged.values())
 
     async def get_tool_definitions_filtered(
         self,
@@ -905,19 +1162,60 @@ class RegistryToolInvoker(ToolInvoker):
         """
         tools = self.get_tool_definitions(context, tool_names)
 
+        if self.mcp_runtime and context.capability_allowlist is not None:
+            requested = set(context.capability_allowlist.tool_names)
+            if tool_names is not None:
+                requested.intersection_update(tool_names)
+            dynamic = await self.mcp_runtime.get_tool_definitions(
+                context=context,
+                bindings=context.capability_allowlist.bindings,
+                tool_names=requested,
+            )
+            known = {tool.name for tool in tools}
+            tools.extend(tool for tool in dynamic if tool.name not in known)
+            denied_connectors: set[str] = set()
+            for name, binding in context.capability_allowlist.bindings.items():
+                if str(binding.get("type") or "") != "connector":
+                    continue
+                try:
+                    await self.mcp_runtime.authorize_connector_binding(
+                        tool_name=name,
+                        binding=binding,
+                        context=context,
+                    )
+                except Exception:
+                    denied_connectors.add(name)
+            if denied_connectors:
+                tools = [tool for tool in tools if tool.name not in denied_connectors]
+
         # Apply tenant tool policy (whitelist/blacklist/category)
         if self.tenant_tool_policy and context.tenant_id:
             try:
                 policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
                 tools = self.tenant_tool_policy.filter_tools(tools, policy)
             except Exception as e:
-                logger.warning(f"Tenant tool policy filter failed: {e}")
+                logger.warning(f"Tenant tool policy filter failed; hiding tools: {e}")
+                tools = []
 
         # Apply tenant MCP config (per-tenant MCP server access)
         if self.tenant_mcp_config and context.tenant_id:
             try:
                 mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
-                tools = self.tenant_mcp_config.filter_mcp_tools(tools, mcp_config)
+                dynamic_names = {
+                    name
+                    for name, binding in (
+                        context.capability_allowlist.bindings.items()
+                        if context.capability_allowlist is not None
+                        else []
+                    )
+                    if str(binding.get("type") or "") == "mcp"
+                }
+                static_tools = [tool for tool in tools if tool.name not in dynamic_names]
+                dynamic_tools = [tool for tool in tools if tool.name in dynamic_names]
+                tools = [
+                    *self.tenant_mcp_config.filter_mcp_tools(static_tools, mcp_config),
+                    *dynamic_tools,
+                ]
             except Exception as e:
                 logger.warning(f"Tenant MCP config filter failed; hiding MCP tools: {e}")
                 tools = [t for t in tools if not t.name.startswith("mcp_")]
@@ -936,6 +1234,7 @@ def create_tool_invoker(
     metrics_collector: Callable[[str, float, bool], None] | None = None,
     tenant_tool_policy: Any | None = None,
     tenant_mcp_config: Any | None = None,
+    mcp_runtime: Any | None = None,
     tool_audit: Any | None = None,
 ) -> ToolInvoker:
     """
@@ -966,6 +1265,7 @@ def create_tool_invoker(
         metrics_collector=metrics_collector,
         tenant_tool_policy=tenant_tool_policy,
         tenant_mcp_config=tenant_mcp_config,
+        mcp_runtime=mcp_runtime,
         tool_audit=tool_audit,
     )
 

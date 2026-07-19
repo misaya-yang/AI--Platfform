@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Protocol
 
 
 class ArtifactStoreError(RuntimeError):
@@ -24,8 +24,8 @@ class Artifact:
     size_bytes: int
     sha256: str
     created_at: datetime
-    critic_score: Optional[float] = None
-    critic_passed: Optional[bool] = None
+    critic_score: float | None = None
+    critic_passed: bool | None = None
     thumbnails: list[str] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
 
@@ -76,13 +76,13 @@ class ArtifactStore(Protocol):
         session_id: str,
         turn_id: str,
         doc_type: str,
-        critic_score: Optional[float] = None,
-        critic_passed: Optional[bool] = None,
-        thumbnails: Optional[list[Path]] = None,
-        extra: Optional[dict] = None,
+        critic_score: float | None = None,
+        critic_passed: bool | None = None,
+        thumbnails: list[Path] | None = None,
+        extra: dict | None = None,
     ) -> Artifact: ...
 
-    async def get(self, artifact_id: str, *, tenant_id: str) -> Optional[Artifact]: ...
+    async def get(self, artifact_id: str, *, tenant_id: str) -> Artifact | None: ...
 
     async def download_url(self, artifact_id: str, *, tenant_id: str, ttl_seconds: int = 3600) -> str: ...
 

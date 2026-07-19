@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Optional
 
 from ..ir import (
     XlsxCell,
@@ -21,7 +20,6 @@ from ..ir import (
 )
 from .base import BasePlanner, Brief, PlannerResult, metadata_for_brief, theme_for_brief
 from .docx_planner import LLMCaller
-
 
 SYSTEM_PROMPT = """You are a financial analyst producing an Excel model.
 
@@ -47,7 +45,7 @@ Absolute rules:
 class XlsxPlanner(BasePlanner):
     doc_type = "xlsx"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(self, llm: LLMCaller | None = None) -> None:
         self._llm = llm
 
     async def plan(self, brief: Brief) -> PlannerResult:

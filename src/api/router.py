@@ -1,5 +1,9 @@
 from fastapi import APIRouter
 
+from .v1.agent_runtime import router as agent_runtime_router
+from .v1.agent_public import router as agent_public_router
+from .v1.agents import publication_router as agent_publications_router
+from .v1.agents import router as agents_router
 from .v1.api_keys import router as api_keys_router
 from .v1.assistant import router as assistant_router
 from .v1.auth import router as auth_router
@@ -17,6 +21,7 @@ from .v1.invoke import router as invoke_router
 from .v1.kb_tools import router as kb_tools_router
 from .v1.knowledge import router as knowledge_router
 from .v1.langgraph import router as langgraph_router
+from .v1.mcp import legacy_router as legacy_mcp_router
 from .v1.mcp import router as mcp_router
 from .v1.metrics import router as metrics_router
 from .v1.models import router as models_router
@@ -45,6 +50,10 @@ api_router.include_router(auth_router)  # 认证：登录/登出/改密
 api_router.include_router(users_router)  # 用户管理 CRUD
 api_router.include_router(roles_router)  # 角色权限管理
 api_router.include_router(api_keys_router)  # API Key 管理
+api_router.include_router(agents_router)  # Agent Studio identity, Draft, Version and ACL
+api_router.include_router(agent_publications_router)  # Agent promotion and rollback
+api_router.include_router(agent_runtime_router)  # Agent Studio resolved runtime
+api_router.include_router(agent_public_router)  # Hosted and origin-bound Embed runtime
 
 # 核心业务 API
 api_router.include_router(invoke_router)
@@ -75,6 +84,7 @@ api_router.include_router(quiz_public_router)  # Public quiz sharing (no auth)
 api_router.include_router(exams_router)  # Exam management (admin only)
 api_router.include_router(skills_router)  # Skills upload & management
 api_router.include_router(mcp_router)  # MCP server management
+api_router.include_router(legacy_mcp_router)  # Existing Assistant MCP route compatibility
 api_router.include_router(tenant_policies_router)  # ADR-002: Tenant isolation admin
 api_router.include_router(conversation_shares_router)  # Conversation sharing with artifacts
 api_router.include_router(connectors_router)  # Third-party connectors (Confluence, Outlook, etc.)

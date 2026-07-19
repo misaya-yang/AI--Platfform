@@ -28,6 +28,7 @@ import time
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,

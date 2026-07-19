@@ -11,6 +11,7 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -52,6 +53,8 @@ class FakeModelRegistry:
         self._scripted = scripted
         self._call_index = 0
         self.last_messages: list[dict[str, Any]] | None = None
+        self.last_tools: list[dict[str, Any]] | None = None
+        self.tools_history: list[list[dict[str, Any]] | None] = []
 
     def get_model(self, _model_id: str) -> Any:
         return FakeModelInfo()
@@ -61,6 +64,8 @@ class FakeModelRegistry:
 
         # Capture the prompt/messages passed by AgentLoop for assertions.
         self.last_messages = kwargs.get("messages")
+        self.last_tools = kwargs.get("tools")
+        self.tools_history.append(self.last_tools)
 
         idx = self._call_index
         self._call_index += 1
@@ -83,6 +88,28 @@ class FakeFailingModelRegistry(FakeModelRegistry):
         if False:
             yield None
         raise RuntimeError(self._error_message)
+
+
+def _signed_agent_runtime_context():
+    from assistant_service.core.agent.runtime_context import AgentRuntimeExecutionContext
+
+    return AgentRuntimeExecutionContext(
+        tenant_id="tenant1",
+        caller_principal="u1",
+        agent_id="11111111-1111-4111-8111-111111111111",
+        agent_version_id="22222222-2222-4222-8222-222222222222",
+        agent_draft_revision=None,
+        publication_id=None,
+        channel="preview",
+        session_id="s1",
+        runtime_fingerprint="sha256:runtime",
+        agent_spec_hash="sha256:spec",
+        prompt_hash="sha256:prompt",
+        tool_schema_hash="sha256:tools",
+        skills_hash="sha256:skills",
+        knowledge_revision_hash="sha256:knowledge",
+        memory_mode="session",
+    )
 
 
 class FakeToolDef:
@@ -218,9 +245,7 @@ def _confirmation_loop(
         execution_gateway=gateway,
         trace_writer=trace_writer,  # type: ignore[arg-type]
     )
-    loop.middleware_chain.add(
-        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
-    )
+    loop.middleware_chain.add(PermissionMiddleware(policy_from_sets(confirm={"generate_image"})))
     return loop
 
 
@@ -322,6 +347,377 @@ async def test_streaming_first_emits_run_lifecycle_and_text() -> None:
     assert "text_delta" in events
     assert "streaming_first_completed" in events
     assert "run_finished" in events
+
+
+@pytest.mark.asyncio
+async def test_agent_mixed_knowledge_auto_retrieves_and_tool_mode_stays_model_driven() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.tool_invoker import CapabilityAllowlist
+
+    class Knowledge:
+        def __init__(self) -> None:
+            self.retrieve_calls: list[dict[str, Any]] = []
+
+        async def list_datasets(self, _user: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "dataset_id": dataset_id,
+                    "name": dataset_id,
+                    "revision_fingerprint": "sha256:" + fingerprint * 64,
+                }
+                for dataset_id, fingerprint in (
+                    ("dataset-auto", "1"),
+                    ("dataset-tool", "2"),
+                )
+            ]
+
+        async def retrieve(self, **kwargs: Any):
+            self.retrieve_calls.append(dict(kwargs))
+            dataset_id = str(kwargs["dataset_id"])
+            return [
+                SimpleNamespace(
+                    metadata={},
+                    image_url=None,
+                    text=f"evidence-{dataset_id}",
+                    score=0.91,
+                    segment_id=f"segment-{dataset_id}",
+                    document_id=f"document-{dataset_id}",
+                )
+            ], {"dataset_name": dataset_id}
+
+    tool_calls = [
+        {
+            "id": "kb_tool_mode",
+            "function": {
+                "name": "search_knowledge_base",
+                "arguments": '{"query":"tool evidence","dataset_ids":["dataset-tool"]}',
+            },
+        }
+    ]
+    model = FakeModelRegistry(
+        scripted=[
+            [{"tool_calls": tool_calls}],
+            [{"content": "answer from exact evidence"}],
+        ]
+    )
+    tool_invoker = FakeToolInvoker(
+        {
+            "search_knowledge_base": {
+                "success": True,
+                "result": "tool-mode-evidence",
+                "metadata": {"contexts": []},
+            }
+        }
+    )
+    knowledge = Knowledge()
+    loop = AgentLoop(
+        model_registry=model,
+        kb_service=knowledge,
+        tool_invoker=tool_invoker,  # type: ignore[arg-type]
+    )
+    config = AgentLoopConfig(
+        model_id="test",
+        max_tool_iterations=3,
+        kb_dataset_ids=["dataset-auto", "dataset-tool"],
+        kb_mode="auto",
+        kb_retrieval_configs={
+            "dataset-auto": {
+                "mode": "auto",
+                "top_k": 4,
+                "threshold": 0.2,
+                "include_images": False,
+            },
+            "dataset-tool": {
+                "mode": "tool",
+                "top_k": 9,
+                "threshold": 0.8,
+                "include_images": True,
+            },
+        },
+        capability_allowlist=CapabilityAllowlist({"search_knowledge_base"}),
+        agent_runtime=_signed_agent_runtime_context(),
+    )
+
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+        message="Use our exact internal evidence",
+        config=config,
+        history=[],
+    ):
+        events.append(event)
+
+    assert len(knowledge.retrieve_calls) == 1
+    assert knowledge.retrieve_calls[0]["dataset_id"] == "dataset-auto"
+    assert knowledge.retrieve_calls[0]["top_k"] == 4
+    assert knowledge.retrieve_calls[0]["score_threshold"] == 0.2
+    assert knowledge.retrieve_calls[0]["include_images"] is False
+    assert tool_invoker.invocations == [
+        (
+            "search_knowledge_base",
+            {"query": "tool evidence", "dataset_ids": ["dataset-tool"]},
+        )
+    ]
+    assert model.tools_history[0] is not None
+    assert {tool["function"]["name"] for tool in model.tools_history[0] or []} == {
+        "search_knowledge_base"
+    }
+    first_user_message = next(
+        message
+        for message in model.last_messages or []
+        if message.get("role") == "user"
+        and "Use our exact internal evidence" in message.get("content", "")
+    )
+    assert "evidence-dataset-auto" in first_user_message["content"]
+    assert "dataset-tool" not in str(knowledge.retrieve_calls)
+    assert "dataset-off" not in str(knowledge.retrieve_calls)
+    assert any(event.event_type == "context_retrieved" for event in events)
+    assert any(event.event_type == "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_auto_knowledge_failure_stops_before_model_fallback() -> None:
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+
+    class FailingKnowledge:
+        def __init__(self) -> None:
+            self.retrieve_calls = 0
+
+        async def list_datasets(self, _user: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "dataset_id": "dataset-auto",
+                    "name": "dataset-auto",
+                    "revision_fingerprint": "sha256:" + "1" * 64,
+                }
+            ]
+
+        async def retrieve(self, **_kwargs: Any):
+            self.retrieve_calls += 1
+            raise RuntimeError("retrieval unavailable")
+
+    knowledge = FailingKnowledge()
+    model = FakeModelRegistry(scripted=[[{"content": "must not run"}]])
+    loop = AgentLoop(model_registry=model, kb_service=knowledge)
+    config = AgentLoopConfig(
+        model_id="test",
+        max_tool_iterations=1,
+        kb_dataset_ids=["dataset-auto"],
+        kb_mode="auto",
+        kb_retrieval_configs={
+            "dataset-auto": {
+                "mode": "auto",
+                "top_k": 4,
+                "threshold": 0.2,
+                "include_images": False,
+            }
+        },
+        agent_runtime=_signed_agent_runtime_context(),
+    )
+
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+        message="Use the bound policy",
+        config=config,
+        history=[],
+    ):
+        events.append(event)
+
+    assert knowledge.retrieve_calls == 1
+    assert model._call_index == 0
+    error = next(event for event in events if event.event_type == "run_error")
+    assert error.data["error"] == "AGENT_KNOWLEDGE_UNAVAILABLE"
+    assert all(event.event_type != "run_finished" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_exact_agent_skill_is_first_turn_visible_invokable_and_not_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from ai_gateway_core.skills import SkillManifest, SkillRegistry, SkillSource
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.skills.tool_bridge import skill_tool_name
+    from assistant_service.core.tool_invoker import (
+        CapabilityAllowlist,
+        RegistryToolInvoker,
+    )
+    from assistant_service.core.tools.tool_registry import ToolRegistry
+
+    skill_id = "11111111-1111-4111-8111-111111111111"
+    version_id = "21111111-1111-4111-8111-111111111111"
+    manifest = SkillManifest(
+        name="report-helper",
+        title="Report Helper",
+        description="Create a report",
+        summary="Create a report",
+        entrypoint=f"db://{skill_id}/{version_id}",
+        instructions="EXACT FIRST-TURN INSTRUCTIONS",
+        permissions=["knowledge:read"],
+        source=SkillSource.USER,
+        artifact_type="tenant_instruction",
+        skill_id=skill_id,
+        version_id=version_id,
+        content_hash="a" * 64,
+        enabled=True,
+    )
+
+    class Repository:
+        def __init__(self, _database: Any):
+            pass
+
+        async def load_versions(self, **values: Any) -> list[SkillManifest]:
+            assert values["tenant_id"] == "tenant1"
+            assert values["user_id"] == "u1"
+            assert values["version_ids"] == frozenset({version_id})
+            return [manifest]
+
+    import ai_gateway_core.skills.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "DatabaseSkillArtifactRepository", Repository)
+    tool_name = skill_tool_name("report-helper", version_id)
+    model = FakeModelRegistry(
+        scripted=[
+            [
+                {
+                    "tool_calls": [
+                        {
+                            "id": "skill-call-1",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": '{"input":"quarterly report"}',
+                            },
+                        }
+                    ]
+                }
+            ],
+            [{"content": "done"}],
+        ]
+    )
+    global_tools = ToolRegistry()
+    invoker = RegistryToolInvoker(global_tools)
+    loop = AgentLoop(model_registry=model, tool_invoker=invoker)
+    loop.assistant_runtime = SimpleNamespace(
+        features=SimpleNamespace(skills=True, memory_v2=False, context_v2=False),
+        skill_registry=SkillRegistry(database=object()),
+    )
+    user = MockUserContext(user_id="u1", roles=["admin"])
+    config = AgentLoopConfig(
+        model_id="test",
+        max_tool_iterations=2,
+        skills_enabled=True,
+        allowed_skill_ids=frozenset({"report-helper"}),
+        allowed_skill_versions={"report-helper": version_id},
+        capability_allowlist=CapabilityAllowlist(frozenset({tool_name})),
+    )
+
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=user,  # type: ignore[arg-type]
+        message="create a report",
+        config=config,
+        history=[],
+    ):
+        events.append(event)
+
+    first_turn_names = {schema["function"]["name"] for schema in (model.tools_history[0] or [])}
+    completed = [event.data for event in events if event.event_type == "tool_call_completed"]
+    assert tool_name in first_turn_names
+    assert any(event.event_type == "skill_loaded" for event in events)
+    assert completed[0]["success"] is True
+    assert "EXACT FIRST-TURN INSTRUCTIONS" in completed[0]["result_preview"]
+    assert global_tools.get_tool(tool_name) is None
+
+
+@pytest.mark.asyncio
+async def test_exact_agent_skill_kill_switch_fails_before_model_execution() -> None:
+    from types import SimpleNamespace
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.skills.tool_bridge import skill_tool_name
+    from assistant_service.core.tool_invoker import CapabilityAllowlist
+
+    version_id = "21111111-1111-4111-8111-111111111111"
+    tool_name = skill_tool_name("report-helper", version_id)
+    model = FakeModelRegistry(scripted=[[{"content": "must not execute"}]])
+    loop = AgentLoop(model_registry=model)
+    loop.assistant_runtime = SimpleNamespace(
+        features=SimpleNamespace(skills=True, memory_v2=False, context_v2=False),
+        skill_registry=object(),
+    )
+    config = AgentLoopConfig(
+        model_id="test",
+        skills_enabled=False,
+        allowed_skill_ids=frozenset({"report-helper"}),
+        allowed_skill_versions={"report-helper": version_id},
+        capability_allowlist=CapabilityAllowlist(frozenset({tool_name})),
+    )
+
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+        message="create a report",
+        config=config,
+        history=[],
+    ):
+        events.append(event)
+
+    errors = [event.data for event in events if event.event_type == "run_error"]
+    assert errors[0]["error"] == "AGENT_SKILL_UNAVAILABLE"
+    assert model.tools_history == []
+
+
+@pytest.mark.asyncio
+async def test_revoked_exact_agent_skill_fails_before_model_execution() -> None:
+    from types import SimpleNamespace
+
+    from assistant_service.core.agent.agent_loop import AgentLoop, AgentLoopConfig
+    from assistant_service.core.skills.tool_bridge import skill_tool_name
+    from assistant_service.core.tool_invoker import CapabilityAllowlist
+
+    version_id = "21111111-1111-4111-8111-111111111111"
+    tool_name = skill_tool_name("report-helper", version_id)
+
+    class RevokedRegistry:
+        def fork_runtime_view(self) -> RevokedRegistry:
+            return self
+
+        async def load_versions_from_database(self, **_values: Any) -> int:
+            raise RuntimeError("revoked artifact must stay unavailable")
+
+    model = FakeModelRegistry(scripted=[[{"content": "must not execute"}]])
+    loop = AgentLoop(model_registry=model)
+    loop.assistant_runtime = SimpleNamespace(
+        features=SimpleNamespace(skills=True, memory_v2=False, context_v2=False),
+        skill_registry=RevokedRegistry(),
+    )
+    config = AgentLoopConfig(
+        model_id="test",
+        skills_enabled=True,
+        allowed_skill_ids=frozenset({"report-helper"}),
+        allowed_skill_versions={"report-helper": version_id},
+        capability_allowlist=CapabilityAllowlist(frozenset({tool_name})),
+    )
+
+    events = []
+    async for event in loop.execute(
+        session_id="s1",
+        user=MockUserContext(user_id="u1"),  # type: ignore[arg-type]
+        message="create a report",
+        config=config,
+        history=[],
+    ):
+        events.append(event)
+
+    errors = [event.data for event in events if event.event_type == "run_error"]
+    assert errors[0]["error"] == "AGENT_SKILL_UNAVAILABLE"
+    assert model.tools_history == []
 
 
 @pytest.mark.asyncio
@@ -472,6 +868,7 @@ async def test_streaming_rag_revision_hash_changes_with_dataset_catalog() -> Non
                 "dataset_id": "kb-a",
                 "name": "Policies",
                 "updated_at": "2026-07-14T00:00:00Z",
+                "revision_fingerprint": "sha256:" + "1" * 64,
                 "embedding_model": "text-embedding-v4",
                 "statistics": {"document_count": 2, "segment_count": 10},
             }
@@ -496,16 +893,18 @@ async def test_streaming_rag_revision_hash_changes_with_dataset_catalog() -> Non
     )
 
     names, first_hash = await loop._get_streaming_dataset_context(  # noqa: SLF001
-        context, user  # type: ignore[arg-type]
+        context,
+        user,  # type: ignore[arg-type]
     )
     knowledge.rows = [
         {
             **knowledge.rows[0],
-            "updated_at": "2026-07-14T01:00:00Z",
+            "revision_fingerprint": "sha256:" + "2" * 64,
         }
     ]
     _, second_hash = await loop._get_streaming_dataset_context(  # noqa: SLF001
-        context, user  # type: ignore[arg-type]
+        context,
+        user,  # type: ignore[arg-type]
     )
 
     assert names == {"kb-a": "Policies"}
@@ -699,15 +1098,11 @@ async def test_streaming_first_tool_artifact_semantic_events() -> None:
     assert "tool_call_end" in got
     assert "tool_call_result" in got
 
-    start_payload = next(
-        data for event_type, data in got_events if event_type == "tool_call_start"
-    )
+    start_payload = next(data for event_type, data in got_events if event_type == "tool_call_start")
     result_payload = next(
         data for event_type, data in got_events if event_type == "tool_call_result"
     )
-    end_payload = next(
-        data for event_type, data in got_events if event_type == "tool_call_end"
-    )
+    end_payload = next(data for event_type, data in got_events if event_type == "tool_call_end")
 
     assert start_payload["tool_call_id"] == "tc_1"
     assert start_payload["name"] == "generate_image"
@@ -836,9 +1231,7 @@ async def test_streaming_first_approval_required_event_is_traceable() -> None:
         tool_invoker=invoker,
         execution_gateway=gateway,
     )
-    loop.middleware_chain.add(
-        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
-    )
+    loop.middleware_chain.add(PermissionMiddleware(policy_from_sets(confirm={"generate_image"})))
     user = MockUserContext(user_id="u1")
 
     events = []
@@ -889,9 +1282,7 @@ async def test_streaming_first_confirm_pause_blocks_run_without_deny_tool_messag
         tool_invoker=invoker,
         execution_gateway=gateway,
     )
-    loop.middleware_chain.add(
-        PermissionMiddleware(policy_from_sets(confirm={"generate_image"}))
-    )
+    loop.middleware_chain.add(PermissionMiddleware(policy_from_sets(confirm={"generate_image"})))
     user = MockUserContext(user_id="u1")
 
     events = []
@@ -1046,9 +1437,7 @@ async def test_approval_resume_continues_after_persisted_trace_sequence() -> Non
     assert writer.events[0]["sequence_no"] == 42
     assert all(event["sequence_no"] != 1 for event in writer.events)
     assert invoker.invocation_count == 1
-    assert {"tool_call_start", "tool_call_result", "tool_call_end"}.issubset(
-        public_event_types
-    )
+    assert {"tool_call_start", "tool_call_result", "tool_call_end"}.issubset(public_event_types)
 
 
 @pytest.mark.asyncio
@@ -1098,8 +1487,7 @@ async def test_approval_resume_without_trace_writer_keeps_db_less_contract() -> 
 
     event_types = [event.event_type for event in events]
     assert not any(
-        isinstance(event.data, dict)
-        and event.data.get("error") == "trace_resume_sequence_failed"
+        isinstance(event.data, dict) and event.data.get("error") == "trace_resume_sequence_failed"
         for event in events
     )
     assert "run_finished" in event_types
@@ -1187,9 +1575,7 @@ async def test_streaming_first_confirm_approval_resume_executes_once() -> None:
                 },
             }
         ]
-        model = FakeModelRegistry(
-            scripted=[[{"tool_calls": tool_calls}], [{"content": "done"}]]
-        )
+        model = FakeModelRegistry(scripted=[[{"tool_calls": tool_calls}], [{"content": "done"}]])
         loop = AgentLoop(
             model_registry=model,
             tool_invoker=invoker,
@@ -1210,9 +1596,7 @@ async def test_streaming_first_confirm_approval_resume_executes_once() -> None:
     ):
         first_events.append(ev)
 
-    first_approval = next(
-        ev.data for ev in first_events if ev.event_type == "approval_required"
-    )
+    first_approval = next(ev.data for ev in first_events if ev.event_type == "approval_required")
     approval_id = first_approval["approval_id"]
     assert approval_id
     assert invoker.invocation_count == 0
@@ -1683,8 +2067,7 @@ async def test_streaming_first_dedups_batch_level_duplicate_tool_calls() -> None
         events.append(ev.event_type)
 
     assert tool_invoker.invocation_count == 1, (
-        "generate_quiz should run exactly once despite two accumulator "
-        "entries on the wire"
+        "generate_quiz should run exactly once despite two accumulator entries on the wire"
     )
     assert events.count("tool_call_started") == 1
     assert events.count("step_started") == 1

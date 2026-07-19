@@ -7,8 +7,11 @@ Migrated from KnowledgeService as part of Phase 2 refactoring.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ...config.settings import Settings
 from ...core.auth.user_resolver import UserContext
@@ -23,6 +26,137 @@ if TYPE_CHECKING:
     from .knowledge_service import KnowledgeService
 
 logger = get_logger(__name__)
+
+_RETRIEVAL_FINGERPRINT_FIELDS = frozenset(
+    {
+        "adaptive_weights",
+        "alpha",
+        "bm25_weight",
+        "candidate_top_k",
+        "dense_weight",
+        "enforce_config",
+        "fusion",
+        "fusion_method",
+        "keyword_candidate_k",
+        "keyword_top_k",
+        "lock",
+        "locked",
+        "mmr",
+        "mmr_lambda",
+        "mmr_threshold",
+        "mode",
+        "native_hybrid",
+        "rerank",
+        "rerank_model",
+        "rerank_top_n",
+        "rrf_k",
+        "rrf_weights",
+        "score_threshold",
+        "top_k",
+        "vector_top_k",
+    }
+)
+_RETRIEVAL_NESTED_FINGERPRINT_FIELDS = {
+    "fusion": frozenset({"strategy", "method", "alpha", "rrf_k", "dense_weight", "bm25_weight"}),
+    "rerank": frozenset({"enabled", "provider", "model", "top_n"}),
+    "mmr": frozenset({"enabled", "lambda", "threshold"}),
+    "rrf_weights": frozenset({"vector", "keyword", "dense", "bm25"}),
+}
+_EMBEDDING_FINGERPRINT_FIELDS = frozenset({"base_url", "dimension", "max_concurrent"})
+
+
+def _secret_free_base_url(value: Any) -> str | None:
+    """Keep endpoint identity while dropping URL userinfo, query, and fragment."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not hostname:
+        return None
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{rendered_host}:{port}" if port is not None else rendered_host
+    return urlunsplit((parsed.scheme.lower(), netloc, parsed.path, "", ""))
+
+
+def _safe_config_projection(
+    value: Any,
+    *,
+    allowed: frozenset[str],
+    nested: dict[str, frozenset[str]] | None = None,
+) -> dict[str, Any]:
+    """Return a canonical allowlisted config without credential-bearing fields."""
+
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    nested = nested or {}
+    for key in sorted(allowed):
+        if key not in value:
+            continue
+        child = value[key]
+        if key in nested and isinstance(child, dict):
+            result[key] = _safe_config_projection(child, allowed=nested[key])
+        elif child is None or isinstance(child, (bool, int, float, str)):
+            result[key] = child
+    return result
+
+
+def _retrieval_effective_dataset_config(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Project only non-secret Dataset settings that can alter retrieval evidence."""
+
+    index_config = _ensure_dict(dataset.get("index_config"))
+    embedding = _safe_config_projection(
+        _ensure_dict(dataset.get("embedding_config")),
+        allowed=_EMBEDDING_FINGERPRINT_FIELDS,
+    )
+    safe_base_url = _secret_free_base_url(embedding.get("base_url"))
+    if safe_base_url is None:
+        embedding.pop("base_url", None)
+    else:
+        embedding["base_url"] = safe_base_url
+    return {
+        "retrieval": _safe_config_projection(
+            _ensure_dict(index_config.get("retrieval")),
+            allowed=_RETRIEVAL_FINGERPRINT_FIELDS,
+            nested=_RETRIEVAL_NESTED_FINGERPRINT_FIELDS,
+        ),
+        "multimodal_enabled": bool(
+            index_config.get("multimodal_enabled") or index_config.get("enable_multimodal")
+        ),
+        "embedding": embedding,
+    }
+
+
+def _dataset_revision_fingerprint(
+    dataset: dict[str, Any],
+) -> str | None:
+    """Hash the authoritative content revision plus retrieval-effective config."""
+
+    revision = dataset.get("content_revision")
+    if not isinstance(revision, int) or revision < 0:
+        return None
+    payload = {
+        "dataset_id": str(dataset.get("dataset_id") or ""),
+        "content_revision": revision,
+        "embedding_provider": dataset.get("embedding_provider"),
+        "embedding_model": dataset.get("embedding_model"),
+        "embedding_dimension": dataset.get("embedding_dimension"),
+        "needs_reindex": dataset.get("needs_reindex"),
+        "collection_name": dataset.get("collection_name"),
+        "retrieval_effective_config": _retrieval_effective_dataset_config(dataset),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _require_not_guest(user: UserContext) -> None:
@@ -87,6 +221,13 @@ class DatasetService:
                         "word_count": 0,
                         "hit_count": 0,
                     }
+
+            for ds in visible:
+                fingerprint = _dataset_revision_fingerprint(
+                    ds,
+                )
+                if fingerprint is not None:
+                    ds["revision_fingerprint"] = fingerprint
 
         return [self._redact_dataset_secrets(ds) for ds in visible]
 
@@ -411,6 +552,8 @@ class DatasetService:
         embedding_config = _ensure_dict(ds.get("embedding_config"))
         if "api_key" in embedding_config:
             embedding_config["api_key"] = "*****"
+        if "base_url" in embedding_config:
+            embedding_config["base_url"] = _secret_free_base_url(embedding_config["base_url"])
         ds["embedding_config"] = embedding_config
 
         index_config = _ensure_dict(ds.get("index_config"))

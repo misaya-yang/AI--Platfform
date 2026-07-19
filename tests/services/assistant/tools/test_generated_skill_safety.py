@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -24,19 +26,6 @@ class _FakeToolRegistry:
     def register(self, definition: ToolDefinition, executor: Any) -> None:
         self.definitions[definition.name] = definition
         self.executors[definition.name] = executor
-
-
-class _RecordingDatabase:
-    def __init__(self) -> None:
-        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
-        self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
-        self.fetchrow_calls.append((sql, args))
-        return {"skill_id": args[0]}
-
-    async def execute(self, sql: str, *args: Any) -> None:
-        self.execute_calls.append((sql, args))
 
 
 def _generated_skill_md() -> str:
@@ -107,8 +96,41 @@ async def test_registry_save_manifest_keeps_generated_skill_proposed_without_gat
 
 
 @pytest.mark.asyncio
-async def test_registry_persists_proposed_status_when_activation_gates_are_missing() -> None:
-    database = _RecordingDatabase()
+async def test_registry_persists_proposed_status_when_activation_gates_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    skill_id = "11111111-1111-4111-8111-111111111111"
+    version_id = "21111111-1111-4111-8111-111111111111"
+
+    class Repository:
+        def __init__(self, database: Any) -> None:
+            assert database is captured["database"]
+
+        async def create_version(self, **values: Any) -> dict[str, Any]:
+            captured.update(values)
+            content_hash = hashlib.sha256(values["content"].encode("utf-8")).hexdigest()
+            stored = replace(
+                values["manifest"],
+                skill_id=skill_id,
+                version_id=version_id,
+                entrypoint=f"db://{skill_id}/{version_id}",
+                content_hash=content_hash,
+            )
+            return {
+                **stored.to_dict(),
+                "manifest": stored.to_dict(),
+                "content": values["content"],
+                "revision": 1,
+                "status": "proposed",
+                "revoked": False,
+            }
+
+    import ai_gateway_core.skills.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "DatabaseSkillArtifactRepository", Repository)
+    database = object()
+    captured["database"] = database
     registry = SkillRegistry(database=database)
 
     await registry.save_manifest(
@@ -118,15 +140,16 @@ async def test_registry_persists_proposed_status_when_activation_gates_are_missi
         created_by="agent",
     )
 
-    insert_sql, insert_args = database.fetchrow_calls[0]
-    version_sql, version_args = database.execute_calls[0]
-
-    assert "assistant_skills" in insert_sql
-    assert "status" in insert_sql
-    assert insert_args[8] is False
-    assert insert_args[9] == "proposed"
-    assert "assistant_skill_versions" in version_sql
-    assert version_args[6] == "proposed"
+    assert captured["manifest"].enabled is False
+    assert captured["manifest"].lifecycle_status == "proposed"
+    assert "Full generated instructions." in captured["content"]
+    assert "generated: true" in captured["content"]
+    assert registry.get_scoped(
+        "weekly-report-helper",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        version_id=version_id,
+    ) is not None
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .base import Block
 
@@ -17,7 +17,7 @@ class DocxHeaderFooter(BaseModel):
 class DocxContent(BaseModel):
     doc_type: Literal["docx"] = "docx"
     blocks: list[Block]
-    header: Optional[DocxHeaderFooter] = None
-    footer: Optional[DocxHeaderFooter] = None
+    header: DocxHeaderFooter | None = None
+    footer: DocxHeaderFooter | None = None
     toc: bool = False
     numbered_headings: bool = False

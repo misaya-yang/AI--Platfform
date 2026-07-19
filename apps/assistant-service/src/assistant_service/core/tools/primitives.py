@@ -17,9 +17,9 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from typing import Any
 
 from ai_gateway_core.logging import get_logger
+
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,

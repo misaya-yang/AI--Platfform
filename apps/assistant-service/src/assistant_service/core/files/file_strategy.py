@@ -107,6 +107,7 @@ class FileProcessingStrategy(ABC):
 
     def supports_file_type(self, content_type: str) -> bool:
         """Check if this strategy supports the given file type."""
+        del content_type
         return True  # Override in subclasses if needed
 
 
@@ -140,6 +141,7 @@ class TextExtractionStrategy(FileProcessingStrategy):
         **kwargs,
     ) -> ProcessedContent:
         """Extract text from document."""
+        del content_type, kwargs
         import time
 
         start_time = time.time()
@@ -322,6 +324,7 @@ class GeminiFileStrategy(FileProcessingStrategy):
         **kwargs,
     ) -> ProcessedContent:
         """Upload file to Gemini and get file URI."""
+        del kwargs
         import time
 
         start_time = time.time()
@@ -362,8 +365,8 @@ class GeminiFileStrategy(FileProcessingStrategy):
             while uploaded_file.state.name == "PROCESSING":
                 await asyncio.sleep(1)
 
-                def get_file_state():
-                    return genai.get_file(uploaded_file.name)
+                def get_file_state(file_name=uploaded_file.name):
+                    return genai.get_file(file_name)
 
                 uploaded_file = await asyncio.to_thread(get_file_state)
 
@@ -482,6 +485,7 @@ class FileProcessingStrategyFactory:
         First checks the model registry if available, then falls back
         to a hardcoded list for backwards compatibility.
         """
+        del provider
         # Try to get from model registry first (dynamic, up-to-date)
         if self.model_registry:
             model_info = self.model_registry.get_model(model_id)

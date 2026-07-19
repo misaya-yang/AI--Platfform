@@ -28,10 +28,107 @@ class TenantToolPolicy:
     """Per-tenant tool access policy."""
 
     tenant_id: str
-    allowed_tools: set[str] = field(default_factory=set)       # whitelist (empty = allow all)
-    blocked_tools: set[str] = field(default_factory=set)       # blacklist (precedence over whitelist)
+    allowed_tools: set[str] = field(default_factory=set)  # whitelist (empty = allow all)
+    blocked_tools: set[str] = field(default_factory=set)  # blacklist (precedence over whitelist)
     allowed_categories: set[str] = field(default_factory=set)  # e.g. {"retrieval", "generation"}
     max_calls_per_minute: int = 20
+
+
+@dataclass(frozen=True)
+class ResolvedAgentRuntimeResourcePolicy:
+    """Request-scoped, non-expanding Agent resource decision."""
+
+    tenant_id: str
+    tool_names: frozenset[str]
+    dataset_ids: frozenset[str]
+
+    def allowed_tool_names(
+        self,
+        *,
+        tenant_id: str,
+        tool_names: frozenset[str],
+    ) -> set[str]:
+        if tenant_id != self.tenant_id:
+            return set()
+        return set(tool_names.intersection(self.tool_names))
+
+    def allowed_dataset_ids(
+        self,
+        *,
+        tenant_id: str,
+        dataset_ids: frozenset[str],
+    ) -> set[str]:
+        if tenant_id != self.tenant_id:
+            return set()
+        return set(dataset_ids.intersection(self.dataset_ids))
+
+
+class AgentRuntimeResourcePolicyService:
+    """Strictly resolve current tenant tool and Dataset authority per Agent run."""
+
+    def __init__(self, database: Any) -> None:
+        self._database = database
+
+    async def resolve(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        is_tenant_admin: bool,
+        tool_names: frozenset[str],
+        dataset_ids: frozenset[str],
+    ) -> ResolvedAgentRuntimeResourcePolicy:
+        """Resolve both policy dimensions atomically enough for request mapping.
+
+        Unlike the legacy Assistant policy loader, this Agent-only path never
+        substitutes an allow-all policy when PostgreSQL is unavailable.
+        """
+
+        pool = getattr(self._database, "_pool", None)
+        if not getattr(self._database, "enabled", False) or pool is None:
+            raise RuntimeError("Agent runtime resource policy is unavailable")
+
+        from ai_gateway_core.persistence.repositories.agent_resource_resolver import (
+            authorized_dataset_ids,
+        )
+
+        async with pool.acquire() as connection:
+            policy_row = await connection.fetchrow(
+                """
+                SELECT allowed_tools, blocked_tools, allowed_categories
+                FROM tenant_tool_policies
+                WHERE tenant_id = $1
+                """,
+                tenant_id,
+            )
+            authorized_datasets = await authorized_dataset_ids(
+                connection,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                dataset_ids=sorted(dataset_ids),
+                is_tenant_admin=is_tenant_admin,
+            )
+
+        allowed = set(policy_row["allowed_tools"] or []) if policy_row else set()
+        blocked = set(policy_row["blocked_tools"] or []) if policy_row else set()
+        categories = set(policy_row["allowed_categories"] or []) if policy_row else set()
+        # The signed Snapshot does not carry the legacy registry category for
+        # every capability source. A configured category restriction therefore
+        # cannot be proven here and must reduce the Agent tool set to empty.
+        resolved_tools = (
+            frozenset()
+            if categories
+            else frozenset(
+                name
+                for name in tool_names
+                if name not in blocked and (not allowed or name in allowed)
+            )
+        )
+        return ResolvedAgentRuntimeResourcePolicy(
+            tenant_id=tenant_id,
+            tool_names=resolved_tools,
+            dataset_ids=frozenset(authorized_datasets.intersection(dataset_ids)),
+        )
 
 
 class TenantToolPolicyService:
@@ -39,7 +136,9 @@ class TenantToolPolicyService:
 
     def __init__(self, database: Any) -> None:
         self._database = database
-        self._cache: dict[str, tuple[TenantToolPolicy, float]] = {}  # tenant_id → (policy, expires_at)
+        self._cache: dict[
+            str, tuple[TenantToolPolicy, float]
+        ] = {}  # tenant_id → (policy, expires_at)
 
     # ------------------------------------------------------------------
     # Policy Loading

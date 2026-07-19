@@ -7,7 +7,7 @@ for the structured-content case (reports, invoices, one-pagers).
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,14 +27,14 @@ class PdfContent(BaseModel):
     blocks: list[Block] = Field(default_factory=list)
     page_size: Literal["A4", "Letter", "Legal"] = "A4"
     margin_pt: float = 54.0  # 0.75 inch default
-    cover: Optional["PdfCover"] = None
+    cover: PdfCover | None = None
 
 
 class PdfCover(BaseModel):
     title: str
-    subtitle: Optional[str] = None
-    author: Optional[str] = None
-    date: Optional[str] = None
+    subtitle: str | None = None
+    author: str | None = None
+    date: str | None = None
 
 
 PdfContent.model_rebuild()

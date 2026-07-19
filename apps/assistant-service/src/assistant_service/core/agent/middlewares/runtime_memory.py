@@ -72,6 +72,14 @@ class RuntimeMemoryMiddleware:
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         if not self._runtime:
             return
+        agent_runtime = getattr(ctx.config, "agent_runtime", None)
+        if agent_runtime is not None and not agent_runtime.user_memory_enabled:
+            return
+        memory_user_id = (
+            agent_runtime.memory_principal
+            if agent_runtime is not None
+            else ctx.user_id
+        )
 
         # Local imports keep this module importable without pulling agent_loop
         # (which imports middlewares lazily via the package entry point).
@@ -80,7 +88,7 @@ class RuntimeMemoryMiddleware:
         try:
             memory_result = await self._runtime.load_memory_context(
                 tenant_id=ctx.tenant_id,
-                user_id=ctx.user_id,
+                user_id=memory_user_id,
                 query=ctx.message,
                 runtime_mode=ctx.config.runtime_mode,
                 memory_profile=ctx.config.memory_profile,
@@ -119,7 +127,7 @@ class RuntimeMemoryMiddleware:
         with contextlib.suppress(Exception):
             scheduled_job_id = await self._runtime.schedule_daily_reflection(
                 tenant_id=ctx.tenant_id,
-                user_id=ctx.user_id,
+                user_id=memory_user_id,
                 payload={"run_id": ctx.run_id, "session_id": ctx.session_id},
             )
             if scheduled_job_id:

@@ -14,6 +14,7 @@ is cheaper than the ~6 provider HTTP client allocations that the old
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
@@ -28,9 +29,22 @@ class GatewayModelMeta:
     configured providers) without dialling the providers themselves.
     """
 
-    def __init__(self, model_service: Any, provider_service: Any) -> None:
+    def __init__(
+        self,
+        model_service: Any,
+        provider_service: Any,
+        *,
+        runtime_configured_providers: Collection[str] = (),
+    ) -> None:
         self.model_service = model_service
         self.provider_service = provider_service
+        # This set reflects providers configured in the separate Assistant
+        # process, not merely enabled administration rows in the Gateway DB.
+        self._runtime_configured_providers = frozenset(
+            str(provider_id).strip()
+            for provider_id in runtime_configured_providers
+            if str(provider_id).strip()
+        )
 
     async def get_access_level(
         self, tenant_id: str, model_id: str
@@ -47,11 +61,20 @@ class GatewayModelMeta:
     async def is_provider_configured(
         self, tenant_id: str, provider_id: str
     ) -> bool:
-        """Return True iff the provider row exists and is_enabled."""
+        """Return whether Gateway metadata and Assistant runtime both agree.
+
+        An enabled provider row is administration metadata, not proof that the
+        Assistant execution process received usable credentials. Agent Runtime
+        resolution therefore fails closed unless the provider was configured in
+        the shared startup environment as well.
+        """
         row = await self.provider_service.get_provider(tenant_id, provider_id)
         if not row:
             return False
-        return bool(row.get("is_enabled"))
+        return bool(
+            row.get("is_enabled")
+            and provider_id in self._runtime_configured_providers
+        )
 
     async def list_enabled_providers(self, tenant_id: str) -> list[str]:
         """Return the set of enabled provider_ids for a tenant."""

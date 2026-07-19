@@ -26,9 +26,9 @@ Helpers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional
-
+import logging
+import threading
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # colour helpers
@@ -406,12 +406,9 @@ def get_design_system(name: str) -> DesignSystem:
 # swap the design system's ``font_display`` / ``font_body`` for a
 # safe-for-this-machine alternative.
 
-import logging
-import threading
-
 _log = logging.getLogger(__name__)
 
-_PROBED_FONTS: Optional[set[str]] = None
+_PROBED_FONTS: set[str] | None = None
 _PROBE_LOCK = threading.Lock()
 
 

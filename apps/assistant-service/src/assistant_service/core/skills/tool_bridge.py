@@ -8,6 +8,7 @@ search_knowledge_base or generate_quiz.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from typing import Any
@@ -25,6 +26,15 @@ from .executor import SkillExecutor
 logger = logging.getLogger(__name__)
 
 
+def skill_tool_name(skill_name: str, version_id: str | None = None) -> str:
+    """Return a collision-safe function name for one resolved Skill artifact."""
+    safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", skill_name)
+    if not version_id:
+        return f"skill_{safe_name}"
+    version_hash = hashlib.sha256(version_id.encode("utf-8")).hexdigest()[:24]
+    return f"skill_{safe_name[:30]}_{version_hash}"
+
+
 class SkillToolBridge:
     """Bridge between SkillRegistry and ToolRegistry."""
 
@@ -33,10 +43,17 @@ class SkillToolBridge:
         self.tools = tool_registry
         self.executor = SkillExecutor()
 
-    def register_skill_as_tool(self, skill: SkillManifest) -> None:
+    def register_skill_as_tool(
+        self,
+        skill: SkillManifest,
+        *,
+        versioned_name: bool = False,
+    ) -> None:
         """Convert a SkillManifest into a ToolDefinition and register it."""
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", skill.name)
-        tool_name = f"skill_{safe_name}"
+        tool_name = skill_tool_name(
+            skill.name,
+            skill.version_id if versioned_name else None,
+        )
 
         # Build parameters from tool_schema or use a generic input param
         params = self._build_params(skill)
@@ -63,7 +80,7 @@ class SkillToolBridge:
         async def skill_executor(request: Any) -> Any:
             from ..tools.tool_registry import ToolCallResult
 
-            args = request.tool_args if hasattr(request, "tool_args") else {}
+            args = request.arguments if hasattr(request, "arguments") else {}
             result = await self.executor.execute(skill, args)
 
             return ToolCallResult(
@@ -82,12 +99,26 @@ class SkillToolBridge:
         self.tools.register(definition, skill_executor)
         logger.info(f"Registered skill as tool: {tool_name} (category=SKILL)")
 
-    def sync_all_skills(self) -> int:
-        """Register all enabled skills as tools. Returns count."""
+    def sync_all_skills(
+        self,
+        *,
+        allowed_names: frozenset[str] | None = None,
+        scope: tuple[str, str] | None = None,
+        allowed_versions: dict[str, str] | None = None,
+    ) -> int:
+        """Register the enabled, resolved Skill subset as tools."""
         count = 0
-        for skill in self.skills.list(enabled_only=True):
+        for skill in self.skills.list(
+            enabled_only=True,
+            allowed_names=allowed_names,
+            scope=scope,
+            allowed_versions=allowed_versions,
+        ):
             try:
-                self.register_skill_as_tool(skill)
+                self.register_skill_as_tool(
+                    skill,
+                    versioned_name=bool(skill.version_id),
+                )
                 count += 1
             except Exception as e:
                 logger.warning(f"Failed to register skill '{skill.name}' as tool: {e}")
@@ -198,6 +229,9 @@ class SkillToolBridge:
             "title": skill.title,
             "summary": skill.summary,
             "version": skill.version,
+            "version_id": skill.version_id,
+            "content_hash": skill.content_hash,
+            "artifact_type": skill.artifact_type,
             "source": self._source_value(skill),
             "tags": list(skill.tags),
             "setup_state": self._setup_state(skill),

@@ -18,7 +18,6 @@ import secrets
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from .base import Artifact, ArtifactStore, ArtifactStoreError, compute_sha256
 
@@ -44,10 +43,10 @@ class LocalArtifactStore(ArtifactStore):
         session_id: str,
         turn_id: str,
         doc_type: str,
-        critic_score: Optional[float] = None,
-        critic_passed: Optional[bool] = None,
-        thumbnails: Optional[list[Path]] = None,
-        extra: Optional[dict] = None,
+        critic_score: float | None = None,
+        critic_passed: bool | None = None,
+        thumbnails: list[Path] | None = None,
+        extra: dict | None = None,
     ) -> Artifact:
         if not path.is_file():
             raise ArtifactStoreError(f"artifact source missing: {path}")
@@ -100,7 +99,7 @@ class LocalArtifactStore(ArtifactStore):
 
     # -------------------------- get / list / delete
 
-    async def get(self, artifact_id: str, *, tenant_id: str) -> Optional[Artifact]:
+    async def get(self, artifact_id: str, *, tenant_id: str) -> Artifact | None:
         for meta_path in (self._root / tenant_id).rglob("*.meta.json"):
             data = json.loads(meta_path.read_text())
             if data.get("artifact_id") == artifact_id:
@@ -136,7 +135,6 @@ class LocalArtifactStore(ArtifactStore):
         artifact = await self.get(artifact_id, tenant_id=tenant_id)
         if artifact is None:
             raise ArtifactStoreError(f"unknown artifact_id: {artifact_id}")
-        target = self._root / artifact.key_path()
         # Local store can't sign URLs; we expose a file:// URL for dev + a
         # signed-ish `?sig=...&exp=...` query for parity with the S3 backend.
         from .signing import sign_url

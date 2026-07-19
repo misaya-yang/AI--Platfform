@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field
 
 from .base import DocMetadata, Theme
 from .docx import DocxContent
+from .pdf import PdfContent
 from .pptx import PptxContent
 from .xlsx import XlsxContent
-from .pdf import PdfContent
 
 
 class DocxIR(BaseModel):

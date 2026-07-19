@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional, Protocol
+from typing import Protocol
 
 from ..ir import (
     DocxContent,
@@ -18,9 +18,15 @@ from ..ir import (
     ParagraphBlock,
 )
 from ..ir.docx import DocxHeaderFooter
-from pydantic import ValidationError
-
-from .base import Brief, BasePlanner, PlannerResult, metadata_for_brief, normalise_docx_ir, parse_markdown_to_blocks, theme_for_brief
+from .base import (
+    BasePlanner,
+    Brief,
+    PlannerResult,
+    metadata_for_brief,
+    normalise_docx_ir,
+    parse_markdown_to_blocks,
+    theme_for_brief,
+)
 
 
 class LLMCaller(Protocol):
@@ -59,13 +65,13 @@ Absolute rules:
 class DocxPlanner(BasePlanner):
     doc_type = "docx"
 
-    def __init__(self, llm: Optional[LLMCaller] = None) -> None:
+    def __init__(self, llm: LLMCaller | None = None) -> None:
         self._llm = llm
 
     async def plan(self, brief: Brief) -> PlannerResult:
         started = time.perf_counter()
         used_llm = False
-        ir: Optional[DocxIR] = None
+        ir: DocxIR | None = None
         if self._llm is not None:
             try:
                 ir = await self._plan_with_llm(brief)

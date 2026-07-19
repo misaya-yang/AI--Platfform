@@ -1699,9 +1699,13 @@ class _TenantClientResolver:
         self,
         database: Any = None,
         fallback_client: ConfluenceAPIClient | None = None,
+        credential_repository: Any = None,
+        secret_resolver: Any = None,
     ):
         self._database = database
         self._fallback = fallback_client
+        self._credential_repository = credential_repository
+        self._secret_resolver = secret_resolver
         self._cache: dict[str, tuple[float, ConfluenceAPIClient]] = {}
 
     def _cache_get(self, tenant_id: str) -> ConfluenceAPIClient | None:
@@ -1733,6 +1737,36 @@ class _TenantClientResolver:
             tenant_id = getattr(user, "tenant_id", "") or ""
         if not tenant_id:
             tenant_id = str((request.metadata or {}).get("tenant_id") or "")
+
+        metadata = request.metadata or {}
+        agent_runtime = bool(metadata.get("agent_id") or metadata.get("agent_version_id"))
+        principal = metadata.get("connector_principal")
+        if agent_runtime:
+            if (
+                not isinstance(principal, dict)
+                or self._credential_repository is None
+                or self._secret_resolver is None
+            ):
+                raise ValueError("Connector credential principal is unavailable.")
+            user_id = str(metadata.get("user_id") or getattr(user, "user_id", "") or "")
+            authenticated = bool(getattr(user, "is_authenticated", False))
+            row = await self._credential_repository.authorize_connector_tool(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                authenticated=authenticated,
+                provider=str(principal.get("provider") or ""),
+                tool_name=request.tool_name,
+                principal_type=str(principal.get("principal_type") or ""),
+                grant_id=str(principal.get("grant_id") or ""),
+                channel=str(principal.get("channel") or ""),
+            )
+            token = await self._secret_resolver.resolve(str(row.get("secret_ref") or ""))
+            connection_metadata = row.get("connection_metadata") or {}
+            domain = str(connection_metadata.get("domain") or "").strip()
+            email = str(connection_metadata.get("email") or "").strip()
+            if not domain or not email or not token:
+                raise ValueError("Connector credential principal is unavailable.")
+            return ConfluenceAPIClient(domain, email, token)
 
         if tenant_id and self._database is not None:
             cached = self._cache_get(tenant_id)
@@ -1782,9 +1816,14 @@ class ConfluenceReadExecutor(ToolExecutor):
         self,
         client: ConfluenceAPIClient | None = None,
         database: Any = None,
+        credential_repository: Any = None,
+        secret_resolver: Any = None,
     ):
         self._resolver = _TenantClientResolver(
-            database=database, fallback_client=client
+            database=database,
+            fallback_client=client,
+            credential_repository=credential_repository,
+            secret_resolver=secret_resolver,
         )
         # `self.client` kept as a shim for legacy tests that poke at
         # `executor.client` directly — always returns the fallback if present.
@@ -2003,13 +2042,18 @@ class ConfluenceReadExecutor(ToolExecutor):
             return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
         except httpx.HTTPStatusError as e:
             logger.error(
-                f"confluence_read action={action} HTTP {e.response.status_code}: "
-                f"{e.response.text[:300]}"
+                "confluence_read action=%s HTTP %s",
+                action,
+                e.response.status_code,
             )
             return _err(request, _classify_http_error(e.response.status_code, action), start)
-        except Exception as e:
-            logger.exception(f"confluence_read action={action} failed")
-            return _err(request, f"confluence_read failed: {e}" + _ANTI_HALLUCINATION_NOTE, start)
+        except Exception:
+            logger.exception("confluence_read action=%s failed", action)
+            return _err(
+                request,
+                "confluence_read failed: upstream unavailable" + _ANTI_HALLUCINATION_NOTE,
+                start,
+            )
 
 
 class ConfluenceWriteExecutor(ToolExecutor):
@@ -2023,9 +2067,14 @@ class ConfluenceWriteExecutor(ToolExecutor):
         self,
         client: ConfluenceAPIClient | None = None,
         database: Any = None,
+        credential_repository: Any = None,
+        secret_resolver: Any = None,
     ):
         self._resolver = _TenantClientResolver(
-            database=database, fallback_client=client
+            database=database,
+            fallback_client=client,
+            credential_repository=credential_repository,
+            secret_resolver=secret_resolver,
         )
         self.client = client
 
@@ -2189,13 +2238,18 @@ class ConfluenceWriteExecutor(ToolExecutor):
             return _err(request, str(e) + _ANTI_HALLUCINATION_NOTE, start)
         except httpx.HTTPStatusError as e:
             logger.error(
-                f"confluence_write action={action} HTTP {e.response.status_code}: "
-                f"{e.response.text[:300]}"
+                "confluence_write action=%s HTTP %s",
+                action,
+                e.response.status_code,
             )
             return _err(request, _classify_http_error(e.response.status_code, action), start)
-        except Exception as e:
-            logger.exception(f"confluence_write action={action} failed")
-            return _err(request, f"confluence_write failed: {e}" + _ANTI_HALLUCINATION_NOTE, start)
+        except Exception:
+            logger.exception("confluence_write action=%s failed", action)
+            return _err(
+                request,
+                "confluence_write failed: upstream unavailable" + _ANTI_HALLUCINATION_NOTE,
+                start,
+            )
 
 
 # ─── Registration ─────────────────────────────────────────────────────
@@ -2253,6 +2307,8 @@ def register_confluence_tools(
     api_token: str = "",
     tenant_id: str = "",  # accepted for backwards compat; no longer consumed here
     database: Any = None,
+    credential_repository: Any = None,
+    secret_resolver: Any = None,
 ) -> None:
     """Register the 2 Confluence meta-tools (confluence_read + confluence_write).
 
@@ -2286,8 +2342,18 @@ def register_confluence_tools(
             "database — all calls will fail until a connection is provided."
         )
 
-    read_executor = ConfluenceReadExecutor(client=static_client, database=database)
-    write_executor = ConfluenceWriteExecutor(client=static_client, database=database)
+    read_executor = ConfluenceReadExecutor(
+        client=static_client,
+        database=database,
+        credential_repository=credential_repository,
+        secret_resolver=secret_resolver,
+    )
+    write_executor = ConfluenceWriteExecutor(
+        client=static_client,
+        database=database,
+        credential_repository=credential_repository,
+        secret_resolver=secret_resolver,
+    )
 
     # Definitions AND executors both live in the global ToolRegistry so the
     # runtime dispatch path (`tool_registry.execute(request)`) can always find

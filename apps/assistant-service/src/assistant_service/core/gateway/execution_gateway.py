@@ -63,6 +63,13 @@ class RunRecord:
     request_preview: str
     queue_mode: str | None = None
     runtime_mode: str | None = None
+    agent_id: str | None = None
+    agent_version_id: str | None = None
+    agent_draft_revision: int | None = None
+    publication_id: str | None = None
+    channel: str | None = None
+    runtime_fingerprint: str | None = None
+    agent_spec_hash: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -87,6 +94,13 @@ class RunCheckpointRecord:
     resume_payload: dict[str, Any] = field(default_factory=dict)
     status: str = "running"
     error: str | None = None
+    agent_id: str | None = None
+    agent_version_id: str | None = None
+    agent_draft_revision: int | None = None
+    publication_id: str | None = None
+    channel: str | None = None
+    runtime_fingerprint: str | None = None
+    agent_spec_hash: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -141,6 +155,30 @@ class AssistantExecutionGateway:
             return str(uuid.UUID(str(value)))
         except Exception:
             return None
+
+    @staticmethod
+    def _agent_dimensions(value: dict[str, Any] | None) -> dict[str, Any]:
+        value = value or {}
+        return {
+            "agent_id": str(value.get("agent_id") or "") or None,
+            "agent_version_id": str(value.get("agent_version_id") or "") or None,
+            "agent_draft_revision": value.get("agent_draft_revision"),
+            "publication_id": str(value.get("publication_id") or "") or None,
+            "channel": str(value.get("channel") or "") or None,
+            "runtime_fingerprint": str(value.get("runtime_fingerprint") or "") or None,
+            "agent_spec_hash": str(value.get("agent_spec_hash") or "") or None,
+        }
+
+    @classmethod
+    def _agent_dimensions_match(
+        cls,
+        actual: dict[str, Any],
+        expected: dict[str, Any] | None,
+    ) -> bool:
+        return all(
+            actual.get(key) == value
+            for key, value in cls._agent_dimensions(expected).items()
+        )
 
     @classmethod
     def _message_state_hash(cls, messages: list[dict[str, Any]] | None) -> str:
@@ -283,8 +321,10 @@ class AssistantExecutionGateway:
         request_preview: str,
         queue_mode: str | None = None,
         runtime_mode: str | None = None,
+        agent_runtime: dict[str, Any] | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
+        dimensions = self._agent_dimensions(agent_runtime)
         record = RunRecord(
             run_id=run_id,
             tenant_id=tenant_id,
@@ -299,6 +339,7 @@ class AssistantExecutionGateway:
             runtime_mode=runtime_mode,
             request_preview=request_preview,
             started_at=now,
+            **dimensions,
         )
 
         if not self.database:
@@ -307,6 +348,13 @@ class AssistantExecutionGateway:
                 existing_run.tenant_id != tenant_id or existing_run.user_id != user_id
             ):
                 raise PermissionError("run_id already belongs to a different owner")
+            if existing_run and existing_run.session_id != session_id:
+                raise PermissionError("run_id already belongs to a different session")
+            if existing_run and not self._agent_dimensions_match(
+                vars(existing_run),
+                dimensions,
+            ):
+                raise PermissionError("run_id belongs to a different Agent runtime")
             self._runs[run_id] = record
             return
 
@@ -314,8 +362,13 @@ class AssistantExecutionGateway:
             INSERT INTO assistant_runs (
                 run_id, tenant_id, user_id, session_id, status, engine,
                 execution_profile, memory_mode, os_agent_enabled,
-                request_preview, started_at, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+                request_preview, started_at, agent_id, agent_version_id,
+                agent_draft_revision, publication_id, channel,
+                runtime_fingerprint, agent_spec_hash, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17, $18, NOW(), NOW()
+            )
             ON CONFLICT (run_id)
             DO UPDATE SET
                 status = EXCLUDED.status,
@@ -328,6 +381,14 @@ class AssistantExecutionGateway:
                 updated_at = NOW()
             WHERE assistant_runs.tenant_id = EXCLUDED.tenant_id
               AND assistant_runs.user_id = EXCLUDED.user_id
+              AND assistant_runs.session_id = EXCLUDED.session_id
+              AND assistant_runs.agent_id IS NOT DISTINCT FROM EXCLUDED.agent_id
+              AND assistant_runs.agent_version_id IS NOT DISTINCT FROM EXCLUDED.agent_version_id
+              AND assistant_runs.agent_draft_revision IS NOT DISTINCT FROM EXCLUDED.agent_draft_revision
+              AND assistant_runs.publication_id IS NOT DISTINCT FROM EXCLUDED.publication_id
+              AND assistant_runs.channel IS NOT DISTINCT FROM EXCLUDED.channel
+              AND assistant_runs.runtime_fingerprint IS NOT DISTINCT FROM EXCLUDED.runtime_fingerprint
+              AND assistant_runs.agent_spec_hash IS NOT DISTINCT FROM EXCLUDED.agent_spec_hash
             RETURNING run_id;
         """
         try:
@@ -344,6 +405,13 @@ class AssistantExecutionGateway:
                 os_agent_enabled,
                 request_preview,
                 now,
+                self._safe_uuid(dimensions["agent_id"]),
+                self._safe_uuid(dimensions["agent_version_id"]),
+                dimensions["agent_draft_revision"],
+                self._safe_uuid(dimensions["publication_id"]),
+                dimensions["channel"],
+                dimensions["runtime_fingerprint"],
+                dimensions["agent_spec_hash"],
             )
             if row is None:
                 raise PermissionError("run_id already belongs to a different owner")
@@ -361,14 +429,38 @@ class AssistantExecutionGateway:
         error: str | None = None,
         tenant_id: str | None = None,
         user_id: str | None = None,
+        session_id: str | None = None,
+        agent_runtime: dict[str, Any] | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
+        dimensions = self._agent_dimensions(agent_runtime)
+        if dimensions["agent_id"] and (
+            tenant_id is None or user_id is None or session_id is None
+        ):
+            raise PermissionError(
+                "Agent run completion requires tenant, user, session, and runtime context"
+            )
         # Write-through mirror for the DB-less fallback path only. When the
         # database is configured (prod) the DB UPDATE below is authoritative;
         # updating the in-memory record too keeps the fallback shape accurate
         # if the DB later errors mid-chat. Not a read source (ADR-004 §B).
         run = self._runs.get(run_id)  # AUDIT-OK: write-through mirror, not a read source
         if run:
+            if run.agent_id is not None and agent_runtime is None:
+                raise PermissionError(
+                    "Agent run completion requires tenant, user, session, and runtime context"
+                )
+            if tenant_id is not None and run.tenant_id != tenant_id:
+                raise PermissionError("run_id already belongs to a different owner")
+            if user_id is not None and run.user_id != user_id:
+                raise PermissionError("run_id already belongs to a different owner")
+            if session_id is not None and run.session_id != session_id:
+                raise PermissionError("run_id already belongs to a different session")
+            if agent_runtime is not None and not self._agent_dimensions_match(
+                vars(run),
+                dimensions,
+            ):
+                raise PermissionError("run_id belongs to a different Agent runtime")
             run.status = status
             run.usage = usage or {}
             run.error = error
@@ -377,42 +469,71 @@ class AssistantExecutionGateway:
         if not self.database:
             return
 
-        if tenant_id and user_id:
-            query = """
-                UPDATE assistant_runs
-                SET status = $2,
-                    usage = $3,
-                    error = $4,
-                    finished_at = $5,
-                    updated_at = NOW()
-                WHERE run_id = $1 AND tenant_id = $6 AND user_id = $7;
-            """
-            params = (
-                run_id,
-                status,
-                json.dumps(usage or {}),
-                error,
-                now,
-                tenant_id,
-                user_id,
+        params: list[Any] = [
+            run_id,
+            status,
+            json.dumps(usage or {}),
+            error,
+            now,
+        ]
+        predicates = ["run_id = $1"]
+
+        def _bind_predicate(column: str, value: Any, *, null_safe: bool = False) -> None:
+            params.append(value)
+            operator = "IS NOT DISTINCT FROM" if null_safe else "="
+            predicates.append(f"{column} {operator} ${len(params)}")
+
+        if tenant_id is not None:
+            _bind_predicate("tenant_id", tenant_id)
+        if user_id is not None:
+            _bind_predicate("user_id", user_id)
+        if session_id is not None:
+            _bind_predicate("session_id", session_id)
+        if agent_runtime is not None:
+            _bind_predicate(
+                "agent_id",
+                self._safe_uuid(dimensions["agent_id"]),
+                null_safe=True,
+            )
+            _bind_predicate(
+                "agent_version_id",
+                self._safe_uuid(dimensions["agent_version_id"]),
+                null_safe=True,
+            )
+            _bind_predicate(
+                "agent_draft_revision",
+                dimensions["agent_draft_revision"],
+                null_safe=True,
+            )
+            _bind_predicate(
+                "publication_id",
+                self._safe_uuid(dimensions["publication_id"]),
+                null_safe=True,
+            )
+            _bind_predicate("channel", dimensions["channel"], null_safe=True)
+            _bind_predicate(
+                "runtime_fingerprint",
+                dimensions["runtime_fingerprint"],
+                null_safe=True,
+            )
+            _bind_predicate(
+                "agent_spec_hash",
+                dimensions["agent_spec_hash"],
+                null_safe=True,
             )
         else:
-            query = """
-                UPDATE assistant_runs
-                SET status = $2,
-                    usage = $3,
-                    error = $4,
-                    finished_at = $5,
-                    updated_at = NOW()
-                WHERE run_id = $1;
-            """
-            params = (
-                run_id,
-                status,
-                json.dumps(usage or {}),
-                error,
-                now,
-            )
+            # Legacy callers may complete only built-in Assistant rows. Agent
+            # rows always require the full identity branch above.
+            predicates.append("agent_id IS NULL")
+        query = f"""
+            UPDATE assistant_runs
+            SET status = $2,
+                usage = $3,
+                error = $4,
+                finished_at = $5,
+                updated_at = NOW()
+            WHERE {' AND '.join(predicates)};
+        """
         try:
             await self.database.execute(query, *params)
         except Exception as exc:
@@ -471,6 +592,7 @@ class AssistantExecutionGateway:
             "os_agent_enabled": run.os_agent_enabled,
             "queue_mode": run.queue_mode,
             "runtime_mode": run.runtime_mode,
+            **self._agent_dimensions(vars(run)),
             "request_preview": run.request_preview,
             "usage": run.usage,
             "error": run.error,
@@ -484,6 +606,8 @@ class AssistantExecutionGateway:
         query = """
             SELECT run_id, tenant_id, user_id, session_id, status, engine,
                    execution_profile, memory_mode, os_agent_enabled,
+                   agent_id, agent_version_id, agent_draft_revision,
+                   publication_id, channel, runtime_fingerprint, agent_spec_hash,
                    request_preview, usage, error, started_at, finished_at
             FROM assistant_runs
             WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
@@ -512,6 +636,7 @@ class AssistantExecutionGateway:
             "os_agent_enabled": bool(row.get("os_agent_enabled")),
             "queue_mode": row.get("queue_mode"),
             "runtime_mode": row.get("runtime_mode"),
+            **self._agent_dimensions(dict(row)),
             "request_preview": row.get("request_preview"),
             "usage": usage or {},
             "error": row.get("error"),
@@ -535,9 +660,11 @@ class AssistantExecutionGateway:
         resume_payload: dict[str, Any] | None = None,
         status: str = "running",
         error: str | None = None,
+        agent_runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist a bounded checkpoint summary for safe resume preparation."""
         checkpoint_id = str(uuid.uuid4())
+        dimensions = self._agent_dimensions(agent_runtime)
         record = RunCheckpointRecord(
             checkpoint_id=checkpoint_id,
             run_id=run_id,
@@ -553,6 +680,7 @@ class AssistantExecutionGateway:
             resume_payload=self._sanitize_checkpoint_value(resume_payload or {}),
             status=str(status or "running")[:32],
             error=str(error)[:500] if error else None,
+            **dimensions,
         )
         self._checkpoints.setdefault(run_id, []).append(record)
         self._checkpoints[run_id] = self._checkpoints[run_id][-20:]
@@ -565,10 +693,12 @@ class AssistantExecutionGateway:
                         checkpoint_id, run_id, tenant_id, user_id, session_id,
                         phase, iteration, message_state_hash, pending_tool,
                         approval_id, idempotency_keys, resume_payload, status,
-                        error, created_at
+                        error, agent_id, agent_version_id, agent_draft_revision,
+                        publication_id, channel, runtime_fingerprint,
+                        agent_spec_hash, created_at
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        $13, $14, $15
+                        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
                     );
                     """,
                     checkpoint_id,
@@ -585,6 +715,13 @@ class AssistantExecutionGateway:
                     json.dumps(record.resume_payload),
                     record.status,
                     record.error,
+                    self._safe_uuid(dimensions["agent_id"]),
+                    self._safe_uuid(dimensions["agent_version_id"]),
+                    dimensions["agent_draft_revision"],
+                    self._safe_uuid(dimensions["publication_id"]),
+                    dimensions["channel"],
+                    dimensions["runtime_fingerprint"],
+                    dimensions["agent_spec_hash"],
                     record.created_at,
                 )
             except Exception as exc:
@@ -606,7 +743,9 @@ class AssistantExecutionGateway:
                     SELECT checkpoint_id, run_id, tenant_id, user_id, session_id,
                            phase, iteration, message_state_hash, pending_tool,
                            approval_id, idempotency_keys, resume_payload, status,
-                           error, created_at
+                           error, agent_id, agent_version_id,
+                           agent_draft_revision, publication_id, channel,
+                           runtime_fingerprint, agent_spec_hash, created_at
                       FROM assistant_run_checkpoints
                      WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
                      ORDER BY created_at DESC
@@ -631,12 +770,41 @@ class AssistantExecutionGateway:
         run_id: str,
         tenant_id: str,
         user_id: str,
+        session_id: str | None = None,
         approval_id: str | None = None,
+        agent_runtime: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Validate latest checkpoint and return a non-executing resume plan."""
         run = await self.get_run(run_id=run_id, tenant_id=tenant_id, user_id=user_id)
         if not run:
             return None
+        if not self._agent_dimensions_match(run, agent_runtime):
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "run_agent_runtime_mismatch",
+                "checkpoint": None,
+                "recoverable": False,
+            }
+
+        expected_session_id = str(session_id or "")
+        run_session_id = str(run.get("session_id") or "")
+        if run.get("agent_id") and not expected_session_id:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "run_session_required",
+                "checkpoint": None,
+                "recoverable": False,
+            }
+        if expected_session_id and run_session_id != expected_session_id:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "run_session_mismatch",
+                "checkpoint": None,
+                "recoverable": False,
+            }
 
         checkpoint = await self._get_resume_checkpoint(
             run_id=run_id,
@@ -665,6 +833,28 @@ class AssistantExecutionGateway:
                 reason="checkpoint_missing",
                 checkpoint=None,
             )
+
+        checkpoint_session_id = str(checkpoint.get("session_id") or "")
+        if checkpoint_session_id != run_session_id or (
+            expected_session_id and checkpoint_session_id != expected_session_id
+        ):
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "checkpoint_session_mismatch",
+                "checkpoint": None,
+                "recoverable": False,
+            }
+        if not self._agent_dimensions_match(checkpoint, agent_runtime) or not (
+            self._agent_dimensions_match(checkpoint, self._agent_dimensions(run))
+        ):
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "reason": "checkpoint_agent_runtime_mismatch",
+                "checkpoint": None,
+                "recoverable": False,
+            }
 
         if checkpoint.get("status") in {"succeeded", "failed", "cancelled"}:
             return {
@@ -771,6 +961,7 @@ class AssistantExecutionGateway:
                 "reason": reason,
                 "source_phase": (checkpoint or {}).get("phase"),
             },
+            agent_runtime=self._agent_dimensions(run),
         )
         await self.finish_run(
             run_id=run_id,
@@ -778,6 +969,8 @@ class AssistantExecutionGateway:
             error=reason,
             tenant_id=tenant_id,
             user_id=user_id,
+            session_id=session_id,
+            agent_runtime=self._agent_dimensions(run),
         )
         return {
             "run_id": run_id,
@@ -823,7 +1016,9 @@ class AssistantExecutionGateway:
                     SELECT checkpoint_id, run_id, tenant_id, user_id, session_id,
                            phase, iteration, message_state_hash, pending_tool,
                            approval_id, idempotency_keys, resume_payload, status,
-                           error, created_at
+                           error, agent_id, agent_version_id,
+                           agent_draft_revision, publication_id, channel,
+                           runtime_fingerprint, agent_spec_hash, created_at
                       FROM assistant_run_checkpoints
                      WHERE run_id = $1 AND tenant_id = $2 AND user_id = $3
                      ORDER BY created_at DESC
@@ -972,6 +1167,7 @@ class AssistantExecutionGateway:
             "resume_payload": record.resume_payload,
             "status": record.status,
             "error": record.error,
+            **AssistantExecutionGateway._agent_dimensions(vars(record)),
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }
 
@@ -1004,6 +1200,7 @@ class AssistantExecutionGateway:
             "resume_payload": _json_dict(row.get("resume_payload")),
             "status": str(row.get("status") or ""),
             "error": row.get("error"),
+            **cls._agent_dimensions(dict(row)),
             "created_at": created_at.isoformat() if created_at else None,
         }
 
@@ -1172,6 +1369,70 @@ class AssistantExecutionGateway:
                 f"Failed to consume approval {approval_id} for tool {tool_name}"
             )
 
+    async def _audit_agent_tool_policy_decision(
+        self,
+        *,
+        context: ToolInvocationContext,
+        tool_name: str,
+        decision: dict[str, Any],
+    ) -> bool:
+        """Persist high-risk Agent policy decisions without tool arguments."""
+
+        dimensions = self._agent_dimensions(context.metadata)
+        agent_id = self._safe_uuid(dimensions.get("agent_id"))
+        requires_audit = bool(dimensions.get("agent_id")) and (
+            tool_name in self.policy_engine.HIGH_RISK_TOOLS
+            or bool(decision.get("requires_approval"))
+        )
+        if not requires_audit:
+            return True
+        if not self.database or not agent_id:
+            return False
+        version_id = self._safe_uuid(dimensions.get("agent_version_id"))
+        publication_id = self._safe_uuid(dimensions.get("publication_id"))
+        channel = dimensions.get("channel")
+        if channel not in {"preview", "hosted", "embed", "api", "builtin"}:
+            return False
+        summary = {
+            "agent_version_id": version_id,
+            "publication_id": publication_id,
+            "channel": channel,
+            "tool_name": str(tool_name)[:160],
+            "allowed": bool(decision.get("allowed")),
+            "requires_approval": bool(decision.get("requires_approval")),
+            "reason": str(decision.get("reason") or "")[:500],
+            "policy_profile": str(decision.get("policy_profile") or "")[:32],
+            "queue_mode": str(decision.get("queue_mode") or "")[:32],
+            "run_id": self._safe_uuid(context.run_id),
+            "request_id": str(context.request_id)[:255],
+        }
+        try:
+            await self.database.execute(
+                """
+                INSERT INTO audit_logs (
+                    event_type, user_id, tenant_id, resource_type, resource_id,
+                    action, request_summary, response_summary, status,
+                    agent_id, agent_version_id, publication_id, channel
+                ) VALUES (
+                    'agent_studio', $1, $2, 'agent', $3,
+                    'tool_policy_decision', $4::jsonb, '{}'::jsonb, 'success',
+                    $5::uuid, $6::uuid, $7::uuid, $8
+                )
+                """,
+                context.user_id,
+                context.tenant_id,
+                agent_id,
+                json.dumps(summary, ensure_ascii=False, sort_keys=True),
+                agent_id,
+                version_id,
+                publication_id,
+                channel,
+            )
+        except Exception as exc:
+            logger.error("Failed to persist Agent tool policy audit: %s", exc)
+            return False
+        return True
+
     async def invoke_tool(
         self,
         tool_name: str,
@@ -1264,6 +1525,22 @@ class AssistantExecutionGateway:
             "lattice": lattice_payload,
         }
         sandbox_payload = sandbox_decision.to_dict()
+
+        if not await self._audit_agent_tool_policy_decision(
+            context=context,
+            tool_name=tool_name,
+            decision=decision_payload,
+        ):
+            decision.allowed = False
+            decision.requires_approval = False
+            decision.reason = "AGENT_TOOL_AUDIT_UNAVAILABLE"
+            decision_payload.update(
+                {
+                    "allowed": False,
+                    "requires_approval": False,
+                    "reason": decision.reason,
+                }
+            )
 
         if not decision.allowed:
             return ToolCallResult(

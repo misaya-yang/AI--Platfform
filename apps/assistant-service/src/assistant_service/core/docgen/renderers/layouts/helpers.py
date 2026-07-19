@@ -9,10 +9,8 @@ transforms / extracts text lives here; anything that *draws* lives in
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 from ...ir import BulletBlock, HeadingBlock, ParagraphBlock, PptxSlide, TableBlock
-
 
 # ---------- B2: anchor_word — CJK-aware ---------------------------------
 
@@ -110,7 +108,7 @@ def split_head_tail(label: str) -> tuple[str, str]:
         return "", ""
 
     # Try colon first but skip URL-scheme colons.
-    best_colon: Optional[re.Match] = None
+    best_colon: re.Match | None = None
     for m in re.finditer(r"[：:]\s*", label):
         start = m.start()
         # URL check: prev char alpha, next two chars '//'
@@ -124,7 +122,7 @@ def split_head_tail(label: str) -> tuple[str, str]:
         break
 
     # Find earliest dash / "via" separator
-    best_other: Optional[re.Match] = None
+    best_other: re.Match | None = None
     for sep_re in _SEP_PATTERNS:
         m = re.search(sep_re, label)
         if m and (best_other is None or m.start() < best_other.start()):
@@ -152,7 +150,7 @@ def truncate(text: str, max_chars: int) -> str:
     return cut.rstrip(" ,，、。") + "…"
 
 
-def first_short_text(s: PptxSlide) -> Optional[str]:
+def first_short_text(s: PptxSlide) -> str | None:
     for b in s.body or []:
         if isinstance(b, ParagraphBlock) and len(b.text) < 200:
             return b.text
@@ -172,7 +170,7 @@ def section_progress(s: PptxSlide) -> tuple[int, int]:
     return 1, 1
 
 
-def synthesize_table_from_labels(s: PptxSlide) -> Optional[TableBlock]:
+def synthesize_table_from_labels(s: PptxSlide) -> TableBlock | None:
     """Synthesize a 2-col table from bullets of shape ``Label: description``."""
     from ...ir import TableCell, TableRow
     items = collect_label_list(s)
@@ -198,9 +196,7 @@ def collect_label_list(s: PptxSlide) -> list[str]:
     for b in s.body or []:
         if isinstance(b, BulletBlock):
             items.extend(b.items)
-        elif isinstance(b, ParagraphBlock):
-            items.append(b.text)
-        elif isinstance(b, HeadingBlock):
+        elif isinstance(b, (ParagraphBlock, HeadingBlock)):
             items.append(b.text)
     return items
 

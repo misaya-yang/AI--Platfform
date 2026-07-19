@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Protocol
 
-from ..ir import FontSpec, HexColor, Theme
+from ..ir import Theme
 from ..ir.base import DocMetadata
-from ..style_guide import PALETTES, FONT_PAIRS, default_theme, theme_from
+from ..style_guide import FONT_PAIRS, PALETTES, default_theme, theme_from
 
 
 class PlannerError(RuntimeError):
@@ -30,9 +30,9 @@ class Brief:
     title: str
     goal: str                               # free text
     locale: str = "en-US"
-    body_markdown: Optional[str] = None      # optional pre-baked content
-    palette_name: Optional[str] = None      # key of style_guide.PALETTES
-    font_pair_name: Optional[str] = None    # key of style_guide.FONT_PAIRS
+    body_markdown: str | None = None      # optional pre-baked content
+    palette_name: str | None = None      # key of style_guide.PALETTES
+    font_pair_name: str | None = None    # key of style_guide.FONT_PAIRS
     accent_style: str = "none"
     style_hints: dict[str, str] = field(default_factory=dict)
 
@@ -64,7 +64,7 @@ def theme_for_brief(brief: Brief) -> Theme:
 
 
 def metadata_for_brief(brief: Brief, page_size: str | None = None) -> DocMetadata:
-    kwargs = dict(title=brief.title, locale=brief.locale)
+    kwargs = {"title": brief.title, "locale": brief.locale}
     if page_size:
         kwargs["page_size"] = page_size  # type: ignore[arg-type]
     return DocMetadata(**kwargs)

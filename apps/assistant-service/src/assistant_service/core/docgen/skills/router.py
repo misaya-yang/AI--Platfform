@@ -10,7 +10,6 @@ Token budget (approximate; real tokenisation is left to the caller):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from .models import Skill
 from .registry import SkillRegistry
@@ -24,7 +23,7 @@ class Intent:
     used when a user says "make me a report" without specifying format.
     """
 
-    doc_type: Optional[str] = None  # "docx" | "pptx" | "xlsx" | "pdf"
+    doc_type: str | None = None  # "docx" | "pptx" | "xlsx" | "pdf"
     keywords: list[str] | None = None
 
 
@@ -42,7 +41,7 @@ class SkillRouter:
     def __init__(self, registry: SkillRegistry) -> None:
         self._registry = registry
 
-    def select(self, intent: Intent) -> Optional[Skill]:
+    def select(self, intent: Intent) -> Skill | None:
         if intent.doc_type and intent.doc_type in self._registry:
             return self._registry.get(intent.doc_type)
 

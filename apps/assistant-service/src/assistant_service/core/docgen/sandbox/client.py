@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Protocol
+from typing import Protocol
 
 
 class SandboxError(RuntimeError):
@@ -37,9 +38,9 @@ class SandboxClient(Protocol):
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult: ...
 
     async def exec_node(
@@ -47,9 +48,9 @@ class SandboxClient(Protocol):
         code: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult: ...
 
     async def exec_bash(
@@ -57,7 +58,7 @@ class SandboxClient(Protocol):
         cmd: str,
         *,
         timeout: float = 120.0,
-        files_in: Optional[Iterable[Path]] = None,
-        produce: Optional[Iterable[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        files_in: Iterable[Path] | None = None,
+        produce: Iterable[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> SandboxResult: ...

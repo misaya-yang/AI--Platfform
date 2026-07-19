@@ -39,9 +39,7 @@ def rag_trace_documents(contexts: list[Any]) -> list[dict[str, Any]]:
                 continue
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
             source_url = (
-                chunk.get("source_url")
-                or metadata.get("source_url")
-                or metadata.get("source_uri")
+                chunk.get("source_url") or metadata.get("source_url") or metadata.get("source_uri")
             )
             documents.append(
                 {
@@ -71,6 +69,7 @@ def build_rag_trace_payload(
     contexts: list[Any] | None = None,
     error: Any = None,
     tool_id: str | None = None,
+    retrieval_configs: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     contexts = contexts or []
     document_count = sum(len(_context_chunks(context)) for context in contexts)
@@ -101,6 +100,11 @@ def build_rag_trace_payload(
     if tool_id:
         payload["tool_id"] = tool_id
         payload["tool_call_id"] = tool_id
+    if retrieval_configs is not None:
+        payload["retrieval.by_dataset"] = {
+            dataset_id: dict(dataset_config)
+            for dataset_id, dataset_config in sorted(retrieval_configs.items())
+        }
     if ended_at is not None:
         payload["ended_at"] = ended_at
         payload["duration_ms"] = max(0, int((ended_at - started_at) * 1000))

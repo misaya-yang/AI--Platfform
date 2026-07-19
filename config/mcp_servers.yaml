@@ -8,13 +8,14 @@ mcp_servers:
   # ``generate_document`` so the agent doesn't need to know about the
   # heavy per-format skill docs (which the server keeps to itself).
   - name: docgen
-    # ``.internal`` suffix matches the gateway's MCPClient trusted-hostname
-    # rule so http:// across the docker network passes the SSRF guard.
+    # This file is platform-managed; tenant registrations remain HTTPS-only.
+    # The explicit platform flag in the loader permits this private Docker hop
+    # while metadata/link-local addresses and redirects remain blocked.
     # The alias is declared on the mcp-docgen-server service in docker-compose.yml.
     # For local (non-docker) testing, point this at ``http://localhost:8765``
     # and run the server directly with ``MCP_TRANSPORT=http``.
     url: http://mcp-docgen-server.internal:8765
-    transport: http
+    transport: streamable_http
     description: "Generate docx / pptx / xlsx / pdf — design-system driven, returns signed download URL"
     enabled: true
     max_concurrent: 4

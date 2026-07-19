@@ -17,7 +17,7 @@ set ``value`` and ``formula`` at the same time.
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,19 +28,19 @@ NumberFormat = Literal["general", "integer", "number_2dp", "currency_usd", "perc
 
 
 class XlsxCell(BaseModel):
-    value: Optional[Union[str, float, int, bool]] = None
-    formula: Optional[str] = None  # without leading '=' — the renderer adds it.
+    value: str | float | int | bool | None = None
+    formula: str | None = None  # without leading '=' — the renderer adds it.
     role: CellRole = "input"
     number_format: NumberFormat = "general"
     bold: bool = False
     italic: bool = False
-    fill: Optional[HexColor] = None
-    font_color: Optional[HexColor] = None
-    align: Optional[Literal["left", "center", "right"]] = None
+    fill: HexColor | None = None
+    font_color: HexColor | None = None
+    align: Literal["left", "center", "right"] | None = None
 
     @field_validator("formula")
     @classmethod
-    def _strip_eq(cls, v: Optional[str]) -> Optional[str]:
+    def _strip_eq(cls, v: str | None) -> str | None:
         if v is None:
             return v
         return v.lstrip("=").strip()
@@ -53,7 +53,7 @@ class XlsxRow(BaseModel):
 class XlsxColumn(BaseModel):
     index: int
     width_chars: float = 12.0
-    header: Optional[str] = None
+    header: str | None = None
 
 
 class XlsxSheet(BaseModel):

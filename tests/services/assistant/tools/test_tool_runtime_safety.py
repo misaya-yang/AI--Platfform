@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -151,6 +152,34 @@ class _FailingApprovalDB:
         raise RuntimeError("database unavailable")
 
 
+class _RecordingAuditDB:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def execute(self, query: str, *args: Any) -> None:
+        if self.fail:
+            raise RuntimeError("audit database unavailable")
+        self.calls.append((query, args))
+
+
+def _agent_tool_context(*, os_agent_enabled: bool = False) -> ToolInvocationContext:
+    return ToolInvocationContext(
+        session_id="session-agent",
+        user_id="user-agent",
+        tenant_id="tenant-agent",
+        request_id="request-agent",
+        run_id="11111111-1111-4111-8111-111111111111",
+        os_agent_enabled=os_agent_enabled,
+        metadata={
+            "agent_id": "22222222-2222-4222-8222-222222222222",
+            "agent_version_id": "33333333-3333-4333-8333-333333333333",
+            "publication_id": "44444444-4444-4444-8444-444444444444",
+            "channel": "api",
+        },
+    )
+
+
 @pytest.mark.asyncio
 async def test_approval_db_failure_denies_risky_execution() -> None:
     gateway = AssistantExecutionGateway(
@@ -167,6 +196,47 @@ async def test_approval_db_failure_denies_risky_execution() -> None:
     )
 
     assert granted is False
+
+
+@pytest.mark.asyncio
+async def test_agent_high_risk_policy_decision_is_dimensioned_and_argument_free() -> None:
+    database = _RecordingAuditDB()
+    gateway = AssistantExecutionGateway(
+        tool_invoker=SimpleNamespace(),
+        database=database,
+    )
+
+    result = await gateway.invoke_tool(
+        "system_run_lite",
+        {"command": "never-persist-this-secret"},
+        _agent_tool_context(),
+    )
+
+    assert result.success is False
+    assert len(database.calls) == 1
+    query, args = database.calls[0]
+    assert "INSERT INTO audit_logs" in query
+    summary = json.loads(args[3])
+    assert summary["tool_name"] == "system_run_lite"
+    assert summary["agent_version_id"] == "33333333-3333-4333-8333-333333333333"
+    assert "never-persist-this-secret" not in args[3]
+
+
+@pytest.mark.asyncio
+async def test_agent_high_risk_execution_fails_closed_when_audit_is_unavailable() -> None:
+    gateway = AssistantExecutionGateway(
+        tool_invoker=SimpleNamespace(),
+        database=_RecordingAuditDB(fail=True),
+    )
+
+    result = await gateway.invoke_tool(
+        "system_run_lite",
+        {},
+        _agent_tool_context(os_agent_enabled=True),
+    )
+
+    assert result.success is False
+    assert result.error == "AGENT_TOOL_AUDIT_UNAVAILABLE"
 
 
 def test_mcp_parameter_descriptions_are_sanitized_and_bounded() -> None:
