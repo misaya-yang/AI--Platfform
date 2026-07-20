@@ -27,6 +27,7 @@ class AgentRuntimeExecutionContext:
     skills_hash: str
     knowledge_revision_hash: str
     memory_mode: str = "session"
+    publication_auth_mode: str = ""
 
     @classmethod
     def from_verified(
@@ -35,6 +36,7 @@ class AgentRuntimeExecutionContext:
     ) -> AgentRuntimeExecutionContext:
         fingerprints = verified.resolved_snapshot["fingerprints"]
         instructions = verified.resolved_snapshot["instructions"]
+        publication = verified.resolved_snapshot.get("publication") or {}
         return cls(
             tenant_id=verified.tenant_id,
             caller_principal=verified.caller_principal,
@@ -51,6 +53,7 @@ class AgentRuntimeExecutionContext:
             skills_hash=str(fingerprints["skills"]),
             knowledge_revision_hash=str(fingerprints["knowledge_revision"]),
             memory_mode=str(verified.resolved_snapshot["memory"]["mode"]),
+            publication_auth_mode=str(publication.get("auth_mode") or ""),
         )
 
     @property
@@ -98,6 +101,7 @@ class AgentRuntimeExecutionContext:
             "agent_draft_revision": self.agent_draft_revision,
             "publication_id": self.publication_id,
             "channel": self.channel,
+            "publication_auth_mode": self.publication_auth_mode,
             "runtime_fingerprint": self.runtime_fingerprint,
             "agent_spec_hash": self.agent_spec_hash,
             "prompt_hash": self.prompt_hash,

@@ -231,6 +231,7 @@ function AgentStudioWorkspace({
     if (item === "Skills") return t("agents.studio.capabilities.skills");
     if (item === "Connectors") return t("agents.studio.capabilities.connectors");
     if (item === "Knowledge") return t("agents.studio.sections.knowledge");
+    if (item === "Eval Datasets") return t("agents.studio.sections.eval");
     return t("agents.studio.sections.model");
   });
   const validationIssues = [
@@ -301,6 +302,14 @@ function AgentStudioWorkspace({
       setLastSavedAt(savedDraft.updated_at);
       setConflictRevision(null);
       setSaveState("saved");
+      // The detail/draft queries use staleTime: Infinity, so without writing
+      // the fresh payloads back into the cache a remount within the gcTime
+      // window (e.g. opening Analytics then returning) re-seeds the workspace
+      // from the pre-save draft — the edits look reverted and the next save
+      // sends the stale If-Match revision and always 409s. Keep the cache in
+      // sync with the just-saved server state.
+      queryClient.setQueryData(["agent", agent.agent_id, "draft"], savedDraft);
+      queryClient.setQueryData(["agent", agent.agent_id], savedAgent);
       void queryClient.invalidateQueries({
         queryKey: ["agent", agent.agent_id, "release-evaluations"],
       });
@@ -381,6 +390,15 @@ function AgentStudioWorkspace({
 
   const guardedBack = () => {
     if (!dirty || window.confirm(t("agents.studio.leaveConfirm"))) navigate("/agents");
+  };
+
+  // The Analytics button unmounts the workspace (separate route), so it must
+  // run the same dirty check as the back arrow or unsaved Draft edits are
+  // silently discarded (AS-UI-004: warn before leaving an unsaved Draft).
+  const guardedAnalytics = () => {
+    if (!dirty || window.confirm(t("agents.studio.leaveConfirm"))) {
+      navigate(`/agents/${agent.agent_id}/analytics`);
+    }
   };
 
   const toggleCapability = (binding: AgentCapabilityBinding, checked: boolean) => {
@@ -580,7 +598,7 @@ function AgentStudioWorkspace({
           <div><Title level={2}>{name || agent.name}</Title><div className="agent-studio-meta"><span>{t("agents.studio.draftRevision", { revision })}</span><span>{t(`agents.common.roles.${agent.caller_role}`)}</span><span className={`agent-save-state is-${saveState}`}>{saveLabel}</span></div></div>
         </div>
         <div className="agent-studio-actions">
-          <Button icon={<BarChart3 size={16} />} onClick={() => navigate(`/agents/${agent.agent_id}/analytics`)}>{t("agents.analytics.title")}</Button>
+          <Button icon={<BarChart3 size={16} />} onClick={guardedAnalytics}>{t("agents.analytics.title")}</Button>
           <Button disabled={!dirty || !canEdit || saveMutation.isPending} onClick={discard}>{t("agents.studio.discard")}</Button>
           <Button type="primary" icon={<Save size={16} />} disabled={!dirty || !canEdit || validationIssues.length > 0} loading={saveMutation.isPending} onClick={requestSave}>{t("agents.common.saveDraft")}</Button>
         </div>

@@ -188,6 +188,42 @@ def _context(
     )
 
 
+def _identity_context(channel: str, auth_mode: str = "") -> SimpleNamespace:
+    metadata: dict[str, Any] = {"channel": channel, "agent_id": "agent-a"}
+    if auth_mode:
+        metadata["publication_auth_mode"] = auth_mode
+    return SimpleNamespace(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        user=SimpleNamespace(is_authenticated=True),
+        metadata=metadata,
+    )
+
+
+@pytest.mark.parametrize(
+    ("channel", "auth_mode", "expected"),
+    [
+        # The runtime envelope signs the raw "hosted" channel; the MCP layer
+        # only accepts hosted_private/hosted_public, so _identity normalizes
+        # on the publication auth_mode.
+        ("hosted", "public", "hosted_public"),
+        ("hosted", "tenant", "hosted_private"),
+        ("hosted", "private", "hosted_private"),
+        ("hosted", "token", "hosted_private"),
+        ("hosted", "", "hosted_private"),
+        # Channels already in the MCP vocabulary pass through unchanged.
+        ("preview", "", "preview"),
+        ("embed", "", "embed"),
+        ("api", "", "api"),
+    ],
+)
+def test_identity_normalizes_hosted_channel_to_mcp_vocabulary(
+    channel: str, auth_mode: str, expected: str
+) -> None:
+    _, _, _, normalized = MCPRuntimeService._identity(_identity_context(channel, auth_mode))
+    assert normalized == expected
+
+
 class _Repository:
     def __init__(self, item: dict[str, Any]) -> None:
         self.item = item

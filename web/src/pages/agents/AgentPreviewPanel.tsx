@@ -142,7 +142,16 @@ export function AgentPreviewPanel({
     setMessages([]);
     setActivities([]);
     setError(null);
-    setHistory({});
+    // A Draft save bumps draftRevision, but immutable Version previews are
+    // unaffected by it — preserve their stored history so returning to a
+    // Version target keeps its recoverable transcript (ux-spec Preview
+    // contract: 旧预览保留可返回的历史记录). Only the stale Draft entry is
+    // dropped; wiping the whole map discarded unrelated Version transcripts.
+    setHistory((current) => {
+      const next = { ...current };
+      delete next.draft;
+      return next;
+    });
   }, [agentId, draftRevision]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -171,6 +180,7 @@ export function AgentPreviewPanel({
     setSending(true);
     setError(null);
     let activeSession = session;
+    let assistantId: string | null = null;
     try {
       if (!activeSession) {
         activeSession = selectedVersion
@@ -179,7 +189,7 @@ export function AgentPreviewPanel({
         setSession(activeSession);
       }
       const userMessage: PreviewMessage = { id: crypto.randomUUID(), role: "user", content: text };
-      const assistantId = crypto.randomUUID();
+      assistantId = crypto.randomUUID();
       setMessages((current) => [...current, userMessage, { id: assistantId, role: "assistant", content: "" }]);
       setInput("");
       const controller = new AbortController();
@@ -226,8 +236,17 @@ export function AgentPreviewPanel({
       }
       setMessages((current) => current.map((message) => message.id === assistantId && !message.content ? { ...message, content: t("agents.preview.emptyResponse") } : message));
     } catch (streamError) {
-      if (!(streamError instanceof DOMException && streamError.name === "AbortError")) {
+      const aborted = streamError instanceof DOMException && streamError.name === "AbortError";
+      if (!aborted) {
         setError(previewErrorMessage(streamError, t));
+      }
+      // The stream failed or was aborted before the emptyResponse patch ran, so
+      // the placeholder assistant bubble would otherwise show a permanent
+      // "Generating…" cursor. Replace its empty content with the empty-response
+      // label (or leave any partially streamed text intact).
+      if (assistantId) {
+        const failedId = assistantId;
+        setMessages((current) => current.map((message) => message.id === failedId && !message.content ? { ...message, content: t("agents.preview.emptyResponse") } : message));
       }
     } finally {
       setSending(false);
@@ -349,7 +368,7 @@ export function AgentPreviewPanel({
       </div>
       <footer className="agent-preview-footer">
         <Button type="text" icon={<Trash2 size={14} />} onClick={clearSession} disabled={!session && messages.length === 0}>{t("agents.preview.clear")}</Button>
-        {session ? <Link to={`/eval?session_id=${encodeURIComponent(session.session_id)}`}>{t("agents.preview.openTrace")} <ExternalLink size={13} /></Link> : <Text type="secondary">{t("agents.preview.traceAfterRun")}</Text>}
+        {session ? <Link to={`/eval?tab=traces&family=assistant&session_id=${encodeURIComponent(session.session_id)}`}>{t("agents.preview.openTrace")} <ExternalLink size={13} /></Link> : <Text type="secondary">{t("agents.preview.traceAfterRun")}</Text>}
       </footer>
     </section>
   );

@@ -101,7 +101,14 @@ export async function* streamPublicAgent(input: {
       body: JSON.stringify({
         message: input.message,
         session_id: input.sessionId,
-        attachments: input.attachments ?? [],
+        // The server's AgentRuntimeAttachment schema is closed (extra="forbid")
+        // and only accepts artifact_id/filename/mime_type. Callers pass the full
+        // upload-response objects (which also carry size_bytes/expires_at/
+        // request_id), so project to the wire shape here or every chat turn with
+        // an attachment fails 422 before the handler runs.
+        attachments: (input.attachments ?? []).map(
+          ({ artifact_id, filename, mime_type }) => ({ artifact_id, filename, mime_type }),
+        ),
         channel,
       }),
       signal: input.signal,

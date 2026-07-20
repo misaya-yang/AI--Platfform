@@ -167,8 +167,14 @@ export function AgentHostedPage() {
 
   async function rate(rating: -1 | 1) {
     if (!sessionId) return;
-    await submitPublicAgentFeedback({ publicId, sessionId, rating });
-    setFeedback(rating);
+    try {
+      await submitPublicAgentFeedback({ publicId, sessionId, rating });
+      setFeedback(rating);
+    } catch {
+      // A failed rating (stale session, quota, network) previously rejected
+      // unhandled and left the button unselected with no feedback to the user.
+      setError(t("agents.public.feedbackFailed"));
+    }
   }
 
   function newConversation() {

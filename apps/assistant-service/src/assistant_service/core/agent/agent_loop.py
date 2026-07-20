@@ -4955,7 +4955,22 @@ class AgentLoop:
                             timestamp=step_finished_at,
                         )
 
-                    if tool_name == "search_knowledge_base":
+                    # Only mark the KB search completed on a genuinely
+                    # successful, evidence-bearing result. mark_completed sits
+                    # after the try/except/finally, so it was previously reached
+                    # on the exception path and on tool success=False too; that
+                    # flipped search_completed=True for the rest of the run,
+                    # stripped search_knowledge_base from the model's toolset,
+                    # and short-circuited any retry with "already searched" —
+                    # steering the model to answer from evidence that was never
+                    # retrieved. Gating on step_success + captured contexts keeps
+                    # a failed/empty search retryable and matches the
+                    # evidence-aware short-circuit guard above.
+                    if (
+                        tool_name == "search_knowledge_base"
+                        and step_success is True
+                        and contexts_for_persistence
+                    ):
                         kb_dedup.mark_completed(kb_query_fp)
 
                     # Add tool result to messages with lifecycle management.
@@ -5090,7 +5105,18 @@ class AgentLoop:
             # never got a real answer.
             max_iter_exhausted = not model_terminated_cleanly and iteration >= max_iterations
             ctx.max_iterations_reached = bool(max_iter_exhausted)
-            if not ctx.generated_content.strip() or max_iter_exhausted or last_tool_failed:
+            # Only let a stale tool failure force synthesis when the model did
+            # NOT already recover with a clean final answer. `last_tool_failed`
+            # is never reset once a tool errors, so without the
+            # `model_terminated_cleanly` guard a turn where a tool fails and the
+            # model then writes a complete answer would run a redundant
+            # tools=None pass that streams a SECOND answer after the good one
+            # and persists the concatenated duplicate into session history.
+            if (
+                not ctx.generated_content.strip()
+                or max_iter_exhausted
+                or (last_tool_failed and not model_terminated_cleanly)
+            ):
                 logger.warning(
                     "[STREAMING-FIRST] Loop ended without clean answer "
                     "(iter=%s, max_iter_exhausted=%s, last_tool_failed=%s, "

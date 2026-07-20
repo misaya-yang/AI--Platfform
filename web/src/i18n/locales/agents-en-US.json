@@ -457,6 +457,7 @@
     "loadForbidden": "You cannot view this Agent",
     "loadError": "Agent Studio could not be loaded",
     "channels": {
+      "description": "Publish immutable versions, manage release channels and Runtime API tokens, and roll back to prior versions.",
       "openHosted": "Open Hosted page",
       "tokensTitle": "Runtime API tokens",
       "hashed": "Hashed at rest",
@@ -639,6 +640,7 @@
     "attach": "Attach a file",
     "attachDisabled": "Attachments are disabled for this agent",
     "uploadFailed": "The attachment could not be uploaded.",
+    "feedbackFailed": "Your rating could not be submitted. Please try again.",
     "attachmentsLabel": "Attachments",
     "removeAttachment": "Remove {{filename}}",
     "citationsLabel": "Knowledge citations",

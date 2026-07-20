@@ -155,7 +155,18 @@ if (root) {
         headers: { "Content-Type": "application/json", "X-Agent-Embed-Token": embedToken },
         body: JSON.stringify({ channel: "embed", session_id: sessionId, message, attachments: [] }),
       });
+      // Terminal runtime failures arrive as {event_type:"error"|"run_error",
+      // data:{message}}. readSse swallows exceptions thrown inside onData, so
+      // capture the message here and raise it after the stream completes; the
+      // catch below then drops the partial bubble, shows the error banner and
+      // posts {type:"error"} to the parent (matching the hosted page).
+      let streamError = null;
       await readSse(response, (event) => {
+        const type = String(event?.event_type ?? "").toLowerCase();
+        if (type === "error" || type === "run_error") {
+          streamError = event?.data?.message || "The agent is unavailable.";
+          return;
+        }
         const delta = typeof event.content === "string"
           ? event.content
           : typeof event.data === "string"
@@ -163,6 +174,7 @@ if (root) {
             : typeof event.data?.content === "string" ? event.data.content : "";
         if (delta) answer.textContent += delta;
       });
+      if (streamError) throw new Error(streamError);
       if (!answer.textContent) answer.textContent = "The agent completed without a text response.";
       post("new_message", { role: "assistant" });
     } catch (cause) {

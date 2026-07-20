@@ -51,7 +51,11 @@ class MCPServerConfig:
 
     name: str
     url: str
-    api_key: str | None = None
+    # Holds the resolved plaintext credential (Bearer secret / OAuth access
+    # token). Keep it out of repr so stringifying the config can never leak
+    # the secret into logs, tracebacks, or error reports (AS-MCP-002),
+    # mirroring dns_resolver/code_verifier below.
+    api_key: str | None = field(default=None, repr=False)
     transport: str = "streamable_http"
     timeout: float = 30.0
     enabled: bool = True

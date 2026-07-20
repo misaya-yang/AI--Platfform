@@ -378,6 +378,7 @@ export function EvalPage() {
   const requestedWorkbenchTab = searchParams.get("tab");
   const requestedTraceFamily = searchParams.get("family");
   const requestedTraceId = searchParams.get("trace_id") || undefined;
+  const requestedSessionId = searchParams.get("session_id") || undefined;
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState(
     ["overview", "runs", "traces", "assets", "gates"].includes(requestedWorkbenchTab || "")
       ? requestedWorkbenchTab!
@@ -439,6 +440,15 @@ export function EvalPage() {
       setActiveWorkbenchTab(requestedWorkbenchTab);
     }
   }, [requestedWorkbenchTab]);
+
+  // Deep links (e.g. the Agent Studio preview "open trace" link) pass a
+  // session_id so the console opens already filtered to that session's
+  // traces. buildServerFilters already forwards filters.session_id.
+  useEffect(() => {
+    if (requestedSessionId) {
+      setFilters((prev) => ({ ...prev, session_id: requestedSessionId }));
+    }
+  }, [requestedSessionId]);
 
   useEffect(() => {
     setTraceOffset(0);

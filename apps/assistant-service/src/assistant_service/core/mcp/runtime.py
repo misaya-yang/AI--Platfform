@@ -212,7 +212,7 @@ class MCPRuntimeService:
         self._repository = repository
         self._secret_resolver = secret_resolver
         self._client_factory = client_factory
-        self._connection_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._connection_semaphores: dict[str, tuple[int, asyncio.Semaphore]] = {}
 
     def _connection_semaphore(
         self,
@@ -222,18 +222,35 @@ class MCPRuntimeService:
         max_concurrency: int,
     ) -> asyncio.Semaphore:
         limit = max(1, min(32, max_concurrency))
-        key = f"{tenant_id}:{connection_id}:{limit}"
-        semaphore = self._connection_semaphores.get(key)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(limit)
-            self._connection_semaphores[key] = semaphore
-        return semaphore
+        # Key by tenant:connection (not by limit) so the cache stays bounded as
+        # max_concurrency changes, and rebuild the semaphore when the configured
+        # limit changes so new requests honor the current cap (AS-MCP-007).
+        key = f"{tenant_id}:{connection_id}"
+        entry = self._connection_semaphores.get(key)
+        if entry is None or entry[0] != limit:
+            entry = (limit, asyncio.Semaphore(limit))
+            self._connection_semaphores[key] = entry
+        return entry[1]
 
     @staticmethod
     def _identity(context: Any) -> tuple[str, str, bool, str]:
         user = getattr(context, "user", None)
         authenticated = bool(getattr(user, "is_authenticated", False))
-        channel = str((getattr(context, "metadata", None) or {}).get("channel") or "")
+        metadata = getattr(context, "metadata", None) or {}
+        channel = str(metadata.get("channel") or "")
+        if channel == "hosted":
+            # The Agent Runtime envelope signs the raw delivery channel
+            # ("hosted"), but the MCP/connector authorization layer uses a
+            # finer vocabulary ({hosted_private, hosted_public}). Normalize
+            # on the publication auth_mode (the publication's exposure, not
+            # merely whether this caller authenticated) so hosted MCP and
+            # connector tools authorize instead of failing closed, and the
+            # public read-only grant guard applies to genuinely public,
+            # anonymous hosted exposure. preview/embed/api are already valid
+            # members of MCP_CHANNELS and pass through unchanged; "builtin"
+            # is not an MCP delivery channel and stays denied downstream.
+            auth_mode = str(metadata.get("publication_auth_mode") or "")
+            channel = "hosted_public" if auth_mode == "public" else "hosted_private"
         return (
             str(getattr(context, "tenant_id", "") or ""),
             str(getattr(context, "user_id", "") or ""),

@@ -36,6 +36,16 @@ def _config(**changes: Any) -> MCPServerConfig:
     return MCPServerConfig(**values)
 
 
+def test_server_config_repr_never_discloses_credential() -> None:
+    # AS-MCP-002: the resolved Bearer/OAuth secret must never reach logs,
+    # tracebacks, or error reports via the dataclass repr.
+    config = _config(api_key="SUPER-SECRET-TOKEN-xyz")
+    assert "SUPER-SECRET-TOKEN-xyz" not in repr(config)
+    assert "SUPER-SECRET-TOKEN-xyz" not in str(config)
+    # The field is still usable for building the Authorization header.
+    assert config.api_key == "SUPER-SECRET-TOKEN-xyz"
+
+
 class _ChunkedStream(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks

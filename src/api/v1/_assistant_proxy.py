@@ -40,6 +40,12 @@ _INJECTED_IDENTITY_HEADERS: Final = frozenset(
     }
 )
 _CLIENT_SUPPLIED_APP_IDENTITY_HEADERS: Final = frozenset({"x-app-user-id", "x-app-tenant-id"})
+# Legitimate client-carried Agent headers. `X-Agent-Embed-Token` is an
+# untrusted, HMAC-signed, origin-bound bearer for the public Embed channel;
+# it is still cryptographically verified downstream (`_verify_embed_token`),
+# so carrying it is not a forgery vector. Everything else under `x-agent-*`
+# remains forbidden to block injection of trusted runtime fields.
+_ALLOWED_AGENT_HEADERS: Final = frozenset({"x-agent-embed-token"})
 _RESERVED_AGENT_FIELDS: Final = frozenset(
     {
         "agent_id",
@@ -62,7 +68,11 @@ def reject_client_agent_forgery(
 ) -> None:
     """Reject reserved Agent fields/headers on every browser-facing route."""
 
-    if any(name.lower().startswith("x-agent-") for name in request.headers):
+    if any(
+        (header := name.lower()).startswith("x-agent-")
+        and header not in _ALLOWED_AGENT_HEADERS
+        for name in request.headers
+    ):
         raise HTTPException(
             status_code=400,
             detail={
