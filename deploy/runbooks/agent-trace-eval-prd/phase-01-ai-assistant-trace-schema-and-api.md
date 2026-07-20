@@ -180,7 +180,7 @@
       {
         "id": "harness-strict",
         "cwd": ".",
-        "command": "python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
+        "command": "python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
         "expected": "Harness strict validation exits 0 after ATE-01 evidence writeback.",
         "required": true
       }
@@ -253,7 +253,7 @@
 - LIKELY_EDIT_PATHS: `database/migrations/060_agent_trace_eval.sql`, `src/api/v1/eval.py`, `src/api/schemas/eval.py`, `packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py`, `src/api/router.py`, `tests/api/test_eval_traces.py`, `tests/contract/test_openapi_schema_compat.py`, harness report and runtime writeback files for ATE-01
 - DO_NOT_EDIT: `apps/assistant-service/`, `web/`, `src/api/v1/langgraph.py`, production systems, secret files, deployment configuration
 - EXECUTION_MODE: plan-first; implement one phase and one feature item; verify before completion; write evidence before handoff
-- VALIDATION_COMMANDS: `uv run ruff check src/api/v1/eval.py src/api/schemas/eval.py packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py tests/api/test_eval_traces.py tests/contract/test_openapi_schema_compat.py`; `uv run --extra dev --extra test pytest -q --no-cov tests/api/test_eval_traces.py tests/api/test_gateway_tenant_isolation.py tests/contract/test_openapi_schema_compat.py`; `rg -n 'agent_traces|agent_trace_spans|agent_trace_events|agent_trace_scores|tenant_id|trace_family|assistant' database/migrations/060_agent_trace_eval.sql`; `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`
+- VALIDATION_COMMANDS: `uv run ruff check src/api/v1/eval.py src/api/schemas/eval.py packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py tests/api/test_eval_traces.py tests/contract/test_openapi_schema_compat.py`; `uv run --extra dev --extra test pytest -q --no-cov tests/api/test_eval_traces.py tests/api/test_gateway_tenant_isolation.py tests/contract/test_openapi_schema_compat.py`; `rg -n 'agent_traces|agent_trace_spans|agent_trace_events|agent_trace_scores|tenant_id|trace_family|assistant' database/migrations/060_agent_trace_eval.sql`; `python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`
 - BROWSER_CHECKS: No browser route is created in ATE-01; any browser-visible edit blocks completion until route and viewport evidence are recorded.
 - REGRESSION_SCOPE: Existing usage trace API behavior remains unchanged; assistant session and OpenAPI compatibility tests remain passing; ATE-00 facts remain valid.
 - COMPLIANCE_GATES: Authenticated tenant context is required; trace queries filter by server-side tenant_id; redacted and bounded payloads only; no production migration.

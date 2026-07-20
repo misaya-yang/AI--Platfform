@@ -2,7 +2,7 @@
 
 **Prepared:** 2026-06-29
 
-**Repo:** `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`
+**Repo:** `the project root`
 
 **Harness:** `deploy/runbooks/assistant-runtime-optimization`
 
@@ -216,7 +216,7 @@ ARO-05 implementation facts:
 Baseline and implementation phases should use targeted subsets of:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score
 uv run ruff check apps/assistant-service/src/assistant_service/core/agent apps/assistant-service/src/assistant_service/core/gateway src/api/v1/eval.py src/services/eval packages/ai-gateway-core/src/ai_gateway_core/eval tests/services/assistant tests/services/eval tests/api/test_eval_traces.py tests/api/test_eval_api_trace_tree.py tests/contract
 uv run --package assistant-service pytest -q --no-cov tests/services/assistant/test_agent_loop_golden.py tests/services/assistant/test_agent_trace_capture.py tests/services/assistant/test_agentloop_streaming_first_contract.py
 uv run pytest -q --no-cov tests/api/test_eval_traces.py tests/api/test_eval_api_trace_tree.py tests/services/eval/test_trace_capture_helpers.py tests/services/eval/test_evaluator_executor.py tests/services/eval/test_golden_regression_gate.py

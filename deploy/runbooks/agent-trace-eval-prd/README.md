@@ -160,7 +160,7 @@ uv run --extra dev --extra test pytest -q --no-cov tests/api tests/services/assi
 pnpm -C web lint
 pnpm -C web type-check
 pnpm -C web e2e:opensource
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
 ```
 
 Each implementation phase narrows this list to the smallest credible subset plus targeted tests added by that phase.

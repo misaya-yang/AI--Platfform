@@ -319,7 +319,7 @@ AHR-00 must record the exact docs, backend, eval, assistant-service, and web com
 Run the docs validation command for this PRD and record the exact output:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
 ```
 
 Do not claim backend or frontend tests passed unless they are actually run during AHR-00.

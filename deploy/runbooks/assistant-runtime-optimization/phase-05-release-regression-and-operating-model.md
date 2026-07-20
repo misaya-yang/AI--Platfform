@@ -117,7 +117,7 @@
       {
         "id": "harness-full-completion",
         "cwd": ".",
-        "command": "python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score",
+        "command": "python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score",
         "expected": "Strict full-demand completion gate passes after reports and critic artifacts exist.",
         "required": true
       },

@@ -186,7 +186,7 @@
       {
         "id": "harness-strict",
         "cwd": ".",
-        "command": "python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
+        "command": "python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
         "expected": "Harness strict validation exits 0 after ATE-03 evidence writeback.",
         "required": true
       }
@@ -263,7 +263,7 @@
 - LIKELY_EDIT_PATHS: `web/src/api/eval.ts`, `web/src/pages/eval/index.tsx`, `web/src/pages/eval/components/AssistantTraceList.tsx`, `web/src/pages/eval/components/AssistantTraceDetail.tsx`, `web/src/pages/eval/components/TraceScorePanel.tsx`, `web/src/router.tsx`, `web/src/layouts/AppLayout.tsx`, `web/e2e/eval-trace.spec.ts`, harness report and runtime writeback files for ATE-03
 - DO_NOT_EDIT: `database/`, `apps/assistant-service/`, `src/api/v1/langgraph.py`, production systems, secret files, deployment configuration
 - EXECUTION_MODE: plan-first; implement one phase and one feature item; verify before completion; write evidence before handoff
-- VALIDATION_COMMANDS: `pnpm -C web lint`; `pnpm -C web type-check`; `pnpm -C web e2e:opensource`; `uv run --extra dev --extra test pytest -q --no-cov tests/api/test_eval_traces.py`; `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`
+- VALIDATION_COMMANDS: `pnpm -C web lint`; `pnpm -C web type-check`; `pnpm -C web e2e:opensource`; `uv run --extra dev --extra test pytest -q --no-cov tests/api/test_eval_traces.py`; `python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`
 - BROWSER_CHECKS: `/eval` desktop 1440x900, `/eval` mobile 390x844, keyboard focus path, guarded LangGraph Proxy tab, guarded RAG tab
 - REGRESSION_SCOPE: Existing /assistant route, dashboard request trace panel, Eval API client contract, and ATE-02 latency guard evidence remain valid.
 - COMPLIANCE_GATES: Authenticated app shell is preserved; redaction markers display; score submission uses authenticated user context; no browser call goes to external observability services.

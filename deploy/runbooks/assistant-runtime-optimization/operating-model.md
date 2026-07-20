@@ -24,8 +24,8 @@
 | --- | --- | --- |
 | Eval/trace/web dev bundle | `make verify-eval-dev` | Python checks/tests pass; golden gate status is `pass`; web lint has 0 errors; web type-check exits 0. |
 | Open-source config | `make validate-example-config` | `Example configuration validation passed`. |
-| ARO phase gate | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase <PHASE_ID> --quality-score` | `Harness validation passed` and quality score is excellent. |
-| Full harness gate | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` | `Harness validation passed` and all completed features cite actor and critic evidence. |
+| ARO phase gate | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase <PHASE_ID> --quality-score` | `Harness validation passed` and quality score is excellent. |
+| Full harness gate | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` | `Harness validation passed` and all completed features cite actor and critic evidence. |
 
 ## SLO and No-Go Thresholds
 

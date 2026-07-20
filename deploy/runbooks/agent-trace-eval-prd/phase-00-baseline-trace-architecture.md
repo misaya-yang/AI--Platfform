@@ -146,7 +146,7 @@
       {
         "id": "harness-strict",
         "cwd": ".",
-        "command": "python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
+        "command": "python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score",
         "expected": "Validator exits 0 and reports strict structure readiness for the harness folder.",
         "required": true
       },
@@ -238,7 +238,7 @@
 - LIKELY_EDIT_PATHS: `deploy/runbooks/agent-trace-eval-prd/source-packet.md`, `deploy/runbooks/agent-trace-eval-prd/continuity-ledger.md`, `deploy/runbooks/agent-trace-eval-prd/progress-log.md`, `deploy/runbooks/agent-trace-eval-prd/agent-handoff.md`, `deploy/runbooks/agent-trace-eval-prd/feature-oracle.json`, `deploy/runbooks/agent-trace-eval-prd/loop-state.json`, `deploy/runbooks/agent-trace-eval-prd/reports/ate-00-baseline-trace-architecture-report.md`, `deploy/runbooks/agent-trace-eval-prd/reports/ate-00-baseline-trace-architecture-critic.md`
 - DO_NOT_EDIT: `src/`, `apps/`, `packages/`, `database/`, `web/`, production systems, secret files, deployment configuration
 - EXECUTION_MODE: plan-first; implement one phase and one feature item; verify before completion; write evidence before handoff
-- VALIDATION_COMMANDS: `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`; `rg -n '\b(T[D]O|T[B]D)\b|\{\{[^}]+\}\}' deploy/runbooks/agent-trace-eval-prd`; `git check-ignore -v docs/agent_trace_eval_prd docs/general_ai_assistant_next_gen/README.md`; `rg --files -g 'pyproject.toml' -g 'Makefile' -g 'package.json' -g 'pnpm-lock.yaml' -g '.github/workflows/*'`
+- VALIDATION_COMMANDS: `python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score`; `rg -n '\b(T[D]O|T[B]D)\b|\{\{[^}]+\}\}' deploy/runbooks/agent-trace-eval-prd`; `git check-ignore -v docs/agent_trace_eval_prd docs/general_ai_assistant_next_gen/README.md`; `rg --files -g 'pyproject.toml' -g 'Makefile' -g 'package.json' -g 'pnpm-lock.yaml' -g '.github/workflows/*'`
 - BROWSER_CHECKS: No browser route is created in ATE-00; any browser-visible edit blocks completion until route and viewport evidence are recorded.
 - REGRESSION_SCOPE: Runtime code remains unchanged; AI Assistant remains the only first-wave implementation scope; LangGraph Proxy Trace and RAG Trace stay in expansion contracts.
 - COMPLIANCE_GATES: Do not read or write secrets, mutate production data, deploy, run production migrations, or configure external services.

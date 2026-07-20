@@ -35,5 +35,5 @@ Implementation is additive only. No database migration, deployment, public field
 ## Validation
 
 - `uv run --package assistant-service pytest -q --no-cov tests/services/assistant`
-- `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score`
-- `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase AHR-01 --quality-score`
+- `python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score`
+- `python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase AHR-01 --quality-score`

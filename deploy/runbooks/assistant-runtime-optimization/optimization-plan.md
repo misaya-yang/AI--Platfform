@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-29
 
-**Repo:** `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`
+**Repo:** `the project root`
 
 ## Bottom Line
 

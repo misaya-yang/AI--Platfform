@@ -329,7 +329,7 @@ Candidate commands to confirm or refine during AHR-00 and prior phases:
 ```bash
 make verify-eval-dev
 make eval-regression-gate
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --quality-score
 ```
 
 If a future runtime gate is added, run it locally and record generated JSON/Markdown reports. Do not promote it into `make verify-eval-dev` or required CI until it is offline, deterministic, and has clear failure output.

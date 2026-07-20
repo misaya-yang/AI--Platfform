@@ -24,5 +24,5 @@ This phase is docs/runbook-only. It may edit only the AHR harness files under `d
 ## Validation
 
 - `rg -n "AHR-F001|Hermes|OpenClaw|ExecutionGateway|MemoryProvider|Context Compiler|memory_search|memory_get|transcript|Doctor|Eval|Hermes_Agent_技术分析" deploy/runbooks/assistant-hermes-runtime-prd/product-prd.md deploy/runbooks/assistant-hermes-runtime-prd/source-packet.md deploy/runbooks/assistant-hermes-runtime-prd/openclaw-synthesis.md deploy/runbooks/assistant-hermes-runtime-prd/feature-oracle.json`
-- `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score`
-- `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase AHR-00 --quality-score`
+- `python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score`
+- `python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase AHR-00 --quality-score`

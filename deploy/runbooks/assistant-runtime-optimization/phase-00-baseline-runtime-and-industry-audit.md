@@ -104,7 +104,7 @@
       {
         "id": "harness-strict",
         "cwd": ".",
-        "command": "python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score",
+        "command": "python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score",
         "expected": "Harness validation passed and quality score is emitted.",
         "required": true
       },

@@ -31,13 +31,13 @@ rg -n "ACCEPTANCE_GATES:" deploy/runbooks/agent-trace-eval-prd/phase-*.md
 Validate harness structure:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
 ```
 
 Validate a completed phase claim:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --completion-gate --phase ATE-00 --quality-score
+python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --completion-gate --phase ATE-00 --quality-score
 ```
 
 ## Phase Index

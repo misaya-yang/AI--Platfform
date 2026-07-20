@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Read(//Users/misaya.yanghejazfs.com.au/hejaz_projects/ai_gateway/ai-gateway/**)"
+      "Read(//Users/yang/projects/AI--Platfform/**)"
     ]
   },
   "enabledPlugins": {

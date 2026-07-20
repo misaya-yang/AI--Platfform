@@ -1,4 +1,5 @@
 {
+  "evidence_scope": "recorded_offline_observation",
   "gate": {
     "failures": [],
     "metrics": {
@@ -280,6 +281,14 @@
     "overall_score": 1.0,
     "pass_rate": 1.0,
     "trajectory_pass_rate": 1.0
+  },
+  "observations": {
+    "case_count": 16,
+    "errors": [],
+    "joined_count": 16,
+    "observation_count": 16,
+    "source": "tests/fixtures/eval/observations/assistant_regression_v1.jsonl",
+    "valid": true
   },
   "schema_version": "eval-regression-gate-v1",
   "source": "tests/fixtures/eval/golden/assistant_regression_v1.jsonl",

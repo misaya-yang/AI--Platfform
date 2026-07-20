@@ -29,7 +29,7 @@ ATE-01 edits only files named by the phase contract. If an existing auth or perm
 uv run ruff check src/api/v1/eval.py src/api/schemas/eval.py packages/ai-gateway-core/src/ai_gateway_core/persistence/repositories/agent_trace_repository.py tests/api/test_eval_traces.py tests/contract/test_openapi_schema_compat.py
 uv run --extra dev --extra test pytest -q --no-cov tests/api/test_eval_traces.py tests/api/test_gateway_tenant_isolation.py tests/contract/test_openapi_schema_compat.py
 rg -n 'agent_traces|agent_trace_spans|agent_trace_events|agent_trace_scores|tenant_id|trace_family|assistant' database/migrations/060_agent_trace_eval.sql
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
 ```
 
 ## Review Method

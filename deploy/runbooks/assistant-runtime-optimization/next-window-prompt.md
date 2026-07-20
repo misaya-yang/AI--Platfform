@@ -2,7 +2,7 @@
 
 Use the `prd-phase-harness` skill.
 
-Repo: `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`
+Repo: `the project root`
 
 Harness: `deploy/runbooks/assistant-runtime-optimization`
 
@@ -34,8 +34,8 @@ Evidence and continuity ledger rule: any repair must update the actor report, cr
 Final validation commands:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score
 ```
 
 If either command fails, repair the named artifact and rerun both gates before claiming completion.

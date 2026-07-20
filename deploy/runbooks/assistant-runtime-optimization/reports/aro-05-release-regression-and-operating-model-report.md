@@ -39,8 +39,8 @@ The plan was followed without application source changes. The only new artifact 
 | Golden eval | included in `make verify-eval-dev` | passed | 10 cases, `overall_score=1.0`, `trajectory_pass_rate=1.0`, `critical_pass_rate=1.0`, gate `status=pass`. |
 | Open-source config | `make validate-example-config` | passed | `Example configuration validation passed`. |
 | Operating model | `deploy/runbooks/assistant-runtime-optimization/operating-model.md` inspected | passed | Contains decisions, rollback boundaries, trusted commands, SLO/no-go thresholds, no-deploy rules, and backlog. |
-| Phase completion gate | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score` | passed | `Harness validation passed`; quality score 100. |
-| Full completion gate | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` | passed | `Harness validation passed`; quality score 100. |
+| Phase completion gate | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score` | passed | `Harness validation passed`; quality score 100. |
+| Full completion gate | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` | passed | `Harness validation passed`; quality score 100. |
 
 ## Whole-Demand Regression Coverage
 

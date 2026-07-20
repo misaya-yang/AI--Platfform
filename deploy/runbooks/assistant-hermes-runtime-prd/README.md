@@ -149,7 +149,7 @@ Use `deploy/runbooks/assistant-hermes-runtime-prd/next-window-prompt.md` when st
 Docs-only PRD validation:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
 ```
 
 Future implementation validation candidates:

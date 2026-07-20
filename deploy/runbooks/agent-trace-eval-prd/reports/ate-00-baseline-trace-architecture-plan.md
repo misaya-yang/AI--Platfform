@@ -36,7 +36,7 @@ ATE-00 changes only PRD harness files under `deploy/runbooks/agent-trace-eval-pr
 ## Validation Commands
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/agent-trace-eval-prd --strict --quality-score
 rg -n '\b(T[D]O|T[B]D)\b|\{\{[^}]+\}\}' deploy/runbooks/agent-trace-eval-prd
 git check-ignore -v docs/agent_trace_eval_prd docs/general_ai_assistant_next_gen/README.md
 rg --files -g 'pyproject.toml' -g 'Makefile' -g 'package.json' -g 'pnpm-lock.yaml' -g '.github/workflows/*'

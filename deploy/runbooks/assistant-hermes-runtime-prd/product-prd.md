@@ -4,9 +4,9 @@
 
 **Baseline:** seeded from `origin/dev_06-30`, adapted on current `main`
 
-**Primary repo:** `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`
+**Primary repo:** `the project root`
 
-**Comparison sources:** `/Users/misaya.yanghejazfs.com.au/Downloads/Hermes_Agent_技术分析与AI平台对标报告.docx`, `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw`
+**Comparison sources:** `downloads/Hermes_Agent_技术分析与AI平台对标报告.docx`, `openclaw source`
 
 ## Executive Summary
 
@@ -71,20 +71,20 @@ AI--Platfform evidence:
 
 Hermes evidence:
 
-- `/Users/misaya.yanghejazfs.com.au/Downloads/Hermes_Agent_技术分析与AI平台对标报告.docx`: local technical report used as the Hermes synthesis source for Context Compiler, harness engine, prompt layering, memory management, session isolation, tool governance, skills, safety, and observability recommendations.
+- `downloads/Hermes_Agent_技术分析与AI平台对标报告.docx`: local technical report used as the Hermes synthesis source for Context Compiler, harness engine, prompt layering, memory management, session isolation, tool governance, skills, safety, and observability recommendations.
 - The report cites Hermes Agent v0.11.0 public materials and describes `AIAgent`, cached system prompt plus ephemeral overlays, MEMORY.md/USER.md bounded memory, SQLite session state, provider lifecycle hooks, tool registry/toolsets/approval, observer hooks, trajectory export, and local-execution security caveats.
 - No local Hermes source checkout was found during the 2026-07-01 adaptation pass. During AHR-00 execution the user approved remote source lookup; official `NousResearch/hermes-agent` HEAD `729bbb7a309a3d13d8cc7d1cd2fbab79e7d969f7` and pinned raw files were verified as read-only comparison source anchors. Do not vendor, import, or execute Hermes code.
 
 OpenClaw evidence:
 
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/whitepapers/openclaw-agent-engineering-whitepaper.md`: expected path from the initial draft, but this path was missing during AHR-00 source recheck on 2026-07-01. Use verified code/docs paths and `openclaw-synthesis.md` instead until the whitepaper is relocated.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/agents/system-prompt.ts`: runtime prompt compilation from actual tools, skills, memory, docs, workspace, sandbox, messaging, and runtime line.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/context-engine/types.ts`: context engine lifecycle with bootstrap, ingest, assemble, compact, afterTurn, and subagent lifecycle hooks.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/packages/memory-host-sdk/src/host/session-files.ts` and `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/hooks/bundled/session-memory/handler.ts`: transcript parsing, redaction, line maps, reset/new memory summaries, and fallback transcript recovery.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/plugins/registry.ts` and `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/extensions/memory-core/index.ts`: plugin API for registering tools, hooks, HTTP routes, channels, providers, CLI, services, and context engines.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/channels/plugins/types.plugin.ts` and `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/src/routing/session-key.ts`: channel plugin and session-key contracts.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/SECURITY.md`: single-operator trust model, plugin TCB, model-as-untrusted, and sandbox/tool-policy boundaries.
-- `/Users/misaya.yanghejazfs.com.au/openclaw/openclaw/docs/gateway/doctor.md`: doctor/status model for health, state integrity, auth, sandbox, gateway runtime, channel status, service audit, and source install checks.
+- `openclaw source/whitepapers/openclaw-agent-engineering-whitepaper.md`: expected path from the initial draft, but this path was missing during AHR-00 source recheck on 2026-07-01. Use verified code/docs paths and `openclaw-synthesis.md` instead until the whitepaper is relocated.
+- `openclaw source/src/agents/system-prompt.ts`: runtime prompt compilation from actual tools, skills, memory, docs, workspace, sandbox, messaging, and runtime line.
+- `openclaw source/src/context-engine/types.ts`: context engine lifecycle with bootstrap, ingest, assemble, compact, afterTurn, and subagent lifecycle hooks.
+- `openclaw source/packages/memory-host-sdk/src/host/session-files.ts` and `openclaw source/src/hooks/bundled/session-memory/handler.ts`: transcript parsing, redaction, line maps, reset/new memory summaries, and fallback transcript recovery.
+- `openclaw source/src/plugins/registry.ts` and `openclaw source/extensions/memory-core/index.ts`: plugin API for registering tools, hooks, HTTP routes, channels, providers, CLI, services, and context engines.
+- `openclaw source/src/channels/plugins/types.plugin.ts` and `openclaw source/src/routing/session-key.ts`: channel plugin and session-key contracts.
+- `openclaw source/SECURITY.md`: single-operator trust model, plugin TCB, model-as-untrusted, and sandbox/tool-policy boundaries.
+- `openclaw source/docs/gateway/doctor.md`: doctor/status model for health, state integrity, auth, sandbox, gateway runtime, channel status, service audit, and source install checks.
 - `deploy/runbooks/assistant-hermes-runtime-prd/openclaw-synthesis.md`: translation of OpenClaw mechanisms into AI--Platfform Assistant requirements.
 
 ## Comparative Maturity
@@ -290,7 +290,7 @@ Acceptance:
 Local docs-only validation for this PRD:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
 ```
 
 Future implementation validation candidates:

@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `/Users/misaya.yanghejazfs.com.au/misaya_project/AI--Platfform`.
+- Work only in `the project root`.
 - Preserve the two pre-existing user modifications under `reports/assistant-runtime-regression/`; do not restore or overwrite them.
 - Do not commit, push, deploy, mutate Docker, call external providers, print secrets, or add a database migration.
 - Preserve public API response fields; additive fields are allowed only when tests prove backward compatibility.

@@ -19,13 +19,13 @@ rg -n "AHR-F00|Requirement|acceptance_gates|GOAL_PROMPT" deploy/runbooks/assista
 Validate this PRD harness structure:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --quality-score
 ```
 
 Validate a future phase completion claim:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase <PHASE_ID> --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-hermes-runtime-prd --strict --completion-gate --phase <PHASE_ID> --quality-score
 ```
 
 ## Phase Index

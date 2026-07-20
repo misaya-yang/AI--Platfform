@@ -61,7 +61,7 @@ Stale against current repo:
 
 | Gate | Command or Check | Result | Notes |
 | --- | --- | --- | --- |
-| Harness structure | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score` | passed | `Harness validation passed`; quality score 100. |
+| Harness structure | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score` | passed | `Harness validation passed`; quality score 100. |
 | Initial assistant baseline | `uv run --package assistant-service pytest -q --no-cov tests/services/assistant/test_agent_loop_golden.py tests/services/assistant/test_agent_trace_capture.py tests/services/assistant/test_agentloop_streaming_first_contract.py` | failed before fix | 31 passed, 2 golden failures: added RAG retrieval stream events and added AssistantConfig trace fields. |
 | Assistant baseline after fix | Same assistant baseline command | passed | 33 passed in 0.40s. |
 | Route traceparent regression | `uv run --package assistant-service pytest -q --no-cov tests/services/assistant/test_assistant_service.py::TestAssistantConfig::test_route_config_carries_traceparent` | passed | 1 passed in 0.36s. |

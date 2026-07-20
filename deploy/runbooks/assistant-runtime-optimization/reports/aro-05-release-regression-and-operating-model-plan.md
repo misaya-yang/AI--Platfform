@@ -48,8 +48,8 @@ ARO-05 is a terminal release-evidence phase. It should not deploy, run productio
 | --- | --- |
 | eval-dev-bundle | `make verify-eval-dev` |
 | open-source-config | `make validate-example-config` |
-| ARO-05 completion | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score` |
-| Full completion | `python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` |
+| ARO-05 completion | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --phase ARO-05 --quality-score` |
+| Full completion | `python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --completion-gate --quality-score` |
 
 ## Minimal-Change Boundary
 

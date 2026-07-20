@@ -144,7 +144,7 @@ Use `deploy/runbooks/assistant-runtime-optimization/next-window-prompt.md` when 
 Harness structure validation:
 
 ```bash
-python3 /Users/misaya.yanghejazfs.com.au/.codex/skills/prd-phase-harness/scripts/validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score
+python3 validate_harness_prd.py deploy/runbooks/assistant-runtime-optimization --strict --quality-score
 ```
 
 Targeted backend gates appear inside each phase's `validation.commands`. Common subsets include:
