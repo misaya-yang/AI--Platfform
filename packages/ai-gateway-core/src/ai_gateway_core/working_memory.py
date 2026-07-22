@@ -17,6 +17,7 @@ Reference: https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -426,3 +427,71 @@ class WorkingMemory:
         memory.collected_info = [CollectedInfo.from_dict(i) for i in data.get("collected_info", [])]
         memory.notes = data.get("notes", [])
         return memory
+
+    @classmethod
+    def from_persisted_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        expected_session_id: str,
+    ) -> WorkingMemory:
+        """Restore bounded state only when it belongs to the active session."""
+
+        if not isinstance(data, dict):
+            raise ValueError("Persisted working memory must be an object")
+        if str(data.get("session_id") or "") != expected_session_id:
+            raise ValueError("Persisted working memory session mismatch")
+        if len(json.dumps(data, ensure_ascii=False, default=str)) > 100_000:
+            raise ValueError("Persisted working memory exceeds size limit")
+
+        goal = data.get("goal")
+        if goal is not None and (not isinstance(goal, str) or len(goal) > 2_000):
+            raise ValueError("Persisted working memory goal is invalid")
+
+        tasks = data.get("tasks", [])
+        info_items = data.get("collected_info", [])
+        notes = data.get("notes", [])
+        if not isinstance(tasks, list) or len(tasks) > 100:
+            raise ValueError("Persisted working memory task list is invalid")
+        if not isinstance(info_items, list) or len(info_items) > 100:
+            raise ValueError("Persisted working memory info list is invalid")
+        if not isinstance(notes, list) or len(notes) > 100:
+            raise ValueError("Persisted working memory notes are invalid")
+
+        task_ids: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                raise ValueError("Persisted working memory task is invalid")
+            task_id = task.get("id")
+            description = task.get("description")
+            if not isinstance(task_id, str) or not task_id or len(task_id) > 128:
+                raise ValueError("Persisted working memory task id is invalid")
+            if task_id in task_ids:
+                raise ValueError("Persisted working memory has duplicate task ids")
+            task_ids.add(task_id)
+            if not isinstance(description, str) or len(description) > 1_000:
+                raise ValueError("Persisted working memory task description is invalid")
+            for field_name in ("result", "error"):
+                value = task.get(field_name)
+                if value is not None and (not isinstance(value, str) or len(value) > 500):
+                    raise ValueError(f"Persisted working memory task {field_name} is invalid")
+
+        for info in info_items:
+            if not isinstance(info, dict):
+                raise ValueError("Persisted working memory info item is invalid")
+            for field_name, max_chars in (
+                ("key", 128),
+                ("value", 2_000),
+                ("source", 128),
+            ):
+                value = info.get(field_name)
+                if not isinstance(value, str) or len(value) > max_chars:
+                    raise ValueError(f"Persisted working memory info {field_name} is invalid")
+
+        if any(not isinstance(note, str) or len(note) > 1_000 for note in notes):
+            raise ValueError("Persisted working memory note is invalid")
+
+        try:
+            return cls.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Persisted working memory payload is invalid") from exc

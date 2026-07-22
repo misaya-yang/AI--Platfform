@@ -15,6 +15,10 @@ from typing import Any
 
 REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
+        re.compile(r"(?i)([?&](?:key|api_key)=)[^&#\s\"']+"),
+        r"\1[redacted]",
+    ),
+    (
         re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]+"),
         "Authorization: Bearer [redacted]",
     ),
@@ -47,6 +51,10 @@ REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}"),
         "AIza[redacted]",
+    ),
+    (
+        re.compile(r"\bAQ\.[A-Za-z0-9._\-]{6,}"),
+        "AQ.[redacted]",
     ),
 )
 

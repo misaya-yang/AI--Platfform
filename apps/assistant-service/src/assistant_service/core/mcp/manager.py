@@ -8,6 +8,7 @@ them into the agent's ToolRegistry with prefix `mcp_{server}:{tool}`.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from contextlib import suppress
 from typing import Any
@@ -19,7 +20,12 @@ from ..tools.tool_registry import (
     ToolRiskLevel,
     get_tool_registry,
 )
-from .client import MCPClient, MCPServerConfig, MCPTool
+from .client import MCPClient, MCPError, MCPServerConfig, MCPTool
+from .resilience import (
+    MCPInvocationPolicy,
+    MCPOperationKind,
+    build_operation_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +76,10 @@ class MCPManager:
         return results
 
     def _register_mcp_tool(
-        self, mcp_tool: MCPTool, client: MCPClient, tool_registry: Any,
+        self,
+        mcp_tool: MCPTool,
+        client: MCPClient,
+        tool_registry: Any,
     ) -> None:
         """Register an MCP tool as a callable tool in ToolRegistry."""
         # Sanitize tool name for ToolRegistry (no colons allowed in some LLM APIs)
@@ -90,10 +99,17 @@ class MCPManager:
             parameters=params,
             category=ToolCategory.MCP,
             risk_level=ToolRiskLevel.MEDIUM,
+            requires_confirmation=True,
             when_to_use=safe_desc,
             when_not_to_use="When this tenant has not explicitly enabled the MCP server.",
             relevance_keywords=keywords,
-            timeout_seconds=int(client.config.timeout),
+            timeout_seconds=max(
+                1,
+                math.ceil(
+                    float(getattr(client.config, "host_deadline", None) or client.config.timeout)
+                )
+                + 1,
+            ),
             is_async=True,
         )
         definition.capability_metadata = self._capability_metadata(
@@ -106,8 +122,45 @@ class MCPManager:
         # Create executor closure
         async def executor(request: Any) -> Any:
             from ..tools.tool_registry import ToolCallResult
+
             args = getattr(request, "arguments", None) or getattr(request, "tool_args", {}) or {}
-            result = await client.call_tool(mcp_tool.upstream_name, args)
+            request_metadata = getattr(request, "metadata", None) or {}
+            operation_metadata = request_metadata.get("tool_operation") or {}
+            operation_id = str(operation_metadata.get("operation_id") or "")
+            if not operation_id:
+                operation_id, _ = build_operation_identity(
+                    context=request_metadata,
+                    tool_name=registry_name,
+                    arguments=args,
+                )
+            invocation_policy = MCPInvocationPolicy(
+                operation_kind=MCPOperationKind.UNKNOWN,
+                operation_id=operation_id,
+                circuit_scope=":".join(
+                    [
+                        str(request_metadata.get("tenant_id") or "unresolved"),
+                        mcp_tool.server_name,
+                    ]
+                ),
+            )
+            try:
+                result = await client.call_tool(
+                    mcp_tool.upstream_name,
+                    args,
+                    invocation_policy=invocation_policy,
+                )
+            except MCPError as exc:
+                return ToolCallResult(
+                    call_id=getattr(request, "call_id", ""),
+                    tool_name=registry_name,
+                    success=False,
+                    error=exc.stable_code,
+                    metadata={
+                        "mcp_server": mcp_tool.server_name,
+                        "mcp_tool": mcp_tool.name,
+                        **exc.metadata(),
+                    },
+                )
             text_parts: list[str] = []
             # File-producing MCP tools return ``type:"resource"`` content with
             # a uri/name/mimeType. We surface these through ToolCallResult.
@@ -126,46 +179,60 @@ class MCPManager:
                     # tool produced. Flat shape (uri/name/mimeType at top level).
                     uri = c.get("uri") or ""
                     if uri:
-                        file_outputs.append({
-                            "download_url": uri,
-                            "filename": c.get("name") or c.get("title") or "artifact",
-                            "mime_type": c.get("mimeType") or c.get("mime_type"),
-                            "size_bytes": c.get("size") or c.get("size_bytes"),
-                            "source": "mcp",
-                            "externally_hosted": True,
-                        })
+                        file_outputs.append(
+                            {
+                                "download_url": uri,
+                                "filename": c.get("name") or c.get("title") or "artifact",
+                                "mime_type": c.get("mimeType") or c.get("mime_type"),
+                                "size_bytes": c.get("size") or c.get("size_bytes"),
+                                "source": "mcp",
+                                "externally_hosted": True,
+                            }
+                        )
                 elif ctype == "resource":
                     # MCP "embedded resource" content — nested resource object.
                     r = c.get("resource") or {}
                     uri = r.get("uri") or ""
                     if uri:
-                        file_outputs.append({
-                            "download_url": uri,
-                            "filename": r.get("name") or r.get("title") or "artifact",
-                            "mime_type": r.get("mimeType") or r.get("mime_type"),
-                            "size_bytes": r.get("size") or r.get("size_bytes"),
-                            "source": "mcp",
-                            "externally_hosted": True,
-                        })
+                        file_outputs.append(
+                            {
+                                "download_url": uri,
+                                "filename": r.get("name") or r.get("title") or "artifact",
+                                "mime_type": r.get("mimeType") or r.get("mime_type"),
+                                "size_bytes": r.get("size") or r.get("size_bytes"),
+                                "source": "mcp",
+                                "externally_hosted": True,
+                            }
+                        )
                 elif ctype == "image":
                     # Inline image content — treat as file with data URL.
                     data = c.get("data")
                     mime = c.get("mimeType") or "image/png"
                     if data:
-                        file_outputs.append({
-                            "download_url": f"data:{mime};base64,{data}",
-                            "filename": "image",
-                            "mime_type": mime,
-                            "source": "mcp_inline",
-                            "externally_hosted": True,
-                        })
+                        file_outputs.append(
+                            {
+                                "download_url": f"data:{mime};base64,{data}",
+                                "filename": "image",
+                                "mime_type": mime,
+                                "source": "mcp_inline",
+                                "externally_hosted": True,
+                            }
+                        )
             return ToolCallResult(
                 call_id=getattr(request, "call_id", ""),
                 tool_name=registry_name,
                 success=not result.is_error,
                 result="\n".join(text_parts) if text_parts else str(result.content),
                 output_files=file_outputs,
-                metadata={"mcp_server": mcp_tool.server_name, "mcp_tool": mcp_tool.name},
+                error="MCP_REMOTE_TOOL_ERROR" if result.is_error else None,
+                metadata={
+                    "mcp_server": mcp_tool.server_name,
+                    "mcp_tool": mcp_tool.name,
+                    "mcp_failure": (
+                        result.failure.to_dict() if result.failure is not None else None
+                    ),
+                    "mcp_circuit": result.circuit,
+                },
             )
 
         tool_registry.register(definition, executor)
@@ -213,14 +280,16 @@ class MCPManager:
         status = []
         for config in self._configs:
             client = self._clients.get(config.name)
-            status.append({
-                "name": config.name,
-                "url": config.url,
-                "description": config.description,
-                "enabled": config.enabled,
-                "connected": client is not None and client.is_initialized,
-                "tool_count": len(client.tools) if client else 0,
-            })
+            status.append(
+                {
+                    "name": config.name,
+                    "url": config.url,
+                    "description": config.description,
+                    "enabled": config.enabled,
+                    "connected": client is not None and client.is_initialized,
+                    "tool_count": len(client.tools) if client else 0,
+                }
+            )
         return status
 
     def _schema_to_params(self, schema: dict) -> list[ToolParameter]:
@@ -229,12 +298,14 @@ class MCPManager:
         properties = schema.get("properties", {})
         required = set(schema.get("required", []))
         for name, prop in properties.items():
-            params.append(ToolParameter(
-                name=name,
-                type=prop.get("type", "string"),
-                description=self._sanitize_external_text(prop.get("description", "")),
-                required=name in required,
-            ))
+            params.append(
+                ToolParameter(
+                    name=name,
+                    type=prop.get("type", "string"),
+                    description=self._sanitize_external_text(prop.get("description", "")),
+                    required=name in required,
+                )
+            )
         return params
 
     def _sanitize_external_text(self, text: str, max_len: int = 500) -> str:
@@ -288,6 +359,11 @@ class MCPManager:
             "setup_state": "ready",
             "policy_scope": "tenant",
             "external_service": True,
+            # Remote annotations are untrusted; static MCP tools therefore
+            # default to unknown/write-capable and cannot be blindly replayed.
+            "read_only": False,
+            "operation_kind": "unknown",
+            "idempotency_supported": False,
             "trigger_examples": keywords[:8],
             "progressive_disclosure": {
                 "level0": [

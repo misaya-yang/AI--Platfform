@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
+import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -36,6 +39,7 @@ from ..schemas.knowledge import (
     DocumentUpdateSchema,
     QABatchTestSchema,
     QAQuerySchema,
+    RetrievalEvalRequestSchema,
     RetrieveRequestSchema,
     SegmentCreateSchema,
     SegmentEnableDisableSchema,
@@ -45,6 +49,8 @@ from ..schemas.knowledge import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+RETRIEVAL_EVAL_MAX_CASES = 20
+RETRIEVAL_EVAL_TIMEOUT_SECONDS = 30.0
 
 
 async def require_admin_user(
@@ -260,9 +266,7 @@ async def upload_document(
             )
 
         # Stream upload to temp file to avoid memory exhaustion
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=ext, prefix="kb_upload_"
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, prefix="kb_upload_") as tmp:
             temp_path = tmp.name
 
         size_bytes = 0
@@ -306,7 +310,10 @@ async def upload_document(
 
             logger.info(
                 "Auto-splitting large PDF: %s (%d pages, %.1fMB) into %d parts",
-                filename, total_pages, size_bytes / 1024 / 1024, num_parts,
+                filename,
+                total_pages,
+                size_bytes / 1024 / 1024,
+                num_parts,
             )
 
             results = []
@@ -318,10 +325,11 @@ async def upload_document(
                 part_bytes = part_doc.tobytes()
                 part_doc.close()
 
-                part_name = f"{Path(filename).stem}_Part_{i+1}_p{start+1}-{end}.pdf"
+                part_name = f"{Path(filename).stem}_Part_{i + 1}_p{start + 1}-{end}.pdf"
 
                 doc = await svc.create_document_from_upload(
-                    user, dataset_id,
+                    user,
+                    dataset_id,
                     filename=part_name,
                     content_bytes=part_bytes,
                     mime_type="application/pdf",
@@ -331,7 +339,12 @@ async def upload_document(
                 results.append(doc)
                 logger.info(
                     "Part %d/%d created: %s, pages %d-%d, doc=%s",
-                    i + 1, num_parts, part_name, start + 1, end, doc["document_id"],
+                    i + 1,
+                    num_parts,
+                    part_name,
+                    start + 1,
+                    end,
+                    doc["document_id"],
                 )
 
             doc_fitz.close()
@@ -803,6 +816,65 @@ async def delete_segment(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+async def _run_hierarchical_retrieval(
+    *,
+    dataset_id: str,
+    query: str,
+    top_k: int,
+    strategy: str,
+    l1_top_k: int,
+    l2_top_k: int,
+    include_context: bool,
+    score_threshold: float | None,
+    svc: KnowledgeService,
+    user: UserContext,
+) -> tuple[list[Any], Any]:
+    """Run hierarchical retrieval with the dataset's authorized embedding setup."""
+
+    dataset = await svc.require_dataset_access(user, dataset_id, required="viewer")
+    embedding_config = dataset.get("embedding_config")
+    if not isinstance(embedding_config, dict):
+        embedding_config = {}
+
+    if svc._is_multimodal_dataset(dataset):
+        embedder: Any = svc._get_unified_multimodal_embedder(
+            dataset,
+            embedding_config,
+        )
+    else:
+        from ...services.knowledge.embedding import get_cached_embedder
+
+        embedding_provider = str(dataset.get("embedding_provider") or "local")
+        embedding_model = str(dataset.get("embedding_model") or "hash-384")
+        embedding_dimension = int(dataset.get("embedding_dimension") or 0) or None
+        embedding_settings = svc._resolve_embedding_config(
+            provider=embedding_provider,
+            model=embedding_model,
+            embedding_config=embedding_config,
+        )
+        embedder = await get_cached_embedder(
+            embedding_settings,
+            dimension=embedding_dimension,
+        )
+
+    from ...services.knowledge.hierarchical_retriever import hierarchical_retrieve
+
+    return await hierarchical_retrieve(
+        query=query,
+        dataset_id=dataset_id,
+        vector_store=svc.vector_store,
+        embedder=embedder,
+        database=svc.db,
+        top_k=top_k,
+        strategy=strategy,
+        base_collection=str(dataset.get("collection_name") or "") or None,
+        l1_top_k=l1_top_k,
+        l2_top_k=l2_top_k,
+        include_context=include_context,
+        score_threshold=score_threshold,
+    )
+
+
 @router.post("/knowledge/{dataset_id}/retrieve")
 async def retrieve(
     dataset_id: str,
@@ -813,20 +885,17 @@ async def retrieve(
     try:
         # Use hierarchical retrieval if enabled
         if payload.hierarchical:
-            from ...services.knowledge.hierarchical_retriever import hierarchical_retrieve
-
-            results, meta = await hierarchical_retrieve(
+            hierarchical_results, hierarchical_meta = await _run_hierarchical_retrieval(
                 query=payload.query,
                 dataset_id=dataset_id,
-                vector_store=svc.vector_store,
-                embedder=svc.embedder,
-                database=svc.db,
                 top_k=payload.top_k,
                 strategy=payload.hierarchical_strategy.value,
                 l1_top_k=payload.l1_top_k,
                 l2_top_k=payload.l2_top_k,
                 include_context=payload.include_context,
                 score_threshold=payload.score_threshold,
+                svc=svc,
+                user=user,
             )
 
             # Build hierarchical response
@@ -842,21 +911,21 @@ async def retrieve(
                         "parent_context": r.parent_context,
                         "document_summary": r.document_summary,
                     }
-                    for r in results
+                    for r in hierarchical_results
                 ],
                 "metadata": {
-                    "strategy": meta.strategy,
-                    "l1_candidates": meta.l1_candidates,
-                    "l2_candidates": meta.l2_candidates,
-                    "l3_results": meta.l3_results,
-                    "total_time_ms": meta.total_time_ms,
-                    "filtered_documents": meta.filtered_documents,
+                    "strategy": hierarchical_meta.strategy,
+                    "l1_candidates": hierarchical_meta.l1_candidates,
+                    "l2_candidates": hierarchical_meta.l2_candidates,
+                    "l3_results": hierarchical_meta.l3_results,
+                    "total_time_ms": hierarchical_meta.total_time_ms,
+                    "filtered_documents": hierarchical_meta.filtered_documents,
                 },
             }
 
         # Use multimodal retrieval if include_associated_images is requested
         if payload.include_associated_images:
-            results, meta = await svc.retrieve_with_images(
+            retrieval_results, retrieval_meta = await svc.retrieve_with_images(
                 user=user,
                 dataset_id=dataset_id,
                 query=payload.query,
@@ -895,7 +964,7 @@ async def retrieve(
                 use_separate_thresholds=payload.use_separate_thresholds,
             )
         else:
-            results, meta = await svc.retrieve(
+            retrieval_results, retrieval_meta = await svc.retrieve(
                 user=user,
                 dataset_id=dataset_id,
                 query=payload.query,
@@ -944,9 +1013,9 @@ async def retrieve(
                     "citation_text": (r.metadata or {}).get("citation_text"),
                     "source_reference": (r.metadata or {}).get("source_reference", {}),
                 }
-                for r in results
+                for r in retrieval_results
             ],
-            "metadata": meta,
+            "metadata": retrieval_meta,
         }
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -1133,6 +1202,399 @@ async def archive_document(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _bounded_eval_metadata(
+    value: Any,
+    *,
+    depth: int = 0,
+    budget: list[int] | None = None,
+) -> Any:
+    """Return bounded, JSON-safe retrieval evidence with secrets redacted."""
+
+    from ai_gateway_core.security import SENSITIVE_KEY_RE, redact_trace_text
+
+    budget = budget if budget is not None else [512]
+    if budget[0] <= 0:
+        return "[truncated]"
+    budget[0] -= 1
+    if depth >= 5:
+        return "[truncated]"
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return redact_trace_text(value, limit=500)
+    if isinstance(value, Mapping):
+        bounded: dict[str, Any] = {}
+        for index, (raw_key, nested) in enumerate(value.items()):
+            if index >= 64 or budget[0] <= 0:
+                bounded["__truncated_entries__"] = len(value) - index
+                break
+            budget[0] -= 1
+            key = redact_trace_text(raw_key, limit=128)
+            bounded[key] = (
+                "[redacted]"
+                if SENSITIVE_KEY_RE.search(key)
+                else _bounded_eval_metadata(nested, depth=depth + 1, budget=budget)
+            )
+        return bounded
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        bounded_items = []
+        for index in range(min(len(value), 64)):
+            if budget[0] <= 0:
+                break
+            bounded_items.append(
+                _bounded_eval_metadata(value[index], depth=depth + 1, budget=budget)
+            )
+        if len(value) > len(bounded_items):
+            bounded_items.append(f"[truncated {len(value) - len(bounded_items)} entries]")
+        return bounded_items
+    return redact_trace_text(value, limit=500)
+
+
+async def _retrieve_eval_case(
+    *,
+    dataset_id: str,
+    query: str,
+    fetch_k: int,
+    payload: RetrievalEvalRequestSchema,
+    svc: KnowledgeService,
+    user: UserContext,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Run the same public retrieval branch selected by ``/retrieve``."""
+
+    if payload.hierarchical:
+        hierarchical_results, hierarchy_meta = await _run_hierarchical_retrieval(
+            query=query,
+            dataset_id=dataset_id,
+            top_k=fetch_k,
+            strategy=payload.hierarchical_strategy.value,
+            l1_top_k=payload.l1_top_k,
+            l2_top_k=payload.l2_top_k,
+            include_context=payload.include_context,
+            score_threshold=payload.score_threshold,
+            svc=svc,
+            user=user,
+        )
+        metadata = {
+            "pipeline": "hierarchical",
+            "strategy": hierarchy_meta.strategy,
+            "l1_candidates": hierarchy_meta.l1_candidates,
+            "l2_candidates": hierarchy_meta.l2_candidates,
+            "l3_results": hierarchy_meta.l3_results,
+            "total_time_ms": hierarchy_meta.total_time_ms,
+            "filtered_documents": hierarchy_meta.filtered_documents,
+        }
+        return list(hierarchical_results), metadata
+
+    if payload.include_associated_images:
+        multimodal_results, raw_metadata = await svc.retrieve_with_images(
+            user=user,
+            dataset_id=dataset_id,
+            query=query,
+            top_k=fetch_k,
+            mode=payload.mode,
+            document_id=payload.document_id,
+            dense_weight=payload.dense_weight,
+            bm25_weight=payload.bm25_weight,
+            fusion_method=payload.fusion_method,
+            alpha=payload.alpha,
+            score_threshold=payload.score_threshold,
+            vector_top_k=payload.vector_top_k,
+            keyword_top_k=payload.keyword_top_k,
+            candidate_top_k=payload.candidate_top_k,
+            keyword_candidate_k=payload.keyword_candidate_k,
+            fusion=payload.fusion,
+            rrf_k=payload.rrf_k,
+            rrf_weights=payload.rrf_weights,
+            rerank=payload.rerank,
+            rerank_model=payload.rerank_model,
+            rerank_top_n=payload.rerank_top_n,
+            mmr=payload.mmr,
+            mmr_lambda=payload.mmr_lambda,
+            mmr_threshold=payload.mmr_threshold,
+            include_images=payload.include_images,
+            content_type_filter=payload.content_type_filter,
+            multimodal_rerank=payload.multimodal_rerank,
+            source_type_filter=payload.source_type_filter,
+            language_filter=payload.language_filter,
+            metadata_filter=payload.metadata_filter,
+            image_search_enabled=payload.image_search_enabled,
+            vlm_rerank_weight=payload.vlm_rerank_weight,
+            image_boost=payload.image_boost,
+            image_score_threshold=payload.image_score_threshold,
+            use_separate_thresholds=payload.use_separate_thresholds,
+        )
+        metadata = dict(raw_metadata or {})
+        metadata["pipeline"] = "multimodal"
+        return list(multimodal_results), metadata
+
+    standard_results, raw_metadata = await svc.retrieve(
+        user=user,
+        dataset_id=dataset_id,
+        query=query,
+        top_k=fetch_k,
+        mode=payload.mode,
+        document_id=payload.document_id,
+        dense_weight=payload.dense_weight,
+        bm25_weight=payload.bm25_weight,
+        fusion_method=payload.fusion_method,
+        alpha=payload.alpha,
+        score_threshold=payload.score_threshold,
+        vector_top_k=payload.vector_top_k,
+        keyword_top_k=payload.keyword_top_k,
+        candidate_top_k=payload.candidate_top_k,
+        keyword_candidate_k=payload.keyword_candidate_k,
+        fusion=payload.fusion,
+        rrf_k=payload.rrf_k,
+        rrf_weights=payload.rrf_weights,
+        rerank=payload.rerank,
+        rerank_model=payload.rerank_model,
+        rerank_top_n=payload.rerank_top_n,
+        mmr=payload.mmr,
+        mmr_lambda=payload.mmr_lambda,
+        mmr_threshold=payload.mmr_threshold,
+        source_type_filter=payload.source_type_filter,
+        language_filter=payload.language_filter,
+        metadata_filter=payload.metadata_filter,
+    )
+    metadata = dict(raw_metadata or {})
+    metadata["pipeline"] = "standard"
+    return list(standard_results), metadata
+
+
+@router.post("/knowledge/{dataset_id}/retrieve_evaluate")
+async def retrieve_evaluate(
+    dataset_id: str,
+    payload: RetrievalEvalRequestSchema = Body(...),
+    svc: KnowledgeService = Depends(get_knowledge_service),
+    user: UserContext = Depends(get_user_context),
+):
+    """Evaluate retrieval quality against a labelled test set.
+
+    Runs the *same* retrieval pipeline as ``/retrieve`` for each labelled case
+    and scores the ranked results with deterministic IR metrics
+    (hit-rate / precision / recall / MRR / nDCG / MAP) at the requested K values.
+    Because every retrieval knob (mode, fusion, weights, rerank, mmr,
+    thresholds) is inherited from the request, calling this endpoint twice with
+    two configurations yields directly A/B-comparable metric sets — this is the
+    backend primitive for the KB retrieval evaluation workbench.
+    """
+    from ...services.eval.retrieval_metrics import (
+        QueryRetrievalJudgement,
+        evaluate_retrieval,
+    )
+
+    try:
+        # Schema validation guarantees this, but retain a defensive route
+        # boundary for direct/internal calls built with ``model_construct``.
+        if not 1 <= len(payload.cases) <= RETRIEVAL_EVAL_MAX_CASES:
+            raise ValidationFailedError(
+                f"cases must contain between 1 and {RETRIEVAL_EVAL_MAX_CASES} items"
+            )
+        if (
+            isinstance(payload.top_k, bool)
+            or not isinstance(payload.top_k, int)
+            or not 1 <= payload.top_k <= 100
+        ):
+            raise ValidationFailedError("top_k must be an integer in 1..100")
+        if not payload.k_values or any(
+            isinstance(k, bool) or not isinstance(k, int) or not 1 <= k <= 100
+            for k in payload.k_values
+        ):
+            raise ValidationFailedError("k_values must contain at least one value in 1..100")
+        k_values = sorted(set(payload.k_values))
+        fetch_k = max(max(k_values), payload.top_k)
+        await svc.require_dataset_access(user, dataset_id, required="editor")
+        deadline = asyncio.get_running_loop().time() + RETRIEVAL_EVAL_TIMEOUT_SECONDS
+
+        judgements: list[QueryRetrievalJudgement] = []
+        per_case_results: list[dict[str, Any]] = []
+        per_case_metadata: list[dict[str, Any]] = []
+        metadata_budget = [4096]
+
+        for idx, case in enumerate(payload.cases):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            results, retrieval_metadata = await asyncio.wait_for(
+                _retrieve_eval_case(
+                    dataset_id=dataset_id,
+                    query=case.query,
+                    fetch_k=fetch_k,
+                    payload=payload,
+                    svc=svc,
+                    user=user,
+                ),
+                timeout=remaining,
+            )
+            provider_retrieved_count = len(results)
+            results = results[:fetch_k]
+            retrieval_metadata = {
+                **retrieval_metadata,
+                "evaluation_window": {
+                    "requested_fetch_k": fetch_k,
+                    "provider_retrieved_count": provider_retrieved_count,
+                    "evaluated_retrieved_count": len(results),
+                    "truncated": provider_retrieved_count > len(results),
+                },
+            }
+
+            ranked_ids = [str(r.segment_id) for r in results]
+            unique_ranked_ids = list(dict.fromkeys(ranked_ids))
+            duplicate_ids = list(
+                dict.fromkeys(
+                    segment_id
+                    for position, segment_id in enumerate(ranked_ids)
+                    if segment_id in ranked_ids[:position]
+                )
+            )
+
+            # Merge binary + graded relevance (graded takes precedence).
+            relevance: dict[str, float] = dict.fromkeys(case.relevant_segment_ids, 1.0)
+            for sid, grade in case.relevance.items():
+                relevance[sid] = float(grade)
+
+            case_id = case.case_id or f"case_{idx}"
+            judgements.append(
+                QueryRetrievalJudgement(
+                    query_id=case_id,
+                    retrieved=ranked_ids,
+                    relevance=relevance,
+                )
+            )
+            bounded_metadata = _bounded_eval_metadata(
+                retrieval_metadata,
+                budget=metadata_budget,
+            )
+            per_case_metadata.append(
+                {
+                    "case_id": case_id,
+                    "provider_retrieved_count": provider_retrieved_count,
+                    "retrieved_count": len(ranked_ids),
+                    "unique_retrieved_count": len(unique_ranked_ids),
+                    "duplicate_segment_ids": duplicate_ids,
+                    "retrieval_metadata": bounded_metadata,
+                }
+            )
+            if payload.return_retrieved:
+                per_case_results.append(
+                    {
+                        "case_id": case_id,
+                        "query": case.query,
+                        "retrieved": [
+                            {
+                                "segment_id": str(r.segment_id),
+                                "document_id": str(r.document_id),
+                                "score": r.score,
+                                "relevant": relevance.get(str(r.segment_id), 0.0) > 0,
+                                "relevance_grade": relevance.get(str(r.segment_id), 0.0),
+                                "metadata": _bounded_eval_metadata(
+                                    getattr(r, "metadata", None) or {},
+                                    budget=metadata_budget,
+                                ),
+                                "content_type": getattr(r, "content_type", "text"),
+                                "level": getattr(r, "level", None),
+                            }
+                            for r in results
+                        ],
+                    }
+                )
+
+        report = evaluate_retrieval(judgements, k_values=k_values)
+        response: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "num_cases": len(judgements),
+            "k_values": report.k_values,
+            "metrics": {str(k): m.to_dict() for k, m in report.metrics_at_k.items()},
+            "requested_config": _bounded_eval_metadata(
+                payload.model_dump(
+                    exclude={"cases", "query", "k_values", "return_retrieved"},
+                    exclude_none=True,
+                    mode="json",
+                )
+            ),
+            "case_metadata": per_case_metadata,
+        }
+        primary = report.primary()
+        if primary is not None:
+            response["primary_metrics"] = primary.to_dict()
+        if payload.return_retrieved:
+            response["cases"] = per_case_results
+            response["per_query"] = report.per_query
+        return response
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Retrieval evaluation timed out") from None
+    except PermissionDeniedError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ValidationFailedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/knowledge/retrieval/presets")
+async def list_retrieval_presets():
+    """Return the built-in retrieval presets with recommended-config copy.
+
+    Powers the one-click preset dropdown in the retrieval-test and evaluation
+    workbench UIs. Each preset maps to a full ``RetrievalConfig`` so the frontend
+    can hydrate every control (mode / fusion / weights / rerank / mmr /
+    threshold) from a single selection.
+    """
+    from ...services.knowledge.retrieval_config import DEFAULT_CONFIGS
+
+    descriptions = {
+        "fast": {
+            "label": "快速 (Fast)",
+            "summary": "仅向量检索，无重排。延迟最低，适合高 QPS / 低延迟场景。",
+            "recommended_for": "实时问答、聊天补全、对延迟敏感的在线服务",
+        },
+        "balanced": {
+            "label": "均衡 (Balanced)",
+            "summary": "混合检索 (RRF) + 重排。质量与延迟的推荐平衡点。",
+            "recommended_for": "大多数企业知识库的默认选择",
+        },
+        "accurate": {
+            "label": "精确 (Accurate)",
+            "summary": "混合检索 + 重排 + 更高阈值。牺牲少量召回换取更高精度。",
+            "recommended_for": "对准确性要求高、可容忍略低召回的场景",
+        },
+        "diverse": {
+            "label": "多样 (Diverse)",
+            "summary": "混合 + 重排 + MMR 去重多样化。减少冗余、覆盖更多角度。",
+            "recommended_for": "多文档摘要、浏览式探索、需要多角度信息",
+        },
+        "sota": {
+            "label": "最优 (SOTA)",
+            "summary": "混合 + 重排(top_n=10) + 轻度 MMR(λ=0.7)。最高质量配置。",
+            "recommended_for": "离线评测基线、对质量要求最高的关键场景",
+        },
+    }
+
+    presets = []
+    for name, cfg in DEFAULT_CONFIGS.items():
+        meta = descriptions.get(name, {})
+        presets.append(
+            {
+                "name": name,
+                "label": meta.get("label", name),
+                "summary": meta.get("summary", ""),
+                "recommended_for": meta.get("recommended_for", ""),
+                "config": cfg.to_dict(),
+            }
+        )
+
+    return {
+        "presets": presets,
+        "recommended_default": "balanced",
+        "notes": {
+            "rrf_k": "RRF 常数默认 60（Elastic/Cormack'09，近优且不敏感）。注意不同向量库口径不同（如 Qdrant 默认 k=2 且零基 rank）。",
+            "mmr": "MMR 默认关闭；仅建议用于多文档摘要/浏览类查询。lambda=0.5（LangChain 默认，0=最多多样、1=最相关）。",
+            "rerank_top_n": "建议一阶段召回 50-100，重排后保留 final top_k（5-10）。",
+            "score_threshold": "相似度阈值建议 0.2-0.35；仅在有重排时生效更稳妥。",
+        },
+    }
+
+
 @router.patch("/knowledge/{dataset_id}/documents/{document_id}")
 async def update_document(
     dataset_id: str,
@@ -1305,6 +1767,7 @@ async def update_segment_status(
 # ---------------------------------------------------------------------------
 # Compat routes: frontend sends POST /enable, KB Service has PATCH /status
 # ---------------------------------------------------------------------------
+
 
 @router.post("/knowledge/{dataset_id}/documents/{document_id}/enable")
 async def enable_document_compat(

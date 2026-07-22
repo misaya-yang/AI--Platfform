@@ -15,8 +15,10 @@ References:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,11 +26,43 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
 
 logger = get_logger(__name__)
+
+_MAX_PUBLIC_ERROR_CHARS = 200
+_TRUNCATION_SUFFIX = "...[truncated]"
+_PUBLIC_URL_RE = re.compile(r"https?://[^\s'\"]+")
+_PUBLIC_INTERNAL_FIELD_RE = re.compile(r"(?i)(host|server|user)\s*=\s*\S+")
+
+
+def _tool_log_label(tool_name: Any) -> str:
+    """Return a stable, non-reversible label for an untrusted tool name."""
+
+    try:
+        digest = hashlib.sha256(str(tool_name).encode("utf-8", errors="replace")).hexdigest()
+    except Exception:
+        return "tool_sha256=unavailable"
+    return f"tool_sha256={digest[:16]}"
+
+
+def _safe_public_error(value: Any, *, fallback: str = "Tool execution failed") -> str:
+    """Return shared-redacted client text with a hard character bound."""
+
+    try:
+        text = redact_trace_text(value)
+    except Exception:
+        text = fallback
+    if not text:
+        text = fallback
+    text = _PUBLIC_URL_RE.sub("[url]", text)
+    text = _PUBLIC_INTERNAL_FIELD_RE.sub(r"\1=[redacted]", text)
+    if len(text) <= _MAX_PUBLIC_ERROR_CHARS:
+        return text
+    return f"{text[: _MAX_PUBLIC_ERROR_CHARS - len(_TRUNCATION_SUFFIX)]}{_TRUNCATION_SUFFIX}"
 
 
 class ToolRiskLevel(str, Enum):
@@ -335,17 +369,25 @@ class ToolRegistry:
             if definition.name in self._tools:
                 if not allow_override:
                     raise ValueError(
-                        f"Tool already registered: {definition.name}. "
-                        "Use allow_override=True only for trusted startup refresh flows."
+                        _safe_public_error(
+                            f"Tool already registered: {definition.name}. "
+                            "Use allow_override=True only for trusted startup refresh flows.",
+                            fallback="Tool already registered",
+                        )
                     )
-                logger.warning(f"Overwriting existing tool: {definition.name}")
+                logger.warning(
+                    "tool_registry.overwrite (tool_label=%s)",
+                    _tool_log_label(definition.name),
+                )
 
             self._tools[definition.name] = definition
             self._executors[definition.name] = executor
 
         logger.info(
-            f"Registered tool: {definition.name} "
-            f"(category={definition.category.value}, risk={definition.risk_level.value})"
+            "tool_registry.registered (tool_label=%s, category=%s, risk=%s)",
+            _tool_log_label(definition.name),
+            definition.category.value,
+            definition.risk_level.value,
         )
 
     def unregister(self, name: str) -> bool:
@@ -354,7 +396,10 @@ class ToolRegistry:
             if name in self._tools:
                 del self._tools[name]
                 del self._executors[name]
-                logger.info(f"Unregistered tool: {name}")
+                logger.info(
+                    "tool_registry.unregistered (tool_label=%s)",
+                    _tool_log_label(name),
+                )
                 return True
             return False
 
@@ -451,7 +496,10 @@ class ToolRegistry:
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"Unknown tool: {request.tool_name}",
+                error=_safe_public_error(
+                    f"Unknown tool: {request.tool_name}",
+                    fallback="Unknown tool",
+                ),
             )
 
         # Get executor (thread-safe snapshot)
@@ -462,7 +510,10 @@ class ToolRegistry:
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"No executor for tool: {request.tool_name}",
+                error=_safe_public_error(
+                    f"No executor for tool: {request.tool_name}",
+                    fallback="No executor for tool",
+                ),
             )
 
         # Enforce required permissions if user context is available
@@ -471,31 +522,44 @@ class ToolRegistry:
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"Permission context required for tool: {request.tool_name}",
+                error=_safe_public_error(
+                    f"Permission context required for tool: {request.tool_name}",
+                    fallback="Permission context required for tool",
+                ),
             )
         if request.user and not self._user_has_required_permissions(request.user, definition):
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"Permission denied for tool: {request.tool_name}",
+                error=_safe_public_error(
+                    f"Permission denied for tool: {request.tool_name}",
+                    fallback="Permission denied for tool",
+                ),
             )
 
         # Validate arguments (skip for non-ToolExecutor callables like MCP closures)
-        errors = executor.validate_arguments(definition, request.arguments) if hasattr(executor, "validate_arguments") else []
+        errors = (
+            executor.validate_arguments(definition, request.arguments)
+            if hasattr(executor, "validate_arguments")
+            else []
+        )
         if errors:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"Validation errors: {'; '.join(errors)}",
+                error=_safe_public_error(
+                    f"Validation errors: {'; '.join(errors)}",
+                    fallback="Tool argument validation failed",
+                ),
             )
 
         if self._requires_gateway(definition) and not self._direct_execution_allowed(request):
             logger.warning(
-                "Direct registry execution denied for tool %s "
-                "(risk=%s, requires_confirmation=%s)",
-                request.tool_name,
+                "tool_registry.direct_execution_denied "
+                "(tool_label=%s, risk=%s, requires_confirmation=%s)",
+                _tool_log_label(request.tool_name),
                 definition.risk_level.value,
                 definition.requires_confirmation,
             )
@@ -504,8 +568,7 @@ class ToolRegistry:
                 tool_name=request.tool_name,
                 success=False,
                 error=(
-                    "Tool execution requires the AssistantExecutionGateway approval "
-                    "and audit path."
+                    "Tool execution requires the AssistantExecutionGateway approval and audit path."
                 ),
                 metadata={
                     "direct_registry_denied": True,
@@ -518,21 +581,24 @@ class ToolRegistry:
         # Execute tool with timeout enforcement
         try:
             logger.info(
-                f"Executing tool: {request.tool_name} "
-                f"(call_id={request.call_id}, timeout={definition.timeout_seconds}s)"
+                "tool_registry.execution_started (tool_label=%s, timeout_seconds=%s)",
+                _tool_log_label(request.tool_name),
+                definition.timeout_seconds,
             )
 
             # Enforce timeout from tool definition
             try:
                 # Support both ToolExecutor instances (.execute) and plain callables (MCP closures)
-                coro = executor.execute(request) if hasattr(executor, "execute") else executor(request)
-                result = await asyncio.wait_for(
-                    coro, timeout=definition.timeout_seconds
+                coro = (
+                    executor.execute(request) if hasattr(executor, "execute") else executor(request)
                 )
+                result = await asyncio.wait_for(coro, timeout=definition.timeout_seconds)
             except asyncio.TimeoutError:
                 duration_ms = definition.timeout_seconds * 1000
                 logger.error(
-                    f"Tool {request.tool_name} timed out after {definition.timeout_seconds}s"
+                    "tool_registry.execution_timeout (tool_label=%s, timeout_seconds=%s)",
+                    _tool_log_label(request.tool_name),
+                    definition.timeout_seconds,
                 )
                 return ToolCallResult(
                     call_id=request.call_id,
@@ -543,80 +609,87 @@ class ToolRegistry:
                 )
 
             result.duration_ms = (time.time() - start_time) * 1000
+            if result.error is not None:
+                result.error = _safe_public_error(result.error)
 
             logger.info(
-                f"Tool {request.tool_name} completed in {result.duration_ms:.1f}ms "
-                f"(success={result.success})"
+                "tool_registry.execution_completed (tool_label=%s, duration_ms=%.1f, success=%s)",
+                _tool_log_label(request.tool_name),
+                result.duration_ms,
+                result.success,
             )
 
             return result
 
-        except Exception as e:
+        except Exception as exc:
             duration_ms = (time.time() - start_time) * 1000
-            # Log full exception (with stack) for ops, but return a sanitized
-            # message to the LLM/client to avoid leaking internal details like
-            # connection strings, hostnames, or stack traces.
             logger.error(
-                f"Tool {request.tool_name} failed (call_id={request.call_id}): {type(e).__name__}: {e}",
-                exc_info=True,
+                "tool_registry.execution_failed (tool_label=%s, exception_type=%s)",
+                _tool_log_label(request.tool_name),
+                type(exc).__name__,
             )
 
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=_safe_error_message(e, tool_name=request.tool_name),
+                error=_safe_error_message(exc, tool_name=request.tool_name),
                 duration_ms=duration_ms,
             )
 
     @staticmethod
     def _requires_gateway(definition: ToolDefinition) -> bool:
-        return (
-            definition.requires_confirmation
-            or definition.risk_level in {ToolRiskLevel.MEDIUM, ToolRiskLevel.HIGH}
-        )
+        return definition.requires_confirmation or definition.risk_level in {
+            ToolRiskLevel.MEDIUM,
+            ToolRiskLevel.HIGH,
+        }
 
     @staticmethod
     def _direct_execution_allowed(request: ToolCallRequest) -> bool:
         metadata = request.metadata or {}
         if metadata.get("execution_gateway_approved") is True:
             return True
-        return (
-            metadata.get("direct_registry_bypass") == "test_only"
-            and os.getenv("PYTEST_CURRENT_TEST")
+        return metadata.get("direct_registry_bypass") == "test_only" and os.getenv(
+            "PYTEST_CURRENT_TEST"
         )
 
 
 def _safe_error_message(exc: BaseException, *, tool_name: str = "tool") -> str:
     """Return a client-safe error message that doesn't leak internal details.
 
-    Full exception + stack is logged separately for ops. This function is
-    called only for the value returned to the LLM/client, never for logging.
-
-    - Known safe exception types: pass a truncated message through
     - Database/network/filesystem errors: return a generic "internal error"
       since their str() typically contains connection strings, hostnames, or paths
-    - Any other exception: return a short class-name-only message
+    - Any other exception: return a shared-redacted, bounded message
     """
-    import re
-
     # Exception types whose str() often contains sensitive internal details
     sensitive_type_names = {
-        "PostgresError", "InterfaceError", "OperationalError", "ConnectionError",
-        "ConnectionRefusedError", "ConnectionResetError", "HTTPStatusError",
-        "ConnectError", "ReadError", "WriteError", "PoolTimeout",
-        "FileNotFoundError", "PermissionError", "OSError", "RuntimeError",
+        "PostgresError",
+        "InterfaceError",
+        "OperationalError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "HTTPStatusError",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "PoolTimeout",
+        "FileNotFoundError",
+        "PermissionError",
+        "OSError",
+        "RuntimeError",
     }
     type_name = type(exc).__name__
     if type_name in sensitive_type_names or "asyncpg" in type(exc).__module__:
-        return f"{tool_name} failed due to an internal error. Please retry; if the issue persists, contact support."
+        return _safe_public_error(
+            f"{tool_name} failed due to an internal error. "
+            "Please retry; if the issue persists, contact support."
+        )
 
-    # Generic exception: return type name + short message, with any
-    # URL/hostname/path-like tokens redacted
-    msg = str(exc)[:200]
-    msg = re.sub(r"https?://[^\s'\"]+", "[url]", msg)
-    msg = re.sub(r"(?i)(host|server|user|password|token|key)\s*=\s*\S+", r"\1=[redacted]", msg)
-    return f"{type_name}: {msg}"
+    return _safe_public_error(
+        exc,
+        fallback=f"{type_name}: Tool execution failed",
+    )
 
 
 # Global registry instance

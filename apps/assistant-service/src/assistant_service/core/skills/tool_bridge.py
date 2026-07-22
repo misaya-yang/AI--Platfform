@@ -131,12 +131,14 @@ class SkillToolBridge:
             properties = skill.tool_schema.get("properties", {})
             required = skill.tool_schema.get("required", [])
             for name, prop in properties.items():
-                params.append(ToolParameter(
-                    name=name,
-                    type=prop.get("type", "string"),
-                    description=prop.get("description", ""),
-                    required=name in required,
-                ))
+                params.append(
+                    ToolParameter(
+                        name=name,
+                        type=prop.get("type", "string"),
+                        description=prop.get("description", ""),
+                        required=name in required,
+                    )
+                )
             return params
 
         # Default: generic input parameter
@@ -215,6 +217,20 @@ class SkillToolBridge:
             "rollback_metadata": False,
         }
 
+    @staticmethod
+    def _operation_kind(skill: SkillManifest) -> str:
+        """Classify the bridge call itself, not future LLM instructions.
+
+        Tenant ``md://`` and ``db://`` Skills only return immutable instruction
+        content from the already-resolved manifest, so replay is read-safe.
+        Builtin handlers are executable Python and the manifest does not carry
+        trusted handler side-effect metadata; keep those conservative.
+        """
+
+        if skill.entrypoint.startswith(("md://", "db://")):
+            return "read"
+        return "unknown"
+
     def _capability_metadata(
         self,
         skill: SkillManifest,
@@ -222,7 +238,8 @@ class SkillToolBridge:
         risk_level: ToolRiskLevel,
     ) -> dict[str, Any]:
         """Expose catalog facts without loading full skill instructions."""
-        return {
+        operation_kind = self._operation_kind(skill)
+        metadata = {
             "kind": "skill",
             "skill_name": skill.name,
             "tool_name": tool_name,
@@ -240,6 +257,7 @@ class SkillToolBridge:
             "review_required": bool(getattr(skill, "review_required", lambda: False)()),
             "activation_requirements": self._activation_requirements(skill),
             "risk_level": risk_level.value,
+            "operation_kind": operation_kind,
             "trigger_examples": self._trigger_examples(skill),
             "progressive_disclosure": {
                 "level0": [
@@ -260,3 +278,6 @@ class SkillToolBridge:
                 "instructions_loaded_on_demand": True,
             },
         }
+        if operation_kind == "read":
+            metadata["read_only"] = True
+        return metadata

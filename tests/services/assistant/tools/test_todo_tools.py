@@ -22,9 +22,7 @@ async def populated_session():
     tenant, user_id, session_id = "acme", "u1", "sess-todo"
     # Enter the session context just long enough to register the session; the
     # tools look it up later via get_task_manager().get_session().
-    async with manager.session_context(
-        session_id=session_id, tenant_id=tenant, user_id=user_id
-    ):
+    async with manager.session_context(session_id=session_id, tenant_id=tenant, user_id=user_id):
         pass
     yield session_id
     await shutdown_task_manager()
@@ -64,9 +62,7 @@ async def test_todo_write_then_read_round_trip(populated_session):
     assert "[~] Write intro" in write_res.result
     assert "[ ] Review" in write_res.result
 
-    read_res = await TodoReadExecutor().execute(
-        _make_request("todo_read", {}, populated_session)
-    )
+    read_res = await TodoReadExecutor().execute(_make_request("todo_read", {}, populated_session))
     assert read_res.success
     assert read_res.metadata["task_count"] == 3
     assert read_res.metadata["progress"]["completed"] == 1
@@ -138,8 +134,8 @@ async def test_todo_write_requires_items_array(populated_session):
 
 @pytest.mark.asyncio
 async def test_missing_session_metadata_errors():
-    from assistant_service.core.tools.tool_registry import ToolCallRequest
     from assistant_service.core.tools.todo_tools import TodoReadExecutor
+    from assistant_service.core.tools.tool_registry import ToolCallRequest
 
     res = await TodoReadExecutor().execute(
         ToolCallRequest(call_id="x", tool_name="todo_read", arguments={}, metadata={})
@@ -154,11 +150,33 @@ async def test_todo_read_no_session_returns_empty():
     model's control flow is simpler if reads never fail for missing state."""
     from assistant_service.core.tools.todo_tools import TodoReadExecutor
 
-    res = await TodoReadExecutor().execute(
-        _make_request("todo_read", {}, "nonexistent-session")
-    )
+    res = await TodoReadExecutor().execute(_make_request("todo_read", {}, "nonexistent-session"))
     assert res.success
     assert res.metadata["task_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_todo_tools_do_not_expose_same_tenant_other_user_session(
+    populated_session,
+):
+    from assistant_service.core.tools.todo_tools import TodoReadExecutor, TodoWriteExecutor
+
+    owner_write = await TodoWriteExecutor().execute(
+        _make_request(
+            "todo_write",
+            {"items": [{"description": "private task"}]},
+            populated_session,
+        )
+    )
+    assert owner_write.success
+
+    other_user = _make_request("todo_read", {}, populated_session)
+    other_user.metadata["user_id"] = "u2"
+    read = await TodoReadExecutor().execute(other_user)
+
+    assert read.success
+    assert read.result == "(no tasks)"
+    assert "private task" not in read.result
 
 
 def test_register_todo_tools():

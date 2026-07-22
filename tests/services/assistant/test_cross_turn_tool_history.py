@@ -24,12 +24,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.models.session import SessionMessage
 from assistant_service.core.assistant_service import (
     _append_tool_results_block,
     _session_history_to_messages,
 )
 
+from src.models.session import SessionMessage
 
 # ---------------------------------------------------------------------------
 # _session_history_to_messages — the core fix
@@ -127,9 +127,7 @@ def test_user_turn_metadata_is_not_enriched():
             metadata={
                 # Defensive: even if a future code path mistakenly attaches
                 # tool_results to a user msg, we must not rewrite user turns.
-                "tool_results": [
-                    {"name": "some_tool", "result": "should-not-appear"}
-                ],
+                "tool_results": [{"name": "some_tool", "result": "should-not-appear"}],
             },
         ),
     ]
@@ -178,12 +176,8 @@ def test_append_tool_results_block_truncates_verbose_tools():
 
 
 def test_append_tool_results_block_enforces_total_cap_across_tools():
-    results = [
-        {"name": f"tool_{i}", "result": "a" * 1000} for i in range(5)
-    ]
-    enriched = _append_tool_results_block(
-        "", results, per_tool_char_cap=1000, total_char_cap=1500
-    )
+    results = [{"name": f"tool_{i}", "result": "a" * 1000} for i in range(5)]
+    enriched = _append_tool_results_block("", results, per_tool_char_cap=1000, total_char_cap=1500)
     # We never blow past 1500 chars of aggregated tool body (plus framing).
     body_char_count = enriched.count("a")
     assert body_char_count <= 1500

@@ -81,6 +81,7 @@ class GatewaySecretAuthMiddleware:
             await _unauthorized()(scope, receive, send)
             return
 
+        scope.setdefault("state", {})["gateway_secret_verified"] = True
         await self.app(scope, replay_receive, send)
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
 from ..memory.memory_manager import (
     MemoryPolicyError,
@@ -16,6 +17,7 @@ from ..memory.memory_manager import (
     MemoryType,
     sanitize_memory_value,
 )
+from ..runtime.memory.lifecycle import memory_policy_enabled
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -29,8 +31,14 @@ from .tool_registry import (
 
 if TYPE_CHECKING:
     from ..memory_service import MemoryService
+    from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
 
 logger = get_logger(__name__)
+
+MEMORY_OPERATION_FAILED = "MEMORY_OPERATION_FAILED"
+MEMORY_POLICY_DENIED = "MEMORY_POLICY_DENIED"
+MEMORY_WRITE_NOT_CONFIRMED = "MEMORY_WRITE_NOT_CONFIRMED"
+MEMORY_DELETE_NOT_CONFIRMED = "MEMORY_DELETE_NOT_CONFIRMED"
 
 UPDATE_MEMORY_DEFINITION = ToolDefinition(
     name="update_user_memory",
@@ -43,22 +51,23 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
             name="key",
             type="string",
             description="The key for the memory item (e.g., 'user_name', 'favorite_language', 'project_context'). "
-            "Use snake_case.",
-            required=True,
+            "Use snake_case. For delete_source, pass a source_id returned by inspect.",
+            required=False,
         ),
         ToolParameter(
             name="value",
             type="string",
             description="The value to remember. Can be a simple string or a JSON string for complex data.",
-            required=True,
+            required=False,
         ),
         ToolParameter(
             name="action",
             type="string",
-            description="Action to perform: 'set' (upsert), 'delete', or 'inspect'. Default is 'set'.",
+            description="Action to perform: 'set' (upsert one key), 'delete' (one key), "
+            "'inspect' (list scoped sources), or 'delete_source' (forget one inspected source).",
             required=False,
             default="set",
-            enum=["set", "delete", "inspect"],
+            enum=["set", "delete", "inspect", "delete_source"],
         ),
         ToolParameter(
             name="profile",
@@ -79,6 +88,10 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={
+        "operation_kind": "write",
+        "external_service": True,
+    },
     when_to_use="When the user says 'remember that my name is X', 'I prefer Python', "
     "or implies a long-term preference.",
     when_not_to_use="For temporary information relevant only to the current turn.",
@@ -86,12 +99,12 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
         ToolExample(
             description="Remember user name",
             input={"key": "user_name", "value": "Alex", "action": "set"},
-            expected_output="Memory updated: user_name = Alex",
+            expected_output="Memory updated",
         ),
         ToolExample(
             description="Remember coding preference",
             input={"key": "coding_style", "value": "PEP8 with type hints", "action": "set"},
-            expected_output="Memory updated: coding_style = PEP8 with type hints",
+            expected_output="Memory updated",
         ),
     ],
 )
@@ -100,8 +113,13 @@ UPDATE_MEMORY_DEFINITION = ToolDefinition(
 class UpdateMemoryExecutor(ToolExecutor):
     """Executor for update memory tool."""
 
-    def __init__(self, memory_service: MemoryService):
+    def __init__(
+        self,
+        memory_service: MemoryService,
+        runtime_adapter: AssistantRuntimeAdapter | None = None,
+    ):
         self.memory_service = memory_service
+        self.runtime_adapter = runtime_adapter
 
     async def execute(self, request: ToolCallRequest) -> ToolCallResult:
         """Execute update memory."""
@@ -126,19 +144,32 @@ class UpdateMemoryExecutor(ToolExecutor):
             )
 
         try:
-            profile = self._parse_profile(request.arguments.get("profile"))
-            memory_type = self._parse_memory_type(request.arguments.get("memory_type"))
             metadata = getattr(request, "metadata", None) or {}
+            profile = self._effective_profile(
+                requested=request.arguments.get("profile"),
+                authoritative=metadata.get("memory_profile"),
+                memory_mode=metadata.get("memory_mode"),
+            )
+            memory_type = self._parse_memory_type(request.arguments.get("memory_type"))
             agent_memory_mode = str(metadata.get("agent_memory_mode") or "")
             if agent_memory_mode and agent_memory_mode != "user":
-                raise MemoryPolicyError(
-                    "This Agent version does not allow user-memory operations."
-                )
-            memory_user_id = str(
-                metadata.get("memory_principal") or request.user.user_id
-            )
+                raise MemoryPolicyError("This Agent version does not allow user-memory operations.")
+            memory_user_id = str(metadata.get("memory_principal") or request.user.user_id)
 
             if action == "inspect":
+                runtime_sources = (
+                    await self.runtime_adapter.inspect_memory_sources(
+                        tenant_id=request.user.tenant_id,
+                        user_id=memory_user_id,
+                    )
+                    if self.runtime_adapter is not None
+                    else {
+                        "scope": "tenant_user",
+                        "file_count": 0,
+                        "sources": [],
+                        "status": "runtime_memory_unavailable",
+                    }
+                )
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -151,16 +182,62 @@ class UpdateMemoryExecutor(ToolExecutor):
                             "pii_filter": "email and phone redaction before write",
                             "prompt_boundary": "stored memory is treated as untrusted data",
                         },
+                        "runtime_sources": runtime_sources,
                     },
                 )
 
+            if action == "delete_source":
+                if self.runtime_adapter is None:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="Runtime memory source deletion is unavailable",
+                        metadata={"error_code": "MEMORY_RUNTIME_UNAVAILABLE"},
+                    )
+                deletion = await self.runtime_adapter.delete_memory_source_by_id(
+                    tenant_id=request.user.tenant_id,
+                    user_id=memory_user_id,
+                    source_id=str(key),
+                )
+                receipt = deletion.to_dict()
+                return ToolCallResult(
+                    call_id=request.call_id,
+                    tool_name=request.tool_name,
+                    success=deletion.completed,
+                    result=receipt,
+                    error=None
+                    if deletion.completed
+                    else "Runtime memory source deletion was not completed",
+                    metadata={
+                        "deletion_scope": "runtime_memory_source",
+                        "retryable": deletion.retryable,
+                        **(
+                            {}
+                            if deletion.completed
+                            else {"error_code": MEMORY_DELETE_NOT_CONFIRMED}
+                        ),
+                    },
+                )
             if action == "delete":
-                await self.memory_service.delete_user_memory(
+                deleted = await self.memory_service.delete_user_memory(
                     tenant_id=request.user.tenant_id,
                     user_id=memory_user_id,
                     key=key,
                 )
-                result_msg = f"Memory deleted: {key}"
+                if deleted is False:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="Memory key deletion was not persisted",
+                        metadata={
+                            "deletion_scope": "user_memory_key",
+                            "error_code": MEMORY_DELETE_NOT_CONFIRMED,
+                        },
+                    )
+                result_msg = "Memory deleted"
+                result_metadata = {"deletion_scope": "user_memory_key"}
             else:
                 self._validate_write_allowed(profile=profile, memory_type=memory_type)
                 if value is None:
@@ -172,35 +249,53 @@ class UpdateMemoryExecutor(ToolExecutor):
                     )
 
                 safe_value, _ = sanitize_memory_value(value)
-                await self.memory_service.set_user_memory(
+                persisted = await self.memory_service.set_user_memory(
                     tenant_id=request.user.tenant_id,
                     user_id=memory_user_id,
                     key=key,
                     value=safe_value,
                 )
-                result_msg = f"Memory updated: {key}"
+                if persisted is False:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="Memory update was not persisted",
+                        metadata={"error_code": MEMORY_WRITE_NOT_CONFIRMED},
+                    )
+                result_msg = "Memory updated"
+                result_metadata = {}
 
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=True,
                 result=result_msg,
+                metadata=result_metadata,
             )
 
-        except MemoryPolicyError as e:
+        except MemoryPolicyError as exc:
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=str(e),
+                error=redact_trace_text(str(exc), limit=200),
+                metadata={"error_code": MEMORY_POLICY_DENIED},
             )
-        except Exception as e:
-            logger.error(f"Memory update failed: {e}")
+        except Exception as exc:
+            logger.error(
+                "Memory tool operation failed (exception_type=%s)",
+                redact_trace_text(type(exc).__name__, limit=80),
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=str(e),
+                error="Memory operation failed",
+                metadata={
+                    "error_code": MEMORY_OPERATION_FAILED,
+                    "retryable": True,
+                },
             )
 
     @staticmethod
@@ -208,14 +303,43 @@ class UpdateMemoryExecutor(ToolExecutor):
         try:
             return MemoryProfile(str(value or MemoryProfile.HYBRID.value).lower())
         except ValueError as exc:
-            raise MemoryPolicyError(f"Unsupported memory profile: {value}") from exc
+            raise MemoryPolicyError("Unsupported memory profile") from exc
+
+    @classmethod
+    def _effective_profile(
+        cls,
+        *,
+        requested: object,
+        authoritative: object,
+        memory_mode: object,
+    ) -> MemoryProfile:
+        requested_profile = cls._parse_profile(requested)
+        authoritative_value = str(authoritative or "").strip()
+        if not memory_policy_enabled(
+            memory_mode=str(memory_mode or ""),
+            memory_profile=authoritative_value,
+        ):
+            return MemoryProfile.OFF
+        if not authoritative_value:
+            return requested_profile
+
+        authoritative_profile = cls._parse_profile(authoritative_value)
+        rank = {
+            MemoryProfile.OFF: 0,
+            MemoryProfile.BASIC: 1,
+            MemoryProfile.HYBRID: 2,
+        }
+        return min(
+            (requested_profile, authoritative_profile),
+            key=rank.__getitem__,
+        )
 
     @staticmethod
     def _parse_memory_type(value: object) -> MemoryType:
         try:
             return MemoryType(str(value or MemoryType.SEMANTIC.value).lower())
         except ValueError as exc:
-            raise MemoryPolicyError(f"Unsupported memory type: {value}") from exc
+            raise MemoryPolicyError("Unsupported memory type") from exc
 
     @staticmethod
     def _validate_write_allowed(*, profile: MemoryProfile, memory_type: MemoryType) -> None:
@@ -227,5 +351,5 @@ class UpdateMemoryExecutor(ToolExecutor):
     @staticmethod
     def _allowed_actions(profile: MemoryProfile) -> list[str]:
         if profile == MemoryProfile.OFF:
-            return ["delete", "inspect"]
-        return ["set", "delete", "inspect"]
+            return ["delete", "delete_source", "inspect"]
+        return ["set", "delete", "delete_source", "inspect"]

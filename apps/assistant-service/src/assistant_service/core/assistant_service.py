@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import time
 import uuid
@@ -56,6 +57,7 @@ from .agent.agent_loop import PRIOR_TOOL_RESULTS_MARKER, AgentLoopEvent, AgentLo
 from .agent.runtime_context import (
     AgentRuntimeExecutionContext,
     assert_session_runtime_pin,
+    compose_agent_system_prompt,
 )
 from .code_executor import CodeExecutorService
 from .content.structured_output import (
@@ -81,7 +83,7 @@ from .quality.guardrails import (
     ToolConstraintValidator,
     ValidationResult,
 )
-from .rag.context_engine import ContextEngine, ContextStructure
+from .rag.context_engine import ContextBudgetManager, ContextStructure
 from .rag.context_manager import ContextConfig, get_context_manager
 from .rag.rag_metrics import (
     Citation,
@@ -92,13 +94,23 @@ from .rag.scenario_analyzer import (
     ScenarioDetectionResult,
     create_scenario_analyzer,
 )
+from .runtime.context.assembler import ContextAssemblerV2
 from .tasks.task_planner import TaskPlanner
 from .tool_invoker import CapabilityAllowlist
 from .tool_orchestrator import ToolExecutionResult, ToolOrchestrator
 from .tools.code_executor_tool import CODE_EXECUTOR_TOOL, CodeExecutorToolExecutor
 from .trace_payloads import build_rag_trace_payload as _rag_trace_payload
 from .trace_writer import AssistantTraceContext, AssistantTraceWriter, build_transcript_locator
-from .turn_contract import build_context_snapshot, build_terminal_envelope
+from .turn_contract import (
+    SideEffectState,
+    TurnKernel,
+    TurnState,
+    TurnTransitionError,
+    build_context_snapshot,
+    build_terminal_envelope,
+    decide_failure,
+    failure_class_for_exit_reason,
+)
 from .working_memory import WorkingMemory
 
 if TYPE_CHECKING:
@@ -108,6 +120,20 @@ if TYPE_CHECKING:
     from .memory_service import MemoryService
 
 logger = get_logger(__name__)
+
+
+def _runtime_context_v2_enabled(requested: bool) -> bool:
+    """Apply the operational rollback switch without overriding per-request opt-out."""
+
+    if not requested:
+        return False
+    return os.getenv("ASSISTANT_RUNTIME_CONTEXT_V2", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 
 # ``RAGMode`` is now defined in ``ai_gateway_core.enums`` so gateway routes
 # (assistant.py) can import the enum without pulling in ``assistant_service``.
@@ -120,6 +146,43 @@ _DEFAULT_NOOP_USAGE_RECORDER: UsageRecorderLike = NoOpUsageRecorder()
 _DEFAULT_NOOP_REALTIME_METRICS: RealtimeMetricsLike = NoOpRealtimeMetrics()
 _DEFAULT_NOOP_ARTIFACT_STORAGE: ArtifactStorageLike = NoOpArtifactStorage()
 _DEFAULT_NOOP_FILE_STORAGE: FileStorageLike = NoOpFileStorage()
+
+
+def _context_receipt_scope(
+    *,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+) -> str:
+    """Hash a length-delimited owner/session tuple without delimiter collisions."""
+
+    digest = hashlib.sha256()
+    for value in (tenant_id, user_id, session_id):
+        encoded = str(value).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return f"ctxscope_{digest.hexdigest()}"
+
+
+def _context_receipt_key(*, scope: str, model_id: str) -> str:
+    model_digest = hashlib.sha256(str(model_id).encode("utf-8")).hexdigest()
+    return f"{scope}:{model_digest}"
+
+
+def _working_memory_scope(
+    *,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+) -> str:
+    """Hash a length-delimited owner/session tuple for process-local state."""
+
+    digest = hashlib.sha256()
+    for value in (tenant_id, user_id, session_id):
+        encoded = str(value).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return f"wmscope_{digest.hexdigest()}"
 
 
 class StreamEventType(str, Enum):
@@ -454,9 +517,8 @@ def _append_tool_results_block(
         return content
 
     total_used = 0
-    # NOTE: the opening line MUST start with PRIOR_TOOL_RESULTS_MARKER —
-    # agent_loop._trim_history_for_streaming matches on that prefix to
-    # enlarge the per-message cap for messages carrying this block.
+    # Keep the opening marker stable across stored history and runtime prompt
+    # assembly so prior tool evidence remains clearly framed as untrusted data.
     lines: list[str] = [
         "",
         f"{PRIOR_TOOL_RESULTS_MARKER} — for your reference only, not shown to the user]",
@@ -741,6 +803,16 @@ Please use this web search context to inform your response when relevant."""
 
         # Per-session working memory with TTL auto-cleanup (1h expiry, max 5000 sessions)
         self._working_memories: TTLCache = TTLCache(maxsize=5000, ttl=3600)
+        # Legacy callers may only provide ``session_id``. Link that surface to
+        # an owner-scoped entry while the session id has exactly one observed
+        # owner; once a collision is observed it remains fail-closed for the
+        # lifetime of this service instance.
+        self._working_memory_legacy_scopes: dict[str, str] = {}
+        self._working_memory_ambiguous_sessions: set[str] = set()
+        # Prompt-free packet receipts support observable cache invalidation
+        # across buffered turns. Keys include tenant/user/session scope supplied
+        # by the composition root; values contain hashes and decisions only.
+        self._context_packet_receipts: TTLCache = TTLCache(maxsize=5000, ttl=3600)
 
         # Quality Guardrails (ensure content meets minimum quality standards)
         self.quality_guardrails = quality_guardrails or QualityGuardrails()
@@ -819,7 +891,11 @@ Please use this web search context to inform your response when relevant."""
         execution starts.
         """
         del history, retrieved_contexts
-        working_memory = self.get_working_memory(session_id)
+        working_memory = self.get_working_memory(
+            session_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
         working_memory.set_goal(message)
         yield AssistantStreamEvent(
             event_type=StreamEventType.WORKING_MEMORY_UPDATE.value,
@@ -960,6 +1036,7 @@ Please use this web search context to inform your response when relevant."""
         temperature: float,
         max_tokens: int | None,
         issues: list[str],
+        context_packet_receipt: dict[str, Any] | None = None,
     ) -> str:
         """Attempt a single repair pass to satisfy policy constraints."""
         repair_instructions = policy.build_repair_instructions(issues)
@@ -967,21 +1044,53 @@ Please use this web search context to inform your response when relevant."""
             "You are a compliance-focused editor. "
             "Revise the answer to meet the rules without adding external knowledge."
         )
-        user_prompt = (
-            f"Context:\n{context_text}\n\n"
+        repair_query = (
             f"Question:\n{user_message}\n\n"
-            f"Draft Answer:\n{answer}\n\n"
-            f"Repair Instructions:\n{repair_instructions}\n"
+            f"Repair Instructions:\n{repair_instructions}\n\n"
+            "Revise the draft using only the attached untrusted context and draft sources."
         )
-        messages = [
-            ChatMessage(role="system", content=system_prompt),
-            ChatMessage(role="user", content=user_prompt),
-        ]
+        model_info = self.model_registry.get_model(model_id)
+        requested_output_tokens = int(
+            max_tokens or getattr(model_info, "max_output_tokens", 0) or 4096
+        )
+        provider = str(getattr(getattr(model_info, "provider", None), "value", None) or "openai")
+        packet = ContextAssemblerV2(
+            provider=provider,
+            budget_manager=ContextBudgetManager(
+                reserved_output_tokens=requested_output_tokens,
+                min_recent_messages=0,
+            ),
+        ).build_packet(
+            context=ContextStructure(
+                system_prompt=system_prompt,
+                tool_definitions=[],
+                current_query=repair_query,
+            ),
+            model_context_window=int(getattr(model_info, "context_window", 0) or 128000),
+            tool_definitions=[],
+            source_summaries=[
+                {"summary": context_text, "source_type": "policy_context"},
+                {"summary": answer, "source_type": "draft_answer"},
+            ],
+            cache_dimensions={
+                "model": model_id,
+                "rule_revision": "domain_policy_repair",
+            },
+        )
+        if context_packet_receipt is not None:
+            auxiliary = context_packet_receipt.setdefault("auxiliary_packets", [])
+            if isinstance(auxiliary, list):
+                auxiliary.append(
+                    {
+                        "purpose": "domain_policy_repair",
+                        "receipt": packet.receipt(),
+                    }
+                )
         repaired, _ = await self.model_registry.chat(
             model_id=model_id,
-            messages=messages,
+            messages=packet.materialize_messages(),
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=min(requested_output_tokens, packet.reserved_output_tokens),
         )
         return repaired
 
@@ -1269,6 +1378,8 @@ Please use this web search context to inform your response when relevant."""
         start_time = time.time()
         run_id = str(uuid.uuid4())
         request_id = str(uuid.uuid4())
+        turn_kernel = TurnKernel(run_id=run_id, request_id=request_id)
+        turn_kernel.transition(TurnState.PREPARING, reason="request_accepted")
         provider = getattr(config.model_provider, "value", str(config.model_provider))
         initial_history = history or []
         trace_ctx = AssistantTraceContext.from_chat_request(
@@ -1295,6 +1406,7 @@ Please use this web search context to inform your response when relevant."""
         trace_sequence_no = 0
         trace_finished = False
         context_snapshot: dict[str, Any] = {}
+        context_packet_receipt: dict[str, Any] = {}
 
         def _refresh_context_snapshot(
             *,
@@ -1329,8 +1441,14 @@ Please use this web search context to inform your response when relevant."""
                 bootstrap={
                     "message_count": message_count,
                     "retrieved_context_count": retrieved_context_count,
+                    **(
+                        {"context_packet": context_packet_receipt} if context_packet_receipt else {}
+                    ),
                 },
                 surface={"stream": False},
+                attempt_id=turn_kernel.attempt_id,
+                attempt_number=turn_kernel.attempt_number,
+                turn_state=turn_kernel.snapshot(),
             )
             return context_snapshot
 
@@ -1341,6 +1459,32 @@ Please use this web search context to inform your response when relevant."""
             usage: dict[str, Any] | None = None,
             error: Any = None,
         ) -> dict[str, Any]:
+            target = (
+                TurnState.SUCCEEDED
+                if status == "succeeded"
+                else TurnState.CANCELLED
+                if status == "cancelled"
+                else TurnState.FAILED
+            )
+            if turn_kernel.is_terminal:
+                if turn_kernel.state is not target:
+                    raise TurnTransitionError(
+                        f"attempt {turn_kernel.attempt_id} already ended as "
+                        f"{turn_kernel.state.value}, not {target.value}"
+                    )
+            else:
+                turn_kernel.finish(target, reason=exit_reason or status)
+            failure_decision = None
+            if status != "succeeded":
+                failure_class = failure_class_for_exit_reason(exit_reason)
+                failure_decision = decide_failure(
+                    failure_class,
+                    side_effect_state=(
+                        SideEffectState.UNKNOWN
+                        if failure_class.value == "side_effect_unknown"
+                        else SideEffectState.NONE
+                    ),
+                )
             return build_terminal_envelope(
                 run_id=run_id,
                 request_id=request_id,
@@ -1359,6 +1503,10 @@ Please use this web search context to inform your response when relevant."""
                 or _refresh_context_snapshot(history_count=0, message_count=1),
                 usage=usage,
                 error=error,
+                attempt_id=turn_kernel.attempt_id,
+                attempt_number=turn_kernel.attempt_number,
+                turn_state=turn_kernel.snapshot(),
+                failure_decision=failure_decision,
             )
 
         def _next_trace_sequence() -> int:
@@ -1442,6 +1590,9 @@ Please use this web search context to inform your response when relevant."""
                 "session_id": session_id,
                 "request_id": request_id,
                 "mode": "non_stream",
+                "attempt_id": turn_kernel.attempt_id,
+                "attempt_number": turn_kernel.attempt_number,
+                "turn_state": turn_kernel.snapshot(),
                 "context_snapshot": context_snapshot,
             },
         )
@@ -1694,16 +1845,44 @@ Please use this web search context to inform your response when relevant."""
             session_id=session_id,
             domain_rules=domain_policy.scenario_rules() if domain_policy else "",
             include_citations=bool(domain_policy),
+            context_packet_receipt=context_packet_receipt,
+            context_cache_scope=_context_receipt_scope(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            ),
+            working_memory_scope=_working_memory_scope(
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+                session_id=session_id,
+            ),
+        )
+        _refresh_context_snapshot(
+            history_count=len(history),
+            message_count=len(messages),
+            retrieved_context_count=len(retrieved_contexts),
+            domain_policy_enabled=bool(domain_policy),
         )
 
         # Get response
         model_started = time.time()
+        turn_kernel.transition(TurnState.MODEL_RUNNING, reason="model_invocation_started")
+        packet_output_reserve = int(
+            (context_packet_receipt.get("model_boundary") or {}).get("reserved_output_tokens", 0)
+            or 0
+        )
+        effective_max_tokens = config.max_tokens
+        if packet_output_reserve > 0:
+            effective_max_tokens = min(
+                int(config.max_tokens or packet_output_reserve),
+                packet_output_reserve,
+            )
         try:
             content, usage = await self.model_registry.chat(
                 model_id=config.model_id,
                 messages=messages,
                 temperature=config.temperature,
-                max_tokens=config.max_tokens,
+                max_tokens=effective_max_tokens,
             )
         except Exception as exc:
             terminal_envelope = _make_terminal_envelope(
@@ -1750,7 +1929,14 @@ Please use this web search context to inform your response when relevant."""
                         temperature=min(config.temperature, 0.3),
                         max_tokens=config.max_tokens,
                         issues=issues,
+                        context_packet_receipt=context_packet_receipt,
                     )
+                )
+                _refresh_context_snapshot(
+                    history_count=len(history),
+                    message_count=len(messages),
+                    retrieved_context_count=len(retrieved_contexts),
+                    domain_policy_enabled=True,
                 )
                 repaired = domain_policy.sanitize_answer(repaired)
                 if not domain_policy.validate_answer(repaired):
@@ -2011,6 +2197,15 @@ Please use this web search context to inform your response when relevant."""
 
         # Create AgentLoop configuration. Streaming-first is the only path
         # — the legacy 8-step pipeline was removed.
+        context_cache_scope = _context_receipt_scope(
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+            session_id=session_id,
+        )
+        context_cache_key = _context_receipt_key(
+            scope=context_cache_scope,
+            model_id=config.model_id,
+        )
         loop_config = AgentLoopConfig(
             model_id=config.model_id,
             temperature=config.temperature,
@@ -2049,6 +2244,7 @@ Please use this web search context to inform your response when relevant."""
             runtime_mode=config.runtime_mode,
             queue_mode=config.queue_mode,
             context_detail=config.context_detail,
+            use_context_engine=_runtime_context_v2_enabled(config.use_context_engine),
             skills_enabled=config.skills_enabled,
             memory_profile=config.memory_profile,
             # Thinking display: enable for thinking-capable models
@@ -2061,6 +2257,7 @@ Please use this web search context to inform your response when relevant."""
             ),
             resume_run_id=config.resume_run_id,
             resume_approval_id=config.resume_approval_id,
+            previous_context_packet_receipt=self._context_packet_receipts.get(context_cache_key),
         )
 
         logger.info(f"[AGENT LOOP] streaming-first model={loop_config.model_id}")
@@ -2108,6 +2305,12 @@ Please use this web search context to inform your response when relevant."""
             history=history,
             traceparent=config.traceparent,
         ):
+            if event.event_type == StreamEventType.CONTEXT_BUDGET.value and isinstance(
+                event.data, dict
+            ):
+                packet_receipt = event.data.get("context_packet")
+                if isinstance(packet_receipt, dict) and packet_receipt:
+                    self._context_packet_receipts[context_cache_key] = packet_receipt
             # Special handling for streaming_first_completed event
             # Split into usage and done events for frontend compatibility
             if event.event_type == "streaming_first_completed":
@@ -2355,6 +2558,9 @@ Please use this web search context to inform your response when relevant."""
         scenario_detection: ScenarioDetectionResult | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
+        context_packet_receipt: dict[str, Any] | None = None,
+        context_cache_scope: str | None = None,
+        working_memory_scope: str | None = None,
     ) -> list[ChatMessage]:
         """Build the message list for the model.
 
@@ -2374,7 +2580,7 @@ Please use this web search context to inform your response when relevant."""
             List of ChatMessage objects ready to send to the model.
         """
         # Use Context Engine for optimized caching if enabled
-        if config.use_context_engine:
+        if _runtime_context_v2_enabled(config.use_context_engine):
             return self._build_messages_with_context_engine(
                 message=message,
                 history=history,
@@ -2387,6 +2593,9 @@ Please use this web search context to inform your response when relevant."""
                 user_preferences=user_preferences,
                 domain_rules=domain_rules,
                 include_citations=include_citations,
+                context_packet_receipt=context_packet_receipt,
+                context_cache_scope=context_cache_scope,
+                working_memory_scope=working_memory_scope,
             )
 
         # Legacy message building (original implementation) - Now with Manus-style prompts
@@ -2562,6 +2771,9 @@ Please use this web search context to inform your response when relevant."""
         user_preferences: str | None = None,
         domain_rules: str = "",
         include_citations: bool = False,
+        context_packet_receipt: dict[str, Any] | None = None,
+        context_cache_scope: str | None = None,
+        working_memory_scope: str | None = None,
     ) -> list[ChatMessage]:
         """Build messages using Context Engine for KV-Cache optimization.
 
@@ -2588,9 +2800,8 @@ Please use this web search context to inform your response when relevant."""
         Returns:
             List of ChatMessage objects with optimized structure.
         """
-        # Get provider from model_id to configure ContextEngine
+        # Get provider from model_id to configure the shared Context Packet.
         provider = self._get_provider_from_model(config.model_id)
-        context_engine = ContextEngine(provider=provider)
 
         # Build current context (KB + web search results)
         current_context_parts: list[str] = []
@@ -2608,10 +2819,54 @@ Please use this web search context to inform your response when relevant."""
             )
             logger.info(f"[CONTEXT ENGINE] Web context: {len(web_search_context)} chars")
 
+        client_prompt = (config.system_prompt or "").strip()
+        if client_prompt:
+            current_context_parts.append(
+                "## User Custom Instructions (client-supplied, lower priority than system)\n"
+                + client_prompt[:500]
+            )
+
+        injected_file_sources: list[dict[str, Any]] = []
+        current_images: list[str] = []
+        if processed_files:
+            injected_file_sources.extend(dict(item) for item in processed_files.file_metadata or [])
+            text_content = str(processed_files.text_content or "")
+            if text_content:
+                injected_file_sources.append(
+                    {
+                        "path": "uploaded-text",
+                        "source_type": "upload",
+                        "content": text_content,
+                    }
+                )
+            if processed_files.image_descriptions and not model_supports_vision:
+                descriptions = "\n".join(
+                    f"- Image {index + 1}: {description}"
+                    for index, description in enumerate(processed_files.image_descriptions)
+                )
+                if descriptions:
+                    injected_file_sources.append(
+                        {
+                            "path": "image-descriptions",
+                            "source_type": "derived",
+                            "content": descriptions,
+                        }
+                    )
+            if model_supports_vision and processed_files.has_images:
+                current_images.extend(
+                    f"data:{image.media_type};base64,{image.base64_data}"
+                    for image in processed_files.images
+                )
+                current_images.extend(
+                    f"data:{page.media_type};base64,{page.base64_data}"
+                    for page in processed_files.pdf_pages
+                )
+
         # Get working memory task state if available
         task_state: str | None = None
-        if session_id and session_id in self._working_memories:
-            working_memory = self._working_memories[session_id]
+        working_memory_key = working_memory_scope or session_id
+        if working_memory_key and working_memory_key in self._working_memories:
+            working_memory = self._working_memories[working_memory_key]
             task_state = working_memory.to_markdown()
             logger.info(f"[CONTEXT ENGINE] Task state injected: {len(task_state)} chars")
 
@@ -2625,17 +2880,21 @@ Please use this web search context to inform your response when relevant."""
 
         # Build ContextStructure with layered content
         # Use TTFT-optimized prompt when context engine is enabled (no timestamps!)
-        effective_system_prompt = config.system_prompt
-        if not effective_system_prompt:
-            # Use TTFT-optimized prompt for KV-Cache stability
-            effective_system_prompt = get_ttft_optimized_prompt(
-                user_role="user",
-                available_datasets=config.kb_dataset_ids,
-                scenario_rules=domain_rules,
+        effective_system_prompt = (
+            config.eval_system_prompt_override or ""
+        ).strip() or get_ttft_optimized_prompt(
+            user_role="user",
+            available_datasets=config.kb_dataset_ids,
+            scenario_rules=domain_rules,
+        )
+        if config.agent_runtime is not None:
+            effective_system_prompt = compose_agent_system_prompt(
+                platform_prompt=effective_system_prompt,
+                agent_instructions=config.trusted_agent_instructions,
+                channel_instructions=config.trusted_channel_instructions,
+                capability_instructions=config.trusted_capability_instructions,
             )
-            logger.info("[CONTEXT ENGINE] Built TTFT-optimized system prompt (no timestamps)")
-        elif domain_rules:
-            effective_system_prompt = f"{effective_system_prompt}\n\n{domain_rules}"
+        logger.info("[CONTEXT ENGINE] Built trusted stable system prompt")
 
         context_structure = ContextStructure(
             system_prompt=effective_system_prompt,
@@ -2644,33 +2903,91 @@ Please use this web search context to inform your response when relevant."""
             long_term_memory=config.long_term_memory,
             task_state=task_state,
             conversation_history=[
-                {"role": h.get("role", "user"), "content": h.get("content", "")}
+                dict(h)
                 for h in history
-                if h.get("role") in ("user", "assistant") and h.get("content")
+                if h.get("role") in ("user", "assistant", "tool")
+                and (h.get("role") == "tool" or h.get("content") or h.get("tool_calls"))
             ],
             current_context="\n\n".join(current_context_parts) if current_context_parts else None,
             current_query=message,
+            current_images=current_images,
         )
 
-        # Build messages using ContextEngine
-        raw_messages = context_engine.build_messages(context_structure)
+        model_info = self.model_registry.get_model(config.model_id)
+        context_window = int(getattr(model_info, "context_window", 0) or 128000)
+        allowlist = config.capability_allowlist
+        permission_snapshot: Any = (
+            sorted(allowlist.tool_names)
+            if allowlist is not None
+            else "legacy-no-explicit-allowlist"
+        )
+        if config.agent_runtime is not None:
+            permission_snapshot = {
+                "runtime_fingerprint": config.agent_runtime.runtime_fingerprint,
+                "allowlist": permission_snapshot,
+            }
+        cache_receipt_key = (
+            _context_receipt_key(
+                scope=context_cache_scope,
+                model_id=config.model_id,
+            )
+            if context_cache_scope
+            else None
+        )
+        previous_cache_receipt = (
+            self._context_packet_receipts.get(cache_receipt_key)
+            if cache_receipt_key is not None
+            else None
+        )
+        packet = ContextAssemblerV2(provider=provider).build_packet(
+            context=context_structure,
+            model_context_window=context_window,
+            injected_files=injected_file_sources,
+            provenance=[
+                {
+                    "kind": "knowledge",
+                    "trust": "untrusted",
+                    "source_id": {
+                        "dataset_id": item.dataset_id,
+                        "dataset_name": item.dataset_name,
+                    },
+                }
+                for item in retrieved_contexts
+            ],
+            cache_dimensions={
+                "model": config.model_id,
+                "permission_snapshot": permission_snapshot,
+                "rule_revision": {
+                    "domain_rules": domain_rules,
+                    "agent_instructions": config.trusted_agent_instructions,
+                    "channel_instructions": config.trusted_channel_instructions,
+                    "capability_instructions": config.trusted_capability_instructions,
+                },
+            },
+            previous_cache_receipt=previous_cache_receipt,
+        )
+        raw_messages = packet.materialize_messages()
+        packet_receipt = packet.receipt()
+        if cache_receipt_key is not None:
+            self._context_packet_receipts[cache_receipt_key] = packet_receipt
+        if context_packet_receipt is not None:
+            context_packet_receipt.update(packet_receipt)
 
         # Convert to ChatMessage objects and handle file content
         messages: list[ChatMessage] = []
-        for i, msg in enumerate(raw_messages):
+        for msg in raw_messages:
             role = msg["role"]
-            content = msg["content"]
-
-            # For the last user message, handle file attachments
-            if i == len(raw_messages) - 1 and role == "user" and processed_files:
-                content, images = self._inject_file_content(
-                    content=content,
-                    processed_files=processed_files,
-                    model_supports_vision=model_supports_vision,
+            messages.append(
+                ChatMessage(
+                    role=role,
+                    content=msg.get("content", ""),
+                    name=msg.get("name"),
+                    tool_calls=msg.get("tool_calls"),
+                    tool_call_id=msg.get("tool_call_id"),
+                    images=msg.get("images"),
+                    thought_signature=msg.get("thought_signature"),
                 )
-                messages.append(ChatMessage(role=role, content=content, images=images))
-            else:
-                messages.append(ChatMessage(role=role, content=content))
+            )
 
         logger.info(f"[CONTEXT ENGINE] Built {len(messages)} messages with stable prefix design")
         return messages
@@ -2680,6 +2997,7 @@ Please use this web search context to inform your response when relevant."""
         content: str,
         processed_files: ProcessedFiles,
         model_supports_vision: bool,
+        include_text: bool = True,
     ) -> tuple[str, list[str] | None]:
         """Inject file content into user message.
 
@@ -2709,13 +3027,13 @@ Please use this web search context to inform your response when relevant."""
                 f"{len(processed_files.pdf_pages)} PDF pages"
             )
 
-        if processed_files.text_content:
+        if include_text and processed_files.text_content:
             content += f"\n\n---\n[上传文件内容]\n{processed_files.text_content}"
             logger.info(
                 f"[CONTEXT ENGINE] Added text content: {len(processed_files.text_content)} chars"
             )
 
-        if processed_files.image_descriptions and not model_supports_vision:
+        if include_text and processed_files.image_descriptions and not model_supports_vision:
             descriptions = "\n".join(
                 f"- 图像 {i + 1}: {desc}"
                 for i, desc in enumerate(processed_files.image_descriptions)
@@ -2727,18 +3045,59 @@ Please use this web search context to inform your response when relevant."""
 
         return content, user_images
 
-    def get_working_memory(self, session_id: str) -> WorkingMemory:
+    def get_working_memory(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> WorkingMemory:
         """Get or create working memory for a session.
 
         Args:
             session_id: The session ID.
+            tenant_id: Optional tenant owner for an isolated cache entry.
+            user_id: Optional user owner for an isolated cache entry.
 
         Returns:
             WorkingMemory instance for the session.
         """
-        if session_id not in self._working_memories:
-            self._working_memories[session_id] = WorkingMemory(session_id=session_id)
-        return self._working_memories[session_id]
+        if (tenant_id is None) != (user_id is None):
+            raise ValueError("tenant_id and user_id must be provided together")
+        legacy_scopes = getattr(self, "_working_memory_legacy_scopes", None)
+        if legacy_scopes is None:
+            legacy_scopes = {}
+            self._working_memory_legacy_scopes = legacy_scopes
+        ambiguous_sessions = getattr(self, "_working_memory_ambiguous_sessions", None)
+        if ambiguous_sessions is None:
+            ambiguous_sessions = set()
+            self._working_memory_ambiguous_sessions = ambiguous_sessions
+
+        if tenant_id is None or user_id is None:
+            # Preserve the public legacy contract only when an owner-scoped
+            # session has never been ambiguous. A raw legacy entry, if one was
+            # explicitly created, remains isolated from all scoped entries.
+            if session_id not in self._working_memories and session_id not in ambiguous_sessions:
+                linked_scope = legacy_scopes.get(session_id)
+                if linked_scope and linked_scope in self._working_memories:
+                    return self._working_memories[linked_scope]
+            cache_key = session_id
+        else:
+            cache_key = _working_memory_scope(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if session_id not in ambiguous_sessions:
+                linked_scope = legacy_scopes.get(session_id)
+                if linked_scope is None:
+                    legacy_scopes[session_id] = cache_key
+                elif linked_scope != cache_key:
+                    legacy_scopes.pop(session_id, None)
+                    ambiguous_sessions.add(session_id)
+        if cache_key not in self._working_memories:
+            self._working_memories[cache_key] = WorkingMemory(session_id=session_id)
+        return self._working_memories[cache_key]
 
     def clear_working_memory(self, session_id: str) -> None:
         """Clear working memory for a session.
@@ -2746,8 +3105,68 @@ Please use this web search context to inform your response when relevant."""
         Args:
             session_id: The session ID.
         """
-        if session_id in self._working_memories:
-            del self._working_memories[session_id]
+        self._working_memories.pop(session_id, None)
+        ambiguous_sessions = getattr(self, "_working_memory_ambiguous_sessions", set())
+        legacy_scopes = getattr(self, "_working_memory_legacy_scopes", None)
+        if session_id not in ambiguous_sessions and isinstance(legacy_scopes, dict):
+            linked_scope = legacy_scopes.pop(session_id, None)
+            if linked_scope:
+                self._working_memories.pop(linked_scope, None)
+
+    def clear_session_runtime_state(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Clear in-process session state and return an honest readback receipt."""
+
+        scoped_working_memory_key = _working_memory_scope(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        # The raw session-id key predates owner scoping and is ambiguous. Remove
+        # it on scoped deletion so stale legacy state can never be re-injected.
+        working_memory_keys = {scoped_working_memory_key, session_id}
+        working_memory_present = any(key in self._working_memories for key in working_memory_keys)
+        for key in working_memory_keys:
+            self._working_memories.pop(key, None)
+        legacy_scopes = getattr(self, "_working_memory_legacy_scopes", None)
+        if (
+            isinstance(legacy_scopes, dict)
+            and legacy_scopes.get(session_id) == scoped_working_memory_key
+        ):
+            legacy_scopes.pop(session_id, None)
+
+        scope = _context_receipt_scope(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        receipt_prefix = f"{scope}:"
+        receipt_keys = [
+            key
+            for key in list(self._context_packet_receipts)
+            if str(key).startswith(receipt_prefix)
+        ]
+        for key in receipt_keys:
+            self._context_packet_receipts.pop(key, None)
+
+        remaining_receipts = sum(
+            1 for key in self._context_packet_receipts if str(key).startswith(receipt_prefix)
+        )
+        working_memory_remaining = any(key in self._working_memories for key in working_memory_keys)
+        return {
+            "cleared": not working_memory_remaining and remaining_receipts == 0,
+            "working_memory_removed": working_memory_present,
+            "context_receipts_removed": len(receipt_keys),
+            "readback": {
+                "working_memory_remaining": working_memory_remaining,
+                "context_receipts_remaining": remaining_receipts,
+            },
+        }
 
     def _format_context(
         self,

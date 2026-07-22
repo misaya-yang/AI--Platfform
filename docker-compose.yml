@@ -170,11 +170,13 @@ services:
     user: "0:0"
     command: >
       sh -ec
-      "mkdir -p /app/data/images /app/logs &&
-       chown -R 1000:1000 /app/data /app/logs"
+      "mkdir -p /app/data/images /app/logs /app/assistant-memory &&
+       chown -R 1000:1000 /app/data /app/logs /app/assistant-memory &&
+       chmod 700 /app/assistant-memory"
     volumes:
       - gateway-logs:/app/logs
       - gateway-data:/app/data
+      - assistant-memory-data:/app/assistant-memory
     networks:
       - ai-gateway-net
     restart: "no"
@@ -256,6 +258,7 @@ services:
       # value must be set on the assistant-service block. Both sides
       # load it via env_file in prod.
       ASSISTANT_SERVICE_URL: "${ASSISTANT_SERVICE_URL:-http://assistant-service:8093}"
+      ASSISTANT_ROUTE_SESSIONS_PROXIED: "${ASSISTANT_ROUTE_SESSIONS_PROXIED:-true}"
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MANAGEMENT_ENABLED: "${AGENT_STUDIO_MANAGEMENT_ENABLED:-true}"
       AGENT_STUDIO_PUBLISH_ENABLED: "${AGENT_STUDIO_PUBLISH_ENABLED:-true}"
@@ -473,6 +476,17 @@ services:
       AGENT_STUDIO_RUNTIME_ENABLED: "${AGENT_STUDIO_RUNTIME_ENABLED:-true}"
       AGENT_STUDIO_MCP_ENABLED: "${AGENT_STUDIO_MCP_ENABLED:-true}"
       AGENT_STUDIO_SKILLS_ENABLED: "${AGENT_STUDIO_SKILLS_ENABLED:-true}"
+      ASSISTANT_RUNTIME_MEMORY_DIR: "${ASSISTANT_RUNTIME_MEMORY_DIR:-/app/data/assistant-memory}"
+      ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR: "${ASSISTANT_RUNTIME_LEGACY_MEMORY_DIR:-/app/legacy-data/assistant-memory}"
+      ASSISTANT_RUNTIME_QDRANT_URL: "${ASSISTANT_RUNTIME_QDRANT_URL:-http://qdrant:6333}"
+      ASSISTANT_RUNTIME_QDRANT_API_KEY: "${ASSISTANT_RUNTIME_QDRANT_API_KEY:-}"
+      ASSISTANT_RUNTIME_MEMORY_V2: "${ASSISTANT_RUNTIME_MEMORY_V2:-true}"
+      ASSISTANT_RUNTIME_CONTEXT_V2: "${ASSISTANT_RUNTIME_CONTEXT_V2:-true}"
+      ASSISTANT_RUNTIME_TOOL_POLICY_V2: "${ASSISTANT_RUNTIME_TOOL_POLICY_V2:-false}"
+      ASSISTANT_RUNTIME_SKILLS: "${ASSISTANT_RUNTIME_SKILLS:-false}"
+      ASSISTANT_RUNTIME_SCHEDULER: "${ASSISTANT_RUNTIME_SCHEDULER:-false}"
+      ASSISTANT_RUNTIME_FAILOVER_V2: "${ASSISTANT_RUNTIME_FAILOVER_V2:-false}"
+      ASSISTANT_SUBAGENTS_ENABLED: "${ASSISTANT_SUBAGENTS_ENABLED:-false}"
       # Shared HMAC for gateway↔assistant-service. Both services MUST
       # have the same value; a mismatch yields 401 at the middleware.
       GATEWAY_ASSISTANT_SHARED_SECRET: "${GATEWAY_ASSISTANT_SHARED_SECRET:?GATEWAY_ASSISTANT_SHARED_SECRET is required for gateway<->assistant-service auth}"
@@ -517,6 +531,8 @@ services:
       GATEWAY_STORAGE__KEY_PREFIX: "${GATEWAY_STORAGE__KEY_PREFIX:-dev}"
     volumes:
       - gateway-data:/app/data
+      - assistant-memory-data:/app/data/assistant-memory
+      - gateway-data:/app/legacy-data
     networks:
       - ai-gateway-net
     depends_on:
@@ -605,6 +621,7 @@ volumes:
   qdrant-data: {}
   gateway-logs: {}
   gateway-data: {}
+  assistant-memory-data: {}
   kb-data: {}
   docgen-artifacts: {}
   tempo-data: {}

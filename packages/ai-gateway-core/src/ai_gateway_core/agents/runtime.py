@@ -45,17 +45,11 @@ _SNAPSHOT_KEYS: Final = frozenset(
 _PUBLICATION_KEYS: Final = frozenset({"id", "channel", "auth_mode"})
 _MODEL_KEYS: Final = frozenset({"id", "provider", "parameters"})
 _INSTRUCTION_KEYS: Final = frozenset({"agent", "prompt_hash"})
-_CAPABILITY_KEYS: Final = frozenset(
-    {"type", "id", "version", "schema_hash", "risk", "config"}
-)
+_CAPABILITY_KEYS: Final = frozenset({"type", "id", "version", "schema_hash", "risk", "config"})
 _KNOWLEDGE_KEYS: Final = frozenset({"datasets", "retrieval"})
 _MEMORY_KEYS: Final = frozenset({"mode"})
-_CHANNEL_POLICY_KEYS: Final = frozenset(
-    {"attachments", "high_risk_tools", "allowed_origins"}
-)
-_FINGERPRINT_KEYS: Final = frozenset(
-    {"spec", "tool_schema", "skills", "knowledge_revision"}
-)
+_CHANNEL_POLICY_KEYS: Final = frozenset({"attachments", "high_risk_tools", "allowed_origins"})
+_FINGERPRINT_KEYS: Final = frozenset({"spec", "tool_schema", "skills", "knowledge_revision"})
 _ENVELOPE_KEYS: Final = frozenset(
     {
         "schema_version",
@@ -101,6 +95,17 @@ _SENSITIVE_KEYS: Final = frozenset(
         "tokenref",
     }
 )
+
+
+def agent_memory_principal(
+    caller_principal: str,
+    agent_id: str,
+    version_scope: str,
+) -> str:
+    """Build an opaque Agent memory principal that fits VARCHAR(64) stores."""
+
+    digest = sha256(f"{caller_principal}:{agent_id}:{version_scope}".encode()).hexdigest()
+    return f"am_{digest[:61]}"
 
 
 class AgentRuntimeEnvelopeError(ValueError):
@@ -343,9 +348,7 @@ class AgentRuntimeSigner:
                 agent_version_id, "AGENT_RUNTIME_IDENTITY_INVALID"
             ),
             "draft_revision": draft_revision,
-            "publication_id": _optional_string(
-                publication_id, "AGENT_RUNTIME_IDENTITY_INVALID"
-            ),
+            "publication_id": _optional_string(publication_id, "AGENT_RUNTIME_IDENTITY_INVALID"),
             "channel": channel,
             "session_id": _non_empty_string(session_id, "AGENT_RUNTIME_IDENTITY_INVALID"),
             "resolved_snapshot": snapshot,
@@ -374,7 +377,9 @@ class AgentRuntimeSigner:
     ) -> VerifiedAgentRuntime:
         if not isinstance(envelope, dict) or set(envelope) != set(_ENVELOPE_KEYS):
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")
-        unsigned = {key: copy.deepcopy(value) for key, value in envelope.items() if key != "signature"}
+        unsigned = {
+            key: copy.deepcopy(value) for key, value in envelope.items() if key != "signature"
+        }
         self._validate_unsigned(unsigned, now_ms=now_ms)
 
         snapshot_hash = runtime_sha256(unsigned["resolved_snapshot"])
@@ -422,15 +427,11 @@ class AgentRuntimeSigner:
         try:
             replayed = self.replay_store.seen_or_record(replay_key, ttl_ms)
         except Exception as exc:  # noqa: BLE001
-            raise AgentRuntimeEnvelopeError(
-                "AGENT_RUNTIME_REPLAY_STORE_UNAVAILABLE"
-            ) from exc
+            raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_REPLAY_STORE_UNAVAILABLE") from exc
         if replayed:
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_REPLAYED")
 
-        capability_ids = frozenset(
-            str(item["id"]) for item in snapshot["capabilities"]
-        )
+        capability_ids = frozenset(str(item["id"]) for item in snapshot["capabilities"])
         return VerifiedAgentRuntime(
             tenant_id=str(unsigned["tenant_id"]),
             caller_principal=str(unsigned["caller_principal"]),
@@ -456,14 +457,24 @@ class AgentRuntimeSigner:
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")
         if envelope["schema_version"] != AGENT_RUNTIME_ENVELOPE_SCHEMA_VERSION:
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_VERSION_UNSUPPORTED")
-        for key in ("issuer", "tenant_id", "caller_principal", "agent_id", "session_id", "spec_hash", "nonce"):
+        for key in (
+            "issuer",
+            "tenant_id",
+            "caller_principal",
+            "agent_id",
+            "session_id",
+            "spec_hash",
+            "nonce",
+        ):
             _non_empty_string(envelope[key], "AGENT_RUNTIME_ENVELOPE_INVALID")
         _optional_string(envelope["agent_version_id"], "AGENT_RUNTIME_ENVELOPE_INVALID")
         _optional_string(envelope["publication_id"], "AGENT_RUNTIME_ENVELOPE_INVALID")
         if envelope["channel"] not in _CHANNELS:
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")
         draft_revision = envelope["draft_revision"]
-        if draft_revision is not None and (not isinstance(draft_revision, int) or draft_revision < 1):
+        if draft_revision is not None and (
+            not isinstance(draft_revision, int) or draft_revision < 1
+        ):
             raise AgentRuntimeEnvelopeError("AGENT_RUNTIME_ENVELOPE_INVALID")
         if envelope["channel"] == "preview":
             if (

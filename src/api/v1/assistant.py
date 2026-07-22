@@ -20,6 +20,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -54,6 +55,13 @@ from ..schemas.assistant import (
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 logger = logging.getLogger(__name__)
+
+_CONTROL_AUDIT_TEXT_LIMIT = 4096
+
+
+def _control_audit_digest(value: Any) -> str:
+    encoded = str(value or "").encode("utf-8", errors="replace")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 # =========================================================================
@@ -170,6 +178,7 @@ async def list_models(
 ) -> ModelsListResponse:
     """Thin proxy — assistant-service owns the model catalogue."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(request, user, path="models")
 
 
@@ -180,6 +189,7 @@ async def list_datasets(
 ) -> DatasetsListResponse:
     """Thin proxy — assistant-service resolves KB datasets via knowledge-service."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(request, user, path="datasets")
 
 
@@ -190,6 +200,7 @@ async def get_config(
 ) -> AssistantConfigResponse:
     """Thin proxy — assistant-service owns provider configuration."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(request, user, path="config")
 
 
@@ -260,6 +271,7 @@ async def list_tools(
 ) -> ToolsListResponse:
     """Thin proxy — assistant-service owns the tool registry."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(request, user, path="tools")
 
 
@@ -270,6 +282,7 @@ async def get_policies(
 ) -> AssistantPoliciesResponse:
     """Thin proxy — policy snapshot comes from assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(request, user, path="policies")
 
 
@@ -283,6 +296,7 @@ async def approve_tool_call(
     """Thin proxy — approval state lives in ``assistant_tool_approvals``
     (ADR-004). Gateway forwards the request body to assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
         request, user, path=f"approvals/{approval_id}", body=body_bytes
@@ -297,9 +311,8 @@ async def get_run_status(
 ) -> RunStatusResponse:
     """Thin proxy — run state lives in ``assistant_runs`` (ADR-004)."""
     from ._assistant_proxy import proxy_to_assistant_service
-    return await proxy_to_assistant_service(
-        request, user, path=f"runs/{run_id}"
-    )
+
+    return await proxy_to_assistant_service(request, user, path=f"runs/{run_id}")
 
 
 @router.post("/runs/{run_id}/resume", response_model=ResumeResponse)
@@ -325,9 +338,7 @@ async def prepare_run_resume(
     )
 
 
-async def _check_model_permission(
-    user: UserContext, model_id: str, model_meta: Any
-) -> None:
+async def _check_model_permission(user: UserContext, model_id: str, model_meta: Any) -> None:
     """Check if the user has permission to invoke ``model_id``.
 
     DB-backed via ``GatewayModelMeta``. Unknown model → 400; caller's
@@ -409,10 +420,9 @@ async def chat(
         await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
-    return await proxy_to_assistant_service(
-        request, user, path="chat", body=body_bytes
-    )
+    return await proxy_to_assistant_service(request, user, path="chat", body=body_bytes)
 
 
 @router.post("/chat/stream")
@@ -467,13 +477,9 @@ async def chat_stream(
     # its own session manager, but defence-in-depth belongs at the edge.
     session_id = body_json.get("session_id")
     if session_id:
-        await _validate_chat_session_access(
-            request=request, user=user, session_id=session_id
-        )
+        await _validate_chat_session_access(request=request, user=user, session_id=session_id)
 
-    return await proxy_to_assistant_service(
-        request, user, path="chat/stream", body=body_bytes
-    )
+    return await proxy_to_assistant_service(request, user, path="chat/stream", body=body_bytes)
 
 
 # =========================================================================
@@ -647,6 +653,13 @@ async def delete_session(
     Permanently deletes the session and all its message history.
     User isolation is enforced.
     """
+    from ._route_flags import proxied
+
+    if proxied("SESSIONS"):
+        from ._assistant_proxy import proxy_to_assistant_service
+
+        return await proxy_to_assistant_service(request, user, path=f"sessions/{session_id}")
+
     session_manager = get_session_manager(request)
 
     try:
@@ -777,8 +790,17 @@ async def cancel_task(
     success = await task_manager.cancel_task(task_ctx.session_id, task_id)
 
     reason = body.reason if body else None
+    reason_chars = len(str(reason or ""))
     logger.info(
-        f"Task cancellation requested: task_id={task_id}, user={user.user_id}, reason={reason}"
+        "event_code=assistant_control_task_cancel_requested event_type=task_cancel "
+        "task_sha256=%s actor_sha256=%s reason_sha256=%s reason_chars=%s "
+        "reason_truncated=%s accepted=%s",
+        _control_audit_digest(task_id),
+        _control_audit_digest(user.user_id),
+        _control_audit_digest(reason),
+        min(reason_chars, _CONTROL_AUDIT_TEXT_LIMIT),
+        str(reason_chars > _CONTROL_AUDIT_TEXT_LIMIT).lower(),
+        str(bool(success)).lower(),
     )
 
     return TaskCancelResponse(
@@ -861,7 +883,9 @@ async def list_session_artifacts(
         return ArtifactListResponse(artifacts=artifact_list, total=len(artifact_list))
     except Exception as e:
         if _is_missing_artifact_schema_error(e):
-            logger.warning("Artifact storage schema is not initialized; returning empty artifact list")
+            logger.warning(
+                "Artifact storage schema is not initialized; returning empty artifact list"
+            )
             return ArtifactListResponse(artifacts=[], total=0)
         logger.error(f"Failed to list artifacts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1132,12 +1156,17 @@ async def generate_image(
     """Thin proxy — assistant-service owns image generation routing
     (Gemini / Doubao / DashScope) and multi-turn session history."""
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request, user, path="generate-image", body=body_bytes,
+        request,
+        user,
+        path="generate-image",
+        body=body_bytes,
     )
 
 
@@ -1149,12 +1178,17 @@ async def submit_image_generation(
 ) -> AsyncImageTaskSubmitResponse:
     """Thin proxy — background task lives in assistant-service's in-memory store."""
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request, user, path="generate-image-async", body=body_bytes,
+        request,
+        user,
+        path="generate-image-async",
+        body=body_bytes,
     )
 
 
@@ -1166,8 +1200,11 @@ async def get_image_task_status(
 ) -> AsyncImageTaskStatusResponse:
     """Thin proxy — polls the task store in assistant-service."""
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(
-        request, user, path=f"image-task/{task_id}",
+        request,
+        user,
+        path=f"image-task/{task_id}",
     )
 
 
@@ -1178,12 +1215,17 @@ async def create_image_blob_upload_url(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobUploadUrlResponse:
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request, user, path="image-blobs/upload-url", body=body_bytes,
+        request,
+        user,
+        path="image-blobs/upload-url",
+        body=body_bytes,
     )
 
 
@@ -1194,12 +1236,17 @@ async def complete_image_blob_upload(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobResponse:
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request, user, path="image-blobs/complete", body=body_bytes,
+        request,
+        user,
+        path="image-blobs/complete",
+        body=body_bytes,
     )
 
 
@@ -1210,12 +1257,17 @@ async def fetch_image_blob_from_url(
     user: UserContext = Depends(get_user_context),
 ) -> ImageBlobResponse:
     from ..deps import enforce_rate_limit
+
     await enforce_rate_limit(request, user, operation="image_generate")
 
     from ._assistant_proxy import proxy_to_assistant_service
+
     body_bytes = await request.body()
     return await proxy_to_assistant_service(
-        request, user, path="image-blobs/fetch-url", body=body_bytes,
+        request,
+        user,
+        path="image-blobs/fetch-url",
+        body=body_bytes,
     )
 
 
@@ -1232,8 +1284,11 @@ async def get_artifact_download_url(
     cross-owner access. See assistant-service for the full contract."""
     # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
+
     return await proxy_to_assistant_service(
-        request, user, path=f"artifacts/{artifact_id}/download-url",
+        request,
+        user,
+        path=f"artifacts/{artifact_id}/download-url",
     )
 
 
@@ -1249,10 +1304,12 @@ async def get_image_session_view(
     ``include_urls`` (bool, default false). Owner-scoped."""
     # Query string is auto-appended by ``proxy.forward`` from request.url.query.
     from ._assistant_proxy import proxy_to_assistant_service
-    return await proxy_to_assistant_service(
-        request, user, path=f"image-sessions/{session_id}",
-    )
 
+    return await proxy_to_assistant_service(
+        request,
+        user,
+        path=f"image-sessions/{session_id}",
+    )
 
 
 # =========================================================================

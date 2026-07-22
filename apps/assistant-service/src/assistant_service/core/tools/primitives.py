@@ -56,9 +56,7 @@ def _workspace_for(request: ToolCallRequest) -> Path:
     tenant_id = str(request.metadata.get("tenant_id") or "").strip()
     session_id = str(request.metadata.get("session_id") or "").strip()
     if not tenant_id or not session_id:
-        raise WorkspaceEscapeError(
-            "tenant_id and session_id are required for primitive tools"
-        )
+        raise WorkspaceEscapeError("tenant_id and session_id are required for primitive tools")
     return tenant_workspace(tenant_id, session_id)
 
 
@@ -96,6 +94,7 @@ FS_READ_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "read", "read_only": True},
     when_to_use="Read a previously-written file or a file the user placed in the workspace.",
 )
 
@@ -173,6 +172,7 @@ FS_WRITE_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.MEDIUM,
+    capability_metadata={"operation_kind": "write"},
     when_to_use="Persist intermediate artifacts, drafts, or generated files.",
 )
 
@@ -233,6 +233,7 @@ FS_GLOB_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "read", "read_only": True},
     when_to_use="Find files matching a pattern before reading or processing them.",
 )
 
@@ -311,6 +312,7 @@ FS_GREP_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "read", "read_only": True},
     when_to_use="Find occurrences of text or regex patterns in workspace files.",
 )
 

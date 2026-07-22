@@ -15,10 +15,19 @@ import os
 import re
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable
-from datetime import datetime
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from typing import Any, Final
 
+from ai_gateway_core.agents import (
+    agent_memory_principal,
+    build_runtime_cleanup_plan,
+    cleanup_receipt_completed,
+    validate_runtime_cleanup_inventory,
+    validate_runtime_cleanup_plan,
+    validate_runtime_cleanup_receipt,
+)
 from ai_gateway_core.eval.agent_version_candidate import (
     build_model_authorization_evidence,
     structured_agent_release_diff,
@@ -33,6 +42,22 @@ from .base import BaseRepository
 
 AGENT_SPEC_SCHEMA_VERSION: Final = "agent-spec/v1"
 ROLE_RANK: Final = {"viewer": 1, "editor": 2, "owner": 3}
+_DATA_DELETION_EXECUTION_SCHEMA: Final = "agent-data-deletion-execution/v1"
+
+
+def _agent_data_deletion_lock_key(*, tenant_id: str, agent_id: str, deletion_id: str) -> int:
+    digest = hashlib.sha256(
+        f"agent-data-deletion:{tenant_id}:{agent_id}:{deletion_id}".encode()
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _agent_data_deletion_claim_digest(
+    *, deletion_id: str, generation: int, claim_token: str
+) -> str:
+    return hashlib.sha256(f"{deletion_id}\x00{generation}\x00{claim_token}".encode()).hexdigest()
+
+
 _AGENT_SPEC_ROOT_KEYS: Final = frozenset(
     {
         "schema_version",
@@ -663,9 +688,7 @@ class DatabaseAgentRepository(BaseRepository):
             ("remove", old_capabilities - new_capabilities),
             ("add", new_capabilities - old_capabilities),
         ):
-            for capability_type, resource_id, resource_version, schema_hash in sorted(
-                bindings
-            ):
+            for capability_type, resource_id, resource_version, schema_hash in sorted(bindings):
                 summary = {
                     "capability_type": capability_type,
                     "resource_id": resource_id,
@@ -1568,8 +1591,7 @@ class DatabaseAgentRepository(BaseRepository):
                 }
             )
         if any(
-            binding["capability_type"] in {"mcp", "connector"}
-            for binding in capability_bindings
+            binding["capability_type"] in {"mcp", "connector"} for binding in capability_bindings
         ):
             from .mcp_repository import DatabaseMCPRepository, MCPValidationError
 
@@ -2101,8 +2123,9 @@ class DatabaseAgentRepository(BaseRepository):
         """Resolve one tenant Eval Dataset to a content-bound, prompt-free identity."""
 
         self._require_enabled()
-        async with self._pool.acquire() as conn, conn.transaction(
-            isolation="repeatable_read", readonly=True
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
         ):
             await self._authorized_agent(
                 conn,
@@ -2140,9 +2163,7 @@ class DatabaseAgentRepository(BaseRepository):
         model_authorization: dict[str, Any] | None,
         actor_model_access_levels: set[str] | None,
         is_tenant_admin: bool,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> None:
         requested = spec.get("model") if isinstance(spec.get("model"), dict) else {}
         model_id = str(requested.get("model_id") or "")
@@ -2201,9 +2222,7 @@ class DatabaseAgentRepository(BaseRepository):
             if current != proof:
                 raise AgentReleaseGateError("AGENT_RUNTIME_MODEL_AUTHORIZATION_STALE")
             if model_authorization_revalidator is None:
-                raise AgentReleaseGateError(
-                    "AGENT_RUNTIME_MODEL_AUTHORIZATION_UNVERIFIABLE"
-                )
+                raise AgentReleaseGateError("AGENT_RUNTIME_MODEL_AUTHORIZATION_UNVERIFIABLE")
             current = await model_authorization_revalidator()
             if current != proof:
                 raise AgentReleaseGateError("AGENT_RUNTIME_MODEL_AUTHORIZATION_STALE")
@@ -2257,9 +2276,7 @@ class DatabaseAgentRepository(BaseRepository):
         candidate: dict[str, Any],
         profile: dict[str, Any],
         actor_model_access_levels: set[str] | None = None,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
         """Persist a durable queued evaluation after current resource checks."""
 
@@ -2327,11 +2344,9 @@ class DatabaseAgentRepository(BaseRepository):
                     dataset_id=str(dataset_id),
                     lock=True,
                 )
-                if (
-                    dataset["version"] != str(candidate.get("dataset_version") or "")
-                    or dataset["manifest_hash"]
-                    != str(candidate.get("dataset_manifest_hash") or "")
-                ):
+                if dataset["version"] != str(candidate.get("dataset_version") or "") or dataset[
+                    "manifest_hash"
+                ] != str(candidate.get("dataset_manifest_hash") or ""):
                     raise AgentReleaseGateError("AGENT_EVAL_DATASET_STALE")
             evaluation_id = uuid.uuid4()
             validation_snapshot = {
@@ -2341,8 +2356,7 @@ class DatabaseAgentRepository(BaseRepository):
                 "runtime_fingerprint_hash": str(candidate["runtime_fingerprint_hash"]),
                 "release_identity_hash": str(candidate["release_identity_hash"]),
                 "evaluation_identity_hash": str(
-                    candidate.get("evaluation_identity_hash")
-                    or candidate["release_identity_hash"]
+                    candidate.get("evaluation_identity_hash") or candidate["release_identity_hash"]
                 ),
                 "dataset_manifest_hash": candidate.get("dataset_manifest_hash"),
                 "resource_authorization_rechecked": True,
@@ -2355,9 +2369,7 @@ class DatabaseAgentRepository(BaseRepository):
                 "profile_id": str(profile["profile_id"]),
                 "profile_version": str(profile["profile_version"]),
                 "execution_scope": str(profile.get("execution_scope") or ""),
-                "model_quality_evaluated": bool(
-                    profile.get("model_quality_evaluated", False)
-                ),
+                "model_quality_evaluated": bool(profile.get("model_quality_evaluated", False)),
                 "blocking_findings": [],
                 "non_blocking_findings": [],
             }
@@ -2387,7 +2399,9 @@ class DatabaseAgentRepository(BaseRepository):
                 canonical_spec(candidate["runtime_fingerprint"]),
                 str(candidate["runtime_fingerprint_hash"]),
                 str(candidate["release_identity_hash"]),
-                str(candidate.get("evaluation_identity_hash") or candidate["release_identity_hash"]),
+                str(
+                    candidate.get("evaluation_identity_hash") or candidate["release_identity_hash"]
+                ),
                 str(profile["profile_id"]),
                 str(profile["profile_version"]),
                 uuid.UUID(str(dataset_id)) if dataset_id else None,
@@ -2428,9 +2442,7 @@ class DatabaseAgentRepository(BaseRepository):
                     "profile_id": str(profile["profile_id"]),
                 },
             )
-            return await self._release_evaluation_result(
-                conn, tenant_id=tenant_id, row=row
-            )
+            return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
 
     async def start_release_evaluation(
         self,
@@ -2466,9 +2478,7 @@ class DatabaseAgentRepository(BaseRepository):
             if not row:
                 raise AgentReleaseEvaluationNotFoundError("AGENT_EVAL_NOT_FOUND")
             if str(row["status"]) != "queued":
-                result = await self._release_evaluation_result(
-                    conn, tenant_id=tenant_id, row=row
-                )
+                result = await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
                 result["execution_claimed"] = False
                 return result
             validation = _row_to_dict(row).get("validation_snapshot") or {}
@@ -2499,9 +2509,7 @@ class DatabaseAgentRepository(BaseRepository):
                 uuid.UUID(evaluation_id),
                 canonical_spec({"execution_scope": gate.get("execution_scope") or ""}),
             )
-            result = await self._release_evaluation_result(
-                conn, tenant_id=tenant_id, row=row
-            )
+            result = await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
             result["execution_claimed"] = True
             return result
 
@@ -2516,9 +2524,7 @@ class DatabaseAgentRepository(BaseRepository):
         candidate: dict[str, Any],
         gate: dict[str, Any],
         actor_model_access_levels: set[str] | None = None,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
         """Write one terminal result unless cancellation won the race."""
 
@@ -2547,13 +2553,9 @@ class DatabaseAgentRepository(BaseRepository):
             if not row:
                 raise AgentReleaseEvaluationNotFoundError("AGENT_EVAL_NOT_FOUND")
             if str(row["status"]) == "cancelled":
-                return await self._release_evaluation_result(
-                    conn, tenant_id=tenant_id, row=row
-                )
+                return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
             if str(row["status"]) in {"passed", "failed"}:
-                return await self._release_evaluation_result(
-                    conn, tenant_id=tenant_id, row=row
-                )
+                return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
             if str(row["status"]) != "running":
                 raise AgentReleaseGateError("AGENT_EVAL_LIFECYCLE_INVALID")
             candidate_checks = {
@@ -2587,9 +2589,7 @@ class DatabaseAgentRepository(BaseRepository):
                     or str(draft["draft_id"]) != str(row["draft_id"])
                     or str(draft["spec_hash"]) != str(row["spec_hash"])
                 ):
-                    raise AgentReleaseEvaluationStaleError(
-                        int(draft["revision"]) if draft else 0
-                    )
+                    raise AgentReleaseEvaluationStaleError(int(draft["revision"]) if draft else 0)
                 spec = (
                     draft["spec"] if isinstance(draft["spec"], dict) else json.loads(draft["spec"])
                 )
@@ -2617,11 +2617,9 @@ class DatabaseAgentRepository(BaseRepository):
                         dataset_id=str(row["dataset_id"]),
                         lock=True,
                     )
-                    if (
-                        dataset["version"] != str(row["dataset_version"] or "")
-                        or dataset["manifest_hash"]
-                        != str(row["dataset_manifest_hash"] or "")
-                    ):
+                    if dataset["version"] != str(row["dataset_version"] or "") or dataset[
+                        "manifest_hash"
+                    ] != str(row["dataset_manifest_hash"] or ""):
                         raise AgentReleaseGateError("AGENT_EVAL_DATASET_STALE")
             blocking = gate.get("blocking_findings")
             blocking = blocking if isinstance(blocking, list) else []
@@ -2685,9 +2683,7 @@ class DatabaseAgentRepository(BaseRepository):
                 action="release_evaluation_completed",
                 summary={"evaluation_id": evaluation_id, "status": status},
             )
-            return await self._release_evaluation_result(
-                conn, tenant_id=tenant_id, row=row
-            )
+            return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
 
     async def cancel_release_evaluation(
         self,
@@ -2724,9 +2720,7 @@ class DatabaseAgentRepository(BaseRepository):
                 raise AgentReleaseEvaluationNotFoundError("AGENT_EVAL_NOT_FOUND")
             current_status = str(row["status"])
             if current_status == "cancelled":
-                return await self._release_evaluation_result(
-                    conn, tenant_id=tenant_id, row=row
-                )
+                return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
             if current_status in {"passed", "failed"}:
                 raise AgentReleaseEvaluationTerminalError("AGENT_EVAL_TERMINAL")
             validation = _row_to_dict(row).get("validation_snapshot") or {}
@@ -2781,9 +2775,7 @@ class DatabaseAgentRepository(BaseRepository):
                 action="release_evaluation_cancelled",
                 summary={"evaluation_id": evaluation_id, "cancelled_from": current_status},
             )
-            return await self._release_evaluation_result(
-                conn, tenant_id=tenant_id, row=row
-            )
+            return await self._release_evaluation_result(conn, tenant_id=tenant_id, row=row)
 
     async def record_release_evaluation(
         self,
@@ -2795,9 +2787,7 @@ class DatabaseAgentRepository(BaseRepository):
         candidate: dict[str, Any],
         gate: dict[str, Any],
         actor_model_access_levels: set[str] | None = None,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
         """Compatibility helper that drives the same durable lifecycle."""
 
@@ -2884,16 +2874,20 @@ class DatabaseAgentRepository(BaseRepository):
                 tenant_id,
                 uuid.UUID(agent_id),
             )
-            events = await conn.fetch(
-                """
+            events = (
+                await conn.fetch(
+                    """
                 SELECT * FROM agent_release_evaluation_events
                 WHERE tenant_id = $1
                   AND evaluation_id = ANY($2::uuid[])
                 ORDER BY evaluation_id, sequence
                 """,
-                tenant_id,
-                [row["evaluation_id"] for row in rows],
-            ) if rows else []
+                    tenant_id,
+                    [row["evaluation_id"] for row in rows],
+                )
+                if rows
+                else []
+            )
             events_by_evaluation: dict[str, list[dict[str, Any]]] = {}
             for event in events:
                 events_by_evaluation.setdefault(str(event["evaluation_id"]), []).append(
@@ -2907,9 +2901,7 @@ class DatabaseAgentRepository(BaseRepository):
                     result["stale_reasons"] = ["draft_changed"]
                 else:
                     result["stale_reasons"] = []
-                result["events"] = events_by_evaluation.get(
-                    str(result["evaluation_id"]), []
-                )
+                result["events"] = events_by_evaluation.get(str(result["evaluation_id"]), [])
                 results.append(result)
             return results
 
@@ -3159,8 +3151,10 @@ class DatabaseAgentRepository(BaseRepository):
                 and str(event["reason"] or "") == reason
             )
             if operation == "promote":
-                matches = matches and evaluation_id is not None and (
-                    str(request_row["evaluation_id"]) == evaluation_id
+                matches = (
+                    matches
+                    and evaluation_id is not None
+                    and (str(request_row["evaluation_id"]) == evaluation_id)
                 )
             else:
                 matches = (
@@ -3171,9 +3165,7 @@ class DatabaseAgentRepository(BaseRepository):
                     and str(request_row["result_version_id"]) == target_version_id
                 )
             if not matches:
-                raise AgentReleaseIdempotencyConflictError(
-                    "AGENT_RELEASE_IDEMPOTENCY_CONFLICT"
-                )
+                raise AgentReleaseIdempotencyConflictError("AGENT_RELEASE_IDEMPOTENCY_CONFLICT")
             return await self._release_result_from_request(
                 conn,
                 tenant_id=tenant_id,
@@ -3193,9 +3185,7 @@ class DatabaseAgentRepository(BaseRepository):
         reason: str,
         current_candidate: dict[str, Any],
         actor_model_access_levels: set[str] | None = None,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
         """Create/reuse an immutable Version and atomically promote its channel."""
 
@@ -3214,9 +3204,7 @@ class DatabaseAgentRepository(BaseRepository):
             "channel_policy_hash": current_candidate.get("channel_policy_hash"),
             "reason": reason,
         }
-        request_hash = hashlib.sha256(
-            canonical_spec(request_identity).encode("utf-8")
-        ).hexdigest()
+        request_hash = hashlib.sha256(canonical_spec(request_identity).encode("utf-8")).hexdigest()
         async with self._pool.acquire() as conn, conn.transaction():
             await self._lock_release_idempotency_key(
                 conn,
@@ -3251,9 +3239,7 @@ class DatabaseAgentRepository(BaseRepository):
                     str(existing_request["request_hash"]) != request_hash
                     or str(existing_request["agent_id"]) != agent_id
                 ):
-                    raise AgentReleaseIdempotencyConflictError(
-                        "AGENT_RELEASE_IDEMPOTENCY_CONFLICT"
-                    )
+                    raise AgentReleaseIdempotencyConflictError("AGENT_RELEASE_IDEMPOTENCY_CONFLICT")
                 return await self._release_result_from_request(
                     conn,
                     tenant_id=tenant_id,
@@ -3300,19 +3286,14 @@ class DatabaseAgentRepository(BaseRepository):
                 "runtime_fingerprint_hash": str(evaluation["runtime_fingerprint_hash"]),
                 "release_identity_hash": str(evaluation["release_identity_hash"]),
                 "evaluation_identity_hash": str(
-                    evaluation["evaluation_identity_hash"]
-                    or evaluation["release_identity_hash"]
+                    evaluation["evaluation_identity_hash"] or evaluation["release_identity_hash"]
                 ),
                 "channel": str(evaluation["channel"]),
                 "auth_mode": str(evaluation["auth_mode"]),
                 "channel_policy_hash": str(evaluation["channel_policy_hash"]),
-                "dataset_id": (
-                    str(evaluation["dataset_id"]) if evaluation["dataset_id"] else None
-                ),
+                "dataset_id": (str(evaluation["dataset_id"]) if evaluation["dataset_id"] else None),
                 "dataset_version": (
-                    str(evaluation["dataset_version"])
-                    if evaluation["dataset_version"]
-                    else None
+                    str(evaluation["dataset_version"]) if evaluation["dataset_version"] else None
                 ),
                 "dataset_manifest_hash": (
                     str(evaluation["dataset_manifest_hash"])
@@ -3344,11 +3325,9 @@ class DatabaseAgentRepository(BaseRepository):
                     dataset_id=str(evaluation["dataset_id"]),
                     lock=True,
                 )
-                if (
-                    dataset["version"] != str(evaluation["dataset_version"] or "")
-                    or dataset["manifest_hash"]
-                    != str(evaluation["dataset_manifest_hash"] or "")
-                ):
+                if dataset["version"] != str(evaluation["dataset_version"] or "") or dataset[
+                    "manifest_hash"
+                ] != str(evaluation["dataset_manifest_hash"] or ""):
                     raise AgentReleaseEvaluationStaleError(int(draft["revision"]))
             material = await self._resolve_version_material(
                 conn,
@@ -3767,9 +3746,7 @@ class DatabaseAgentRepository(BaseRepository):
         runtime_spec_hash: str,
         model_authorization: dict[str, Any] | None = None,
         actor_model_access_levels: set[str] | None = None,
-        model_authorization_revalidator: (
-            Callable[[], Awaitable[dict[str, Any]]] | None
-        ) = None,
+        model_authorization_revalidator: (Callable[[], Awaitable[dict[str, Any]]] | None) = None,
     ) -> dict[str, Any]:
         """Atomically repoint one Publication after current resource rechecks."""
 
@@ -3784,9 +3761,7 @@ class DatabaseAgentRepository(BaseRepository):
             "model_authorization_hash": _canonical_hash(model_authorization or {}),
             "reason": reason,
         }
-        request_hash = hashlib.sha256(
-            canonical_spec(request_identity).encode("utf-8")
-        ).hexdigest()
+        request_hash = hashlib.sha256(canonical_spec(request_identity).encode("utf-8")).hexdigest()
         async with self._pool.acquire() as conn, conn.transaction():
             await self._lock_release_idempotency_key(
                 conn,
@@ -3832,9 +3807,7 @@ class DatabaseAgentRepository(BaseRepository):
                     str(existing_request["request_hash"]) != request_hash
                     or str(existing_request["agent_id"]) != agent_id
                 ):
-                    raise AgentReleaseIdempotencyConflictError(
-                        "AGENT_RELEASE_IDEMPOTENCY_CONFLICT"
-                    )
+                    raise AgentReleaseIdempotencyConflictError("AGENT_RELEASE_IDEMPOTENCY_CONFLICT")
                 return await self._release_result_from_request(
                     conn,
                     tenant_id=tenant_id,
@@ -4558,7 +4531,10 @@ class DatabaseAgentRepository(BaseRepository):
             if (
                 not token
                 or token["revoked_at"] is not None
-                or (token["expires_at"] is not None and token["expires_at"] <= datetime.now(token["expires_at"].tzinfo))
+                or (
+                    token["expires_at"] is not None
+                    and token["expires_at"] <= datetime.now(token["expires_at"].tzinfo)
+                )
             ):
                 raise AgentRuntimeUnavailableError("AGENT_RUNTIME_TOKEN_INVALID")
             if token["publication_status"] != "active":
@@ -5066,6 +5042,87 @@ class DatabaseAgentRepository(BaseRepository):
                 )
             )
             merged = {**current, **changes}
+            if bool(changes.get("legal_hold")) and not bool(current.get("legal_hold")):
+                active_cleanups = await conn.fetch(
+                    """
+                    SELECT deletion_id, status, deleted_counts, attempt_count
+                    FROM agent_data_deletion_requests
+                    WHERE tenant_id = $1 AND agent_id = $2::uuid
+                      AND status IN ('pending', 'failed')
+                    ORDER BY requested_at, deletion_id
+                    FOR UPDATE
+                    """,
+                    tenant_id,
+                    agent_id,
+                )
+                for cleanup_row in active_cleanups:
+                    cleanup = _row_to_dict(cleanup_row)
+                    counts = cleanup.get("deleted_counts") or {}
+                    if isinstance(counts, str):
+                        try:
+                            counts = json.loads(counts)
+                        except json.JSONDecodeError as exc:
+                            raise AgentRepositoryError(
+                                "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                            ) from exc
+                    if not isinstance(counts, dict):
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_STATE_INVALID")
+                    execution = counts.get("cleanup_execution")
+                    if execution is not None and not isinstance(execution, dict):
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_STATE_INVALID")
+                    execution = dict(execution or {})
+                    execution_state = str(execution.get("state") or "")
+                    if execution_state == "claimed":
+                        # A released DB session lock does not prove the remote deletion
+                        # stopped: the provider may have accepted it before disconnect.
+                        # Only an idempotent recovery may advance a claimed execution.
+                        raise AgentRepositoryError("AGENT_LEGAL_HOLD_CLEANUP_ACTIVE")
+                    elif (
+                        str(cleanup.get("status")) == "pending"
+                        and int(cleanup.get("attempt_count") or 0) > 0
+                        and not execution_state
+                    ):
+                        # A pre-fence in-flight request has no safe liveness proof.
+                        raise AgentRepositoryError("AGENT_LEGAL_HOLD_CLEANUP_ACTIVE")
+
+                    interrupted = bool(execution) or int(cleanup.get("attempt_count") or 0) > 0
+                    execution.pop("claim_digest", None)
+                    execution.update(
+                        {
+                            "schema_version": _DATA_DELETION_EXECUTION_SCHEMA,
+                            "state": "blocked",
+                            "blocked_after_execution_started": interrupted,
+                        }
+                    )
+                    counts["cleanup_execution"] = execution
+                    error_code = (
+                        "AGENT_LEGAL_HOLD_ACTIVE_AFTER_INTERRUPTED_CLEANUP"
+                        if interrupted
+                        else "AGENT_LEGAL_HOLD_ACTIVE"
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE agent_data_deletion_requests
+                        SET status = 'blocked', error_code = $2,
+                            deleted_counts = $3::jsonb, completed_at = NOW()
+                        WHERE deletion_id = $1::uuid
+                        """,
+                        cleanup["deletion_id"],
+                        error_code,
+                        json.dumps(counts, sort_keys=True),
+                    )
+                    await self._audit(
+                        conn,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        action="data_deletion_blocked",
+                        summary={
+                            "deletion_id": str(cleanup["deletion_id"]),
+                            "stage": "legal_hold_activation",
+                            "interrupted": interrupted,
+                        },
+                    )
             row = await conn.fetchrow(
                 """
                 INSERT INTO agent_governance_policies (
@@ -5530,6 +5587,91 @@ class DatabaseAgentRepository(BaseRepository):
             )
         return counts
 
+    async def _frozen_agent_memory_principals(
+        self,
+        conn: Any,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        scope: str,
+        subject_user_id: str | None,
+        cutoff_at: datetime,
+    ) -> list[str]:
+        """Resolve opaque Agent memory principals at the prepare cutoff."""
+
+        session_params: list[Any] = [tenant_id, agent_id, cutoff_at]
+        timestamp_column = "updated_at" if scope == "retention" else "created_at"
+        session_condition = f" AND {timestamp_column} <= $3"
+        if scope == "user":
+            session_params.append(subject_user_id)
+            session_condition += f" AND user_id = ${len(session_params)}"
+        session_rows = await conn.fetch(
+            f"""
+            SELECT user_id, agent_version_id, agent_draft_revision
+            FROM sessions
+            WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
+            """,
+            *session_params,
+        )
+        principals: set[str] = set()
+
+        def add_principal(caller: str, version_scope: str) -> None:
+            digest = hashlib.sha256(f"{caller}:{agent_id}:{version_scope}".encode()).hexdigest()
+            principals.add(agent_memory_principal(caller, agent_id, version_scope))
+            principals.add(f"agent-memory:{digest}")
+
+        for item in session_rows:
+            caller = str(item.get("user_id") or "")
+            version_id = item.get("agent_version_id")
+            draft_revision = item.get("agent_draft_revision")
+            if not caller or (version_id is None and draft_revision is None):
+                continue
+            version_scope = (
+                f"version:{version_id}" if version_id is not None else f"draft:{draft_revision}"
+            )
+            add_principal(caller, version_scope)
+
+        if scope in {"user", "tenant"}:
+            if scope == "user":
+                callers = {str(subject_user_id)}
+            else:
+                caller_rows = await conn.fetch(
+                    "SELECT user_id FROM users WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                callers = {str(item["user_id"]) for item in caller_rows if item.get("user_id")}
+            version_rows = await conn.fetch(
+                """
+                SELECT agent_version_id
+                FROM agent_versions
+                WHERE tenant_id = $1 AND agent_id = $2::uuid
+                  AND created_at <= $3
+                """,
+                tenant_id,
+                agent_id,
+                cutoff_at,
+            )
+            version_scopes = {f"version:{item['agent_version_id']}" for item in version_rows}
+            draft_revision = await conn.fetchval(
+                """
+                SELECT revision
+                FROM agent_drafts
+                WHERE tenant_id = $1 AND agent_id = $2::uuid
+                  AND created_at <= $3
+                """,
+                tenant_id,
+                agent_id,
+                cutoff_at,
+            )
+            if draft_revision:
+                version_scopes.update(
+                    f"draft:{revision}" for revision in range(1, int(draft_revision) + 1)
+                )
+            for caller in callers:
+                for version_scope in version_scopes:
+                    add_principal(caller, version_scope)
+        return sorted(principals)
+
     async def prepare_agent_data_deletion(
         self,
         *,
@@ -5563,10 +5705,7 @@ class DatabaseAgentRepository(BaseRepository):
             )
             if existing:
                 existing_data = _row_to_dict(existing)
-                if (
-                    not is_tenant_admin
-                    and existing_data.get("requested_by") != user_id
-                ):
+                if not is_tenant_admin and existing_data.get("requested_by") != user_id:
                     raise AgentNotFoundError("AGENT_NOT_FOUND")
                 if existing_data.get("status") in {"completed", "blocked"}:
                     return existing_data
@@ -5589,10 +5728,7 @@ class DatabaseAgentRepository(BaseRepository):
             )
             if existing:
                 existing_data = _row_to_dict(existing)
-                if (
-                    not is_tenant_admin
-                    and existing_data.get("requested_by") != user_id
-                ):
+                if not is_tenant_admin and existing_data.get("requested_by") != user_id:
                     raise AgentNotFoundError("AGENT_NOT_FOUND")
                 return existing_data
             policy = await conn.fetchrow(
@@ -5643,9 +5779,7 @@ class DatabaseAgentRepository(BaseRepository):
             ]
             if scope == "user":
                 attachment_params.append(subject_user_id)
-                attachment_filters.append(
-                    f"a.principal_id = ${len(attachment_params)}"
-                )
+                attachment_filters.append(f"a.principal_id = ${len(attachment_params)}")
             elif scope == "retention":
                 attachment_params.append(int(policy_data["attachment_retention_days"]))
                 attachment_filters.append(
@@ -5657,12 +5791,17 @@ class DatabaseAgentRepository(BaseRepository):
                 FROM agent_runtime_attachments a
                 JOIN agent_publications p
                   ON p.tenant_id = a.tenant_id AND p.publication_id = a.publication_id
-                WHERE {' AND '.join(attachment_filters)}
+                WHERE {" AND ".join(attachment_filters)}
                 ORDER BY a.storage_key
                 """,
                 *attachment_params,
             )
             object_keys = [str(item["storage_key"]) for item in object_rows]
+            policy_snapshot = {
+                "trace_retention_days": policy_data["trace_retention_days"],
+                "runtime_retention_days": policy_data["runtime_retention_days"],
+                "attachment_retention_days": policy_data["attachment_retention_days"],
+            }
             row = await conn.fetchrow(
                 """
                 INSERT INTO agent_data_deletion_requests (
@@ -5677,18 +5816,47 @@ class DatabaseAgentRepository(BaseRepository):
                 subject_user_id,
                 idempotency_key,
                 json.dumps(object_keys),
+                json.dumps({"policy": policy_snapshot}),
+                user_id,
+            )
+            requested_at = row["requested_at"]
+            cutoff_at = requested_at
+            if scope == "retention":
+                cutoff_at = requested_at - timedelta(
+                    days=int(policy_snapshot["runtime_retention_days"])
+                )
+            principal_handles = await self._frozen_agent_memory_principals(
+                conn,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                scope=scope,
+                subject_user_id=subject_user_id,
+                cutoff_at=cutoff_at,
+            )
+            cleanup_plan = build_runtime_cleanup_plan(
+                deletion_id=str(row["deletion_id"]),
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                scope=scope,
+                subject_user_id=subject_user_id,
+                cutoff_at=cutoff_at.isoformat(),
+                principal_handles=principal_handles,
+            )
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_data_deletion_requests
+                SET deleted_counts = $2::jsonb
+                WHERE deletion_id = $1::uuid
+                RETURNING *
+                """,
+                row["deletion_id"],
                 json.dumps(
                     {
-                        "policy": {
-                            "trace_retention_days": policy_data["trace_retention_days"],
-                            "runtime_retention_days": policy_data["runtime_retention_days"],
-                            "attachment_retention_days": policy_data[
-                                "attachment_retention_days"
-                            ],
-                        }
-                    }
+                        "policy": policy_snapshot,
+                        "runtime_cleanup_plan": cleanup_plan,
+                    },
+                    sort_keys=True,
                 ),
-                user_id,
             )
             await self._audit(
                 conn,
@@ -5705,6 +5873,438 @@ class DatabaseAgentRepository(BaseRepository):
             )
         return _row_to_dict(row)
 
+    @asynccontextmanager
+    async def _agent_data_deletion_connection(
+        self,
+        bound_connection: Any | None,
+    ) -> AsyncIterator[Any]:
+        """Reuse a claimed session-lock connection or acquire one for legacy callers."""
+
+        if bound_connection is not None:
+            if bound_connection.is_closed():
+                raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST")
+            yield bound_connection
+            return
+        async with self._pool.acquire() as conn:
+            yield conn
+
+    async def freeze_agent_runtime_cleanup_inventory(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        deletion_id: str,
+        user_id: str,
+        is_tenant_admin: bool,
+        inventory: dict[str, Any],
+        _execution_connection: Any | None = None,
+        _execution_generation: int | None = None,
+        _execution_claim_digest: str | None = None,
+    ) -> dict[str, Any]:
+        """Durably freeze Assistant's source handles before deletion starts."""
+
+        self._require_enabled()
+        async with (
+            self._agent_data_deletion_connection(_execution_connection) as conn,
+            conn.transaction(),
+        ):
+            await self._authorized_agent(
+                conn,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                required_role="owner",
+                is_tenant_admin=is_tenant_admin,
+                for_update=True,
+            )
+            request_row = await conn.fetchrow(
+                """
+                SELECT * FROM agent_data_deletion_requests
+                WHERE tenant_id = $1 AND agent_id = $2::uuid
+                  AND deletion_id = $3::uuid
+                FOR UPDATE
+                """,
+                tenant_id,
+                agent_id,
+                deletion_id,
+            )
+            if not request_row:
+                raise AgentRepositoryError("AGENT_DATA_DELETION_NOT_FOUND")
+            request_data = _row_to_dict(request_row)
+            if _execution_connection is not None:
+                counts_snapshot = request_data.get("deleted_counts") or {}
+                if isinstance(counts_snapshot, str):
+                    try:
+                        counts_snapshot = json.loads(counts_snapshot)
+                    except json.JSONDecodeError as exc:
+                        raise AgentRepositoryError(
+                            "AGENT_DATA_DELETION_EXECUTION_FENCE_LOST"
+                        ) from exc
+                execution = (
+                    counts_snapshot.get("cleanup_execution")
+                    if isinstance(counts_snapshot, dict)
+                    else None
+                )
+                try:
+                    stored_generation = int((execution or {}).get("generation") or 0)
+                    expected_generation = int(_execution_generation or 0)
+                except (TypeError, ValueError) as exc:
+                    raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST") from exc
+                if (
+                    request_data["status"] != "pending"
+                    or not isinstance(execution, dict)
+                    or execution.get("schema_version") != _DATA_DELETION_EXECUTION_SCHEMA
+                    or execution.get("state") != "claimed"
+                    or stored_generation < 1
+                    or stored_generation != expected_generation
+                    or not _execution_claim_digest
+                    or not secrets.compare_digest(
+                        str(execution.get("claim_digest") or ""),
+                        _execution_claim_digest,
+                    )
+                ):
+                    raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST")
+            if request_data["status"] not in {"pending", "failed"}:
+                return request_data
+            deleted_counts = request_data.get("deleted_counts") or {}
+            if isinstance(deleted_counts, str):
+                deleted_counts = json.loads(deleted_counts)
+            try:
+                plan = validate_runtime_cleanup_plan(deleted_counts.get("runtime_cleanup_plan"))
+                frozen_inventory = validate_runtime_cleanup_inventory(
+                    inventory,
+                    plan=plan,
+                )
+            except (TypeError, ValueError) as exc:
+                raise AgentRepositoryError("AGENT_RUNTIME_CLEANUP_INVENTORY_INVALID") from exc
+            existing_inventory = deleted_counts.get("runtime_cleanup_inventory")
+            if existing_inventory is not None:
+                try:
+                    existing_inventory = validate_runtime_cleanup_inventory(
+                        existing_inventory,
+                        plan=plan,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise AgentRepositoryError("AGENT_RUNTIME_CLEANUP_INVENTORY_INVALID") from exc
+                if existing_inventory["inventory_digest"] != frozen_inventory["inventory_digest"]:
+                    raise AgentRepositoryError("AGENT_RUNTIME_CLEANUP_INVENTORY_CONFLICT")
+                return request_data
+            deleted_counts = {
+                **deleted_counts,
+                "runtime_cleanup_inventory": frozen_inventory,
+            }
+            row = await conn.fetchrow(
+                """
+                UPDATE agent_data_deletion_requests
+                SET deleted_counts = $2::jsonb
+                WHERE deletion_id = $1::uuid
+                RETURNING *
+                """,
+                deletion_id,
+                json.dumps(deleted_counts, sort_keys=True),
+            )
+            await self._audit(
+                conn,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                action="data_deletion_inventory_frozen",
+                summary={
+                    "deletion_id": deletion_id,
+                    "principal_count": len(frozen_inventory["principals"]),
+                    "source_count": sum(
+                        int(item.get("source_count") or 0)
+                        for item in frozen_inventory["principals"]
+                    ),
+                    "inventory_digest": frozen_inventory["inventory_digest"],
+                },
+            )
+        return _row_to_dict(row)
+
+    @asynccontextmanager
+    async def claim_agent_data_deletion_execution(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        deletion_id: str,
+        user_id: str,
+        is_tenant_admin: bool,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Fence one external cleanup execution with a durable generation claim."""
+
+        self._require_enabled()
+        lock_key = _agent_data_deletion_lock_key(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            deletion_id=deletion_id,
+        )
+        async with self._pool.acquire() as conn:
+            lock_acquired = bool(
+                await conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1::bigint)",
+                    lock_key,
+                )
+            )
+            if not lock_acquired:
+                await self._authorized_agent(
+                    conn,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    required_role="owner",
+                    is_tenant_admin=is_tenant_admin,
+                )
+                request_row = await conn.fetchrow(
+                    """
+                    SELECT * FROM agent_data_deletion_requests
+                    WHERE tenant_id = $1 AND agent_id = $2::uuid
+                      AND deletion_id = $3::uuid
+                    """,
+                    tenant_id,
+                    agent_id,
+                    deletion_id,
+                )
+                if not request_row:
+                    raise AgentRepositoryError("AGENT_DATA_DELETION_NOT_FOUND")
+                result = _row_to_dict(request_row)
+                result["execution_claimed"] = False
+                yield result
+                return
+
+            try:
+                claim_token = secrets.token_urlsafe(32)
+                claim_generation = 0
+                claim_digest = ""
+                execution_claimed = False
+                async with conn.transaction():
+                    await self._authorized_agent(
+                        conn,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        required_role="owner",
+                        is_tenant_admin=is_tenant_admin,
+                        for_update=True,
+                    )
+                    request_row = await conn.fetchrow(
+                        """
+                        SELECT * FROM agent_data_deletion_requests
+                        WHERE tenant_id = $1 AND agent_id = $2::uuid
+                          AND deletion_id = $3::uuid
+                        FOR UPDATE
+                        """,
+                        tenant_id,
+                        agent_id,
+                        deletion_id,
+                    )
+                    if not request_row:
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_NOT_FOUND")
+                    request_data = _row_to_dict(request_row)
+                    if request_data["status"] not in {"pending", "failed"}:
+                        result = request_data
+                    else:
+                        policy_row = await conn.fetchrow(
+                            """
+                            SELECT legal_hold
+                            FROM agent_governance_policies
+                            WHERE tenant_id = $1 AND agent_id = $2::uuid
+                            FOR UPDATE
+                            """,
+                            tenant_id,
+                            agent_id,
+                        )
+                        if bool((policy_row or {}).get("legal_hold")):
+                            result_row = await conn.fetchrow(
+                                """
+                                UPDATE agent_data_deletion_requests
+                                SET status = 'blocked',
+                                    error_code = 'AGENT_LEGAL_HOLD_ACTIVE',
+                                    completed_at = NOW()
+                                WHERE deletion_id = $1::uuid
+                                RETURNING *
+                                """,
+                                deletion_id,
+                            )
+                            await self._audit(
+                                conn,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                agent_id=agent_id,
+                                action="data_deletion_blocked",
+                                summary={
+                                    "deletion_id": deletion_id,
+                                    "scope": request_data["scope"],
+                                    "stage": "execution_claim",
+                                },
+                            )
+                            result = _row_to_dict(result_row)
+                        else:
+                            counts = request_data.get("deleted_counts") or {}
+                            if isinstance(counts, str):
+                                try:
+                                    counts = json.loads(counts)
+                                except json.JSONDecodeError as exc:
+                                    raise AgentRepositoryError(
+                                        "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                                    ) from exc
+                            if not isinstance(counts, dict):
+                                raise AgentRepositoryError(
+                                    "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                                )
+                            prior_execution = counts.get("cleanup_execution")
+                            if prior_execution is not None and not isinstance(
+                                prior_execution, dict
+                            ):
+                                raise AgentRepositoryError(
+                                    "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                                )
+                            prior_execution = dict(prior_execution or {})
+                            try:
+                                prior_generation = int(prior_execution.get("generation") or 0)
+                            except (TypeError, ValueError) as exc:
+                                raise AgentRepositoryError(
+                                    "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                                ) from exc
+                            if prior_generation < 0:
+                                raise AgentRepositoryError(
+                                    "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                                )
+                            claim_generation = prior_generation + 1
+                            claim_digest = _agent_data_deletion_claim_digest(
+                                deletion_id=deletion_id,
+                                generation=claim_generation,
+                                claim_token=claim_token,
+                            )
+                            claimed_at = await conn.fetchval("SELECT NOW()")
+                            counts["cleanup_execution"] = {
+                                "schema_version": _DATA_DELETION_EXECUTION_SCHEMA,
+                                "state": "claimed",
+                                "generation": claim_generation,
+                                "claim_digest": claim_digest,
+                                "claimed_at": claimed_at.isoformat(),
+                                "recovered": bool(prior_execution),
+                            }
+                            result_row = await conn.fetchrow(
+                                """
+                                UPDATE agent_data_deletion_requests
+                                SET status = 'pending', deleted_counts = $2::jsonb,
+                                    error_code = 'AGENT_DATA_DELETION_EXECUTION_IN_PROGRESS',
+                                    attempt_count = attempt_count + 1,
+                                    last_attempt_at = NOW(), completed_at = NULL
+                                WHERE deletion_id = $1::uuid
+                                RETURNING *
+                                """,
+                                deletion_id,
+                                json.dumps(counts, sort_keys=True),
+                            )
+                            await self._audit(
+                                conn,
+                                tenant_id=tenant_id,
+                                user_id=user_id,
+                                agent_id=agent_id,
+                                action="data_deletion_execution_claimed",
+                                summary={
+                                    "deletion_id": deletion_id,
+                                    "generation": claim_generation,
+                                    "recovered": bool(prior_execution),
+                                },
+                            )
+                            result = _row_to_dict(result_row)
+                            execution_claimed = True
+
+                result["execution_claimed"] = execution_claimed
+                if not execution_claimed:
+                    yield result
+                    return
+
+                async def assert_execution_fence() -> None:
+                    if conn.is_closed():
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST")
+                    current_row = await conn.fetchrow(
+                        """
+                        SELECT status, deleted_counts
+                        FROM agent_data_deletion_requests
+                        WHERE tenant_id = $1 AND agent_id = $2::uuid
+                          AND deletion_id = $3::uuid
+                        """,
+                        tenant_id,
+                        agent_id,
+                        deletion_id,
+                    )
+                    if not current_row or str(current_row["status"]) != "pending":
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST")
+                    current_counts = current_row["deleted_counts"] or {}
+                    if isinstance(current_counts, str):
+                        try:
+                            current_counts = json.loads(current_counts)
+                        except json.JSONDecodeError as exc:
+                            raise AgentRepositoryError(
+                                "AGENT_DATA_DELETION_EXECUTION_FENCE_LOST"
+                            ) from exc
+                    execution = (
+                        current_counts.get("cleanup_execution")
+                        if isinstance(current_counts, dict)
+                        else None
+                    )
+                    if not isinstance(execution, dict) or (
+                        execution.get("state") != "claimed"
+                        or execution.get("generation") != claim_generation
+                        or not secrets.compare_digest(
+                            str(execution.get("claim_digest") or ""),
+                            claim_digest,
+                        )
+                    ):
+                        raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_FENCE_LOST")
+
+                async def freeze_execution_inventory(
+                    *, inventory: dict[str, Any]
+                ) -> dict[str, Any]:
+                    await assert_execution_fence()
+                    return await self.freeze_agent_runtime_cleanup_inventory(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        deletion_id=deletion_id,
+                        user_id=user_id,
+                        is_tenant_admin=is_tenant_admin,
+                        inventory=inventory,
+                        _execution_connection=conn,
+                        _execution_generation=claim_generation,
+                        _execution_claim_digest=claim_digest,
+                    )
+
+                async def finish_execution(
+                    *,
+                    storage_cleanup_succeeded: bool,
+                    runtime_cleanup_receipt: dict[str, Any] | None = None,
+                ) -> dict[str, Any]:
+                    await assert_execution_fence()
+                    return await self.finish_agent_data_deletion(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        deletion_id=deletion_id,
+                        user_id=user_id,
+                        is_tenant_admin=is_tenant_admin,
+                        storage_cleanup_succeeded=storage_cleanup_succeeded,
+                        runtime_cleanup_receipt=runtime_cleanup_receipt,
+                        execution_claim_token=claim_token,
+                        execution_generation=claim_generation,
+                        _execution_connection=conn,
+                    )
+
+                result["_execution_claim_token"] = claim_token
+                result["_execution_generation"] = claim_generation
+                result["_execution_guard"] = assert_execution_fence
+                result["_execution_freeze_inventory"] = freeze_execution_inventory
+                result["_execution_finish"] = finish_execution
+                yield result
+            finally:
+                if lock_acquired and not conn.is_closed():
+                    await conn.fetchval(
+                        "SELECT pg_advisory_unlock($1::bigint)",
+                        lock_key,
+                    )
+
     async def finish_agent_data_deletion(
         self,
         *,
@@ -5714,11 +6314,18 @@ class DatabaseAgentRepository(BaseRepository):
         user_id: str,
         is_tenant_admin: bool,
         storage_cleanup_succeeded: bool,
+        runtime_cleanup_receipt: dict[str, Any] | None = None,
+        execution_claim_token: str | None = None,
+        execution_generation: int | None = None,
+        _execution_connection: Any | None = None,
     ) -> dict[str, Any]:
-        """Commit database cleanup only after every frozen object was removed."""
+        """Commit DB cleanup only after frozen object/runtime receipts complete."""
 
         self._require_enabled()
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with (
+            self._agent_data_deletion_connection(_execution_connection) as conn,
+            conn.transaction(),
+        ):
             await self._authorized_agent(
                 conn,
                 tenant_id=tenant_id,
@@ -5744,6 +6351,42 @@ class DatabaseAgentRepository(BaseRepository):
             request_data = _row_to_dict(request_row)
             if request_data["status"] not in {"pending", "failed"}:
                 return request_data
+            counts_snapshot = request_data.get("deleted_counts") or {}
+            if isinstance(counts_snapshot, str):
+                try:
+                    counts_snapshot = json.loads(counts_snapshot)
+                except json.JSONDecodeError as exc:
+                    raise AgentRepositoryError(
+                        "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID"
+                    ) from exc
+            if not isinstance(counts_snapshot, dict):
+                raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_STATE_INVALID")
+            execution = counts_snapshot.get("cleanup_execution")
+            if not isinstance(execution, dict):
+                raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_CLAIM_INVALID")
+            try:
+                stored_generation = int(execution.get("generation") or 0)
+                supplied_generation = int(execution_generation or 0)
+            except (TypeError, ValueError) as exc:
+                raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_CLAIM_INVALID") from exc
+            supplied_token = str(execution_claim_token or "")
+            supplied_digest = _agent_data_deletion_claim_digest(
+                deletion_id=deletion_id,
+                generation=supplied_generation,
+                claim_token=supplied_token,
+            )
+            if (
+                request_data["status"] != "pending"
+                or execution.get("schema_version") != _DATA_DELETION_EXECUTION_SCHEMA
+                or execution.get("state") != "claimed"
+                or stored_generation < 1
+                or supplied_generation != stored_generation
+                or not supplied_token
+                or not secrets.compare_digest(
+                    str(execution.get("claim_digest") or ""), supplied_digest
+                )
+            ):
+                raise AgentRepositoryError("AGENT_DATA_DELETION_EXECUTION_CLAIM_INVALID")
             policy_row = await conn.fetchrow(
                 """
                 SELECT legal_hold
@@ -5755,41 +6398,57 @@ class DatabaseAgentRepository(BaseRepository):
                 agent_id,
             )
             if bool((policy_row or {}).get("legal_hold")):
+                interrupted_counts = dict(counts_snapshot)
+                interrupted_execution = dict(execution)
+                interrupted_execution.pop("claim_digest", None)
+                interrupted_execution.update(
+                    {
+                        "state": "interrupted",
+                        "reason": "legal_hold_race_detected",
+                    }
+                )
+                interrupted_counts["cleanup_execution"] = interrupted_execution
                 row = await conn.fetchrow(
                     """
                     UPDATE agent_data_deletion_requests
-                    SET status = 'blocked', error_code = 'AGENT_LEGAL_HOLD_ACTIVE',
-                        attempt_count = attempt_count + 1,
-                        last_attempt_at = NOW(), completed_at = NOW()
+                    SET status = 'failed',
+                        error_code = 'AGENT_LEGAL_HOLD_RACE_DETECTED',
+                        deleted_counts = $2::jsonb, completed_at = NOW()
                     WHERE deletion_id = $1::uuid
                     RETURNING *
                     """,
                     deletion_id,
+                    json.dumps(interrupted_counts, sort_keys=True),
                 )
                 await self._audit(
                     conn,
                     tenant_id=tenant_id,
                     user_id=user_id,
                     agent_id=agent_id,
-                    action="data_deletion_blocked",
+                    action="data_deletion_failed",
                     summary={
                         "deletion_id": deletion_id,
                         "scope": request_data["scope"],
-                        "stage": "commit",
+                        "stage": "commit_race_detected",
                     },
                 )
                 return _row_to_dict(row)
             if not storage_cleanup_succeeded:
+                retry_counts = dict(counts_snapshot)
+                retry_execution = dict(execution)
+                retry_execution.pop("claim_digest", None)
+                retry_execution.update({"state": "retryable", "reason": "storage_cleanup_failed"})
+                retry_counts["cleanup_execution"] = retry_execution
                 row = await conn.fetchrow(
                     """
                     UPDATE agent_data_deletion_requests
                     SET status = 'failed', error_code = 'AGENT_STORAGE_CLEANUP_FAILED',
-                        attempt_count = attempt_count + 1,
-                        last_attempt_at = NOW(), completed_at = NULL
+                        deleted_counts = $2::jsonb, completed_at = NULL
                     WHERE deletion_id = $1::uuid
                     RETURNING *
                     """,
                     deletion_id,
+                    json.dumps(retry_counts, sort_keys=True),
                 )
                 await self._audit(
                     conn,
@@ -5801,106 +6460,87 @@ class DatabaseAgentRepository(BaseRepository):
                 )
                 return _row_to_dict(row)
 
+            runtime_receipt: dict[str, Any] | None = None
+            try:
+                cleanup_plan = validate_runtime_cleanup_plan(
+                    counts_snapshot.get("runtime_cleanup_plan")
+                )
+                cleanup_inventory = validate_runtime_cleanup_inventory(
+                    counts_snapshot.get("runtime_cleanup_inventory"),
+                    plan=cleanup_plan,
+                )
+                runtime_receipt = validate_runtime_cleanup_receipt(
+                    runtime_cleanup_receipt,
+                    plan=cleanup_plan,
+                    inventory=cleanup_inventory,
+                )
+                runtime_cleanup_succeeded = cleanup_receipt_completed(runtime_receipt)
+            except (TypeError, ValueError):
+                runtime_cleanup_succeeded = False
+            if not runtime_cleanup_succeeded:
+                retry_counts = dict(counts_snapshot)
+                retry_execution = dict(execution)
+                retry_execution.pop("claim_digest", None)
+                retry_execution.update(
+                    {"state": "retryable", "reason": "runtime_cleanup_incomplete"}
+                )
+                retry_counts["cleanup_execution"] = retry_execution
+                row = await conn.fetchrow(
+                    """
+                    UPDATE agent_data_deletion_requests
+                    SET status = 'failed',
+                        error_code = 'AGENT_RUNTIME_CLEANUP_FAILED',
+                        deleted_counts = $2::jsonb, completed_at = NULL
+                    WHERE deletion_id = $1::uuid
+                    RETURNING *
+                    """,
+                    deletion_id,
+                    json.dumps(retry_counts, sort_keys=True),
+                )
+                await self._audit(
+                    conn,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    action="data_deletion_failed",
+                    summary={"deletion_id": deletion_id, "stage": "runtime_memory"},
+                )
+                return _row_to_dict(row)
+
             scope = str(request_data["scope"])
             subject = request_data.get("subject_user_id")
-            counts_snapshot = request_data.get("deleted_counts") or {}
-            if isinstance(counts_snapshot, str):
-                counts_snapshot = json.loads(counts_snapshot)
             policy = counts_snapshot.get("policy") or {}
-            runtime_days = int(policy.get("runtime_retention_days") or 30)
             trace_days = int(policy.get("trace_retention_days") or 90)
             keys = request_data.get("object_keys") or []
             if isinstance(keys, str):
                 keys = json.loads(keys)
 
-            condition = ""
-            condition_params: list[Any] = [tenant_id, agent_id]
+            cutoff_at = datetime.fromisoformat(str(cleanup_plan["cutoff_at"]))
+            condition_params: list[Any] = [tenant_id, agent_id, cutoff_at]
+            condition = " AND created_at <= $3"
             if scope == "user":
                 condition_params.append(subject)
-                condition = f" AND user_id = ${len(condition_params)}"
-            elif scope == "retention":
-                condition_params.append(runtime_days)
-                condition = (
-                    f" AND created_at < NOW() - make_interval(days => ${len(condition_params)}::int)"
-                )
+                condition += f" AND user_id = ${len(condition_params)}"
 
+            session_condition = (
+                condition.replace("created_at", "updated_at") if scope == "retention" else condition
+            )
             session_rows = await conn.fetch(
                 f"""
                 SELECT session_id, user_id, agent_version_id, agent_draft_revision
                 FROM sessions
-                WHERE tenant_id = $1 AND agent_id = $2::uuid{condition}
+                WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
                 """,
                 *condition_params,
             )
             session_ids = [str(item["session_id"]) for item in session_rows]
-            memory_principals: set[str] = set()
-            for item in session_rows:
-                caller = str(item.get("user_id") or "")
-                version_id = item.get("agent_version_id")
-                draft_revision = item.get("agent_draft_revision")
-                if not caller or (version_id is None and draft_revision is None):
-                    continue
-                version_scope = (
-                    f"version:{version_id}"
-                    if version_id is not None
-                    else f"draft:{draft_revision}"
-                )
-                digest = hashlib.sha256(
-                    f"{caller}:{agent_id}:{version_scope}".encode()
-                ).hexdigest()
-                memory_principals.add(f"agent-memory:{digest}")
-
-            if scope in {"user", "tenant"}:
-                if scope == "user":
-                    callers = {str(subject)}
-                else:
-                    caller_rows = await conn.fetch(
-                        "SELECT user_id FROM users WHERE tenant_id = $1",
-                        tenant_id,
-                    )
-                    callers = {
-                        str(item["user_id"])
-                        for item in caller_rows
-                        if item.get("user_id")
-                    }
-                version_rows = await conn.fetch(
-                    """
-                    SELECT agent_version_id
-                    FROM agent_versions
-                    WHERE tenant_id = $1 AND agent_id = $2::uuid
-                    """,
-                    tenant_id,
-                    agent_id,
-                )
-                version_scopes = {
-                    f"version:{item['agent_version_id']}" for item in version_rows
-                }
-                draft_revision = await conn.fetchval(
-                    """
-                    SELECT revision
-                    FROM agent_drafts
-                    WHERE tenant_id = $1 AND agent_id = $2::uuid
-                    """,
-                    tenant_id,
-                    agent_id,
-                )
-                if draft_revision:
-                    version_scopes.update(
-                        f"draft:{revision}"
-                        for revision in range(1, int(draft_revision) + 1)
-                    )
-                for caller in callers:
-                    for version_scope in version_scopes:
-                        digest = hashlib.sha256(
-                            f"{caller}:{agent_id}:{version_scope}".encode()
-                        ).hexdigest()
-                        memory_principals.add(f"agent-memory:{digest}")
+            memory_principals = set(cleanup_plan["principal_handles"])
 
             async def delete_count(sql: str, *params: Any) -> int:
                 rows = await conn.fetch(sql, *params)
                 return len(rows)
 
-            deleted: dict[str, int] = {}
+            deleted: dict[str, Any] = {}
             deleted["checkpoints"] = await delete_count(
                 f"""
                 DELETE FROM assistant_run_checkpoints
@@ -5935,52 +6575,63 @@ class DatabaseAgentRepository(BaseRepository):
                     """
                     DELETE FROM user_memory
                     WHERE tenant_id = $1 AND user_id = ANY($2::varchar[])
+                      AND updated_at <= $3
                     RETURNING key
                     """,
                     tenant_id,
                     memory_ids,
+                    cutoff_at,
                 )
-                deleted["memory_sources"] = await delete_count(
-                    """
-                    DELETE FROM assistant_memory_sources
-                    WHERE tenant_id = $1 AND user_id = ANY($2::varchar[])
-                    RETURNING source_id
-                    """,
-                    tenant_id,
-                    memory_ids,
+                deleted["memory_sources"] = sum(
+                    int(item.get("deleted_source_count") or 0)
+                    for item in (runtime_receipt or {}).get("principals", [])
                 )
                 deleted["memory_reflections"] = await delete_count(
                     """
                     DELETE FROM assistant_memory_reflections
                     WHERE tenant_id = $1 AND user_id = ANY($2::varchar[])
+                      AND updated_at <= $3
                     RETURNING reflection_id
                     """,
                     tenant_id,
                     memory_ids,
+                    cutoff_at,
                 )
             else:
                 deleted["user_memory"] = 0
                 deleted["memory_sources"] = 0
                 deleted["memory_reflections"] = 0
+            deleted["memory_vectors"] = sum(
+                int(item.get("deleted_vector_count") or 0)
+                for item in (runtime_receipt or {}).get("principals", [])
+            )
+            deleted["runtime_cleanup"] = {
+                "status": "completed",
+                "principal_count": len((runtime_receipt or {}).get("principals", [])),
+                "plan_digest": cleanup_plan["plan_digest"],
+                "inventory_digest": cleanup_inventory["inventory_digest"],
+                "receipt_digest": (runtime_receipt or {}).get("receipt_digest"),
+            }
             deleted["sessions"] = await delete_count(
                 f"""
                 DELETE FROM sessions
-                WHERE tenant_id = $1 AND agent_id = $2::uuid{condition}
+                WHERE tenant_id = $1 AND agent_id = $2::uuid{session_condition}
                 RETURNING session_id
                 """,
                 *condition_params,
             )
 
-            trace_params = [tenant_id, agent_id]
-            trace_condition = ""
+            requested_at = request_data["requested_at"]
+            if isinstance(requested_at, str):
+                requested_at = datetime.fromisoformat(requested_at)
+            trace_cutoff = requested_at
+            if scope == "retention":
+                trace_cutoff = requested_at - timedelta(days=trace_days)
+            trace_params = [tenant_id, agent_id, trace_cutoff]
+            trace_condition = " AND created_at <= $3"
             if scope == "user":
                 trace_params.append(subject)
-                trace_condition = f" AND user_id = ${len(trace_params)}"
-            elif scope == "retention":
-                trace_params.append(trace_days)
-                trace_condition = (
-                    f" AND created_at < NOW() - make_interval(days => ${len(trace_params)}::int)"
-                )
+                trace_condition += f" AND user_id = ${len(trace_params)}"
             deleted["traces"] = await delete_count(
                 f"""
                 DELETE FROM agent_traces
@@ -5990,16 +6641,11 @@ class DatabaseAgentRepository(BaseRepository):
                 *trace_params,
             )
 
-            principal_filter = ""
-            principal_params: list[Any] = [tenant_id, agent_id]
+            principal_params: list[Any] = [tenant_id, agent_id, cutoff_at]
+            principal_filter = " AND r.created_at <= $3"
             if scope == "user":
                 principal_params.append(subject)
-                principal_filter = f" AND r.principal_id = ${len(principal_params)}"
-            elif scope == "retention":
-                principal_params.append(runtime_days)
-                principal_filter = (
-                    f" AND r.created_at < NOW() - make_interval(days => ${len(principal_params)}::int)"
-                )
+                principal_filter += f" AND r.principal_id = ${len(principal_params)}"
             for table, id_column in (
                 ("agent_runtime_idempotency", "idempotency_key"),
                 ("agent_runtime_feedback", "feedback_id"),
@@ -6089,14 +6735,23 @@ class DatabaseAgentRepository(BaseRepository):
             except (TypeError, ValueError):
                 deleted["api_tokens_revoked"] = 0
 
+            cache_params: list[Any] = [tenant_id, agent_id, cutoff_at]
+            cache_condition = " AND created_at <= $3"
+            if scope == "user":
+                cache_params.append(subject)
+                cache_condition += (
+                    f" AND (metadata->>'user_id' = ${len(cache_params)}"
+                    f" OR metadata->>'principal_id' = ${len(cache_params)}"
+                    f" OR metadata->>'caller_principal' = ${len(cache_params)})"
+                )
             deleted["semantic_cache"] = await delete_count(
-                """
+                f"""
                 DELETE FROM semantic_cache
                 WHERE metadata->>'tenant_id' = $1 AND metadata->>'agent_id' = $2
+                  {cache_condition}
                 RETURNING id
                 """,
-                tenant_id,
-                agent_id,
+                *cache_params,
             )
             if scope == "tenant":
                 deleted["publications_disabled"] = await delete_count(
@@ -6209,12 +6864,16 @@ class DatabaseAgentRepository(BaseRepository):
                     tenant_id,
                     agent_id,
                 )
+            deleted["cleanup_execution"] = {
+                "schema_version": _DATA_DELETION_EXECUTION_SCHEMA,
+                "state": "completed",
+                "generation": stored_generation,
+            }
             row = await conn.fetchrow(
                 """
                 UPDATE agent_data_deletion_requests
                 SET status = 'completed', deleted_counts = $2::jsonb,
-                    error_code = NULL, attempt_count = attempt_count + 1,
-                    last_attempt_at = NOW(), completed_at = NOW()
+                    error_code = NULL, completed_at = NOW()
                 WHERE deletion_id = $1::uuid
                 RETURNING *
                 """,

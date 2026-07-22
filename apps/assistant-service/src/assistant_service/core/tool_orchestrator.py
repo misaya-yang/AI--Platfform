@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
 from .tasks.task_planner import ExecutionPlan, PlannedTask
 from .working_memory import TaskStatus, WorkingMemory
@@ -53,6 +54,18 @@ if TYPE_CHECKING:
     from .tools.tool_registry import ToolRegistry
 
 logger = get_logger(__name__)
+
+_MAX_ERROR_TEXT_CHARS = 200
+
+
+def _safe_error_text(value: Any) -> str:
+    """Return bounded, secret-redacted error text without changing its prefix contract."""
+
+    try:
+        text = str(value) if isinstance(value, BaseException) else value
+        return redact_trace_text(text, limit=_MAX_ERROR_TEXT_CHARS)
+    except Exception:
+        return "Tool execution failed"
 
 
 # =============================================================================
@@ -225,10 +238,14 @@ class ToolOrchestrator:
         # KB/web calls when multiple tasks hit the same cache_key before the
         # first result is stored.
         self._inflight: dict[str, asyncio.Future[ToolExecutionResult]] = {}
-        self._cacheable_tools = frozenset({
-            "search_knowledge_base", "search_documents",
-            "list_datasets", "get_dataset_info",
-        })
+        self._cacheable_tools = frozenset(
+            {
+                "search_knowledge_base",
+                "search_documents",
+                "list_datasets",
+                "get_dataset_info",
+            }
+        )
 
         # If no invoker provided, create one from registry or default
         if self.tool_invoker is None:
@@ -389,7 +406,7 @@ class ToolOrchestrator:
             try:
                 result = await coro
                 yield result
-            except Exception as e:
+            except Exception as exc:
                 # Find which planned task this was for using O(1) lookup
                 # Note: as_completed may wrap the original task, so we need
                 # to find by matching. Since exceptions are rare and the dict
@@ -411,12 +428,15 @@ class ToolOrchestrator:
                 task_id = planned_task.id if planned_task else "unknown"
                 tool_name = planned_task.tool if planned_task else "unknown"
 
-                logger.error(f"Unexpected error in task {task_id}: {e}")
+                logger.error(
+                    "Unexpected tool task failure (exception_type=%s)",
+                    type(exc).__name__,
+                )
                 yield ToolExecutionResult(
                     task_id=task_id,
                     tool=tool_name,
                     success=False,
-                    error=f"Unexpected error: {str(e)}",
+                    error=f"Unexpected error: {_safe_error_text(exc)}",
                     duration_ms=0,
                 )
 
@@ -449,6 +469,7 @@ class ToolOrchestrator:
         if task.tool in self._cacheable_tools:
             import hashlib
             import json as _json
+
             cache_key = hashlib.md5(
                 f"{task.tool}|{_json.dumps(task.parameters, sort_keys=True, default=str)}".encode()
             ).hexdigest()
@@ -456,9 +477,12 @@ class ToolOrchestrator:
                 cached = self._result_cache[cache_key]
                 logger.debug(f"Tool cache HIT: {task.tool} (task {task.id})")
                 return ToolExecutionResult(
-                    task_id=task.id, tool=task.tool,
-                    success=cached.success, result=cached.result,
-                    error=cached.error, duration_ms=0.1,
+                    task_id=task.id,
+                    tool=task.tool,
+                    success=cached.success,
+                    result=cached.result,
+                    error=cached.error,
+                    duration_ms=0.1,
                 )
             # In-flight dedup: if another coroutine is already computing the
             # same cache_key, wait for its result instead of duplicating work.
@@ -469,15 +493,20 @@ class ToolOrchestrator:
                     shared = await inflight
                     # Re-tag with this task's id, keep other fields
                     return ToolExecutionResult(
-                        task_id=task.id, tool=task.tool,
-                        success=shared.success, result=shared.result,
-                        error=shared.error, duration_ms=0.1,
+                        task_id=task.id,
+                        tool=task.tool,
+                        success=shared.success,
+                        result=shared.result,
+                        error=shared.error,
+                        duration_ms=0.1,
                     )
                 except Exception:
                     # Upstream failed; fall through and execute ourselves
                     pass
             # Become the in-flight owner for this cache_key
-            owner_future: asyncio.Future[ToolExecutionResult] = asyncio.get_running_loop().create_future()
+            owner_future: asyncio.Future[ToolExecutionResult] = (
+                asyncio.get_running_loop().create_future()
+            )
             self._inflight[cache_key] = owner_future
         else:
             owner_future = None  # type: ignore[assignment]
@@ -494,7 +523,7 @@ class ToolOrchestrator:
                 # Execute via ToolInvoker (unified execution layer)
                 if invocation_context is None:
                     raise ValueError(
-                        f"invocation_context is required for task {task.id}; "
+                        "invocation_context is required; "
                         "tool execution without tenant/user context is forbidden."
                     )
 
@@ -519,7 +548,11 @@ class ToolOrchestrator:
                     tool=task.tool,
                     success=tool_result.success,
                     result=tool_result.result,
-                    error=tool_result.error,
+                    error=(
+                        _safe_error_text(tool_result.error)
+                        if tool_result.error is not None
+                        else None
+                    ),
                     duration_ms=duration_ms,
                 )
 
@@ -533,19 +566,25 @@ class ToolOrchestrator:
 
                 return result
 
-            except Exception as e:
+            except Exception as exc:
                 duration_ms = (time.time() - start_time) * 1000
-                logger.error(f"Task {task.id} failed with exception: {e}")
+                logger.error(
+                    "Tool task execution failed (exception_type=%s)",
+                    type(exc).__name__,
+                )
 
                 # Fail in-flight waiters so they fall through to their own execution
                 if cache_key and owner_future is not None and not owner_future.done():
-                    owner_future.set_exception(e)
+                    owner_future.set_exception(RuntimeError("tool execution failed"))
+                    # Mark the generic exception retrieved when there are no joiners;
+                    # existing joiners still observe it and retry through their path.
+                    owner_future.exception()
 
                 return ToolExecutionResult(
                     task_id=task.id,
                     tool=task.tool,
                     success=False,
-                    error=str(e),
+                    error=_safe_error_text(exc),
                     duration_ms=duration_ms,
                 )
             finally:
@@ -622,15 +661,9 @@ class ToolOrchestrator:
         if isinstance(value, str):
             return self._resolve_string(value, prior_results)
         elif isinstance(value, dict):
-            return {
-                k: self._resolve_value(v, prior_results, _depth + 1)
-                for k, v in value.items()
-            }
+            return {k: self._resolve_value(v, prior_results, _depth + 1) for k, v in value.items()}
         elif isinstance(value, list):
-            return [
-                self._resolve_value(item, prior_results, _depth + 1)
-                for item in value
-            ]
+            return [self._resolve_value(item, prior_results, _depth + 1) for item in value]
         else:
             # For non-string primitives (int, float, bool, None), return as-is
             return value

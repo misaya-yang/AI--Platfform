@@ -18,6 +18,25 @@ from ai_gateway_core.security import SENSITIVE_KEY_RE, redact_trace_text
 
 logger = get_logger(__name__)
 
+_AUDIT_TEXT_LIMIT = 500
+_TRUNCATION_SUFFIX = "...[truncated]"
+
+
+def _bounded_redacted_text(value: Any, *, limit: int = _AUDIT_TEXT_LIMIT) -> str:
+    """Return secret-redacted audit text with a hard character bound."""
+
+    if limit <= 0:
+        return ""
+    try:
+        text = redact_trace_text(value)
+    except Exception:
+        return "[redacted]"[:limit]
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_SUFFIX):
+        return _TRUNCATION_SUFFIX[:limit]
+    return f"{text[: limit - len(_TRUNCATION_SUFFIX)]}{_TRUNCATION_SUFFIX}"
+
 
 @dataclass
 class ToolAuditEntry:
@@ -27,10 +46,10 @@ class ToolAuditEntry:
     user_id: str
     session_id: str
     request_id: str
-    tool_type: str        # "tool" | "skill" | "mcp"
+    tool_type: str  # "tool" | "skill" | "mcp"
     tool_name: str
-    input_summary: str    # Truncated input (max 500 chars)
-    output_status: str    # "success" | "error" | "denied"
+    input_summary: str  # Truncated input (max 500 chars)
+    output_status: str  # "success" | "error" | "denied"
     error_message: str | None = None
     latency_ms: float = 0
     timestamp: float = 0
@@ -70,13 +89,20 @@ class ToolAuditService:
                 entry.request_id,
                 entry.tool_type,
                 entry.tool_name,
-                (entry.input_summary or "")[:500],
+                _bounded_redacted_text(entry.input_summary or ""),
                 entry.output_status,
-                entry.error_message,
+                (
+                    _bounded_redacted_text(entry.error_message)
+                    if entry.error_message is not None
+                    else None
+                ),
                 entry.latency_ms,
             )
-        except Exception as e:
-            logger.warning(f"Audit log write failed: {e}")
+        except Exception as exc:
+            logger.warning(
+                "tool_audit.write_failed (exception_type=%s)",
+                type(exc).__name__,
+            )
 
     # ------------------------------------------------------------------
     # Rate Limiting
@@ -104,8 +130,11 @@ class ToolAuditService:
             )
             count = row["cnt"] if row else 0
             return count < limit_per_minute
-        except Exception as e:
-            logger.warning(f"Rate limit check failed: {e}")
+        except Exception as exc:
+            logger.warning(
+                "tool_audit.rate_limit_check_failed (exception_type=%s)",
+                type(exc).__name__,
+            )
             return True  # Fail open
 
     # ------------------------------------------------------------------
@@ -131,14 +160,14 @@ class ToolAuditService:
             text = json.dumps(safe_arguments, ensure_ascii=False, default=str)
         except Exception:
             text = str(safe_arguments)
-        return redact_trace_text(text, limit=max_len)
+        return _bounded_redacted_text(text, limit=max_len)
 
     @staticmethod
     def _redact_arguments(value: Any) -> Any:
         if isinstance(value, dict):
             safe: dict[str, Any] = {}
             for key, item in list(value.items())[:100]:
-                key_text = str(key)
+                key_text = _bounded_redacted_text(key, limit=100)
                 if SENSITIVE_KEY_RE.search(key_text):
                     safe[key_text] = "[redacted]"
                 else:
@@ -147,7 +176,7 @@ class ToolAuditService:
         if isinstance(value, list):
             return [ToolAuditService._redact_arguments(item) for item in value[:100]]
         if isinstance(value, str):
-            return redact_trace_text(value, limit=500)
+            return _bounded_redacted_text(value)
         if isinstance(value, (int, float, bool)) or value is None:
             return value
-        return redact_trace_text(value, limit=500)
+        return _bounded_redacted_text(value)

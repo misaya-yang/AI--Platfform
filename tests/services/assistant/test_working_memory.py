@@ -10,12 +10,317 @@ Tests for WorkingMemory class and related components:
 
 from datetime import datetime
 
+import pytest
+from ai_gateway_core.tasks.task_manager import TaskManager
+from assistant_service.core.runtime.memory.working_state import (
+    LEGACY_WORKING_MEMORY_KEY,
+    bounded_working_memory_context,
+    persist_working_memory,
+    restore_working_memory,
+    working_memory_key,
+)
 from assistant_service.core.working_memory import (
     CollectedInfo,
     TaskItem,
     TaskStatus,
     WorkingMemory,
 )
+
+
+class _WorkingStateMemoryService:
+    def __init__(self) -> None:
+        self.payloads: dict[str, object] = {}
+        self.calls: list[dict[str, object]] = []
+        self.fail_keys: set[str] = set()
+
+    async def get_session_memory(self, **kwargs):
+        return self.payloads.get(str(kwargs["key"]))
+
+    async def set_session_memory(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        key = str(kwargs["key"])
+        if key in self.fail_keys:
+            return False
+        self.payloads[key] = kwargs["value"]
+        return True
+
+
+@pytest.mark.asyncio
+async def test_task_manager_rejects_cross_owner_session_reuse():
+    """A cached session id remains bound to its original tenant and user."""
+    manager = TaskManager()
+
+    async with manager.session_context("shared", "tenant_a", "user_a") as session:
+        session.working_memory.set_goal("tenant-a private goal")
+
+    with pytest.raises(PermissionError, match="different tenant or user"):
+        async with manager.session_context("shared", "tenant_b", "user_a"):
+            pass
+
+    with pytest.raises(PermissionError, match="different tenant or user"):
+        async with manager.session_context("shared", "tenant_a", "user_b"):
+            pass
+
+    original = await manager.get_session("shared")
+    assert original is not None
+    assert original.tenant_id == "tenant_a"
+    assert original.user_id == "user_a"
+    assert await manager.get_session("shared", tenant_id="tenant_a", user_id="user_b") is None
+
+
+def test_persisted_working_memory_restores_only_for_expected_session():
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("finish the report")
+    memory.add_task("task-1", "collect evidence")
+
+    restored = WorkingMemory.from_persisted_dict(
+        memory.to_dict(),
+        expected_session_id="session-a",
+    )
+
+    assert restored.to_dict() == memory.to_dict()
+    with pytest.raises(ValueError, match="session mismatch"):
+        WorkingMemory.from_persisted_dict(
+            memory.to_dict(),
+            expected_session_id="session-b",
+        )
+
+
+def test_persisted_working_memory_rejects_unbounded_or_ambiguous_state():
+    memory = WorkingMemory(session_id="session-a").to_dict()
+    memory["tasks"] = [
+        {
+            "id": "duplicate",
+            "description": "task",
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None,
+        },
+        {
+            "id": "duplicate",
+            "description": "other task",
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "created_at": datetime.now().isoformat(),
+            "completed_at": None,
+        },
+    ]
+
+    with pytest.raises(ValueError, match="duplicate task ids"):
+        WorkingMemory.from_persisted_dict(
+            memory,
+            expected_session_id="session-a",
+        )
+
+    memory["tasks"] = []
+    memory["notes"] = ["x" * 1_001]
+    with pytest.raises(ValueError, match="note is invalid"):
+        WorkingMemory.from_persisted_dict(
+            memory,
+            expected_session_id="session-a",
+        )
+
+
+@pytest.mark.asyncio
+async def test_working_memory_persistence_has_scoped_honest_receipts():
+    service = _WorkingStateMemoryService()
+    memory = WorkingMemory(session_id="session-a")
+    memory.set_goal("resume safely")
+    memory.add_task("task-1", "read back external state")
+
+    assert await persist_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        memory=memory,
+    )
+    assert working_memory_key(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    ).startswith("working_memory:")
+    assert [call["key"] for call in service.calls] == [
+        working_memory_key(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+        ),
+        LEGACY_WORKING_MEMORY_KEY,
+    ]
+    assert service.calls[0]["metadata"] == {
+        "schema_version": "assistant-working-memory/v2",
+        "scope": "tenant_user_session",
+        "owner_scope": service.calls[0]["metadata"]["owner_scope"],
+        "source": "assistant_working_memory",
+    }
+    assert service.payloads[LEGACY_WORKING_MEMORY_KEY] == memory.to_dict()
+    restored = await restore_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    )
+    assert restored is not None
+    assert restored.to_dict() == memory.to_dict()
+    assert "read back external state" in str(bounded_working_memory_context(restored))
+    assert (
+        await restore_working_memory(
+            service,
+            tenant_id="tenant-a",
+            user_id="user-b",
+            session_id="session-a",
+        )
+        is None
+    )
+
+    service.fail_keys.add(
+        working_memory_key(
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+        )
+    )
+    assert not await persist_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        memory=memory,
+    )
+
+
+def test_working_memory_key_uses_collision_safe_length_delimited_scope():
+    first = working_memory_key(
+        tenant_id="tenant\0nested",
+        user_id="user",
+        session_id="session",
+    )
+    delimiter_collision = working_memory_key(
+        tenant_id="tenant",
+        user_id="nested\0user",
+        session_id="session",
+    )
+
+    assert first != delimiter_collision
+
+
+@pytest.mark.asyncio
+async def test_working_memory_v2_priority_and_owner_proven_legacy_fallback():
+    service = _WorkingStateMemoryService()
+    legacy = WorkingMemory(session_id="session-a")
+    legacy.set_goal("legacy private goal")
+    service.payloads[LEGACY_WORKING_MEMORY_KEY] = legacy.to_dict()
+
+    assert (
+        await restore_working_memory(
+            service,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+        )
+        is None
+    )
+    restored_legacy = await restore_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        legacy_owner_verified=True,
+    )
+    assert restored_legacy is not None
+    assert restored_legacy.goal == "legacy private goal"
+
+    current = WorkingMemory(session_id="session-a")
+    current.set_goal("v2 current goal")
+    assert await persist_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        memory=current,
+    )
+    # A stale legacy consumer row cannot override a valid v2 envelope.
+    service.payloads[LEGACY_WORKING_MEMORY_KEY] = legacy.to_dict()
+    restored_v2 = await restore_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        legacy_owner_verified=True,
+    )
+    assert restored_v2 is not None
+    assert restored_v2.goal == "v2 current goal"
+
+    v2_key = working_memory_key(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    )
+    assert isinstance(service.payloads[v2_key], dict)
+    service.payloads[v2_key]["schema_version"] = "malformed"  # type: ignore[index]
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        await restore_working_memory(
+            service,
+            tenant_id="tenant-a",
+            user_id="user-a",
+            session_id="session-a",
+            legacy_owner_verified=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_working_memory_dual_write_receipts_prevent_legacy_tearing():
+    service = _WorkingStateMemoryService()
+    v2_key = working_memory_key(
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+    )
+    stale = WorkingMemory(session_id="session-a")
+    stale.set_goal("stale")
+    service.payloads[v2_key] = {"stale": True}
+    service.payloads[LEGACY_WORKING_MEMORY_KEY] = stale.to_dict()
+
+    updated = WorkingMemory(session_id="session-a")
+    updated.set_goal("updated")
+    service.fail_keys.add(v2_key)
+    assert not await persist_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        memory=updated,
+    )
+    assert [call["key"] for call in service.calls] == [v2_key]
+    assert service.payloads[LEGACY_WORKING_MEMORY_KEY] == stale.to_dict()
+
+    service.calls.clear()
+    service.fail_keys = {LEGACY_WORKING_MEMORY_KEY}
+    assert not await persist_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        memory=updated,
+    )
+    assert [call["key"] for call in service.calls] == [
+        v2_key,
+        LEGACY_WORKING_MEMORY_KEY,
+    ]
+    restored = await restore_working_memory(
+        service,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        session_id="session-a",
+        legacy_owner_verified=True,
+    )
+    assert restored is not None
+    assert restored.goal == "updated"
+
 
 # =============================================================================
 # TaskStatus Tests

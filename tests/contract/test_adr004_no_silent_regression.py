@@ -10,6 +10,7 @@ cross-instance split-brain that blocks Polaris items #4 and #5.
 This test guards the invariant so a future refactor can't silently
 re-introduce an in-memory read.
 """
+
 from __future__ import annotations
 
 import re

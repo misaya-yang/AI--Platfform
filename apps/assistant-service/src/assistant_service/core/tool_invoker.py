@@ -47,10 +47,10 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
 if TYPE_CHECKING:
     from ai_gateway_core.auth import UserContextLike
@@ -59,10 +59,70 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MAX_PUBLIC_ERROR_CHARS = 200
+
+
+def _safe_public_error(value: Any) -> str:
+    """Return a bounded, shared-redaction error while preserving safe short messages."""
+
+    try:
+        text = str(value) if isinstance(value, BaseException) else value
+        return redact_trace_text(text, limit=_MAX_PUBLIC_ERROR_CHARS)
+    except Exception:
+        return "Tool execution failed"
+
+
+def _tool_log_label(tool_name: Any) -> str:
+    """Return a stable non-reversible label for untrusted tool names."""
+
+    try:
+        digest = hashlib.sha256(str(tool_name).encode("utf-8", errors="replace")).hexdigest()
+    except Exception:
+        return "tool_sha256=unavailable"
+    return f"tool_sha256={digest[:16]}"
+
+
+def _log_audit_task_completion(task: asyncio.Task[Any], tool_label: str) -> None:
+    """Retrieve an async audit failure without exposing its exception payload."""
+
+    if task.cancelled():
+        return
+    try:
+        error = task.exception()
+    except Exception as exc:
+        logger.debug(
+            "Tool audit callback inspection failed (tool_label=%s, exception_type=%s)",
+            tool_label,
+            type(exc).__name__,
+        )
+        return
+    if error is not None:
+        logger.debug(
+            "Async tool audit failed (tool_label=%s, exception_type=%s)",
+            tool_label,
+            type(error).__name__,
+        )
+
 
 # =============================================================================
 # Data Classes
 # =============================================================================
+
+
+class _CopiedBindingMap(Mapping[str, dict[str, Any]]):
+    """Read-only binding map whose nested values are never shared with callers."""
+
+    def __init__(self, values: Mapping[str, dict[str, Any]]) -> None:
+        self._values = copy.deepcopy(dict(values))
+
+    def __getitem__(self, key: str) -> dict[str, Any]:
+        return copy.deepcopy(self._values[key])
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 @dataclass(frozen=True)
@@ -89,7 +149,7 @@ class CapabilityAllowlist:
         object.__setattr__(
             self,
             "bindings",
-            MappingProxyType(
+            _CopiedBindingMap(
                 {
                     str(name): copy.deepcopy(binding)
                     for name, binding in dict(self.bindings or {}).items()
@@ -110,6 +170,160 @@ class CapabilityAllowlist:
         tools: list[ToolDefinition],
     ) -> list[ToolDefinition]:
         return [tool for tool in tools if self.allows(tool.name)]
+
+
+@dataclass(frozen=True)
+class ToolPolicySnapshot:
+    """Immutable upper bound shared by catalog and invocation for one run.
+
+    A live execution check may only remove capabilities from this snapshot. It
+    can never add a tool that was absent when the model-facing catalog was
+    compiled. The identity fields prevent a snapshot from being reused across
+    tenants, users, sessions, or runs.
+    """
+
+    tenant_id: str
+    user_id: str
+    session_id: str
+    run_scope: str
+    identity_resolved: bool = True
+    tool_policy_enabled: bool = False
+    tool_policy_resolved: bool = True
+    allowed_tools: frozenset[str] = field(default_factory=frozenset)
+    blocked_tools: frozenset[str] = field(default_factory=frozenset)
+    allowed_categories: frozenset[str] = field(default_factory=frozenset)
+    mcp_policy_enabled: bool = False
+    mcp_policy_resolved: bool = True
+    allowed_mcp_servers: frozenset[str] = field(default_factory=frozenset)
+    mcp_policy_source: str = "not_configured"
+    snapshot_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "allowed_tools",
+            "blocked_tools",
+            "allowed_categories",
+            "allowed_mcp_servers",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                raise TypeError(f"{name} must be a collection")
+            object.__setattr__(self, name, frozenset(str(item) for item in value))
+        payload = {
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "run_scope": self.run_scope,
+            "identity_resolved": self.identity_resolved,
+            "tool_policy_enabled": self.tool_policy_enabled,
+            "tool_policy_resolved": self.tool_policy_resolved,
+            "allowed_tools": sorted(self.allowed_tools),
+            "blocked_tools": sorted(self.blocked_tools),
+            "allowed_categories": sorted(self.allowed_categories),
+            "mcp_policy_enabled": self.mcp_policy_enabled,
+            "mcp_policy_resolved": self.mcp_policy_resolved,
+            "allowed_mcp_servers": sorted(self.allowed_mcp_servers),
+            "mcp_policy_source": self.mcp_policy_source,
+        }
+        digest = hashlib.sha256(
+            _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:24]
+        object.__setattr__(self, "snapshot_id", f"tps_{digest}")
+
+    @classmethod
+    def denied_for(cls, context: ToolInvocationContext) -> ToolPolicySnapshot:
+        """Create a scope-bound deny-all snapshot for an invalid identity."""
+
+        return cls(
+            tenant_id=str(context.tenant_id or ""),
+            user_id=str(context.user_id or ""),
+            session_id=str(context.session_id or ""),
+            run_scope=str(context.run_id or context.request_id or ""),
+            identity_resolved=False,
+            tool_policy_resolved=False,
+            mcp_policy_resolved=False,
+            mcp_policy_source="identity_unresolved",
+        )
+
+    def matches(self, context: ToolInvocationContext) -> bool:
+        return (
+            self.tenant_id == str(context.tenant_id or "")
+            and self.user_id == str(context.user_id or "")
+            and self.session_id == str(context.session_id or "")
+            and self.run_scope == str(context.run_id or context.request_id or "")
+        )
+
+    def allows(
+        self,
+        tool_name: str,
+        *,
+        category: str | None,
+        binding_type: str = "",
+    ) -> bool:
+        if not self.identity_resolved or not self.tool_policy_resolved:
+            return False
+        if self.tool_policy_enabled:
+            if tool_name in self.blocked_tools:
+                return False
+            if self.allowed_tools and tool_name not in self.allowed_tools:
+                return False
+            if self.allowed_categories and (
+                not category or category not in self.allowed_categories
+            ):
+                return False
+        if tool_name.startswith("mcp_") and binding_type != "mcp":
+            if not self.mcp_policy_resolved:
+                return False
+            if self.mcp_policy_enabled:
+                prefixes = tuple(f"mcp_{name}__" for name in self.allowed_mcp_servers)
+                if not prefixes or not tool_name.startswith(prefixes):
+                    return False
+        return True
+
+
+@dataclass(frozen=True)
+class ToolExecutionPolicy:
+    """Trusted retry and side-effect facts for one tool operation."""
+
+    operation_kind: str
+    operation_id: str
+    operation_fingerprint: str = ""
+    external_service: bool = False
+    idempotency_key: str | None = None
+    idempotency_supported: bool = False
+    read_back_available: bool = False
+    compensation_available: bool = False
+    max_attempts: int = 1
+
+    @property
+    def side_effecting(self) -> bool:
+        return self.operation_kind != "read"
+
+    @property
+    def replay_safe(self) -> bool:
+        return self.operation_kind == "read" or bool(
+            self.idempotency_supported and self.idempotency_key
+        )
+
+    @property
+    def may_have_external_side_effect(self) -> bool:
+        # ``unknown`` is not evidence of read-only behavior. Treat it like a
+        # potentially irreversible write until repository-owned metadata proves
+        # otherwise, regardless of whether ``external_service`` was declared.
+        return self.side_effecting
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operation_kind": self.operation_kind,
+            "operation_id": self.operation_id,
+            "operation_fingerprint": self.operation_fingerprint,
+            "external_service": self.external_service,
+            "idempotency_key_present": bool(self.idempotency_key),
+            "idempotency_supported": self.idempotency_supported,
+            "read_back_available": self.read_back_available,
+            "compensation_available": self.compensation_available,
+            "max_attempts": self.max_attempts,
+        }
 
 
 @dataclass
@@ -165,6 +379,28 @@ class ToolInvocationContext:
     # tools and is enforced again immediately before invocation.
     capability_allowlist: CapabilityAllowlist | None = None
 
+    # Immutable catalog-time authorization ceiling. It is populated by the
+    # async catalog/invocation boundary and intentionally omitted from
+    # ``to_dict`` except for its opaque digest.
+    policy_snapshot: ToolPolicySnapshot | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    # Run-local side-effect fence. These opaque fingerprints are shared by
+    # parent/child invocation contexts but are not serialized into logs.
+    uncertain_operation_fingerprints: set[str] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+    inflight_operation_fingerprints: set[str] = field(
+        default_factory=set,
+        repr=False,
+        compare=False,
+    )
+
     # Per-run tools (for example exact tenant Skill versions) live outside the
     # process-global registry.  The field is deliberately omitted from
     # ``to_dict`` so definitions, executors, and instruction content cannot
@@ -197,6 +433,9 @@ class ToolInvocationContext:
                 None
                 if self.capability_allowlist is None
                 else sorted(self.capability_allowlist.tool_names)
+            ),
+            "policy_snapshot_id": (
+                self.policy_snapshot.snapshot_id if self.policy_snapshot is not None else None
             ),
             "metadata": self.metadata,
         }
@@ -345,6 +584,17 @@ class ToolInvoker(ABC):
         """
         return self.get_tool_definitions(context, tool_names)
 
+    async def filter_tool_definitions_authorized(
+        self,
+        context: ToolInvocationContext,
+        tools: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        """Recheck externally merged definitions at the invocation boundary."""
+
+        if context.capability_allowlist is None:
+            return list(tools)
+        return context.capability_allowlist.filter_definitions(tools)
+
 
 # =============================================================================
 # Concrete Implementation
@@ -438,6 +688,249 @@ class RegistryToolInvoker(ToolInvoker):
             del self._result_cache[oldest]
         self._result_cache[(session_id, key)] = (result, time.monotonic() + self._cache_ttl)
 
+    async def _load_policy_snapshot(
+        self,
+        context: ToolInvocationContext,
+        *,
+        fresh: bool = False,
+    ) -> ToolPolicySnapshot:
+        """Resolve both tenant policy dimensions into one immutable value."""
+
+        tenant_id = str(context.tenant_id or "")
+        user_id = str(context.user_id or "")
+        session_id = str(context.session_id or "")
+        run_scope = str(context.run_id or context.request_id or "")
+        if not tenant_id or not user_id or not session_id or not run_scope:
+            return ToolPolicySnapshot.denied_for(context)
+
+        tool_policy_resolved = True
+        allowed_tools: frozenset[str] = frozenset()
+        blocked_tools: frozenset[str] = frozenset()
+        allowed_categories: frozenset[str] = frozenset()
+        if self.tenant_tool_policy is not None:
+            try:
+                if fresh and hasattr(self.tenant_tool_policy, "get_policy_fresh"):
+                    policy = await self.tenant_tool_policy.get_policy_fresh(tenant_id)
+                else:
+                    policy = await self.tenant_tool_policy.get_policy(tenant_id)
+                allowed_tools = frozenset(str(item) for item in policy.allowed_tools)
+                blocked_tools = frozenset(str(item) for item in policy.blocked_tools)
+                allowed_categories = frozenset(str(item) for item in policy.allowed_categories)
+            except Exception as exc:
+                logger.warning(
+                    "Tenant tool policy snapshot failed closed (exception_type=%s)",
+                    type(exc).__name__,
+                )
+                tool_policy_resolved = False
+
+        mcp_policy_resolved = True
+        allowed_mcp_servers: frozenset[str] = frozenset()
+        mcp_policy_source = "not_configured"
+        if self.tenant_mcp_config is not None:
+            try:
+                if fresh and hasattr(self.tenant_mcp_config, "get_config_fresh"):
+                    mcp_config = await self.tenant_mcp_config.get_config_fresh(tenant_id)
+                else:
+                    mcp_config = await self.tenant_mcp_config.get_config(tenant_id)
+                allowed_mcp_servers = frozenset(str(item) for item in mcp_config.allowed_servers)
+                mcp_policy_source = str(
+                    getattr(mcp_config, "policy_source", "configured") or "configured"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Tenant MCP policy snapshot failed closed (exception_type=%s)",
+                    type(exc).__name__,
+                )
+                mcp_policy_resolved = False
+                mcp_policy_source = "unavailable"
+
+        return ToolPolicySnapshot(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            run_scope=run_scope,
+            tool_policy_enabled=self.tenant_tool_policy is not None,
+            tool_policy_resolved=tool_policy_resolved,
+            allowed_tools=allowed_tools,
+            blocked_tools=blocked_tools,
+            allowed_categories=allowed_categories,
+            mcp_policy_enabled=self.tenant_mcp_config is not None,
+            mcp_policy_resolved=mcp_policy_resolved,
+            allowed_mcp_servers=allowed_mcp_servers,
+            mcp_policy_source=mcp_policy_source,
+        )
+
+    async def _policy_snapshots(
+        self,
+        context: ToolInvocationContext,
+        *,
+        fresh_current: bool = False,
+    ) -> tuple[ToolPolicySnapshot, ToolPolicySnapshot]:
+        """Return catalog ceiling plus a live, non-expanding revocation check."""
+
+        pinned = context.policy_snapshot
+        if pinned is not None and not pinned.matches(context):
+            logger.warning("Tool policy snapshot identity mismatch; denying scope")
+            denied = ToolPolicySnapshot.denied_for(context)
+            context.policy_snapshot = denied
+            return denied, denied
+        if pinned is None:
+            pinned = await self._load_policy_snapshot(context)
+            context.policy_snapshot = pinned
+            if not fresh_current:
+                return pinned, pinned
+        current = await self._load_policy_snapshot(
+            context,
+            fresh=fresh_current,
+        )
+        return pinned, current
+
+    @staticmethod
+    def _policy_allows(
+        snapshots: tuple[ToolPolicySnapshot, ToolPolicySnapshot],
+        *,
+        tool_name: str,
+        category: str | None,
+        binding_type: str,
+    ) -> bool:
+        return all(
+            snapshot.allows(
+                tool_name,
+                category=category,
+                binding_type=binding_type,
+            )
+            for snapshot in snapshots
+        )
+
+    @staticmethod
+    def _policy_metadata(
+        snapshots: tuple[ToolPolicySnapshot, ToolPolicySnapshot],
+    ) -> dict[str, Any]:
+        pinned, current = snapshots
+        return {
+            "tool_policy_snapshot_id": pinned.snapshot_id,
+            "tool_policy_recheck_id": current.snapshot_id,
+            "tool_policy_revalidated": pinned.snapshot_id == current.snapshot_id,
+        }
+
+    def _tool_execution_policy(
+        self,
+        *,
+        context: ToolInvocationContext,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_definition: Any | None,
+        logical_operation_id: str,
+        binding_type: str = "",
+    ) -> ToolExecutionPolicy:
+        metadata = (
+            dict(getattr(tool_definition, "capability_metadata", None) or {})
+            if tool_definition is not None
+            else {}
+        )
+        declared_kind = str(metadata.get("operation_kind") or "").lower()
+        if declared_kind not in {"read", "write", "unknown"}:
+            if tool_definition is None:
+                # A legacy execution adapter may expose ``execute`` without a
+                # model-facing ToolDefinition. Concrete ToolRegistry misses
+                # still fail as unknown tools at dispatch. Dynamic MCP and
+                # connector bindings remain conservative writes because their
+                # side effects are external and learned at authorization time.
+                declared_kind = "write" if binding_type in {"mcp", "connector"} else "read"
+            elif bool(metadata.get("read_only")) or self._is_cacheable(tool_name):
+                declared_kind = "read"
+            elif bool(getattr(tool_definition, "requires_confirmation", False)) or str(
+                getattr(getattr(tool_definition, "risk_level", None), "value", "low")
+            ) in {"medium", "high"}:
+                # ToolDefinition risk is repository-owned metadata: medium/high
+                # explicitly means the tool may mutate data. Conservatively
+                # fence an ambiguous timeout as an unknown write outcome.
+                declared_kind = "write"
+            else:
+                declared_kind = "unknown"
+        scope = ":".join(
+            [
+                context.tenant_id,
+                context.user_id,
+                context.session_id,
+                str(context.run_id or context.request_id),
+                tool_name,
+            ]
+        )
+        encoded_args = _json.dumps(
+            arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        fingerprint = hashlib.sha256(f"{scope}:{encoded_args}".encode()).hexdigest()
+        digest = hashlib.sha256(f"{fingerprint}:{logical_operation_id}".encode()).hexdigest()
+        operation_id = f"tool_op_{digest[:24]}"
+        idempotency_supported = bool(metadata.get("idempotency_supported"))
+        supplied_key = str((context.metadata or {}).get("idempotency_key") or "")
+        idempotency_key = (
+            supplied_key or f"tool_idem_{digest[24:56]}" if idempotency_supported else None
+        )
+        definition_retries = int(getattr(tool_definition, "max_retries", 0) or 0)
+        retries = max(0, min(2, int(context.max_retries or 0), definition_retries))
+        safe_to_retry = declared_kind == "read" or bool(idempotency_supported and idempotency_key)
+        return ToolExecutionPolicy(
+            operation_kind=declared_kind,
+            operation_id=operation_id,
+            operation_fingerprint=f"tool_fp_{fingerprint[:24]}",
+            external_service=bool(metadata.get("external_service")),
+            idempotency_key=idempotency_key,
+            idempotency_supported=idempotency_supported,
+            read_back_available=bool(metadata.get("read_back_available")),
+            compensation_available=bool(metadata.get("compensation_available")),
+            max_attempts=1 + retries if safe_to_retry else 1,
+        )
+
+    @staticmethod
+    def _side_effect_unknown_metadata(
+        policy: ToolExecutionPolicy,
+        *,
+        cause: str,
+    ) -> dict[str, Any]:
+        from .turn_contract import decide_failure
+
+        decision = decide_failure("side_effect_unknown", side_effect_state="unknown").to_dict()
+        if policy.read_back_available:
+            decision["recovery_action"] = "resume"
+        elif policy.compensation_available:
+            decision["recovery_action"] = "compensate"
+        return {
+            "tool_operation": policy.to_dict(),
+            "tool_failure": {**decision, "cause": cause},
+            "side_effect_unknown": True,
+        }
+
+    @staticmethod
+    def _result_has_unknown_side_effect(result: Any) -> bool:
+        metadata = dict(getattr(result, "metadata", None) or {})
+        if metadata.get("side_effect_unknown"):
+            return True
+        tool_failure = metadata.get("tool_failure") or {}
+        mcp_failure = metadata.get("mcp_failure") or {}
+        return any(
+            isinstance(value, dict)
+            and (
+                value.get("side_effect_state") == "unknown"
+                or value.get("failure_kind") == "side_effect_unknown"
+            )
+            for value in (tool_failure, mcp_failure)
+        )
+
+    def _side_effect_unresolved_metadata(
+        self,
+        policy: ToolExecutionPolicy,
+        *,
+        cause: str,
+    ) -> dict[str, Any]:
+        metadata = self._side_effect_unknown_metadata(policy, cause=cause)
+        metadata["side_effect_unresolved"] = True
+        return metadata
+
     async def _deny_tool_call(
         self,
         *,
@@ -447,11 +940,14 @@ class RegistryToolInvoker(ToolInvoker):
         context: ToolInvocationContext,
         error: str,
         start_time: float,
+        metadata: dict[str, Any] | None = None,
     ) -> Any:
         """Return a denied tool result and record best-effort audit evidence."""
         from .tools.tool_registry import ToolCallResult
 
         duration_ms = (time.time() - start_time) * 1000
+        safe_error = _safe_public_error(error)
+        tool_label = _tool_log_label(tool_name)
         if self.tool_audit:
             try:
                 from .audit.tool_audit import ToolAuditEntry
@@ -466,19 +962,24 @@ class RegistryToolInvoker(ToolInvoker):
                         tool_name=tool_name,
                         input_summary=self.tool_audit.summarize_input(arguments),
                         output_status="denied",
-                        error_message=error,
+                        error_message=safe_error,
                         latency_ms=duration_ms,
                     )
                 )
-            except Exception as e:
-                logger.debug(f"Denied tool audit failed: {e}")
+            except Exception as exc:
+                logger.debug(
+                    "Denied tool audit failed (tool_label=%s, exception_type=%s)",
+                    tool_label,
+                    type(exc).__name__,
+                )
 
         return ToolCallResult(
             call_id=call_id,
             tool_name=tool_name,
             success=False,
-            error=error,
+            error=safe_error,
             duration_ms=duration_ms,
+            metadata=dict(metadata or {}),
         )
 
     async def invoke(
@@ -500,10 +1001,11 @@ class RegistryToolInvoker(ToolInvoker):
         6. Record metrics (if configured)
         7. Return result
         """
-        from .tools.tool_registry import ToolCallRequest, ToolCallResult
+        from .tools.tool_registry import ToolCallRequest, ToolCallResult, ToolDefinition
 
         start_time = time.time()
         call_id = str(uuid.uuid4())
+        tool_label = _tool_log_label(tool_name)
         runtime_registry = context.runtime_tool_registry
         runtime_definition = (
             runtime_registry.get_tool(tool_name) if runtime_registry is not None else None
@@ -512,6 +1014,8 @@ class RegistryToolInvoker(ToolInvoker):
             runtime_registry if runtime_definition is not None else self.tool_registry
         )
         tool_definition = runtime_definition or self.tool_registry.get_tool(tool_name)
+        if not isinstance(tool_definition, ToolDefinition):
+            tool_definition = None
 
         # Check cancellation before starting
         if cancel_event and cancel_event.is_set():
@@ -526,9 +1030,8 @@ class RegistryToolInvoker(ToolInvoker):
             tool_name
         ):
             logger.warning(
-                "Agent capability allowlist denied: tool=%s tenant=%s",
-                tool_name,
-                context.tenant_id,
+                "Agent capability allowlist denied (tool_label=%s)",
+                tool_label,
             )
             return await self._deny_tool_call(
                 call_id=call_id,
@@ -545,6 +1048,37 @@ class RegistryToolInvoker(ToolInvoker):
             else None
         )
         binding_type = str((capability_binding or {}).get("type") or "")
+        policy_snapshots = await self._policy_snapshots(
+            context,
+            fresh_current=True,
+        )
+        policy_metadata = self._policy_metadata(policy_snapshots)
+        tool_category = (
+            tool_definition.category.value
+            if tool_definition is not None
+            else "mcp"
+            if binding_type == "mcp"
+            else None
+        )
+        if not self._policy_allows(
+            policy_snapshots,
+            tool_name=tool_name,
+            category=tool_category,
+            binding_type=binding_type,
+        ):
+            logger.warning(
+                "Tool policy snapshot denied (tool_label=%s)",
+                tool_label,
+            )
+            return await self._deny_tool_call(
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                context=context,
+                error=f"Tool '{tool_name}' is not available for this tenant.",
+                start_time=start_time,
+                metadata=policy_metadata,
+            )
         connector_authorization: dict[str, Any] | None = None
         if binding_type == "connector":
             if self.mcp_runtime is None:
@@ -631,103 +1165,19 @@ class RegistryToolInvoker(ToolInvoker):
             cache_key = self._cache_key(tool_name, cache_args)
             cached = self._cache_get(cache_scope, cache_key)
 
-        # Enforce tenant tool policy (blocked tools / MCP access)
-        if self.tenant_tool_policy and context.tenant_id:
-            try:
-                policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
-                if tool_name in policy.blocked_tools:
-                    logger.warning(
-                        f"Tenant policy denied: tool={tool_name} tenant={context.tenant_id}"
-                    )
-                    return ToolCallResult(
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        success=False,
-                        error=f"Tool '{tool_name}' is not available for this tenant.",
-                    )
-                if policy.allowed_tools and tool_name not in policy.allowed_tools:
-                    logger.warning(
-                        f"Tenant policy denied (not in whitelist): tool={tool_name} tenant={context.tenant_id}"
-                    )
-                    return ToolCallResult(
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        success=False,
-                        error=f"Tool '{tool_name}' is not available for this tenant.",
-                    )
-                if (
-                    policy.allowed_categories
-                    and tool_definition
-                    and tool_definition.category.value not in policy.allowed_categories
-                ):
-                    logger.warning(
-                        "Tenant policy denied (category): tool=%s cat=%s tenant=%s",
-                        tool_name,
-                        tool_definition.category.value,
-                        context.tenant_id,
-                    )
-                    return ToolCallResult(
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        success=False,
-                        error=f"Tool '{tool_name}' category is not allowed for this tenant.",
-                    )
-            except Exception as e:
-                logger.warning(f"Tenant policy check failed (denying): {e}")
-                return await self._deny_tool_call(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    context=context,
-                    error=f"Tool '{tool_name}' is not available for this tenant.",
-                    start_time=start_time,
-                )
-
-        if (
-            self.tenant_mcp_config
-            and context.tenant_id
-            and tool_name.startswith("mcp_")
-            and binding_type != "mcp"
-        ):
-            try:
-                mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
-                allowed_prefixes = tuple(f"mcp_{s}__" for s in mcp_config.allowed_servers)
-                if not mcp_config.allowed_servers or not tool_name.startswith(allowed_prefixes):
-                    logger.warning(
-                        f"MCP policy denied: tool={tool_name} tenant={context.tenant_id}"
-                    )
-                    return await self._deny_tool_call(
-                        call_id=call_id,
-                        tool_name=tool_name,
-                        arguments=arguments,
-                        context=context,
-                        error=f"MCP tool '{tool_name}' is not available for this tenant.",
-                        start_time=start_time,
-                    )
-            except Exception as e:
-                logger.warning(f"MCP policy check failed (denying): {e}")
-                return await self._deny_tool_call(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    context=context,
-                    error=f"MCP tool '{tool_name}' is not available for this tenant.",
-                    start_time=start_time,
-                )
-
         # Authorization is deliberately evaluated before a cache hit can be
         # returned. A stale cached result must not bypass a newly denied or
         # currently unavailable tenant/MCP policy.
         if cached is not None:
-            logger.info(f"Cache hit: tool={tool_name} session={context.session_id[:12]}")
+            logger.info("Tool cache hit (tool_label=%s)", tool_label)
             cached_copy = ToolCallResult(
                 call_id=call_id,
                 tool_name=cached.tool_name,
                 success=cached.success,
                 result=cached.result,
-                error=cached.error,
+                error=(_safe_public_error(cached.error) if cached.error is not None else None),
                 duration_ms=0,
-                metadata={**cached.metadata, "cache_hit": True},
+                metadata={**cached.metadata, **policy_metadata, "cache_hit": True},
                 output_files=cached.output_files,
             )
             if self.tool_audit:
@@ -746,14 +1196,18 @@ class RegistryToolInvoker(ToolInvoker):
                         latency_ms=0,
                     )
                     _t = asyncio.create_task(self.tool_audit.log(entry))
-                    _t.add_done_callback(lambda t: None if not t.exception() else None)
-                except Exception:
-                    pass
+                    _t.add_done_callback(lambda task: _log_audit_task_completion(task, tool_label))
+                except Exception as exc:
+                    logger.debug(
+                        "Cached tool audit setup failed (tool_label=%s, exception_type=%s)",
+                        tool_label,
+                        type(exc).__name__,
+                    )
             return cached_copy
 
         # Check rate limit
         if self.rate_limiter and self.rate_limiter(context.tenant_id, tool_name):
-            logger.warning(f"Rate limited: tool={tool_name} tenant={context.tenant_id}")
+            logger.warning("Tool invocation rate limited (tool_label=%s)", tool_label)
             return ToolCallResult(
                 call_id=call_id,
                 tool_name=tool_name,
@@ -771,8 +1225,53 @@ class RegistryToolInvoker(ToolInvoker):
         ):
             final_arguments["dataset_ids"] = context.kb_dataset_ids
             logger.info(
-                f"Auto-injected kb_dataset_ids into search_knowledge_base: {context.kb_dataset_ids}"
+                "Injected knowledge dataset scope (tool_label=%s, dataset_count=%s)",
+                tool_label,
+                len(context.kb_dataset_ids),
             )
+
+        execution_policy = self._tool_execution_policy(
+            context=context,
+            tool_name=tool_name,
+            arguments=final_arguments,
+            tool_definition=tool_definition,
+            logical_operation_id=str(
+                (context.metadata or {}).get("logical_operation_id") or call_id
+            ),
+            binding_type=binding_type,
+        )
+
+        fingerprint = execution_policy.operation_fingerprint
+        operation_claimed = False
+        if execution_policy.side_effecting:
+            if fingerprint in context.uncertain_operation_fingerprints:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="SIDE_EFFECT_UNRESOLVED",
+                    start_time=start_time,
+                    metadata=self._side_effect_unresolved_metadata(
+                        execution_policy,
+                        cause="previous_unresolved_operation",
+                    ),
+                )
+            if fingerprint in context.inflight_operation_fingerprints:
+                return await self._deny_tool_call(
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    context=context,
+                    error="SIDE_EFFECT_UNRESOLVED",
+                    start_time=start_time,
+                    metadata=self._side_effect_unresolved_metadata(
+                        execution_policy,
+                        cause="operation_in_flight",
+                    ),
+                )
+            context.inflight_operation_fingerprints.add(fingerprint)
+            operation_claimed = True
 
         # Build request
         request = ToolCallRequest(
@@ -782,6 +1281,7 @@ class RegistryToolInvoker(ToolInvoker):
             user=context.user,  # Pass user context for tools that need permissions
             metadata={
                 **(context.metadata or {}),
+                **policy_metadata,
                 "session_id": context.session_id,
                 "user_id": context.user_id,
                 "tenant_id": context.tenant_id,
@@ -790,6 +1290,8 @@ class RegistryToolInvoker(ToolInvoker):
                 "scope_id": context.scope_id,
                 "policy_profile": context.policy_profile,
                 "kb_dataset_ids": context.kb_dataset_ids,
+                "tool_operation": execution_policy.to_dict(),
+                "idempotency_key": execution_policy.idempotency_key,
                 **(
                     {
                         "connector_principal": {
@@ -809,42 +1311,101 @@ class RegistryToolInvoker(ToolInvoker):
 
         # Use tool-specific timeout if defined (e.g. quiz generation needs 120s)
         effective_timeout = context.timeout_ms
-        if tool_definition and tool_definition.timeout_seconds * 1000 > effective_timeout:
-            effective_timeout = tool_definition.timeout_seconds * 1000
+        tool_timeout_seconds = getattr(tool_definition, "timeout_seconds", None)
+        if (
+            isinstance(tool_timeout_seconds, (int, float))
+            and not isinstance(tool_timeout_seconds, bool)
+            and tool_timeout_seconds * 1000 > effective_timeout
+        ):
+            effective_timeout = tool_timeout_seconds * 1000
 
         # Execute with timeout, retry, and cancellation support
-        if binding_type == "mcp":
-            if self.mcp_runtime is None or capability_binding is None:
-                result = ToolCallResult(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    success=False,
-                    error="MCP capability is unavailable.",
-                )
+        try:
+            if binding_type == "mcp":
+                if self.mcp_runtime is None or capability_binding is None:
+                    result = ToolCallResult(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        success=False,
+                        error="MCP capability is unavailable.",
+                    )
+                else:
+                    mcp_task = asyncio.create_task(
+                        self.mcp_runtime.invoke(
+                            tool_name=tool_name,
+                            arguments=final_arguments,
+                            binding=capability_binding,
+                            context=context,
+                            call_id=call_id,
+                        )
+                    )
+                    cancel_task: asyncio.Task[bool] | None = None
+                    try:
+                        if cancel_event is None:
+                            result = await mcp_task
+                        else:
+                            cancel_task = asyncio.create_task(cancel_event.wait())
+                            done, _pending = await asyncio.wait(
+                                {mcp_task, cancel_task},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if mcp_task in done:
+                                result = mcp_task.result()
+                            else:
+                                mcp_task.cancel()
+                                try:
+                                    result = await mcp_task
+                                except asyncio.CancelledError:
+                                    result = ToolCallResult(
+                                        call_id=call_id,
+                                        tool_name=tool_name,
+                                        success=False,
+                                        error="Cancelled before MCP dispatch",
+                                    )
+                    except asyncio.CancelledError:
+                        mcp_task.cancel()
+                        try:
+                            result = await mcp_task
+                        except asyncio.CancelledError:
+                            result = ToolCallResult(
+                                call_id=call_id,
+                                tool_name=tool_name,
+                                success=False,
+                                error="Cancelled before MCP dispatch",
+                            )
+                    finally:
+                        if cancel_task is not None and not cancel_task.done():
+                            cancel_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await cancel_task
             else:
-                result = await self.mcp_runtime.invoke(
-                    tool_name=tool_name,
-                    arguments=final_arguments,
-                    binding=capability_binding,
-                    context=context,
-                    call_id=call_id,
+                result = await self._execute_with_retry(
+                    request=request,
+                    timeout_ms=effective_timeout,
+                    execution_policy=execution_policy,
+                    cancel_event=cancel_event,
+                    tool_registry=execution_registry,
                 )
-        else:
-            result = await self._execute_with_retry(
-                request=request,
-                timeout_ms=effective_timeout,
-                max_retries=context.max_retries,
-                cancel_event=cancel_event,
-                tool_registry=execution_registry,
-            )
+            if operation_claimed and self._result_has_unknown_side_effect(result):
+                context.uncertain_operation_fingerprints.add(fingerprint)
+        finally:
+            if operation_claimed:
+                context.inflight_operation_fingerprints.discard(fingerprint)
+
+        if result.error is not None:
+            result.error = _safe_public_error(result.error)
 
         # Record metrics
         duration_ms = (time.time() - start_time) * 1000
         if self.metrics_collector:
             try:
                 self.metrics_collector(tool_name, duration_ms, result.success)
-            except Exception as e:
-                logger.error(f"Failed to record metrics: {e}")
+            except Exception as exc:
+                logger.error(
+                    "Tool metrics collection failed (tool_label=%s, exception_type=%s)",
+                    tool_label,
+                    type(exc).__name__,
+                )
 
         # Audit log (fire-and-forget with error suppression)
         if self.tool_audit:
@@ -865,18 +1426,23 @@ class RegistryToolInvoker(ToolInvoker):
                 )
                 task = asyncio.create_task(self.tool_audit.log(entry))
                 task.add_done_callback(
-                    lambda t: (
-                        logger.debug(f"Audit write error: {t.exception()}")
-                        if not t.cancelled() and t.exception()
-                        else None
-                    )
+                    lambda finished: _log_audit_task_completion(finished, tool_label)
                 )
-            except Exception as e:
-                logger.debug(f"Audit log failed: {e}")
+            except Exception as exc:
+                logger.debug(
+                    "Tool audit setup failed (tool_label=%s, exception_type=%s)",
+                    tool_label,
+                    type(exc).__name__,
+                )
 
         # ADR-003 Phase 3: Cache successful results for idempotent tools
         if cache_key and result.success:
             self._cache_put(cache_scope, cache_key, result)
+
+        result.metadata = {
+            **(result.metadata or {}),
+            **policy_metadata,
+        }
 
         return result
 
@@ -884,7 +1450,7 @@ class RegistryToolInvoker(ToolInvoker):
         self,
         request: ToolCallRequest,
         timeout_ms: int,
-        max_retries: int,
+        execution_policy: ToolExecutionPolicy,
         cancel_event: asyncio.Event | None = None,
         tool_registry: ToolRegistry | None = None,
     ) -> ToolCallResult:
@@ -906,7 +1472,8 @@ class RegistryToolInvoker(ToolInvoker):
         last_error: str | None = None
         execution_registry = tool_registry or self.tool_registry
 
-        for attempt in range(max_retries + 1):
+        max_attempts = execution_policy.max_attempts
+        for attempt in range(max_attempts):
             # Check cancellation before each attempt
             if cancel_event and cancel_event.is_set():
                 return ToolCallResult(
@@ -916,6 +1483,7 @@ class RegistryToolInvoker(ToolInvoker):
                     error="Cancelled during execution",
                 )
 
+            execution_task: asyncio.Task[ToolCallResult] | None = None
             try:
                 # Create execution task
                 execution_task = asyncio.create_task(execution_registry.execute(request))
@@ -938,6 +1506,17 @@ class RegistryToolInvoker(ToolInvoker):
 
                     # Check if cancellation won the race
                     if cancel_task in done:
+                        if execution_policy.may_have_external_side_effect:
+                            return ToolCallResult(
+                                call_id=request.call_id,
+                                tool_name=request.tool_name,
+                                success=False,
+                                error="SIDE_EFFECT_UNKNOWN",
+                                metadata=self._side_effect_unknown_metadata(
+                                    execution_policy,
+                                    cause="cancelled_after_dispatch",
+                                ),
+                            )
                         return ToolCallResult(
                             call_id=request.call_id,
                             tool_name=request.tool_name,
@@ -958,10 +1537,29 @@ class RegistryToolInvoker(ToolInvoker):
                         timeout=timeout_ms / 1000,
                     )
 
-                # Don't retry on non-transient errors
+                # A tool-level timeout may have happened after a write was
+                # accepted. Only explicitly read-only/idempotent operations
+                # can be replayed; every other result pauses as unknown.
                 if not result.success:
                     error_lower = (result.error or "").lower()
-                    # Non-retryable errors
+                    if any(
+                        key in (result.metadata or {})
+                        for key in ("mcp_failure", "tool_failure", "side_effect_state")
+                    ):
+                        return result
+                    if (
+                        "cancelled" in error_lower
+                        and execution_policy.may_have_external_side_effect
+                    ):
+                        result.metadata = {
+                            **(result.metadata or {}),
+                            **self._side_effect_unknown_metadata(
+                                execution_policy,
+                                cause="cancelled_after_dispatch",
+                            ),
+                        }
+                        result.error = "SIDE_EFFECT_UNKNOWN"
+                        return result
                     if any(
                         phrase in error_lower
                         for phrase in [
@@ -969,9 +1567,37 @@ class RegistryToolInvoker(ToolInvoker):
                             "validation error",
                             "missing required",
                             "permission denied",
+                            "requires the assistantexecutiongateway",
                             "cancelled",
                         ]
                     ):
+                        return result
+                    is_timeout = "timed out" in error_lower or "timeout" in error_lower
+                    if (
+                        is_timeout
+                        and execution_policy.may_have_external_side_effect
+                        and not (execution_policy.replay_safe and attempt + 1 < max_attempts)
+                    ):
+                        result.metadata = {
+                            **(result.metadata or {}),
+                            **self._side_effect_unknown_metadata(
+                                execution_policy,
+                                cause="deadline",
+                            ),
+                        }
+                        result.error = "SIDE_EFFECT_UNKNOWN"
+                        return result
+                    if is_timeout and attempt + 1 < max_attempts:
+                        continue
+                    if execution_policy.may_have_external_side_effect:
+                        result.metadata = {
+                            **(result.metadata or {}),
+                            **self._side_effect_unknown_metadata(
+                                execution_policy,
+                                cause="untyped_external_failure",
+                            ),
+                        }
+                        result.error = "SIDE_EFFECT_UNKNOWN"
                         return result
 
                 return result
@@ -979,10 +1605,41 @@ class RegistryToolInvoker(ToolInvoker):
             except asyncio.TimeoutError:
                 last_error = f"Tool execution timed out after {timeout_ms}ms"
                 logger.warning(
-                    f"Timeout on attempt {attempt + 1}/{max_retries + 1}: tool={request.tool_name}"
+                    "Tool execution timed out (tool_label=%s, attempt=%s, max_attempts=%s)",
+                    _tool_log_label(request.tool_name),
+                    attempt + 1,
+                    max_attempts,
                 )
+                if execution_policy.may_have_external_side_effect and not (
+                    execution_policy.replay_safe and attempt + 1 < max_attempts
+                ):
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="SIDE_EFFECT_UNKNOWN",
+                        metadata=self._side_effect_unknown_metadata(
+                            execution_policy,
+                            cause="host_deadline",
+                        ),
+                    )
 
             except asyncio.CancelledError:
+                if execution_task is not None and not execution_task.done():
+                    execution_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await execution_task
+                if execution_policy.may_have_external_side_effect:
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="SIDE_EFFECT_UNKNOWN",
+                        metadata=self._side_effect_unknown_metadata(
+                            execution_policy,
+                            cause="cancelled_after_dispatch",
+                        ),
+                    )
                 return ToolCallResult(
                     call_id=request.call_id,
                     tool_name=request.tool_name,
@@ -990,15 +1647,32 @@ class RegistryToolInvoker(ToolInvoker):
                     error="Task cancelled",
                 )
 
-            except Exception as e:
-                last_error = str(e)
+            except Exception as exc:
+                last_error = _safe_public_error(exc)
                 logger.warning(
-                    f"Error on attempt {attempt + 1}/{max_retries + 1}: "
-                    f"tool={request.tool_name} error={e}"
+                    "Tool execution attempt failed "
+                    "(tool_label=%s, attempt=%s, max_attempts=%s, exception_type=%s)",
+                    _tool_log_label(request.tool_name),
+                    attempt + 1,
+                    max_attempts,
+                    type(exc).__name__,
                 )
+                if execution_policy.may_have_external_side_effect and not (
+                    execution_policy.replay_safe and attempt + 1 < max_attempts
+                ):
+                    return ToolCallResult(
+                        call_id=request.call_id,
+                        tool_name=request.tool_name,
+                        success=False,
+                        error="SIDE_EFFECT_UNKNOWN",
+                        metadata=self._side_effect_unknown_metadata(
+                            execution_policy,
+                            cause="transport",
+                        ),
+                    )
 
             # Wait before retry (exponential backoff), but check cancellation
-            if attempt < max_retries:
+            if attempt + 1 < max_attempts:
                 if cancel_event and cancel_event.is_set():
                     return ToolCallResult(
                         call_id=request.call_id,
@@ -1013,7 +1687,8 @@ class RegistryToolInvoker(ToolInvoker):
             call_id=request.call_id,
             tool_name=request.tool_name,
             success=False,
-            error=f"Failed after {max_retries + 1} attempts: {last_error}",
+            error=_safe_public_error(f"Failed after {max_attempts} attempts: {last_error}"),
+            metadata={"tool_operation": execution_policy.to_dict()},
         )
 
     async def invoke_batch(
@@ -1089,10 +1764,15 @@ class RegistryToolInvoker(ToolInvoker):
         # Sort by original index and extract results
 
         results: list[ToolCallResult] = [None] * len(requests)  # type: ignore
-        for item in completed:
+        for completed_index, item in enumerate(completed):
             if isinstance(item, Exception):
                 # Should not happen with return_exceptions=True
-                logger.error(f"Unexpected exception in batch: {item}")
+                tool_name = requests[completed_index].get("tool_name", "unknown")
+                logger.error(
+                    "Unexpected tool batch exception (tool_label=%s, exception_type=%s)",
+                    _tool_log_label(tool_name),
+                    type(item).__name__,
+                )
                 continue
             idx, result = item
             results[idx] = result
@@ -1105,14 +1785,31 @@ class RegistryToolInvoker(ToolInvoker):
         context: ToolInvocationContext,
     ) -> list[ToolCallResult]:
         """Execute requests sequentially."""
+        from .tools.tool_registry import ToolCallResult
+
         results = []
-        for req in requests:
+        for index, req in enumerate(requests):
             result = await self.invoke(
                 tool_name=req["tool_name"],
                 arguments=req.get("arguments", {}),
                 context=context,
             )
             results.append(result)
+            if self._result_has_unknown_side_effect(result):
+                results.extend(
+                    ToolCallResult(
+                        call_id=str(uuid.uuid4()),
+                        tool_name=str(pending.get("tool_name") or "unknown"),
+                        success=False,
+                        error="SIDE_EFFECT_UNRESOLVED",
+                        metadata={
+                            "side_effect_unresolved": True,
+                            "blocked_by_batch_index": index,
+                        },
+                    )
+                    for pending in requests[index + 1 :]
+                )
+                break
         return results
 
     def get_available_tools(
@@ -1161,6 +1858,10 @@ class RegistryToolInvoker(ToolInvoker):
         Falls back to `get_tool_definitions()` if no policies are configured.
         """
         tools = self.get_tool_definitions(context, tool_names)
+        policy_snapshots = await self._policy_snapshots(
+            context,
+            fresh_current=True,
+        )
 
         if self.mcp_runtime and context.capability_allowlist is not None:
             requested = set(context.capability_allowlist.tool_names)
@@ -1188,39 +1889,56 @@ class RegistryToolInvoker(ToolInvoker):
             if denied_connectors:
                 tools = [tool for tool in tools if tool.name not in denied_connectors]
 
-        # Apply tenant tool policy (whitelist/blacklist/category)
-        if self.tenant_tool_policy and context.tenant_id:
-            try:
-                policy = await self.tenant_tool_policy.get_policy(context.tenant_id)
-                tools = self.tenant_tool_policy.filter_tools(tools, policy)
-            except Exception as e:
-                logger.warning(f"Tenant tool policy filter failed; hiding tools: {e}")
-                tools = []
+        def _binding_type(name: str) -> str:
+            if context.capability_allowlist is None:
+                return ""
+            binding = context.capability_allowlist.bindings.get(name) or {}
+            return str(binding.get("type") or "")
 
-        # Apply tenant MCP config (per-tenant MCP server access)
-        if self.tenant_mcp_config and context.tenant_id:
-            try:
-                mcp_config = await self.tenant_mcp_config.get_config(context.tenant_id)
-                dynamic_names = {
-                    name
-                    for name, binding in (
-                        context.capability_allowlist.bindings.items()
-                        if context.capability_allowlist is not None
-                        else []
-                    )
-                    if str(binding.get("type") or "") == "mcp"
-                }
-                static_tools = [tool for tool in tools if tool.name not in dynamic_names]
-                dynamic_tools = [tool for tool in tools if tool.name in dynamic_names]
-                tools = [
-                    *self.tenant_mcp_config.filter_mcp_tools(static_tools, mcp_config),
-                    *dynamic_tools,
-                ]
-            except Exception as e:
-                logger.warning(f"Tenant MCP config filter failed; hiding MCP tools: {e}")
-                tools = [t for t in tools if not t.name.startswith("mcp_")]
+        tools = [
+            tool
+            for tool in tools
+            if self._policy_allows(
+                policy_snapshots,
+                tool_name=tool.name,
+                category=tool.category.value,
+                binding_type=_binding_type(tool.name),
+            )
+        ]
 
         return tools
+
+    async def filter_tool_definitions_authorized(
+        self,
+        context: ToolInvocationContext,
+        tools: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        """Apply pinned and fresh policy state to a secondary catalog source."""
+
+        policy_snapshots = await self._policy_snapshots(
+            context,
+            fresh_current=True,
+        )
+
+        def _binding_type(name: str) -> str:
+            if context.capability_allowlist is None:
+                return ""
+            binding = context.capability_allowlist.bindings.get(name) or {}
+            return str(binding.get("type") or "")
+
+        filtered = [
+            tool
+            for tool in tools
+            if self._policy_allows(
+                policy_snapshots,
+                tool_name=tool.name,
+                category=tool.category.value,
+                binding_type=_binding_type(tool.name),
+            )
+        ]
+        if context.capability_allowlist is not None:
+            filtered = context.capability_allowlist.filter_definitions(filtered)
+        return filtered
 
 
 # =============================================================================

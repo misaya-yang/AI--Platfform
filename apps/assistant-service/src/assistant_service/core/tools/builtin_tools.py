@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
 from .tool_registry import (
     ToolCallRequest,
@@ -36,6 +37,21 @@ if TYPE_CHECKING:
     from ..memory_service import MemoryService
 
 logger = get_logger(__name__)
+
+_MAX_KB_PUBLIC_ERROR_CHARS = 200
+_TRUNCATION_SUFFIX = "...[truncated]"
+
+
+def _safe_kb_public_error(value: Any) -> str:
+    """Return shared-redacted, bounded KB failure text for tool consumers."""
+
+    try:
+        text = redact_trace_text(str(value)) or "Knowledge base search failed"
+    except Exception:
+        return "Knowledge base search failed"
+    if len(text) <= _MAX_KB_PUBLIC_ERROR_CHARS:
+        return text
+    return f"{text[: _MAX_KB_PUBLIC_ERROR_CHARS - len(_TRUNCATION_SUFFIX)]}{_TRUNCATION_SUFFIX}"
 
 
 # =============================================================================
@@ -253,13 +269,17 @@ class KBSearchExecutor(ToolExecutor):
                         "error": None,
                     }
                 except Exception as exc:
+                    logger.warning(
+                        "assistant.kb_dataset_search_failed (exception_type=%s)",
+                        type(exc).__name__,
+                    )
                     return {
                         "dataset_id": dataset_id,
                         "results": [],
                         "meta": {},
                         "retrieval_config": {},
                         "took_ms": (time.time() - ds_start) * 1000,
-                        "error": str(exc),
+                        "error": _safe_kb_public_error(exc),
                     }
 
             search_outcomes = await asyncio.gather(
@@ -288,7 +308,6 @@ class KBSearchExecutor(ToolExecutor):
                             "error": msg[:500],
                         }
                     )
-                    logger.warning(f"Failed to search dataset {dataset_id}: {msg}")
                     continue
 
                 results = list(outcome.get("results") or [])
@@ -424,13 +443,16 @@ class KBSearchExecutor(ToolExecutor):
                 },
             )
 
-        except Exception as e:
-            logger.exception(f"KB search failed: {e}")
+        except Exception as exc:
+            logger.error(
+                "assistant.kb_search_failed (exception_type=%s)",
+                type(exc).__name__,
+            )
             return ToolCallResult(
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=str(e),
+                error=_safe_kb_public_error(exc),
                 duration_ms=(time.time() - start_time) * 1000,
             )
 
@@ -500,7 +522,21 @@ def register_builtin_tools(
     if memory_service:
         from .memory_tool import UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor
 
-        register_tool(UPDATE_MEMORY_DEFINITION, UpdateMemoryExecutor(memory_service))
+        runtime_adapter = None
+        if database is not None:
+            try:
+                from ..runtime.compat.runtime_adapter import AssistantRuntimeAdapter
+
+                runtime_adapter = AssistantRuntimeAdapter.from_env(database=database)
+            except Exception as exc:
+                logger.error(
+                    "assistant.runtime_memory_adapter_init_failed (exception_type=%s)",
+                    type(exc).__name__,
+                )
+        register_tool(
+            UPDATE_MEMORY_DEFINITION,
+            UpdateMemoryExecutor(memory_service, runtime_adapter=runtime_adapter),
+        )
         logger.info("Registered memory tool")
 
     # web_fetch — URL-fetch fallback for models without native search.
@@ -511,8 +547,11 @@ def register_builtin_tools(
         from .web_fetch import register_web_fetch_tool
 
         register_web_fetch_tool()
-    except Exception:
-        logger.exception("Failed to register web_fetch tool")
+    except Exception as exc:
+        logger.error(
+            "assistant.web_fetch_registration_failed (exception_type=%s)",
+            type(exc).__name__,
+        )
 
     # Confluence tools are registered dynamically via MCP when user connects.
     # See: ConnectorMCPService.start_confluence_mcp()

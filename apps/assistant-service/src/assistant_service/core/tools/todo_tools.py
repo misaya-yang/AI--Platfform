@@ -77,6 +77,7 @@ TODO_WRITE_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "write"},
     when_to_use=(
         "Right after receiving a multi-step task, to lay out the plan; and "
         "whenever task status changes (item done, new step discovered)."
@@ -89,22 +90,25 @@ class TodoWriteExecutor(ToolExecutor):
         start = time.time()
         session_id = str(request.metadata.get("session_id") or "").strip()
         tenant_id = str(request.metadata.get("tenant_id") or "").strip()
-        if not session_id or not tenant_id:
-            return _err(request, "session_id and tenant_id are required in metadata", start)
+        user_id = str(request.metadata.get("user_id") or "").strip()
+        if not session_id or not tenant_id or not user_id:
+            return _err(
+                request,
+                "session_id, tenant_id, and user_id are required in metadata",
+                start,
+            )
 
         items = request.arguments.get("items")
         if not isinstance(items, list):
             return _err(request, "items must be an array", start)
 
-        session = await get_task_manager().get_session(session_id)
+        session = await get_task_manager().get_session(
+            session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
         if session is None or session.working_memory is None:
             return _err(request, f"no active working memory for session {session_id}", start)
-        # Tenant isolation: TaskManager.get_session looks up by session_id only,
-        # so a session_id guess from another tenant would otherwise leak. Verify
-        # the session actually belongs to the caller's tenant.
-        if session.tenant_id != tenant_id:
-            return _err(request, "session does not belong to this tenant", start)
-
         wm = session.working_memory
         wm.clear()
         for idx, item in enumerate(items):
@@ -151,6 +155,7 @@ TODO_READ_DEFINITION = ToolDefinition(
     parameters=[],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "read", "read_only": True},
     when_to_use="Check progress before deciding the next step on a long task.",
 )
 
@@ -160,10 +165,19 @@ class TodoReadExecutor(ToolExecutor):
         start = time.time()
         session_id = str(request.metadata.get("session_id") or "").strip()
         tenant_id = str(request.metadata.get("tenant_id") or "").strip()
-        if not session_id or not tenant_id:
-            return _err(request, "session_id and tenant_id are required in metadata", start)
+        user_id = str(request.metadata.get("user_id") or "").strip()
+        if not session_id or not tenant_id or not user_id:
+            return _err(
+                request,
+                "session_id, tenant_id, and user_id are required in metadata",
+                start,
+            )
 
-        session = await get_task_manager().get_session(session_id)
+        session = await get_task_manager().get_session(
+            session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
         if session is None or session.working_memory is None:
             return ToolCallResult(
                 call_id=request.call_id,
@@ -173,10 +187,6 @@ class TodoReadExecutor(ToolExecutor):
                 duration_ms=(time.time() - start) * 1000,
                 metadata={"task_count": 0},
             )
-        # Same tenant isolation guard as TodoWriteExecutor.
-        if session.tenant_id != tenant_id:
-            return _err(request, "session does not belong to this tenant", start)
-
         wm = session.working_memory
         return ToolCallResult(
             call_id=request.call_id,

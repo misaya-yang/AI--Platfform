@@ -247,6 +247,7 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "max_summary_tokens",
         "max_history_tokens",
         "enable_history_trimming",
+        "use_context_engine",
         "enable_react_loop",
         "react_max_iterations",
         "react_thinking_visible",
@@ -275,6 +276,7 @@ EXPECTED_AGENT_LOOP_CONFIG_FIELDS: frozenset[str] = frozenset(
         "memory_profile",
         "resume_run_id",
         "resume_approval_id",
+        "previous_context_packet_receipt",
     }
 )
 

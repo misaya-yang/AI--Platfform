@@ -488,7 +488,9 @@ async def test_agent_run_resume_rejects_missing_or_cross_session_context() -> No
     assert cross_session["status"] == "blocked"
     assert cross_session["reason"] == "run_session_mismatch"
     assert same_session is not None
-    assert same_session["status"] == "ready"
+    assert same_session["status"] == "blocked"
+    assert same_session["reason"] == "checkpoint_not_restorable"
+    assert same_session["execution_authorized"] is False
     assert same_session["checkpoint"]["session_id"] == "session-a"
 
 
@@ -749,13 +751,16 @@ async def test_resume_sequence_without_trace_database_returns_zero() -> None:
     writer = AssistantTraceWriter(None, write_timeout_s=1.0)
     ctx = _trace_ctx()
 
-    assert writer.record_event(
-        ctx=ctx,
-        event_type="approval_required",
-        sequence_no=1,
-        payload={"approval_id": "approval-1"},
-        phase="execution",
-    ) is False
+    assert (
+        writer.record_event(
+            ctx=ctx,
+            event_type="approval_required",
+            sequence_no=1,
+            payload={"approval_id": "approval-1"},
+            phase="execution",
+        )
+        is False
+    )
 
     assert await writer.resume_sequence(ctx) == 0
 
@@ -980,6 +985,11 @@ async def test_non_stream_chat_returns_turn_contract_and_trace_metadata() -> Non
     assert result["terminal_envelope"]["schema_version"] == "assistant-turn-contract/v1"
     assert result["terminal_envelope"]["exit_reason"] == "succeeded"
     assert result["terminal_envelope"]["context_snapshot_id"].startswith("ctx_")
+    assert result["terminal_envelope"]["attempt_id"].startswith("att_")
+    assert result["terminal_envelope"]["attempt_number"] == 1
+    assert result["terminal_envelope"]["turn_state"]["state"] == "succeeded"
+    assert result["terminal_envelope"]["turn_state"]["terminal"] is True
+    assert result["context_snapshot"]["attempt_id"] == result["terminal_envelope"]["attempt_id"]
     assert result["context_snapshot"]["mode"] == "non_stream"
     assert "super-secret-value" not in json.dumps(result, default=str)
     assert "terminal_envelope" in db.serialized_calls()
@@ -1109,7 +1119,9 @@ async def test_non_stream_final_response_does_not_wait_for_trace_persistence() -
 
 
 @pytest.mark.asyncio
-async def test_non_stream_pre_model_failure_finishes_failed_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_non_stream_pre_model_failure_finishes_failed_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     db = RecordingDB()
     writer = AssistantTraceWriter(db, write_timeout_s=1.0)
     service = AssistantService(

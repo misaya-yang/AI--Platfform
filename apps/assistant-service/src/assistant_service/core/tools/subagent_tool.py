@@ -59,6 +59,10 @@ SPAWN_SUBAGENT_DEFINITION = ToolDefinition(
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
     requires_confirmation=False,
+    capability_metadata={
+        "operation_kind": "write",
+        "external_service": True,
+    },
     when_to_use=(
         "Use when a task requires deep exploration, independent execution, "
         "or when you want to parallelize work. For example: "
@@ -70,11 +74,19 @@ SPAWN_SUBAGENT_DEFINITION = ToolDefinition(
     examples=[
         ToolExample(
             description="Search for information",
-            input={"agent_type": "explore", "prompt": "Search the knowledge base for all information about Zakat calculation methods", "description": "Search Zakat info"},
+            input={
+                "agent_type": "explore",
+                "prompt": "Search the knowledge base for all information about Zakat calculation methods",
+                "description": "Search Zakat info",
+            },
         ),
         ToolExample(
             description="Create a plan",
-            input={"agent_type": "plan", "prompt": "Analyze the fasting rules across all four madhabs and create a comparison plan", "description": "Plan madhab comparison"},
+            input={
+                "agent_type": "plan",
+                "prompt": "Analyze the fasting rules across all four madhabs and create a comparison plan",
+                "description": "Plan madhab comparison",
+            },
         ),
     ],
     timeout_seconds=180,

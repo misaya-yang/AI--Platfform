@@ -111,9 +111,7 @@ class _Repository:
             "status": self.prepared_status,
             "object_keys": [],
             "deleted_counts": {},
-            "error_code": "AGENT_LEGAL_HOLD_ACTIVE"
-            if self.prepared_status == "blocked"
-            else None,
+            "error_code": "AGENT_LEGAL_HOLD_ACTIVE" if self.prepared_status == "blocked" else None,
             "requested_by": kwargs["user_id"],
             "requested_at": now,
             "completed_at": now if self.prepared_status != "pending" else None,
@@ -259,9 +257,7 @@ def test_governance_policy_cache_and_credential_controls() -> None:
         "legal_hold": True,
     }
 
-    invalidated = client.post(
-        f"/api/v1/agents/{AGENT_ID}/governance/cache:invalidate"
-    )
+    invalidated = client.post(f"/api/v1/agents/{AGENT_ID}/governance/cache:invalidate")
     assert invalidated.status_code == 200
     assert invalidated.json() == {
         "request_id": invalidated.json()["request_id"],
@@ -269,9 +265,7 @@ def test_governance_policy_cache_and_credential_controls() -> None:
         "deleted_cache_rows": 2,
     }
 
-    revoked = client.post(
-        f"/api/v1/agents/{AGENT_ID}/governance/credentials:revoke"
-    )
+    revoked = client.post(f"/api/v1/agents/{AGENT_ID}/governance/credentials:revoke")
     assert revoked.status_code == 200
     assert revoked.json()["revoked"]["api_tokens"] == 2
 

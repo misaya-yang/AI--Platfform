@@ -26,6 +26,12 @@ from urllib.parse import quote
 logger = logging.getLogger(__name__)
 
 
+def storage_key_log_hash(storage_key: str) -> str:
+    """Return a stable opaque identifier for logs without exposing object paths."""
+
+    return hashlib.sha256(storage_key.encode("utf-8", errors="replace")).hexdigest()
+
+
 def _sanitize_for_s3_metadata(value: str) -> str:
     """
     Sanitize a string for S3 metadata (ASCII only).
@@ -552,8 +558,13 @@ class S3StorageBackend(BaseStorageBackend):
         try:
             await client.delete_object(Bucket=self.bucket, Key=pkey)
             return True
-        except Exception as e:
-            logger.warning(f"Failed to delete {pkey}: {e}")
+        except Exception as exc:
+            logger.warning(
+                "Storage operation failed "
+                "(provider=s3, operation=delete, key_hash=%s, exception_type=%s)",
+                storage_key_log_hash(pkey),
+                type(exc).__name__,
+            )
             return False
 
     async def delete_prefix(self, prefix: str) -> int:
@@ -582,8 +593,16 @@ class S3StorageBackend(BaseStorageBackend):
         try:
             await client.head_object(Bucket=self.bucket, Key=pkey)
             return True
-        except Exception:
-            return False
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            error = response.get("Error", {}) if isinstance(response, dict) else {}
+            metadata = response.get("ResponseMetadata", {}) if isinstance(response, dict) else {}
+            if (
+                str(error.get("Code") or "") in {"404", "NoSuchKey", "NotFound"}
+                or str(metadata.get("HTTPStatusCode") or "") == "404"
+            ):
+                return False
+            raise
 
     def get_url(self, key: str, expiry_seconds: int = 3600) -> str:
         """Get S3 URL (non-presigned for now, can be enhanced)"""
@@ -808,8 +827,13 @@ class OSSStorageBackend(BaseStorageBackend):
         try:
             await asyncio.to_thread(bucket.delete_object, pkey)
             return True
-        except Exception as e:
-            logger.warning(f"Failed to delete {pkey}: {e}")
+        except Exception as exc:
+            logger.warning(
+                "Storage operation failed "
+                "(provider=oss, operation=delete, key_hash=%s, exception_type=%s)",
+                storage_key_log_hash(pkey),
+                type(exc).__name__,
+            )
             return False
 
     async def delete_prefix(self, prefix: str) -> int:

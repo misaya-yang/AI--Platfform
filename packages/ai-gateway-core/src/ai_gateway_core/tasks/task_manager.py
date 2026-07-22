@@ -47,6 +47,7 @@ References:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
@@ -58,6 +59,10 @@ from ai_gateway_core.logging import get_logger
 from ai_gateway_core.working_memory import WorkingMemory
 
 logger = get_logger(__name__)
+
+
+class SessionDeletionBusyError(RuntimeError):
+    """Raised when a session cannot enter the deletion admission fence."""
 
 
 # =============================================================================
@@ -100,6 +105,8 @@ class SessionResources:
     # Execution state
     active_tasks: set[str] = field(default_factory=set)
     pending_tool_calls: dict[str, Any] = field(default_factory=dict)
+    active_contexts: int = 0
+    deletion_pending: bool = False
 
     # Timing (using UTC for consistent timezone handling)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -139,6 +146,8 @@ class SessionResources:
             "user_id": self.user_id,
             "active_tasks": list(self.active_tasks),
             "pending_tool_calls": len(self.pending_tool_calls),
+            "active_contexts": self.active_contexts,
+            "deletion_pending": self.deletion_pending,
             "created_at": self.created_at.isoformat(),
             "last_activity": self.last_activity.isoformat(),
             "is_expired": self.is_expired(),
@@ -309,11 +318,77 @@ class TaskManager:
             timeout_seconds=timeout_seconds,
         )
 
+        async with session.lock, self._lock:
+            if self._sessions.get(session_id) is not session or session.deletion_pending:
+                raise SessionDeletionBusyError("Session deletion is pending")
+            session.active_contexts += 1
+
         try:
             session.touch()
             yield session
         finally:
+            async with session.lock, self._lock:
+                if self._sessions.get(session_id) is session:
+                    session.active_contexts = max(0, session.active_contexts - 1)
             session.touch()
+
+    @asynccontextmanager
+    async def session_deletion_context(
+        self,
+        session_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> AsyncGenerator[SessionResources, None]:
+        """Fence new run admission while a caller deletes durable session state.
+
+        The session lock remains held across the caller's durable-memory and
+        session-row cleanup.  A normal exit removes the in-process resources;
+        any exception releases the fence so the still-durable session remains
+        usable.
+        """
+
+        session = await self._get_or_create_session(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        fence_owned = False
+        finalized = False
+        await session.lock.acquire()
+        try:
+            async with self._lock:
+                if self._sessions.get(session_id) is not session:
+                    raise SessionDeletionBusyError("Session admission changed")
+                if session.deletion_pending:
+                    raise SessionDeletionBusyError("Session deletion is already pending")
+                session.deletion_pending = True
+                fence_owned = True
+                if session.active_tasks or session.active_contexts:
+                    raise SessionDeletionBusyError("Session has active tasks or contexts")
+
+            yield session
+
+            async with self._lock:
+                if self._sessions.get(session_id) is not session:
+                    raise SessionDeletionBusyError("Session admission changed")
+                if session.active_tasks or session.active_contexts:
+                    raise SessionDeletionBusyError("Session gained an active admission")
+                self._sessions.pop(session_id)
+                session.working_memory.clear()
+                to_remove = [
+                    task_id
+                    for task_id, context in self._task_contexts.items()
+                    if context.session_id == session_id
+                ]
+                for task_id in to_remove:
+                    del self._task_contexts[task_id]
+                finalized = True
+        finally:
+            if fence_owned and not finalized:
+                async with self._lock:
+                    if self._sessions.get(session_id) is session:
+                        session.deletion_pending = False
+            session.lock.release()
 
     async def _get_or_create_session(
         self,
@@ -326,7 +401,13 @@ class TaskManager:
         async with self._lock:
             if session_id in self._sessions:
                 session = self._sessions[session_id]
+                if session.tenant_id != tenant_id or session.user_id != user_id:
+                    raise PermissionError("Session is already bound to a different tenant or user")
+                if session.deletion_pending:
+                    raise SessionDeletionBusyError("Session deletion is pending")
                 if session.is_expired():
+                    if session.active_tasks or session.active_contexts:
+                        return session
                     # Clean up expired session
                     session.working_memory.clear()
                     del self._sessions[session_id]
@@ -353,31 +434,52 @@ class TaskManager:
             logger.debug(f"Created new session: {session_id}")
             return session
 
-    async def get_session(self, session_id: str) -> SessionResources | None:
-        """Get a session if it exists and is not expired."""
+    async def get_session(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> SessionResources | None:
+        """Get a live session, optionally enforcing its tenant/user owner."""
         async with self._lock:
             session = self._sessions.get(session_id)
-            if session and not session.is_expired():
-                return session
-            return None
+            if session is None or session.deletion_pending:
+                return None
+            if session.is_expired() and not session.active_tasks and not session.active_contexts:
+                return None
+            if tenant_id is not None and session.tenant_id != tenant_id:
+                return None
+            if user_id is not None and session.user_id != user_id:
+                return None
+            return session
 
     async def delete_session(self, session_id: str) -> bool:
         """Delete a session and clean up resources."""
         async with self._lock:
-            if session_id in self._sessions:
-                session = self._sessions.pop(session_id)
-                session.working_memory.clear()
-
-                # Clean up associated task contexts
-                to_remove = [
-                    tid for tid, ctx in self._task_contexts.items() if ctx.session_id == session_id
-                ]
-                for tid in to_remove:
-                    del self._task_contexts[tid]
-
-                logger.debug(f"Deleted session: {session_id}")
-                return True
+            session = self._sessions.get(session_id)
+        if session is None:
             return False
+        async with session.lock, self._lock:
+            if self._sessions.get(session_id) is not session:
+                return False
+            if session.deletion_pending or session.active_tasks or session.active_contexts:
+                return False
+            session.deletion_pending = True
+            self._sessions.pop(session_id)
+            session.working_memory.clear()
+
+            # Clean up associated task contexts
+            to_remove = [
+                tid
+                for tid, context in self._task_contexts.items()
+                if context.session_id == session_id
+            ]
+            for tid in to_remove:
+                del self._task_contexts[tid]
+
+            logger.debug(f"Deleted session: {session_id}")
+            return True
 
     async def register_task(
         self,
@@ -399,12 +501,13 @@ class TaskManager:
             return None
 
         task_id = task_id or str(uuid.uuid4())
-
-        async with session.lock:
-            session.active_tasks.add(task_id)
-
         context = TaskContext(task_id=task_id, session_id=session_id)
-        self._task_contexts[task_id] = context
+
+        async with session.lock, self._lock:
+            if self._sessions.get(session_id) is not session or session.deletion_pending:
+                return None
+            session.active_tasks.add(task_id)
+            self._task_contexts[task_id] = context
 
         logger.debug(f"Registered task {task_id} in session {session_id}")
         return context
@@ -415,13 +518,16 @@ class TaskManager:
         task_id: str,
     ) -> None:
         """Mark a task as complete."""
-        session = await self.get_session(session_id)
+        async with self._lock:
+            session = self._sessions.get(session_id)
         if session:
-            async with session.lock:
-                session.active_tasks.discard(task_id)
-
-        if task_id in self._task_contexts:
-            del self._task_contexts[task_id]
+            async with session.lock, self._lock:
+                if self._sessions.get(session_id) is session:
+                    session.active_tasks.discard(task_id)
+                self._task_contexts.pop(task_id, None)
+        else:
+            async with self._lock:
+                self._task_contexts.pop(task_id, None)
 
         logger.debug(f"Completed task {task_id} in session {session_id}")
 
@@ -440,16 +546,35 @@ class TaskManager:
         Returns:
             True if task was found and cancellation requested
         """
-        context = self._task_contexts.get(task_id)
-        if context and context.session_id == session_id:
-            context.request_cancel()
-            logger.info(f"Requested cancellation of task {task_id}")
-            return True
+        async with self._lock:
+            session = self._sessions.get(session_id)
+        if session is not None:
+            async with session.lock, self._lock:
+                context = self._task_contexts.get(task_id)
+                if (
+                    self._sessions.get(session_id) is session
+                    and context is not None
+                    and context.session_id == session_id
+                ):
+                    # Cancellation is only a request. Keep the active admission
+                    # until AgentLoop reaches finally/complete_task, otherwise a
+                    # durable delete could race a still-running task.
+                    context.request_cancel()
+                    task_digest = hashlib.sha256(
+                        str(task_id).encode("utf-8", errors="replace")
+                    ).hexdigest()[:16]
+                    logger.info(
+                        "event_code=assistant_task_cancel_signal event_type=task_cancel "
+                        "task_sha256=%s accepted=true",
+                        task_digest,
+                    )
+                    return True
         return False
 
     async def get_task_context(self, task_id: str) -> TaskContext | None:
         """Get the context for a task."""
-        return self._task_contexts.get(task_id)
+        async with self._lock:
+            return self._task_contexts.get(task_id)
 
     async def get_session_stats(self) -> dict[str, Any]:
         """Get statistics about active sessions."""
@@ -486,7 +611,14 @@ class TaskManager:
     async def _cleanup_expired(self) -> int:
         """Remove expired sessions."""
         async with self._lock:
-            expired = [sid for sid, session in self._sessions.items() if session.is_expired()]
+            expired = [
+                sid
+                for sid, session in self._sessions.items()
+                if session.is_expired()
+                and not session.deletion_pending
+                and not session.active_tasks
+                and not session.active_contexts
+            ]
             for sid in expired:
                 session = self._sessions.pop(sid)
                 session.working_memory.clear()
@@ -510,7 +642,12 @@ class TaskManager:
         oldest_time = datetime.now(timezone.utc)
 
         for sid, session in self._sessions.items():
-            if session.last_activity < oldest_time:
+            if (
+                not session.deletion_pending
+                and not session.active_tasks
+                and not session.active_contexts
+                and session.last_activity < oldest_time
+            ):
                 oldest_time = session.last_activity
                 oldest_id = sid
 

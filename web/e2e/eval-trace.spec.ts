@@ -1033,14 +1033,14 @@ test.describe("Eval trace console", () => {
       "../../tests/fixtures/eval/golden/assistant_regression_v1.jsonl"
     );
     await page.locator('[data-testid="golden-jsonl-import"] input[type="file"]').setInputFiles(goldenFixture);
-    await expect(page.getByText("16 case(s) passed validation")).toBeVisible();
+    await expect(page.getByText("18 case(s) passed validation")).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 16 case(s) across 1 batch(es). Skipped 0.")
+      page.getByTestId("golden-jsonl-import").getByText("Imported 18 case(s) across 1 batch(es). Skipped 0.")
     ).toBeVisible();
     await page.getByTestId("golden-jsonl-import-submit").click();
     await expect(
-      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 16.")
+      page.getByTestId("golden-jsonl-import").getByText("Imported 0 case(s) across 1 batch(es). Skipped 18.")
     ).toBeVisible();
 
     await page.getByRole("tab", { name: "Run & Results", exact: true }).click();

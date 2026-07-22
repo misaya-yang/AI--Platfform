@@ -6,6 +6,8 @@ import {
   approveToolCall,
   chatStream,
   getArtifactDownloadUrl,
+  getAssistantRunStatus,
+  deleteSession as deleteAssistantSession,
   prepareAssistantRunResume,
   type AssistantMessage,
   type WebSearchResult,
@@ -16,7 +18,6 @@ import { SSEEventType } from "../sse-events";
 import {
   listSessions,
   createSession,
-  deleteSession,
   getSessionHistory,
   updateSession,
   getSession,
@@ -122,6 +123,143 @@ function mergeUsageWithTurnState(
       ? { total_tokens: turnState.usage.totalTokens }
       : {}),
   };
+}
+
+const ASSISTANT_ACTIVE_RUN_METADATA_KEY = "assistant_active_run";
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function restoreLatestRun(
+  messages: ChatMessageType[],
+  metadata: Record<string, unknown> | null | undefined,
+  sessionId: string,
+): Promise<{ messages: ChatMessageType[]; error?: string }> {
+  const marker = asRecord(metadata?.[ASSISTANT_ACTIVE_RUN_METADATA_KEY]);
+  const runId = nonEmptyString(marker?.run_id);
+  if (!marker || !runId) return { messages };
+  const roles = messages.map((message) => message.role);
+  const latestAssistantIndex = roles.lastIndexOf("assistant");
+  const latestUserIndex = roles.lastIndexOf("user");
+  const markerUpdatedAt = Date.parse(nonEmptyString(marker.updated_at) || "");
+  const userUpdatedAt = Date.parse(messages[latestUserIndex]?.createdAt || "");
+  if (
+    Number.isFinite(markerUpdatedAt) &&
+    Number.isFinite(userUpdatedAt) &&
+    markerUpdatedAt < userUpdatedAt
+  ) {
+    return { messages };
+  }
+
+  const processSummary: ProcessSummaryState = {
+    collapsed: true,
+    runId,
+    status: "running",
+    startedAt: Number.isFinite(markerUpdatedAt) ? markerUpdatedAt : undefined,
+    steps: [],
+    tools: [],
+  };
+  const next = [...messages];
+  let targetIndex = latestAssistantIndex;
+  if (latestAssistantIndex > latestUserIndex) {
+    next[latestAssistantIndex] = {
+      ...next[latestAssistantIndex],
+      processSummary,
+    };
+  } else {
+    targetIndex = next.length;
+    next.push({
+      id: `${sessionId}-run-${runId}`,
+      role: "assistant",
+      content: "",
+      createdAt: nonEmptyString(marker.updated_at) || new Date().toISOString(),
+      parts: [],
+      status: "streaming",
+      isStreaming: false,
+      processSummary,
+    });
+  }
+  try {
+    const { run } = await getAssistantRunStatus(runId);
+    if (
+      nonEmptyString(run.run_id) !== runId ||
+      (nonEmptyString(run.session_id) && run.session_id !== sessionId)
+    ) {
+      throw new Error("run_scope_mismatch");
+    }
+    const checkpoint = asRecord(run.checkpoint);
+    const status = nonEmptyString(run.status) || "unknown";
+    const phase = nonEmptyString(checkpoint?.phase);
+    const approvalId = nonEmptyString(checkpoint?.approval_id);
+    const current = next[targetIndex];
+    const base = current.processSummary!;
+    if (phase === "approval_pending" && approvalId) {
+      const pendingTool = asRecord(checkpoint?.pending_tool);
+      next[targetIndex] = {
+        ...current,
+        isStreaming: false,
+        status: "streaming",
+        processSummary: {
+          ...base,
+          collapsed: false,
+          tools: [{
+            id: nonEmptyString(pendingTool?.tool_id) ?? `approval-${approvalId}`,
+            name: nonEmptyString(pendingTool?.tool_name) ?? "Pending tool",
+            status: "approval_required",
+            approvalId,
+          }],
+        },
+      };
+    } else {
+      const succeeded = status === "succeeded";
+      const active = status === "running" || status === "queued";
+      next[targetIndex] = {
+        ...current,
+        isStreaming: active,
+        status: succeeded
+          ? "completed"
+          : active
+            ? "streaming"
+            : status === "cancelled"
+              ? "cancelled"
+              : "failed",
+        processSummary: {
+          ...base,
+          status: succeeded ? "succeeded" : active ? "running" : "failed",
+          collapsed: succeeded || active ? base.collapsed : false,
+          isErrorExpanded: succeeded || active ? undefined : true,
+          tools: [],
+        },
+      };
+    }
+    return { messages: next };
+  } catch {
+    console.warn("Assistant run status reconciliation failed");
+    const current = next[targetIndex];
+    next[targetIndex] = {
+      ...current,
+      isStreaming: false,
+      status: "failed",
+      processSummary: {
+        ...current.processSummary!,
+        status: "failed",
+        collapsed: false,
+        isErrorExpanded: true,
+        tools: [],
+      },
+    };
+    return {
+      messages: next,
+      error: "Run status unavailable. Reopen this conversation to retry.",
+    };
+  }
 }
 
 // Helper to restore message metadata
@@ -234,6 +372,7 @@ const restoreMessageMetadata = (msg: any, index: number, sessionId: string): Cha
         duration_ms: typeof tr?.duration_ms === "number" ? tr.duration_ms : undefined,
       }));
     }
+
   }
   return baseMessage;
 };
@@ -592,7 +731,7 @@ export function useChatSession() {
             try {
               setHistoryRestoreState("loading");
               setHistoryRestoreError(null);
-              const [, history, sessionArtifacts] = await Promise.all([
+              const [sessionDetails, history, sessionArtifacts] = await Promise.all([
                 getSession(savedSessionId),
                 getSessionHistory(savedSessionId, { limit: 200 }),
                 getSessionArtifacts(savedSessionId).catch(() => []),
@@ -624,8 +763,21 @@ export function useChatSession() {
                 restoreMessageMetadata(msg, index, savedSessionId)
               );
               chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+              const reconciliation = await restoreLatestRun(
+                chatMessages,
+                sessionDetails.metadata,
+                savedSessionId,
+              );
+              chatMessages = reconciliation.messages;
               setMessages(chatMessages);
               hydrateQuizData(chatMessages, setMessages);
+              const restoredConfig = sessionDetails.config || {};
+              lastStreamConfigRef.current = {
+                config: restoredConfig,
+                selectedDatasets: restoredConfig.selected_datasets || [],
+                models: [],
+                datasets: [],
+              };
 
               // Rehydrate "Current run" (most-recent assistant message's
               // code-executor output) so the drawer's split view works
@@ -646,6 +798,7 @@ export function useChatSession() {
                 outputFiles: latestRunFiles,
               });
               setHistoryRestoreState("ready");
+              setHistoryRestoreError(reconciliation.error || null);
               trackChatHistoryRestored("assistant", {
                 sessionId: savedSessionId,
                 messageCount: chatMessages.length,
@@ -691,6 +844,7 @@ export function useChatSession() {
     setShowArtifacts(false);
     setWorkingMemory(null);
     setShowTaskPanel(false);
+    lastStreamConfigRef.current = null;
     setCodeExecution({
       isExecuting: false,
       executionId: null,
@@ -704,7 +858,7 @@ export function useChatSession() {
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     try {
-      await deleteSession(sessionId);
+      await deleteAssistantSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
       if (activeSessionId === sessionId) {
         handleNewChat();
@@ -756,8 +910,21 @@ export function useChatSession() {
         restoreMessageMetadata(msg, index, sessionId)
       );
       chatMessages = hydrateMessageArtifacts(chatMessages, sessionArtifacts);
+      const reconciliation = await restoreLatestRun(
+        chatMessages,
+        sessionDetails.metadata,
+        sessionId,
+      );
+      chatMessages = reconciliation.messages;
       setMessages(chatMessages);
       hydrateQuizData(chatMessages, setMessages);
+      const restoredConfig = sessionDetails.config || {};
+      lastStreamConfigRef.current = {
+        config: restoredConfig,
+        selectedDatasets: restoredConfig.selected_datasets || [],
+        models: [],
+        datasets: [],
+      };
 
       // Rehydrate "Current run" from the most-recent assistant message's
       // persisted artifact IDs so the drawer's split view matches live
@@ -777,6 +944,7 @@ export function useChatSession() {
       });
       setActiveSessionId(sessionId);
       setHistoryRestoreState("ready");
+      setHistoryRestoreError(reconciliation.error || null);
       trackChatHistoryRestored("assistant", {
         sessionId,
         messageCount: chatMessages.length,
@@ -941,6 +1109,25 @@ export function useChatSession() {
     } else {
       updateSession(sessionId, { config }).catch(console.error);
     }
+
+    let persistedRunId = resumeRunId;
+    const persistAssistantRunId = async (value: unknown) => {
+      const runId = nonEmptyString(value);
+      if (!sessionId || !runId || runId === persistedRunId) return;
+      persistedRunId = runId;
+      try {
+        await updateSession(sessionId, {
+          metadata: {
+            [ASSISTANT_ACTIVE_RUN_METADATA_KEY]: {
+              run_id: runId,
+              updated_at: new Date().toISOString(),
+            },
+          },
+        });
+      } catch {
+        console.warn("Assistant run reconnect marker could not be persisted");
+      }
+    };
 
     // 3. Start Stream
     abortControllerRef.current = new AbortController();
@@ -1426,15 +1613,20 @@ export function useChatSession() {
             break;
 
           case SSEEventType.APPROVAL_REQUIRED:
+            const approvalData = (event.data || {}) as Record<string, unknown>;
+            const approvalToolId =
+              typeof approvalData.tool_id === "string" ? approvalData.tool_id : "";
+            const approvalToolName =
+              typeof approvalData.tool_name === "string"
+                ? approvalData.tool_name
+                : approvalToolId;
             updateAssistantMessage((m) => {
               const prev = m.processSummary ?? initProcessSummary(undefined, now);
-              const approvalData = (event.data || {}) as Record<string, unknown>;
-              const toolId = typeof approvalData.tool_id === "string" ? approvalData.tool_id : "";
-              if (!toolId) return m;
-              const existing = prev.tools.find((tool) => tool.id === toolId);
+              if (!approvalToolId) return m;
+              const existing = prev.tools.find((tool) => tool.id === approvalToolId);
               const toolName =
                 existing?.name ||
-                (typeof approvalData.tool_name === "string" ? approvalData.tool_name : toolId);
+                approvalToolName;
               const runId =
                 typeof approvalData.run_id === "string"
                   ? approvalData.run_id
@@ -1446,7 +1638,7 @@ export function useChatSession() {
                   collapsed: false,
                   runId,
                   tools: upsertTool(prev.tools, {
-                    id: toolId,
+                    id: approvalToolId,
                     name: toolName,
                     status: "approval_required",
                     approvalId:
@@ -1459,6 +1651,7 @@ export function useChatSession() {
                 },
               };
             });
+            await persistAssistantRunId(approvalData.run_id);
             break;
 
           case SSEEventType.RAG_RETRIEVAL_STARTED:
@@ -1570,9 +1763,10 @@ export function useChatSession() {
               ...m,
               processSummary: initProcessSummary(
                 runStartedData?.run_id,
-                runStartedData?.timestamp ?? now
+                runStartedData?.timestamp ?? now,
               ),
             }));
+            await persistAssistantRunId(runStartedData?.run_id);
             break;
 
           case SSEEventType.RUN_FINISHED:
@@ -1612,6 +1806,7 @@ export function useChatSession() {
                 },
               };
             });
+            await persistAssistantRunId(runErrorData.run_id);
             break;
 
           // === AG-UI Step Events (Manus-style) ===
@@ -2489,13 +2684,6 @@ export function useChatSession() {
       approved: boolean,
     ) => {
       if (!approvalId || isStreaming) return;
-      try {
-        await approveToolCall(approvalId, { approved });
-      } catch (error) {
-        console.error("Failed to submit tool approval", error);
-        return;
-      }
-
       const messageSnapshot = messagesRef.current;
       const targetIndex = messageSnapshot.findIndex((message) => message.id === messageId);
       const target = targetIndex >= 0 ? messageSnapshot[targetIndex] : undefined;
@@ -2508,6 +2696,18 @@ export function useChatSession() {
             break;
           }
         }
+      }
+
+      if (!runId) {
+        console.warn("Approval action skipped because the run id is unavailable");
+        return;
+      }
+
+      try {
+        await approveToolCall(approvalId, { approved });
+      } catch {
+        console.warn("Assistant tool approval submission failed");
+        return;
       }
 
       setMessages((prev) => {
@@ -2535,10 +2735,6 @@ export function useChatSession() {
       });
 
       if (!approved) return;
-      if (!runId) {
-        console.warn("Approval resume skipped: missing run id");
-        return;
-      }
 
       try {
         const resumePlan = await prepareAssistantRunResume(runId, {

@@ -113,6 +113,7 @@ PPTX_GENERATION_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "write"},
     when_to_use="""Use when user asks for PowerPoint/PPT/slides/演示文稿.
 You MUST call this tool in the same response - do not just describe what you will do.""",
     when_not_to_use="Don't use for simple text. Don't use for documents (use Word instead).",

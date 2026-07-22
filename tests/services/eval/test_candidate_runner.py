@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
-from ai_gateway_core.eval.evaluator_executor import EvaluatorExecutor
+from ai_gateway_core.eval.evaluator_executor import (
+    REQUIRED_ASSISTANT_HARD_BLOCKERS,
+    EvaluatorExecutor,
+)
 
 from src.services.eval import eval_outbox_worker as outbox_module
 from src.services.eval.eval_candidate_client import EvalCandidateResult
@@ -22,15 +25,18 @@ def _run_case(case_id: str, trial_index: int) -> dict[str, Any]:
         "expected_output": {},
         "expected_trajectory": {},
         "assertions": [],
-        "metadata": {"critical": case_id == "critical"},
+        "metadata": {
+            "critical": case_id == "critical" or case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
+        },
         "observed_metrics": {},
     }
 
 
 def test_candidate_contract_cost_is_unknown_without_catalog_pricing() -> None:
-    assert _candidate_cost_cents(
-        "unknown-eval-model", {"input_tokens": 1000, "output_tokens": 1000}
-    ) is None
+    assert (
+        _candidate_cost_cents("unknown-eval-model", {"input_tokens": 1000, "output_tokens": 1000})
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -219,6 +225,48 @@ async def test_live_executor_runs_each_trial_once_and_reuses_trace_for_evaluator
     assert final["score_summary"]["behavior_pass_rate"] == 1.0
     assert final["metrics"]["mixed_runtime"] is False
     assert all(case["status"] == "succeeded" for case in repository.cases)
+
+
+@pytest.mark.asyncio
+async def test_live_gate_requires_critical_and_mandatory_safety_cases() -> None:
+    async def run_candidate(**kwargs: Any) -> dict[str, Any]:
+        return _candidate_result(kwargs["run_case"])
+
+    missing = _LiveRepository([_run_case("normal", 1)])
+    await EvaluatorExecutor(
+        missing,  # type: ignore[arg-type]
+        candidate_run=run_candidate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-live",
+            "evaluator_id": "rule-a",
+            "run_mode": "live_candidate",
+        },
+    )
+    missing_metrics = missing.run_updates[-1]["metrics"]
+    assert missing_metrics["critical_case_count"] == 0
+    assert missing_metrics["hard_blockers_passed"] is False
+    assert missing_metrics["gate"]["status"] == "fail"
+
+    covered = _LiveRepository(
+        [_run_case(case_id, 1) for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS]
+    )
+    await EvaluatorExecutor(
+        covered,  # type: ignore[arg-type]
+        candidate_run=run_candidate,
+    ).run_job(
+        tenant_id="tenant-a",
+        job_payload={
+            "run_id": "run-live",
+            "evaluator_id": "rule-a",
+            "run_mode": "live_candidate",
+        },
+    )
+    covered_metrics = covered.run_updates[-1]["metrics"]
+    assert covered_metrics["critical_case_count"] == 2
+    assert covered_metrics["hard_blockers_passed"] is True
+    assert covered_metrics["gate"]["status"] == "pass"
 
 
 @pytest.mark.asyncio

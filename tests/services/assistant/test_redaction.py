@@ -56,6 +56,16 @@ class _BoomError(Exception):
             ["AIzaSyA123456789012345678901234567890"],
             ["AIza[redacted]"],
         ),
+        (
+            "https://provider.test/generate?key=AQ.vertex-secret-123&alt=sse",
+            ["AQ.vertex-secret-123"],
+            ["key=[redacted]", "alt=sse"],
+        ),
+        (
+            "vertex credential AQ.vertex-secret-456",
+            ["AQ.vertex-secret-456"],
+            ["AQ.[redacted]"],
+        ),
     ],
 )
 def test_redact_trace_text_covers_union_of_both_original_pattern_sets(

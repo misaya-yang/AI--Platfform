@@ -15,12 +15,8 @@ overridden per-request).
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
 from assistant_service.core.models.model_registry import (
-    ModelConfig,
     ModelProvider,
     ModelRegistry,
 )
@@ -50,9 +46,7 @@ def test_configure_google_default_backend_is_ai_studio(registry: ModelRegistry):
 
 
 def test_configure_google_backend_vertex_picks_vertex_base(registry: ModelRegistry):
-    registry.configure_provider(
-        ModelProvider.GOOGLE, api_key="AQ.xxx", backend="vertex"
-    )
+    registry.configure_provider(ModelProvider.GOOGLE, api_key="AQ.xxx", backend="vertex")
     cfg = registry._configs[ModelProvider.GOOGLE]
     assert cfg.backend == "vertex"
     assert cfg.base_url == "https://aiplatform.googleapis.com"
@@ -63,7 +57,9 @@ def test_configure_non_google_backend_field_is_ignored(registry: ModelRegistry):
     silently become ``"ai_studio"`` (no-op) — we don't want rogue backends
     leaking onto unrelated providers."""
     registry.configure_provider(
-        ModelProvider.OPENAI, api_key="sk-fake", backend="vertex",
+        ModelProvider.OPENAI,
+        api_key="sk-fake",
+        backend="vertex",
     )
     cfg = registry._configs[ModelProvider.OPENAI]
     assert cfg.backend == "ai_studio"
@@ -78,14 +74,13 @@ def test_backend_for_model_defaults_to_ai_studio_without_config(registry: ModelR
 
 
 def test_backend_for_model_follows_config_backend(registry: ModelRegistry):
-    registry.configure_provider(
-        ModelProvider.GOOGLE, api_key="AQ.xxx", backend="vertex"
-    )
+    registry.configure_provider(ModelProvider.GOOGLE, api_key="AQ.xxx", backend="vertex")
     assert registry._google_backend_for_model("gemini-2.5-flash") == "vertex"
 
 
 def test_vertex_models_env_overrides_ai_studio_default(
-    registry: ModelRegistry, monkeypatch,
+    registry: ModelRegistry,
+    monkeypatch,
 ):
     """``GOOGLE_VERTEX_MODELS`` is the escape hatch for A/B testing one
     model on Vertex while leaving the rest on AI Studio."""
@@ -96,7 +91,8 @@ def test_vertex_models_env_overrides_ai_studio_default(
 
 
 def test_vertex_models_env_handles_whitespace_and_empty_items(
-    registry: ModelRegistry, monkeypatch,
+    registry: ModelRegistry,
+    monkeypatch,
 ):
     registry.configure_provider(ModelProvider.GOOGLE, api_key="AIzaSy_fake")
     monkeypatch.setenv("GOOGLE_VERTEX_MODELS", "  gemini-3-flash-preview , , gemini-2.5-pro  ")
@@ -114,7 +110,8 @@ def test_ai_studio_endpoint_non_stream(registry: ModelRegistry):
     url = registry._google_endpoint("gemini-2.5-flash", stream=False)
     assert url.startswith("https://generativelanguage.googleapis.com/v1beta/models/")
     assert "gemini-2.5-flash:generateContent" in url
-    assert "key=AIzaSy_fake" in url
+    assert "AIzaSy_fake" not in url
+    assert "key=" not in url
     assert "alt=sse" not in url
 
 
@@ -122,21 +119,25 @@ def test_ai_studio_endpoint_stream_appends_alt_sse(registry: ModelRegistry):
     registry.configure_provider(ModelProvider.GOOGLE, api_key="AIzaSy_fake")
     url = registry._google_endpoint("gemini-2.5-flash", stream=True)
     assert "streamGenerateContent" in url
-    assert url.endswith("&alt=sse")
+    assert url.endswith("?alt=sse")
 
 
 def test_vertex_endpoint_has_publishers_google_prefix(registry: ModelRegistry):
     registry.configure_provider(
-        ModelProvider.GOOGLE, api_key="AQ.xxx", backend="vertex",
+        ModelProvider.GOOGLE,
+        api_key="AQ.xxx",
+        backend="vertex",
     )
     url = registry._google_endpoint("gemini-2.5-flash-lite", stream=False)
     assert url.startswith("https://aiplatform.googleapis.com/v1/publishers/google/models/")
     assert "gemini-2.5-flash-lite:generateContent" in url
-    assert "key=AQ.xxx" in url
+    assert "AQ.xxx" not in url
+    assert "key=" not in url
 
 
 def test_per_model_override_flips_only_that_model_url(
-    registry: ModelRegistry, monkeypatch,
+    registry: ModelRegistry,
+    monkeypatch,
 ):
     """Config says ai_studio for the provider; env routes ONE model to
     Vertex. The two endpoints should land on different hosts — this is
@@ -157,36 +158,44 @@ def test_per_model_override_flips_only_that_model_url(
 
 def test_missing_google_config_still_produces_usable_url(registry: ModelRegistry):
     """If configure_provider was never called, we still get a URL — just
-    without an API key. Lets the error surface at the HTTP layer (401)
-    instead of crashing during URL construction."""
+    without crashing during URL construction. Authentication is carried
+    separately in a request header."""
     url = registry._google_endpoint("gemini-2.5-flash", stream=False)
     assert url.startswith("https://generativelanguage.googleapis.com/")
-    assert url.endswith("key=")
+    assert "key=" not in url
 
 
 def test_per_model_vertex_override_uses_vertex_api_key(
-    registry: ModelRegistry, monkeypatch,
+    registry: ModelRegistry,
+    monkeypatch,
 ):
     """The global provider is configured for AI Studio with an
-    ``AIzaSy...`` key. When one model flips to Vertex via env, the URL
-    must carry ``VERTEX_API_KEY`` (``AQ.xxx``) instead — otherwise the
-    AI-Studio-shaped key hits the Vertex endpoint and gets 401."""
+    ``AIzaSy...`` key. When one model flips to Vertex via env, the request
+    header must carry ``VERTEX_API_KEY`` (``AQ.xxx``) instead."""
     registry.configure_provider(ModelProvider.GOOGLE, api_key="AIzaSy_ai_studio_key")
     monkeypatch.setenv("GOOGLE_VERTEX_MODELS", "gemini-3-flash-preview")
     monkeypatch.setenv("VERTEX_API_KEY", "AQ.vertex_express_mode_key")
 
     url = registry._google_endpoint("gemini-3-flash-preview", stream=False)
     assert "aiplatform.googleapis.com" in url
-    assert "key=AQ.vertex_express_mode_key" in url
-    assert "AIzaSy_ai_studio_key" not in url
+    assert "key=" not in url
+    assert (
+        registry._google_api_key_for_model(ModelProvider.GOOGLE, "gemini-3-flash-preview")
+        == "AQ.vertex_express_mode_key"
+    )
 
     # The non-overridden model should still use the AI Studio key.
     other = registry._google_endpoint("gemini-2.5-flash", stream=False)
-    assert "key=AIzaSy_ai_studio_key" in other
+    assert "key=" not in other
+    assert (
+        registry._google_api_key_for_model(ModelProvider.GOOGLE, "gemini-2.5-flash")
+        == "AIzaSy_ai_studio_key"
+    )
 
 
 def test_vertex_override_falls_back_to_config_key_when_no_vertex_env(
-    registry: ModelRegistry, monkeypatch,
+    registry: ModelRegistry,
+    monkeypatch,
 ):
     """If someone sets ``GOOGLE_VERTEX_MODELS`` without also setting
     ``VERTEX_API_KEY`` we still try the call — but with the config's
@@ -199,4 +208,8 @@ def test_vertex_override_falls_back_to_config_key_when_no_vertex_env(
 
     url = registry._google_endpoint("gemini-3-flash-preview", stream=False)
     assert "aiplatform.googleapis.com" in url
-    assert "key=AIzaSy_shared" in url
+    assert "key=" not in url
+    assert (
+        registry._google_api_key_for_model(ModelProvider.GOOGLE, "gemini-3-flash-preview")
+        == "AIzaSy_shared"
+    )

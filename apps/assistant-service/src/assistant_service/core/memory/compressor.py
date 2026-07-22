@@ -506,6 +506,9 @@ class ModelRegistryLLMService:
                 max_tokens=effective_max,
             )
             return content or ""
-        except Exception:
-            _compressor_logger.exception("ModelRegistryLLMService.complete failed")
+        except Exception as exc:
+            _compressor_logger.error(
+                "ModelRegistryLLMService.complete failed (exception_type=%s)",
+                type(exc).__name__,
+            )
             return ""

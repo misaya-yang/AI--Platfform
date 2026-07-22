@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from .scope import scoped_collection_candidates, scoped_collection_name
+
 
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
     """Read DB rows from mappings, asyncpg.Record, or simple objects."""
@@ -66,9 +68,7 @@ class HybridMemoryRetriever:
 
     @staticmethod
     def _collection_name(prefix: str, tenant_id: str, user_id: str) -> str:
-        safe_tenant = tenant_id.replace("-", "_")
-        safe_user = user_id.replace("-", "_")
-        return f"{prefix}_{safe_tenant}_{safe_user}"
+        return scoped_collection_name(prefix, tenant_id, user_id)
 
     async def search(
         self,
@@ -126,7 +126,11 @@ class HybridMemoryRetriever:
         scored.sort(key=lambda item: item[3], reverse=True)
 
         top_chunk_ids = [item[0] for item in scored[:max_results]]
-        chunk_rows = await self._load_chunks(top_chunk_ids)
+        chunk_rows = await self._load_chunks(
+            top_chunk_ids,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
 
         lookup = {str(_row_value(chunk, "chunk_id")): chunk for chunk in chunk_rows}
         results: list[MemorySearchHit] = []
@@ -185,6 +189,9 @@ class HybridMemoryRetriever:
                 JOIN assistant_memory_sources s ON s.source_id = c.source_id
                 WHERE c.tenant_id = $1
                   AND c.user_id = $2
+                  AND s.tenant_id = $1
+                  AND s.user_id = $2
+                  AND COALESCE(s.metadata->>'deletion_pending', 'false') <> 'true'
                   AND c.text_search @@ plainto_tsquery('simple', $3)
                   {filters_sql}
                 LIMIT $4
@@ -215,23 +222,78 @@ class HybridMemoryRetriever:
         if not query_embedding:
             return {}
 
-        collection_name = self._collection_name(self.collection_prefix, tenant_id, user_id)
-        results = await self.vector_store.search(
-            collection_name=collection_name,
-            query_vector=query_embedding,
-            top_k=limit,
-            filter_payload={"tenant_id": tenant_id, "user_id": user_id},
-        )
-
         scores: dict[str, float] = {}
-        for hit in results or []:
-            payload = getattr(hit, "payload", None) or {}
-            chunk_id = str(payload.get("chunk_id") or getattr(hit, "point_id", ""))
-            if not chunk_id:
+        search_method = self.vector_store.search
+        parameters = inspect.signature(search_method).parameters
+        accepts_kwargs = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        persisted_collections: list[str] = []
+        try:
+            rows = await self.database.fetch(
+                """
+                SELECT DISTINCT jsonb_array_elements_text(
+                    CASE
+                        WHEN jsonb_typeof(metadata->'vector_collections') = 'array'
+                        THEN metadata->'vector_collections'
+                        ELSE '[]'::jsonb
+                    END
+                ) AS collection_name
+                FROM assistant_memory_sources
+                WHERE tenant_id = $1
+                  AND user_id = $2
+                  AND COALESCE(metadata->>'deletion_pending', 'false') <> 'true'
+                """,
+                tenant_id,
+                user_id,
+            )
+            persisted_collections = [
+                str(_row_value(row, "collection_name") or "")
+                for row in rows or []
+                if _row_value(row, "collection_name")
+            ]
+        except Exception:
+            persisted_collections = []
+
+        for collection_name in scoped_collection_candidates(
+            self.collection_prefix,
+            tenant_id,
+            user_id,
+            dimension=len(query_embedding),
+            persisted=persisted_collections,
+        ):
+            kwargs: dict[str, Any] = {
+                "collection_name": collection_name,
+                "query_vector": query_embedding,
+                "top_k": limit,
+            }
+            if "tenant_id" in parameters or accepts_kwargs:
+                kwargs["tenant_id"] = tenant_id
+            if "user_id" in parameters or accepts_kwargs:
+                kwargs["user_id"] = user_id
+            if "filter_payload" in parameters or accepts_kwargs:
+                kwargs["filter_payload"] = {
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                }
+            try:
+                results = await search_method(**kwargs)
+            except Exception:
                 continue
-            raw_score = float(getattr(hit, "score", 0.0) or 0.0)
-            norm_score = max(0.0, min(1.0, (raw_score + 1.0) / 2.0))
-            scores[chunk_id] = max(scores.get(chunk_id, 0.0), norm_score)
+
+            for hit in results or []:
+                payload = getattr(hit, "payload", None) or {}
+                if (
+                    str(payload.get("tenant_id") or "") != tenant_id
+                    or str(payload.get("user_id") or "") != user_id
+                ):
+                    continue
+                chunk_id = str(payload.get("chunk_id") or getattr(hit, "point_id", ""))
+                if not chunk_id:
+                    continue
+                raw_score = float(getattr(hit, "score", 0.0) or 0.0)
+                norm_score = max(0.0, min(1.0, (raw_score + 1.0) / 2.0))
+                scores[chunk_id] = max(scores.get(chunk_id, 0.0), norm_score)
         return scores
 
     async def _embed_query(self, query: str) -> list[float]:
@@ -262,7 +324,13 @@ class HybridMemoryRetriever:
 
         return []
 
-    async def _load_chunks(self, chunk_ids: list[str]) -> list[Any]:
+    async def _load_chunks(
+        self,
+        chunk_ids: list[str],
+        *,
+        tenant_id: str,
+        user_id: str,
+    ) -> list[Any]:
         if not chunk_ids:
             return []
 
@@ -279,5 +347,10 @@ class HybridMemoryRetriever:
             FROM assistant_memory_chunks c
             JOIN assistant_memory_sources s ON s.source_id = c.source_id
             WHERE c.chunk_id = ANY($1::uuid[])
+              AND c.tenant_id = $2
+              AND c.user_id = $3
+              AND s.tenant_id = $2
+              AND s.user_id = $3
+              AND COALESCE(s.metadata->>'deletion_pending', 'false') <> 'true'
         """
-        return await self.database.fetch(sql, chunk_ids)
+        return await self.database.fetch(sql, chunk_ids, tenant_id, user_id)

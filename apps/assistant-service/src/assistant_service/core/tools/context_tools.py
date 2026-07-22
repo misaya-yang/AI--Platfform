@@ -24,11 +24,14 @@ pure while letting the loop do the mutation at a safe point.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 
 from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
 
+from ..turn_contract import FailureClass, SideEffectState, decide_failure
 from .tool_registry import (
     ToolCallRequest,
     ToolCallResult,
@@ -48,6 +51,30 @@ logger = get_logger(__name__)
 _MIN_KEEP_TURNS = 1
 _MAX_KEEP_TURNS = 10
 _DEFAULT_KEEP_TURNS = 3
+_MAX_REASON_CHARS = 200
+_TRUNCATION_SUFFIX = "...[truncated]"
+
+
+def _bounded_reason(value: Any) -> str:
+    """Return a single-line, shared-redacted reason for events and lineage."""
+
+    try:
+        text = " ".join(redact_trace_text(value).split())
+    except Exception:
+        return ""
+    if len(text) <= _MAX_REASON_CHARS:
+        return text
+    return f"{text[: _MAX_REASON_CHARS - len(_TRUNCATION_SUFFIX)]}{_TRUNCATION_SUFFIX}"
+
+
+def _log_digest(value: Any, *, prefix: str) -> str:
+    """Return a bounded, non-reversible label for provider-controlled text."""
+
+    try:
+        digest = hashlib.sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+    except Exception:
+        return f"{prefix}_sha256=unavailable"
+    return f"{prefix}_sha256={digest[:16]}"
 
 
 CONTEXT_COMPACT_DEFINITION = ToolDefinition(
@@ -88,6 +115,7 @@ CONTEXT_COMPACT_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.UTILITY,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "write"},
     when_to_use=(
         "After completing a discrete subtask and the details of that subtask "
         "are no longer needed for the next step. Also when the tool-result "
@@ -123,18 +151,26 @@ class ContextCompactExecutor(ToolExecutor):
                 call_id=request.call_id,
                 tool_name=request.tool_name,
                 success=False,
-                error=f"keep_recent_turns must be an integer, got {keep_raw!r}",
+                error="keep_recent_turns must be an integer",
                 duration_ms=(time.time() - start) * 1000,
+                metadata={
+                    "tool_failure": decide_failure(
+                        FailureClass.INVALID_INPUT,
+                        side_effect_state=SideEffectState.NOT_STARTED,
+                    ).to_dict()
+                },
             )
         keep_turns = max(_MIN_KEEP_TURNS, min(_MAX_KEEP_TURNS, keep_turns))
 
-        reason = str(request.arguments.get("reason") or "").strip()[:200]
+        reason = _bounded_reason(request.arguments.get("reason") or "")
 
         logger.info(
-            "context_compact requested (call_id=%s keep_recent_turns=%d reason=%r)",
-            request.call_id,
+            "context_compact.requested "
+            "(call_label=%s keep_recent_turns=%d reason_present=%s reason_label=%s)",
+            _log_digest(request.call_id, prefix="call"),
             keep_turns,
-            reason,
+            bool(reason),
+            _log_digest(reason, prefix="reason"),
         )
 
         # The loop reads `metadata["compact_context"]` and performs the

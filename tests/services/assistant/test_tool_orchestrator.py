@@ -11,10 +11,10 @@ Comprehensive tests for the ToolOrchestrator module including:
 """
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from assistant_service.core.task_planner import (
     ExecutionPlan,
     PlannedTask,
@@ -824,6 +824,139 @@ class TestToolOrchestratorErrorHandling:
         assert "Unexpected error" in results[0].error
 
     @pytest.mark.asyncio
+    async def test_task_exception_logs_type_only_and_returns_redacted_bounded_error(
+        self,
+        simple_plan,
+        working_memory,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Untrusted task identifiers and exception details must not enter error logs."""
+        task_id_sentinel = "private-task-id-sentinel"
+        exception_sentinel = "private-exception-detail-sentinel"
+        raw_secret = "postgresql://private-user:private-password@private-host/private-db"
+        simple_plan.tasks[0].id = task_id_sentinel
+        simple_plan.parallel_groups = [[task_id_sentinel]]
+
+        invoker = MagicMock()
+        invoker.invoke = AsyncMock(
+            side_effect=RuntimeError(f"{exception_sentinel}: {raw_secret} " + "x" * 500)
+        )
+        orchestrator = ToolOrchestrator(tool_invoker=invoker, max_parallel=3)
+
+        with caplog.at_level(logging.ERROR, logger="assistant_service.core.tool_orchestrator"):
+            results = [
+                result
+                async for result in orchestrator.execute_plan(
+                    simple_plan,
+                    working_memory,
+                    invocation_context=_test_invocation_context(),
+                )
+            ]
+
+        assert len(results) == 1
+        assert results[0].task_id == task_id_sentinel
+        assert results[0].success is False
+        assert raw_secret not in (results[0].error or "")
+        assert "postgresql://[redacted]" in (results[0].error or "")
+        assert len(results[0].error or "") <= 214
+        assert exception_sentinel not in caplog.text
+        assert task_id_sentinel not in caplog.text
+        assert "exception_type=RuntimeError" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_unexpected_parallel_exception_logs_type_only(
+        self,
+        simple_plan,
+        working_memory,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """The defensive parallel wrapper must not log task or exception payloads."""
+        task_id_sentinel = "private-parallel-task-id-sentinel"
+        exception_sentinel = "private-parallel-exception-sentinel"
+        raw_secret = "api_key=private-parallel-secret"
+        simple_plan.tasks[0].id = task_id_sentinel
+        simple_plan.parallel_groups = [[task_id_sentinel]]
+
+        orchestrator = ToolOrchestrator(tool_invoker=MagicMock(), max_parallel=3)
+        orchestrator._execute_single_task = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError(f"{exception_sentinel}: {raw_secret}")
+        )
+
+        with caplog.at_level(logging.ERROR, logger="assistant_service.core.tool_orchestrator"):
+            results = [
+                result
+                async for result in orchestrator.execute_plan(
+                    simple_plan,
+                    working_memory,
+                    invocation_context=_test_invocation_context(),
+                )
+            ]
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert (results[0].error or "").startswith("Unexpected error: ")
+        assert "private-parallel-secret" not in (results[0].error or "")
+        assert "api_key=[redacted]" in (results[0].error or "")
+        assert exception_sentinel not in caplog.text
+        assert task_id_sentinel not in caplog.text
+        assert "exception_type=RuntimeError" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_tool_result_error_is_redacted_and_bounded(
+        self,
+        simple_plan,
+        working_memory,
+    ):
+        """A failed tool's user-facing error keeps its shape without leaking secrets."""
+        secret = "private-result-secret"
+        invoker = MagicMock()
+        invoker.invoke = AsyncMock(
+            return_value=MagicMock(
+                success=False,
+                result=None,
+                error=f"Tool error: token={secret} " + "x" * 500,
+            )
+        )
+        orchestrator = ToolOrchestrator(tool_invoker=invoker, max_parallel=3)
+
+        results = [
+            result
+            async for result in orchestrator.execute_plan(
+                simple_plan,
+                working_memory,
+                invocation_context=_test_invocation_context(),
+            )
+        ]
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert secret not in (results[0].error or "")
+        assert "token=[redacted]" in (results[0].error or "")
+        assert len(results[0].error or "") <= 214
+
+    @pytest.mark.asyncio
+    async def test_missing_invocation_context_fails_closed_before_invocation(
+        self,
+        simple_plan,
+        working_memory,
+    ):
+        """A missing tenant/user invocation context must never reach a tool."""
+        invoker = MagicMock()
+        invoker.invoke = AsyncMock()
+        orchestrator = ToolOrchestrator(tool_invoker=invoker, max_parallel=3)
+
+        results = [
+            result async for result in orchestrator.execute_plan(simple_plan, working_memory)
+        ]
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "invocation_context is required" in (results[0].error or "")
+        invoker.invoke.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_mixed_success_and_failure(self, mock_tool_registry, working_memory):
         """Test plan with mixed successful and failed tasks."""
         call_count = 0
@@ -1320,7 +1453,7 @@ class TestToolOrchestratorEdgeCases:
         assert len(results[0].result["data"]) == 100000
 
     @pytest.mark.asyncio
-    async def test_circular_reference_in_params(self, orchestrator, working_memory):
+    async def test_circular_reference_in_params(self, orchestrator):
         """Test that circular references in params don't cause infinite loop."""
         # This tests the param resolution, not task dependencies
         # A param referencing itself or creating a cycle shouldn't happen in normal use

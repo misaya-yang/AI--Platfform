@@ -11,8 +11,10 @@ Verifies:
 
 This is the dedup hotpath: wrong answer = double-tool-execution.
 """
+
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -82,7 +84,8 @@ async def test_db_hit_returns_command_id_from_db():
     db.fetchrow.assert_awaited_once()
     query, key = db.fetchrow.await_args.args
     assert "assistant_command_queue" in query
-    assert "IN ('queued', 'running', 'awaiting_approval')" in query
+    assert "'queued', 'running', 'awaiting_approval'" in query
+    assert "'approval_claimed', 'side_effect_unknown'" in query
     assert key == "k1"
 
 
@@ -180,7 +183,10 @@ async def test_approval_resume_consumes_approval_and_prevents_duplicate_executio
     assert resumed.success is True
     assert invoker.count == 1
     assert invoker.arguments == [{"code": "print('once')"}]
-    assert gw._approvals[approval_id].status == "consumed"  # AUDIT-OK: DB-less / DB-error fallback only
+    assert (
+        gw._approvals[approval_id].status == "consumed"
+    )  # AUDIT-OK: DB-less / DB-error fallback only
+    approval_count = len(gw._approvals)
 
     duplicate = await gw.invoke_tool(
         "execute_python_code",
@@ -189,9 +195,66 @@ async def test_approval_resume_consumes_approval_and_prevents_duplicate_executio
     )
 
     assert duplicate.success is False
-    assert duplicate.error == "APPROVAL_REQUIRED"
-    assert duplicate.metadata["approval_id"] != approval_id
+    assert duplicate.error == "SIDE_EFFECT_UNKNOWN"
+    assert duplicate.metadata["approval_id"] == approval_id
+    assert duplicate.metadata["execution_authorized"] is False
+    assert duplicate.metadata["recovery_plan"]["blind_replay_allowed"] is False
+    assert len(gw._approvals) == approval_count
     assert invoker.count == 1
+
+    new_intent = await gw.invoke_tool(
+        "execute_python_code",
+        {"code": "print('once')"},
+        context=context,
+    )
+    assert new_intent.error == "APPROVAL_REQUIRED"
+    assert new_intent.error != "COMMAND_DEDUPED"
+    assert new_intent.metadata["approval_id"] != approval_id
+    assert invoker.count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_approval_state", ["rejected", "expired"])
+async def test_terminal_approval_state_does_not_permanently_dedupe_new_intent(
+    terminal_approval_state: str,
+) -> None:
+    invoker = _CountingInvoker()
+    gw = AssistantExecutionGateway(tool_invoker=invoker, database=None)
+    context = _context()
+    first = await gw.invoke_tool(
+        "execute_python_code",
+        {"code": "print('new intent')"},
+        context=context,
+    )
+    approval_id = str(first.metadata["approval_id"])
+
+    if terminal_approval_state == "rejected":
+        rejected = await gw.approve(
+            approval_id=approval_id,
+            tenant_id=context.tenant_id,
+            user_id=context.user_id,
+            approved=False,
+            approver_user_id=context.user_id,
+        )
+        assert rejected is not None
+        assert rejected["status"] == "rejected"
+    else:
+        gw._approvals[approval_id].expires_at = datetime.now(
+            timezone.utc
+        ) - timedelta(  # AUDIT-OK: DB-less expiry setup
+            seconds=1
+        )
+
+    new_intent = await gw.invoke_tool(
+        "execute_python_code",
+        {"code": "print('new intent')"},
+        context=context,
+    )
+
+    assert new_intent.error == "APPROVAL_REQUIRED"
+    assert new_intent.error != "COMMAND_DEDUPED"
+    assert new_intent.metadata["approval_id"] != approval_id
+    assert invoker.count == 0
 
 
 @pytest.mark.asyncio
@@ -284,8 +347,8 @@ async def test_prepare_run_resume_blocks_without_required_approval():
 
     assert blocked is not None
     assert blocked["status"] == "blocked"
-    assert blocked["reason"] == "approval_required"
-    assert blocked.get("recoverable") is True
+    assert blocked["reason"] == "approval_checkpoint_invalid"
+    assert blocked.get("recoverable") is False
     assert cross_scope is None
     assert run is not None
     assert run["status"] == "running"
@@ -369,13 +432,6 @@ async def test_prepare_run_resume_ready_after_approved_checkpoint():
         arguments={"code": "print('once')"},
         reason="approval required",
     )
-    await gw.approve(
-        approval_id=approval_id,
-        tenant_id=context.tenant_id,
-        user_id=context.user_id,
-        approved=True,
-        approver_user_id=context.user_id,
-    )
     await gw.save_run_checkpoint(
         run_id=context.run_id,
         tenant_id=context.tenant_id,
@@ -388,7 +444,15 @@ async def test_prepare_run_resume_ready_after_approved_checkpoint():
             "arguments": {"code": "print('once')"},
         },
         approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-approval"},
         status="blocked",
+    )
+    await gw.approve(
+        approval_id=approval_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        approved=True,
+        approver_user_id=context.user_id,
     )
 
     ready = await gw.prepare_run_resume(
@@ -425,6 +489,21 @@ async def test_prepare_run_resume_blocks_when_approved_arguments_do_not_match_ch
         arguments={"code": "print('approved')"},
         reason="approval required",
     )
+    await gw.save_run_checkpoint(
+        run_id=context.run_id,
+        tenant_id=context.tenant_id,
+        user_id=context.user_id,
+        session_id=context.session_id,
+        phase="approval_pending",
+        pending_tool={
+            "tool_id": "tc1",
+            "tool_name": "execute_python_code",
+            "arguments": {"code": "print('approved')"},
+        },
+        approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-approved"},
+        status="blocked",
+    )
     await gw.approve(
         approval_id=approval_id,
         tenant_id=context.tenant_id,
@@ -439,11 +518,12 @@ async def test_prepare_run_resume_blocks_when_approved_arguments_do_not_match_ch
         session_id=context.session_id,
         phase="approval_pending",
         pending_tool={
-            "tool_id": "tc1",
+            "tool_id": "tc1-newer",
             "tool_name": "execute_python_code",
             "arguments": {"code": "print('different')"},
         },
         approval_id=approval_id,
+        resume_payload={"attempt_id": "attempt-newer"},
         status="blocked",
     )
 

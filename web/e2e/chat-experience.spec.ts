@@ -175,6 +175,10 @@ async function installAssistantHarness(
     );
   });
 
+  await page.route("**/api/v1/confluence/connections*", async (route) => {
+    await route.fulfill(jsonResponse([]));
+  });
+
   await page.route("**/api/v1/assistant/sessions/*/artifacts", async (route) => {
     const sessionId = pathSegmentAfter(route.request().url(), "sessions");
     const artifacts = artifactsBySessionId[sessionId] || [];
@@ -676,6 +680,44 @@ test("assistant mobile history uses a bounded overlay sheet", async ({ page }) =
   await expect(historySheet).toBeHidden();
 });
 
+test("assistant deletes a session through the runtime cleanup route", async ({ page }) => {
+  test.setTimeout(30_000);
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-delete-user",
+    email: "assistant-delete@example.com",
+    display_name: "Assistant Delete",
+  });
+  const title = "Delete through assistant runtime";
+  const session = buildMockAssistantSession("delete-runtime-session", { title });
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+      });
+    },
+    { preloadedSessions: [session] }
+  );
+  let deleteHits = 0;
+  await page.route(
+    "**/api/v1/assistant/sessions/delete-runtime-session",
+    async (route) => {
+      deleteHits += 1;
+      await route.fulfill(jsonResponse({ status: "deleted" }));
+    }
+  );
+
+  await page.goto("/assistant");
+  await page.getByLabel("Show history").click();
+  await page.getByRole("button", { name: `Delete: ${title}` }).click();
+
+  await expect(page.getByRole("button", { name: `Delete: ${title}` })).toHaveCount(0);
+  expect(deleteHits).toBe(1);
+});
+
 test("assistant emits stream telemetry lifecycle on mocked stream", async ({ page }) => {
   await installAssistantHarness(page, async (route) => {
     const body = toSseBody([
@@ -930,7 +972,8 @@ test("assistant restores session artifacts into unique artifact and share counts
   );
 
   await page.goto("/assistant");
-  await page.getByRole("button", { name: title }).click();
+  await page.getByRole("button", { name: /show history/i }).first().click();
+  await page.getByRole("button", { name: title, exact: true }).click();
 
   await expect(page.getByText("Recover my generated plan")).toBeVisible();
   await expect(page.getByText("Here is the recovered plan.")).toBeVisible();
@@ -950,6 +993,115 @@ test("assistant restores session artifacts into unique artifact and share counts
   await shareDialog.getByRole("button", { name: "Create Share Link" }).click();
   await expect(shareDialog.getByText("Share link is ready!")).toBeVisible();
   expect(shareRequests).toEqual([{ sessionId, includeArtifacts: true }]);
+});
+
+test("assistant restores a pending approval after refresh", async ({ page }) => {
+  await seedClientPrefs(page, { locale: "en-US" });
+  await installClientAuth(page, {
+    user_id: "e2e-assistant-reconnect-user",
+    email: "assistant-reconnect@example.com",
+    display_name: "Assistant Reconnect",
+  });
+
+  const sessionId = "e2e-reconnect-session";
+  const runId = "e2e-reconnect-run";
+  const approvalId = "e2e-reconnect-approval";
+  const title = `reconnect-approval-${Date.now()}`;
+  const now = new Date().toISOString();
+  const consoleErrors: string[] = [];
+  const requestFailures: string[] = [];
+  let runStatusHits = 0;
+  let runSucceeded = false;
+
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("requestfailed", (request) => {
+    requestFailures.push(`${request.method()} ${new URL(request.url()).pathname}`);
+  });
+
+  await installAssistantHarness(
+    page,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: toSseBody([{ event_type: "done", data: { duration_ms: 0 } }]),
+      });
+    },
+    {
+      preloadedSessions: [
+        buildMockAssistantSession(sessionId, {
+          title,
+          assistant_active_run: {
+            run_id: runId,
+            updated_at: now,
+          },
+        }),
+      ],
+      historyBySessionId: {
+        [sessionId]: [
+          { role: "user", content: "Run the guarded command", timestamp: now },
+          {
+            role: "assistant",
+            content: "Awaiting operator approval.",
+            timestamp: now,
+            metadata: {
+              tool_calls: [
+                { id: "guarded-shell", name: "shell", arguments: {}, status: "completed" },
+              ],
+            },
+          },
+        ],
+      },
+    }
+  );
+  await page.route(`**/api/v1/assistant/runs/${runId}`, async (route) => {
+    runStatusHits += 1;
+    await route.fulfill(
+      jsonResponse({
+        run: {
+          run_id: runId,
+          session_id: sessionId,
+          status: runSucceeded ? "succeeded" : "running",
+          checkpoint: runSucceeded
+            ? { phase: "completed" }
+            : {
+                phase: "approval_pending",
+                approval_id: approvalId,
+                pending_tool: { tool_id: "guarded-shell", tool_name: "shell" },
+              },
+        },
+      })
+    );
+  });
+  await page.route("**/api/v1/confluence/connections?*", async (route) => {
+    await route.fulfill(jsonResponse([]));
+  });
+
+  await page.goto("/assistant");
+  await page.getByRole("button", { name: /show history/i }).first().click();
+  await page.getByRole("button", { name: title, exact: true }).click();
+  await expect(page.getByText("Awaiting operator approval.")).toBeVisible();
+
+  const hitsBeforeRefresh = runStatusHits;
+  await page.reload();
+  await expect.poll(() => runStatusHits).toBeGreaterThan(hitsBeforeRefresh);
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByText("Approval required: shell")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
+
+  runSucceeded = true;
+  const hitsBeforeTerminalRefresh = runStatusHits;
+  await page.reload();
+  await expect.poll(() => runStatusHits).toBeGreaterThan(hitsBeforeTerminalRefresh);
+  await page.getByRole("button", { name: /Activity/ }).last().click();
+  await expect(page.getByRole("button", { name: "Approve" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reject" })).toHaveCount(0);
+  await expect(page.getByText(/^completed ·/)).toBeVisible();
+  expect(consoleErrors).toEqual([]);
+  expect(requestFailures).toEqual([]);
 });
 
 test("assistant escape cancels delayed stream", async ({ page }) => {

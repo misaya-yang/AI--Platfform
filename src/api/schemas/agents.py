@@ -16,12 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 AgentRole = Literal["owner", "editor", "viewer"]
 AgentStatus = Literal["draft", "active", "archived", "deleted"]
-CapabilityType = Literal[
-    "native", "model_native", "mcp", "skill", "connector", "knowledge"
-]
+CapabilityType = Literal["native", "model_native", "mcp", "skill", "connector", "knowledge"]
 AgentChannel = Literal["hosted", "embed", "api"]
 AgentAuthMode = Literal["private", "tenant", "public", "token"]
 AgentReleaseStatus = Literal["queued", "running", "passed", "failed", "cancelled", "stale"]
+
 
 class AgentIdentitySpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -596,6 +595,12 @@ class AgentDataDeletionResponse(BaseModel):
     attempt_count: int = 0
     last_attempt_at: datetime | str | None = None
     completed_at: datetime | str | None = None
+    retryable: bool = False
+
+    @model_validator(mode="after")
+    def _derive_retryable(self) -> AgentDataDeletionResponse:
+        self.retryable = self.status == "failed" and self.completed_at is None
+        return self
 
 
 class AgentCredentialRevocationResponse(BaseModel):

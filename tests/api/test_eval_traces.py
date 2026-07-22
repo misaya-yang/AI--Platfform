@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from ai_gateway_core.eval.evaluator_executor import REQUIRED_ASSISTANT_HARD_BLOCKERS
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
@@ -237,7 +238,11 @@ class FakeTraceRepository:
             "dataset_id": self.dataset["dataset_id"],
             "status": "succeeded",
             "target_snapshot": {"candidate_label": "baseline"},
-            "score_summary": {"overall_score": 0.9, "trajectory_pass_rate": 1.0, "critical_pass_rate": 1.0},
+            "score_summary": {
+                "overall_score": 0.9,
+                "trajectory_pass_rate": 1.0,
+                "critical_pass_rate": 1.0,
+            },
             "metrics": {"targets": 10},
             "error_message": None,
             "created_by": "user-a",
@@ -250,7 +255,11 @@ class FakeTraceRepository:
             **self.baseline_run,
             "run_id": "34343434-3434-4434-8434-343434343434",
             "target_snapshot": {"candidate_label": "candidate"},
-            "score_summary": {"overall_score": 0.88, "trajectory_pass_rate": 0.96, "critical_pass_rate": 1.0},
+            "score_summary": {
+                "overall_score": 0.88,
+                "trajectory_pass_rate": 0.96,
+                "critical_pass_rate": 1.0,
+            },
         }
 
     async def list_traces(self, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
@@ -267,7 +276,11 @@ class FakeTraceRepository:
 
     async def ingest_trace(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("ingest", kwargs))
-        return {"trace_id": "11111111-1111-4111-8111-111111111111", "status": "stored", "job_id": None}
+        return {
+            "trace_id": "11111111-1111-4111-8111-111111111111",
+            "status": "stored",
+            "job_id": None,
+        }
 
     async def get_thread(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("thread", kwargs))
@@ -297,7 +310,14 @@ class FakeTraceRepository:
             **self.example["metadata"],
             **payload.get("metadata", {}),
         }
-        for key in ("expected_trajectory", "assertions", "tags", "difficulty", "owner", "review_status"):
+        for key in (
+            "expected_trajectory",
+            "assertions",
+            "tags",
+            "difficulty",
+            "owner",
+            "review_status",
+        ):
             if payload.get(key) is not None:
                 metadata[key] = payload[key]
         self.example = {
@@ -674,8 +694,7 @@ async def test_repository_groups_experiment_scores_into_case_results() -> None:
     assert all("experiment_run_id" in query for query in score_queries)
     assert "ROW_NUMBER() OVER" in score_queries[-1]
     assert (
-        "COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)"
-        in score_queries[-1]
+        "COALESCE(NULLIF(s.target_id, ''), s.span_id::text, s.trace_id::text)" in score_queries[-1]
     )
 
 
@@ -818,7 +837,9 @@ async def test_kb_ragas_score_retrieval_endpoint_maps_service_payload(monkeypatc
             ],
         }
 
-    monkeypatch.setattr(eval_routes, "score_retrieval_with_kb_ragas", _score_retrieval_with_kb_ragas)
+    monkeypatch.setattr(
+        eval_routes, "score_retrieval_with_kb_ragas", _score_retrieval_with_kb_ragas
+    )
 
     result = await score_kb_ragas_retrieval(
         body=KbRagasScoreRetrievalRequest(
@@ -1110,9 +1131,7 @@ async def test_eval_dataset_evaluator_experiment_workflow(monkeypatch):
     )
     example = await create_eval_example_from_trace(
         dataset_id=dataset.dataset_id,
-        body=EvalExampleFromTraceCreate(
-            source_trace_id="11111111-1111-4111-8111-111111111111"
-        ),
+        body=EvalExampleFromTraceCreate(source_trace_id="11111111-1111-4111-8111-111111111111"),
         request=request,
         auth=auth,
     )
@@ -1128,7 +1147,9 @@ async def test_eval_dataset_evaluator_experiment_workflow(monkeypatch):
     )
     job = await run_eval_evaluator_async(
         evaluator_id=evaluator.evaluator_id,
-        body=EvalEvaluatorRunRequest(experiment_id=experiment.experiment_id, dataset_id=dataset.dataset_id),
+        body=EvalEvaluatorRunRequest(
+            experiment_id=experiment.experiment_id, dataset_id=dataset.dataset_id
+        ),
         request=request,
         auth=auth,
     )
@@ -1596,9 +1617,15 @@ async def test_eval_baseline_promotion_requires_complete_verified_live_run(monke
         **repo.candidate_run,
         "run_mode": "live_candidate",
         "status": "succeeded",
+        "dataset_manifest_hash": "a" * 64,
+        "evaluator_suite_hash": "b" * 64,
         "score_summary": {"overall_score": 0.9, "critical_pass_rate": 1.0},
         "metrics": {
             "gate": {"status": "pass"},
+            "critical_case_count": 2,
+            "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
+            "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
+            "hard_blockers_passed": True,
             "failed_trials": 0,
             "completed_trials": 3,
             "total_trials": 3,
@@ -1635,9 +1662,14 @@ async def test_eval_baseline_promotion_rejects_partial_runtime_fingerprint(monke
         **repo.candidate_run,
         "run_mode": "live_candidate",
         "status": "succeeded",
+        "dataset_manifest_hash": "a" * 64,
+        "evaluator_suite_hash": "b" * 64,
         "score_summary": {"critical_pass_rate": 1.0},
         "metrics": {
             "gate": {"status": "pass"},
+            "critical_case_count": 2,
+            "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
+            "hard_blockers_passed": True,
             "failed_trials": 0,
             "completed_trials": 3,
             "total_trials": 3,
@@ -1657,6 +1689,48 @@ async def test_eval_baseline_promotion_rejects_partial_runtime_fingerprint(monke
 
     assert error.value.status_code == 409
     assert "complete verified runtime fingerprint" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_eval_baseline_promotion_rejects_missing_safety_or_provenance(monkeypatch) -> None:
+    repo = FakeTraceRepository()
+    repo.experiment["baseline_run_id"] = None
+    repo.candidate_run = {
+        **repo.candidate_run,
+        "run_mode": "live_candidate",
+        "status": "succeeded",
+        "score_summary": {"critical_pass_rate": 1.0},
+        "metrics": {
+            "gate": {"status": "pass"},
+            "critical_case_count": 0,
+            "hard_blocker_results": {},
+            "hard_blockers_passed": False,
+        },
+    }
+    monkeypatch.setattr(eval_routes, "_get_trace_repository", lambda _request: repo)
+
+    with pytest.raises(HTTPException, match="mandatory Assistant safety blockers"):
+        await promote_eval_experiment_baseline(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
+
+    repo.candidate_run["metrics"].update(
+        {
+            "critical_case_count": 2,
+            "hard_blocker_results": dict.fromkeys(REQUIRED_ASSISTANT_HARD_BLOCKERS, True),
+            "hard_blockers_passed": True,
+        }
+    )
+    with pytest.raises(HTTPException, match="verified dataset and evaluator provenance"):
+        await promote_eval_experiment_baseline(
+            experiment_id=repo.experiment["experiment_id"],
+            body=EvalBaselinePromotionRequest(run_id=repo.candidate_run["run_id"]),
+            request=_request(),
+            auth=_auth(permissions=["console:eval:view", "console:eval:run"]),
+        )
 
 
 def test_eval_openapi_paths_are_registered() -> None:

@@ -9,6 +9,7 @@ Tests for the context compression functionality:
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from typing import Any
 
@@ -27,6 +28,7 @@ _spec.loader.exec_module(_compressor_module)
 CompressedContext = _compressor_module.CompressedContext
 ContextCompressor = _compressor_module.ContextCompressor
 LLMService = _compressor_module.LLMService
+ModelRegistryLLMService = _compressor_module.ModelRegistryLLMService
 PRESERVE_PATTERNS = _compressor_module.PRESERVE_PATTERNS
 ARTIFACT_PATTERN = _compressor_module.ARTIFACT_PATTERN
 MAX_PRESERVED_URLS = _compressor_module.MAX_PRESERVED_URLS
@@ -714,6 +716,34 @@ class TestLLMServiceProtocol:
 
         # The protocol should be decorated with @runtime_checkable
         assert hasattr(LLMService, "__protocol_attrs__") or isinstance(MockLLMService(), LLMService)
+
+
+class TestModelRegistryLLMService:
+    """Test the concrete ModelRegistry adapter boundary."""
+
+    @pytest.mark.asyncio
+    async def test_complete_redacts_raw_registry_exception_from_logs(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        sentinel = "provider-secret-must-not-reach-compressor-logs"
+
+        class _FailingRegistry:
+            async def chat(self, **_kwargs: Any) -> tuple[str, dict[str, Any]]:
+                raise RuntimeError(f"upstream response included {sentinel}")
+
+        service = ModelRegistryLLMService(
+            model_registry=_FailingRegistry(),
+            model_id="test-model",
+        )
+
+        with caplog.at_level(logging.ERROR, logger=_compressor_module.__name__):
+            result = await service.complete("summarize this")
+
+        assert result == ""
+        assert sentinel not in caplog.text
+        assert "exception_type=RuntimeError" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
 
 
 # =============================================================================

@@ -4,8 +4,10 @@ Response shapes match the gateway's ``ToolsListResponse`` /
 ``AssistantPoliciesResponse`` so Phase 5b proxy routes see identical
 payloads regardless of whether the flag is ON or OFF.
 """
+
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -100,10 +102,30 @@ async def list_tools(request: Request, user: UserContext = Depends(get_user_cont
 
     registry = get_tool_registry()
     tools = registry.list_tools(user=user)
+    assistant = get_assistant_service(request)
+    gateway = getattr(assistant, "execution_gateway", None)
+    invoker = getattr(gateway, "tool_invoker", None)
+    get_filtered = getattr(invoker, "get_tool_definitions_filtered", None)
+    if callable(get_filtered):
+        from ...core.tool_invoker import ToolInvocationContext
 
-    return {
-        "tools": [_tool_catalog_entry(t) for t in tools]
-    }
+        request_id = str(
+            getattr(request.state, "request_id", None)
+            or request.headers.get("x-request-id")
+            or uuid.uuid4()
+        )
+        context = ToolInvocationContext(
+            session_id=f"tool-catalog:{request_id}",
+            user_id=str(getattr(user, "user_id", "") or ""),
+            tenant_id=str(getattr(user, "tenant_id", "") or ""),
+            request_id=request_id,
+            run_id=request_id,
+            user=user,
+            metadata={"channel": "api", "catalog_only": True},
+        )
+        tools = await get_filtered(context)
+
+    return {"tools": [_tool_catalog_entry(t) for t in tools]}
 
 
 @router.get("/policies")

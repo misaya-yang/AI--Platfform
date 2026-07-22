@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from assistant_service.api.routes.tools import router as tools_router
+from assistant_service.auth import UserContext, get_user_context
 from assistant_service.core.mcp.client import MCPServerConfig, MCPTool
 from assistant_service.core.mcp.manager import MCPManager
 from assistant_service.core.mcp.tenant_mcp_config import (
@@ -15,6 +18,7 @@ from assistant_service.core.tool_invoker import (
     ToolInvocationContext,
     create_tool_invoker,
 )
+from assistant_service.core.tools.tenant_tool_policy import TenantToolPolicyService
 from assistant_service.core.tools.tool_registry import (
     ToolCallResult,
     ToolCategory,
@@ -23,6 +27,8 @@ from assistant_service.core.tools.tool_registry import (
     ToolRegistry,
     ToolRiskLevel,
 )
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 
 class _MissingRowDatabase:
@@ -33,6 +39,25 @@ class _MissingRowDatabase:
 class _FailingDatabase:
     async def fetchrow(self, *_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("config unavailable")
+
+
+class _DisconnectedDatabase:
+    enabled = True
+    _pool = None
+
+    async def fetchrow(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+class _MutablePolicyDatabase:
+    def __init__(self, row: dict[str, Any]) -> None:
+        self.row = row
+        self.fail = False
+
+    async def fetchrow(self, *_args: Any, **_kwargs: Any) -> dict[str, Any] | None:
+        if self.fail:
+            raise RuntimeError("policy storage unavailable")
+        return dict(self.row)
 
 
 class _AuditRecorder:
@@ -83,6 +108,188 @@ async def test_mcp_policy_defaults_to_deny_on_missing_or_failed_tenant_row() -> 
     assert missing_config.policy_source == "default_deny_missing_config"
     assert failed_config.allowed_servers == set()
     assert failed_config.policy_source == "default_deny_config_error"
+
+
+@pytest.mark.asyncio
+async def test_tenant_tool_policy_storage_failure_is_not_substituted_with_allow_all() -> None:
+    service = TenantToolPolicyService(database=_FailingDatabase())
+
+    with pytest.raises(RuntimeError, match="policy is unavailable"):
+        await service.get_policy("tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_tenant_tool_policy_disconnected_pool_is_not_a_missing_row() -> None:
+    service = TenantToolPolicyService(database=_DisconnectedDatabase())
+
+    with pytest.raises(RuntimeError, match="policy is unavailable"):
+        await service.get_policy("tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_invocation_bypasses_cached_tool_policy_for_fresh_outage_check() -> None:
+    database = _MutablePolicyDatabase(
+        {
+            "allowed_tools": ["alpha"],
+            "blocked_tools": [],
+            "allowed_categories": [],
+            "max_calls_per_minute": 20,
+        }
+    )
+    registry = ToolRegistry()
+    calls = 0
+
+    async def executor(request: Any) -> ToolCallResult:
+        nonlocal calls
+        calls += 1
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+        )
+
+    registry.register(_tool("alpha"), executor)
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=TenantToolPolicyService(database=database),
+    )
+    context = ToolInvocationContext(
+        session_id="session",
+        user_id="user",
+        tenant_id="tenant-a",
+        request_id="request",
+    )
+
+    definitions = await invoker.get_tool_definitions_filtered(context)
+    database.fail = True
+    result = await invoker.invoke("alpha", {}, context)
+
+    assert [definition.name for definition in definitions] == ["alpha"]
+    assert result.success is False
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_invocation_rechecks_fresh_policy_even_without_catalog() -> None:
+    database = _MutablePolicyDatabase(
+        {
+            "allowed_tools": ["alpha"],
+            "blocked_tools": [],
+            "allowed_categories": [],
+            "max_calls_per_minute": 20,
+        }
+    )
+    service = TenantToolPolicyService(database=database)
+    await service.get_policy("tenant-a")
+    database.row["blocked_tools"] = ["alpha"]
+    registry = ToolRegistry()
+    calls = 0
+
+    async def executor(request: Any) -> ToolCallResult:
+        nonlocal calls
+        calls += 1
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+        )
+
+    registry.register(_tool("alpha"), executor)
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=service,
+    )
+
+    result = await invoker.invoke(
+        "alpha",
+        {},
+        ToolInvocationContext(
+            session_id="session-direct",
+            user_id="user-direct",
+            tenant_id="tenant-a",
+            request_id="request-direct",
+        ),
+    )
+
+    assert result.success is False
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_invocation_bypasses_cached_mcp_policy_for_fresh_outage_check() -> None:
+    database = _MutablePolicyDatabase(
+        {
+            "allowed_servers": ["docgen"],
+            "server_overrides": None,
+            "max_connections": 5,
+        }
+    )
+    registry = ToolRegistry()
+    calls = 0
+
+    async def executor(request: Any) -> ToolCallResult:
+        nonlocal calls
+        calls += 1
+        return ToolCallResult(
+            call_id=request.call_id,
+            tool_name=request.tool_name,
+            success=True,
+        )
+
+    tool_name = "mcp_docgen__write"
+    registry.register(_tool(tool_name, ToolCategory.MCP), executor)
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_mcp_config=TenantMCPConfigService(
+            database=database,
+            all_server_names=["docgen"],
+        ),
+    )
+    context = ToolInvocationContext(
+        session_id="session",
+        user_id="user",
+        tenant_id="tenant-a",
+        request_id="request",
+    )
+
+    definitions = await invoker.get_tool_definitions_filtered(context)
+    database.fail = True
+    result = await invoker.invoke(tool_name, {}, context)
+
+    assert [definition.name for definition in definitions] == [tool_name]
+    assert result.success is False
+    assert calls == 0
+
+
+def test_http_tool_catalog_uses_same_fail_closed_invoker_boundary(monkeypatch) -> None:
+    class FailingPolicy:
+        async def get_policy(self, _tenant_id: str) -> Any:
+            raise RuntimeError("policy unavailable")
+
+    registry = ToolRegistry()
+    registry.register(_tool("alpha"), lambda _request: None)
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=FailingPolicy(),
+    )
+    monkeypatch.setattr(
+        "assistant_service.core.tools.get_tool_registry",
+        lambda: registry,
+    )
+    app = FastAPI()
+    app.include_router(tools_router)
+    app.state.assistant_service = SimpleNamespace(
+        execution_gateway=SimpleNamespace(tool_invoker=invoker)
+    )
+    app.dependency_overrides[get_user_context] = lambda: UserContext(
+        user_id="user-a",
+        tenant_id="tenant-a",
+    )
+
+    response = TestClient(app).get("/tools")
+
+    assert response.status_code == 200
+    assert response.json() == {"tools": []}
 
 
 def test_mcp_filter_allows_only_configured_servers() -> None:

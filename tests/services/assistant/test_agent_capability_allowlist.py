@@ -54,6 +54,7 @@ def _registry_with_executors(*names: str) -> tuple[ToolRegistry, dict[str, int]]
     calls = dict.fromkeys(names, 0)
 
     for name in names:
+
         async def executor(request: Any, *, _name: str = name) -> ToolCallResult:
             calls[_name] += 1
             return ToolCallResult(
@@ -237,7 +238,7 @@ async def test_policy_uncertainty_cannot_reuse_a_previously_allowed_cache_hit() 
 
         async def get_policy(self, _tenant_id: str) -> Any:
             self.calls += 1
-            if self.calls > 1:
+            if self.calls > 2:
                 raise RuntimeError("policy unavailable")
 
             class Allowed:
@@ -264,6 +265,31 @@ async def test_policy_uncertainty_cannot_reuse_a_previously_allowed_cache_hit() 
 
 
 @pytest.mark.asyncio
+async def test_catalog_hides_warm_cached_tools_when_fresh_policy_is_unavailable() -> None:
+    class CachedThenUnavailablePolicy:
+        async def get_policy(self, _tenant_id: str) -> Any:
+            class CachedAllowed:
+                blocked_tools: set[str] = set()
+                allowed_tools: set[str] = set()
+                allowed_categories: set[str] = set()
+
+            return CachedAllowed()
+
+        async def get_policy_fresh(self, _tenant_id: str) -> Any:
+            raise RuntimeError("policy database unavailable")
+
+    registry, _calls = _registry_with_executors("alpha")
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=CachedThenUnavailablePolicy(),
+    )
+
+    definitions = await invoker.get_tool_definitions_filtered(_context(None))
+
+    assert definitions == []
+
+
+@pytest.mark.asyncio
 async def test_tenant_policy_uncertainty_fails_closed() -> None:
     class FailingPolicy:
         async def get_policy(self, _tenant_id: str) -> Any:
@@ -285,12 +311,127 @@ async def test_tenant_policy_uncertainty_fails_closed() -> None:
     assert calls["alpha"] == 0
 
 
+@pytest.mark.asyncio
+async def test_catalog_snapshot_cannot_expand_when_live_policy_becomes_more_permissive() -> None:
+    class ExpandingPolicy:
+        calls = 0
+
+        async def get_policy(self, _tenant_id: str) -> Any:
+            self.calls += 1
+
+            class Policy:
+                blocked_tools: set[str] = set()
+                allowed_tools = {"alpha"} if self.calls == 1 else {"alpha", "beta"}
+                allowed_categories: set[str] = set()
+
+            return Policy()
+
+    registry, calls = _registry_with_executors("alpha", "beta")
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=ExpandingPolicy(),
+    )
+    context = _context(None)
+
+    definitions = await invoker.get_tool_definitions_filtered(context)
+    forged = await invoker.invoke("beta", {}, context)
+
+    assert [definition.name for definition in definitions] == ["alpha"]
+    assert context.policy_snapshot is not None
+    assert forged.success is False
+    assert calls["beta"] == 0
+
+
+@pytest.mark.asyncio
+async def test_live_policy_recheck_can_revoke_but_never_expand_catalog_snapshot() -> None:
+    class RevokingPolicy:
+        calls = 0
+
+        async def get_policy(self, _tenant_id: str) -> Any:
+            self.calls += 1
+
+            class Policy:
+                allowed_tools: set[str] = set()
+                blocked_tools = set() if self.calls <= 2 else {"alpha"}
+                allowed_categories: set[str] = set()
+
+            return Policy()
+
+    registry, calls = _registry_with_executors("alpha")
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=RevokingPolicy(),
+    )
+    context = _context(None)
+
+    definitions = await invoker.get_tool_definitions_filtered(context)
+    revoked = await invoker.invoke("alpha", {}, context)
+
+    assert [definition.name for definition in definitions] == ["alpha"]
+    assert revoked.success is False
+    assert calls["alpha"] == 0
+    assert revoked.metadata["tool_policy_revalidated"] is False
+
+
+@pytest.mark.asyncio
+async def test_secondary_catalog_merge_rechecks_live_revocation() -> None:
+    class RevokingPolicy:
+        calls = 0
+
+        async def get_policy(self, _tenant_id: str) -> Any:
+            self.calls += 1
+
+            class Policy:
+                allowed_tools: set[str] = set()
+                blocked_tools = set() if self.calls <= 2 else {"alpha"}
+                allowed_categories: set[str] = set()
+
+            return Policy()
+
+    registry, _ = _registry_with_executors("alpha")
+    invoker = RegistryToolInvoker(
+        tool_registry=registry,
+        tenant_tool_policy=RevokingPolicy(),
+    )
+    context = _context(None)
+
+    canonical = await invoker.get_tool_definitions_filtered(context)
+    merged = await invoker.filter_tool_definitions_authorized(context, canonical)
+
+    assert [definition.name for definition in canonical] == ["alpha"]
+    assert merged == []
+
+
+@pytest.mark.asyncio
+async def test_policy_snapshot_is_bound_to_tenant_user_session_and_run_scope() -> None:
+    registry, calls = _registry_with_executors("alpha")
+    invoker = RegistryToolInvoker(tool_registry=registry)
+    original = _context(None)
+    await invoker.get_tool_definitions_filtered(original)
+    assert original.policy_snapshot is not None
+
+    mismatched = _context(None, session_id="different-session")
+    mismatched.policy_snapshot = original.policy_snapshot
+    result = await invoker.invoke("alpha", {}, mismatched)
+
+    assert result.success is False
+    assert calls["alpha"] == 0
+
+
 def test_allowlist_is_immutable_and_serializes_without_changing_none_semantics() -> None:
     names = {"beta", "alpha"}
-    allowlist = CapabilityAllowlist(names)  # type: ignore[arg-type]
+    source_bindings = {"alpha": {"type": "mcp", "config": {"connection_id": "original"}}}
+    allowlist = CapabilityAllowlist(  # type: ignore[arg-type]
+        names,
+        bindings=source_bindings,
+    )
     names.add("gamma")
+    source_bindings["alpha"]["config"]["connection_id"] = "mutated-source"
+    exposed = allowlist.bindings["alpha"]
+    exposed["config"]["connection_id"] = "mutated-copy"
 
     assert allowlist.tool_names == frozenset({"alpha", "beta"})
+    assert allowlist.binding("alpha")["config"]["connection_id"] == "original"
     assert _context(allowlist).to_dict()["capability_allowlist"] == ["alpha", "beta"]
     assert _context(None).to_dict()["capability_allowlist"] is None
 

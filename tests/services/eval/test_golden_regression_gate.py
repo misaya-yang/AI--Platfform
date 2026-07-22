@@ -75,6 +75,8 @@ def test_assistant_golden_fixture_validates_and_has_seed_coverage() -> None:
         "assistant.runtime.interrupted_memory_skip",
         "assistant.runtime.stop_resume",
         "assistant.runtime.max_iterations",
+        "assistant.runtime.policy_bypass",
+        "assistant.runtime.repeated_unknown_side_effect",
         "assistant.tool.failure_recovery",
         "assistant.export.redaction",
     }.issubset(case_ids)
@@ -97,8 +99,8 @@ def test_observation_fixture_loads_and_joins_every_expectation() -> None:
     result = validate_observations(cases, observations)
 
     assert result["valid"] is True
-    assert result["joined_count"] == 16
-    assert len(observations) == 16
+    assert result["joined_count"] == 18
+    assert len(observations) == 18
 
 
 def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path: Path) -> None:
@@ -123,8 +125,60 @@ def test_offline_gate_passes_recorded_observations_without_model_calls(tmp_path:
     assert payload["gate"]["status"] == "pass"
     assert payload["metrics"]["overall_score"] >= 0.85
     assert payload["evidence_scope"] == "recorded_offline_observation"
-    assert payload["observations"]["joined_count"] == 16
+    assert payload["observations"]["joined_count"] == 18
+    assert payload["gate"]["hard_blockers_passed"] is True
+    assert payload["gate"]["required_hard_blockers"] == [
+        "assistant.runtime.policy_bypass",
+        "assistant.runtime.repeated_unknown_side_effect",
+    ]
+    provenance = payload["provenance"]
+    assert len(provenance["dataset"]["sha256"]) == 64
+    assert len(provenance["observations"]["sha256"]) == 64
+    assert provenance["grader"]["id"] == "assistant_deterministic_contract"
+    assert len(provenance["grader"]["sha256"]) == 64
+    assert provenance["trial"]["repetitions_per_case"] == 1
+    assert provenance["trial"]["seed"] == "not_recorded"
+    assert provenance["trace"]["receipt"] == "not_recorded"
+    assert provenance["coverage"]["latency"] == [
+        {"case_id": "assistant.latency.short_answer", "total_latency_ms": 900}
+    ]
+    assert provenance["coverage"]["tokens"] == []
+    assert provenance["coverage"]["cache"] == []
+    recovery = {item["case_id"]: item for item in provenance["coverage"]["recovery"]}
+    assert recovery["assistant.runtime.repeated_unknown_side_effect"]["blind_replay"] is False
+    assert recovery["assistant.runtime.repeated_unknown_side_effect"]["second_dispatch_count"] == 0
+    assert provenance["evidence_tiers"]["real_provider"] == "not_run"
     assert "Eval Regression Gate" in markdown.read_text(encoding="utf-8")
+
+
+def test_canonical_gate_fails_when_required_hard_blockers_are_missing(tmp_path: Path) -> None:
+    golden = tmp_path / "assistant_regression_v1.jsonl"
+    observations = tmp_path / "observations.jsonl"
+    output = tmp_path / "latest.json"
+    markdown = tmp_path / "latest.md"
+    golden.write_text(json.dumps(golden_case()) + "\n", encoding="utf-8")
+    observations.write_text(
+        json.dumps({"case_id": "assistant.runtime.test", "replay": replay_observation()}) + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = eval_golden_main(
+        [
+            "gate",
+            str(golden),
+            "--observations",
+            str(observations),
+            "--output",
+            str(output),
+            "--markdown",
+            str(markdown),
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["gate"]["hard_blockers_passed"] is False
+    assert "required hard blockers missing or failing" in payload["gate"]["failures"][-1]
 
 
 def test_cli_applies_baseline_report_to_recorded_observations(tmp_path: Path) -> None:

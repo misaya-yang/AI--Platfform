@@ -221,14 +221,16 @@ class TestContextEngineBuildMessages:
 
         messages = engine.build_messages(context)
 
-        # Should only have system message and history
-        assert len(messages) == 2
+        # System/history remain stable and the current empty user turn is
+        # still explicit for provider conversation-shape compatibility.
+        assert len(messages) == 3
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
         assert messages[1]["content"] == "Previous message"
+        assert messages[2] == {"role": "user", "content": ""}
 
     def test_empty_current_query(self):
-        """Test that empty current_query string does not add user message."""
+        """Test that an empty current user turn preserves provider shape."""
         engine = ContextEngine(provider="anthropic")
         context = ContextStructure(
             system_prompt="You are a helpful assistant.",
@@ -237,9 +239,9 @@ class TestContextEngineBuildMessages:
 
         messages = engine.build_messages(context)
 
-        # Should only have system message
-        assert len(messages) == 1
+        assert len(messages) == 2
         assert messages[0]["role"] == "system"
+        assert messages[1] == {"role": "user", "content": ""}
 
 
 class TestContextEngineBuildSystemContent:
@@ -454,12 +456,16 @@ class TestRAGSourceScope:
         processor = FileProcessor(knowledge_service=kb, storage_base_path=tmp_path)
 
         async def fake_process_document(file_path, api_path, max_text_chars):
-            return "", True, {
-                "file_path": api_path,
-                "file_name": file_path.name,
-                "file_type": "document",
-                "requires_rag": True,
-            }
+            return (
+                "",
+                True,
+                {
+                    "file_path": api_path,
+                    "file_name": file_path.name,
+                    "file_type": "document",
+                    "requires_rag": True,
+                },
+            )
 
         processor._process_document = fake_process_document
 

@@ -1379,6 +1379,7 @@ class DatabaseMCPRepository(BaseRepository):
         server_id: str,
         success: bool,
         error_code: str | None = None,
+        counts_toward_circuit: bool = True,
         failure_threshold: int = 3,
         recovery_seconds: int = 30,
     ) -> None:
@@ -1395,6 +1396,19 @@ class DatabaseMCPRepository(BaseRepository):
                 """,
                 tenant_id,
                 server_id,
+            )
+            return
+        if not counts_toward_circuit:
+            await self.execute(
+                """
+                UPDATE mcp_servers
+                SET last_health_at = NOW(), last_error_code = $3,
+                    updated_at = NOW()
+                WHERE tenant_id = $1 AND server_id = $2::uuid
+                """,
+                tenant_id,
+                server_id,
+                (error_code or "MCP_OPERATION_NOT_COUNTED")[:64],
             )
             return
         await self.execute(

@@ -13,15 +13,26 @@ from __future__ import annotations
 import contextlib
 import json
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
-from typing import TYPE_CHECKING
+from ai_gateway_core.security import redact_trace_text
 
 if TYPE_CHECKING:
     from ai_gateway_core.persistence import DatabaseStorageLike
 
 logger = get_logger(__name__)
+
+
+def _log_memory_failure(operation: str, exc: BaseException) -> None:
+    """Log a stable operation and exception type without identity or payload data."""
+
+    exception_type = redact_trace_text(type(exc).__name__, limit=80)
+    logger.error(
+        "Memory service operation failed (operation=%s, exception_type=%s)",
+        operation,
+        exception_type,
+    )
 
 
 class MemoryService:
@@ -122,8 +133,8 @@ class MemoryService:
                 source,
             )
             return True
-        except Exception as e:
-            logger.error(f"Failed to set user memory {user_id}:{key}: {e}")
+        except Exception as exc:
+            _log_memory_failure("set_user_memory", exc)
             return False
 
     async def get_user_memory(
@@ -220,8 +231,8 @@ class MemoryService:
             query = "DELETE FROM user_memory WHERE tenant_id = $1 AND user_id = $2 AND key = $3"
             await self.database.execute(query, tenant_id, user_id, key)
             return True
-        except Exception as e:
-            logger.error(f"Failed to delete user memory {user_id}:{key}: {e}")
+        except Exception as exc:
+            _log_memory_failure("delete_user_memory", exc)
             return False
 
     # =========================================================================
@@ -280,8 +291,8 @@ class MemoryService:
                 source,
             )
             return True
-        except Exception as e:
-            logger.error(f"Failed to set session memory {session_id}:{key}: {e}")
+        except Exception as exc:
+            _log_memory_failure("set_session_memory", exc)
             return False
 
     async def get_session_memory(self, tenant_id: str, session_id: str, key: str) -> Any | None:
@@ -354,8 +365,25 @@ class MemoryService:
             )
             await self.database.execute(query, tenant_id, session_id, key)
             return True
-        except Exception as e:
-            logger.error(f"Failed to delete session memory {session_id}:{key}: {e}")
+        except Exception as exc:
+            _log_memory_failure("delete_session_memory", exc)
+            return False
+
+    async def delete_all_session_memories(self, tenant_id: str, session_id: str) -> bool:
+        """Delete every memory row in one tenant/session scope."""
+
+        try:
+            query = "DELETE FROM session_memory WHERE tenant_id = $1 AND session_id = $2"
+            await self.database.execute(query, tenant_id, session_id)
+            remaining = await self.database.fetchrow(
+                "SELECT 1 AS present FROM session_memory "
+                "WHERE tenant_id = $1 AND session_id = $2 LIMIT 1",
+                tenant_id,
+                session_id,
+            )
+            return remaining is None
+        except Exception as exc:
+            _log_memory_failure("delete_all_session_memories", exc)
             return False
 
     async def get_session_context(

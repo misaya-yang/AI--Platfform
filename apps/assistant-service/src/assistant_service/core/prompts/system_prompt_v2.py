@@ -1163,6 +1163,7 @@ def get_time_context_block() -> str:
     """
     from datetime import datetime as _dt
     from datetime import timedelta as _td
+
     _now = _dt.now()
     _yesterday = _now - _td(days=1)
     _two_days_ago = _now - _td(days=2)
@@ -1173,15 +1174,15 @@ def get_time_context_block() -> str:
         "## Current Date & Time (authoritative — do NOT question)\n"
         f"- Today is **{_today_str}** ({_now.strftime('%A')}), "
         f"local time {_now.strftime('%H:%M')}.\n"
-        f"- \"Yesterday\" = {_yesterday_str}. "
-        f"\"The day before yesterday\" / \"两天前\" = {_two_days_ago_str}.\n"
+        f'- "Yesterday" = {_yesterday_str}. '
+        f'"The day before yesterday" / "两天前" = {_two_days_ago_str}.\n'
         "- This is the real current date from the system clock. "
         "Do NOT treat it as hypothetical. Do NOT add disclaimers like "
-        "\"this appears to be a future date\" or \"I cannot verify events "
-        "after my training cutoff\" — just answer the question.\n"
+        '"this appears to be a future date" or "I cannot verify events '
+        'after my training cutoff" — just answer the question.\n'
         "- For time-sensitive web queries, put the **literal date** in the query "
-        f"(e.g. \"NBA scores {_yesterday_str}\"), not vague words like \"yesterday\" "
-        "or \"今天\". One well-formed search is better than three reworded ones."
+        f'(e.g. "NBA scores {_yesterday_str}"), not vague words like "yesterday" '
+        'or "今天". One well-formed search is better than three reworded ones.'
     )
 
 
@@ -1192,6 +1193,7 @@ def get_streaming_first_prompt(
     available_tools: list[str] | None = None,
     dataset_name_map: dict[str, str] | None = None,
     os_agent_enabled: bool = False,
+    capabilities_enabled: bool = True,
 ) -> str:
     """
     Get an ultra-minimal system prompt for Streaming-First mode.
@@ -1210,12 +1212,15 @@ def get_streaming_first_prompt(
     Args:
         available_datasets: Available knowledge base IDs (for context)
         web_search_enabled: User's web search preference (True=always use, False=AI decides)
+        capabilities_enabled: Whether this model call can invoke tools, retrieval,
+            native search, or the local OS agent. Disable this for synthesis-only
+            calls whose transport contract uses ``tools=None``.
 
     Returns:
         Ultra-minimal system prompt (~500 tokens)
     """
     kb_hint = ""
-    if available_datasets:
+    if capabilities_enabled and available_datasets:
         if dataset_name_map:
             ds_lines = []
             for ds_id in available_datasets:
@@ -1245,7 +1250,7 @@ You have access to company knowledge bases:
 """
 
     tools_hint = ""
-    if available_tools:
+    if capabilities_enabled and available_tools:
         # Keep this short to preserve Streaming-first TTFT advantages.
         tools_hint = f"""
 ## Available Tools
@@ -1283,7 +1288,9 @@ Your chat text reply MUST be:
     # capability (Qwen ``enable_search``, Anthropic ``web_search_20250305``);
     # ``web_fetch`` reads a specific URL when one is known. There is no
     # in-tree ``search_web`` tool any more.
-    if web_search_enabled:
+    if not capabilities_enabled:
+        web_hint = ""
+    elif web_search_enabled:
         web_hint = """
 ## Web Search (ENABLED - Always Use)
 The user has enabled web search mode. For ANY question that could benefit from
@@ -1306,7 +1313,7 @@ respond directly without searching.
 
     # P1.3: OS Agent instructions when enabled
     os_agent_hint = ""
-    if os_agent_enabled:
+    if capabilities_enabled and os_agent_enabled:
         os_agent_hint = """
 ## Local OS Agent (ENABLED)
 You have DIRECT access to the user's local file system and terminal. You are NOT a cloud-only assistant.
@@ -1321,17 +1328,24 @@ Read-only tools (auto-approved): read_file, glob, grep, list_dir, tree.
 Write tools (require user confirmation): write_file, edit_file, bash.
 """
 
+    response_priorities = """3. If you need to search for information: first acknowledge the request with a brief message, then use the tool
+4. Never make the user wait in silence - always provide immediate feedback"""
+    tool_principle = "- Use tools intelligently based on context"
+    if not capabilities_enabled:
+        response_priorities = """3. Answer only from the supplied conversation and source material
+4. Never claim that a tool, retrieval, search, or OS action ran in this synthesis pass"""
+        tool_principle = "- Be explicit when the supplied material is insufficient"
+
     return f"""You are an enterprise AI assistant.
 
 ## Response Priority (CRITICAL)
 1. For simple greetings (hi, hello, 你好): reply briefly (1-2 sentences), do NOT list capabilities
 2. For simple questions you can answer confidently: respond directly without tools
-3. If you need to search for information: first acknowledge the request with a brief message, then use the tool
-4. Never make the user wait in silence - always provide immediate feedback
+{response_priorities}
 
 ## Core Principles
 - Be helpful, accurate, and concise
-- Use tools intelligently based on context
+{tool_principle}
 - Cite sources when using retrieved information
 - Admit uncertainty rather than hallucinate
 {os_agent_hint}{tools_hint}{kb_hint}{web_hint}

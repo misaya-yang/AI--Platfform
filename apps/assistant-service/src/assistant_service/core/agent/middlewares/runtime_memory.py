@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 from ai_gateway_core.logging import get_logger
 
+from ...runtime.memory.lifecycle import memory_policy_enabled
+
 if TYPE_CHECKING:
     from ...runtime.compat.runtime_adapter import AssistantRuntimeAdapter
     from ..agent_loop import AgentLoopContext, AgentLoopEvent
@@ -72,13 +74,16 @@ class RuntimeMemoryMiddleware:
     ) -> AsyncGenerator[AgentLoopEvent, None]:
         if not self._runtime:
             return
+        if not memory_policy_enabled(
+            memory_mode=getattr(ctx.config, "memory_mode", None),
+            memory_profile=getattr(ctx.config, "memory_profile", None),
+        ):
+            return
         agent_runtime = getattr(ctx.config, "agent_runtime", None)
         if agent_runtime is not None and not agent_runtime.user_memory_enabled:
             return
         memory_user_id = (
-            agent_runtime.memory_principal
-            if agent_runtime is not None
-            else ctx.user_id
+            agent_runtime.memory_principal if agent_runtime is not None else ctx.user_id
         )
 
         # Local imports keep this module importable without pulling agent_loop
@@ -120,8 +125,11 @@ class RuntimeMemoryMiddleware:
                     "provenance": memory_result.provenance,
                 },
             )
-        except Exception:
-            logger.exception("assistant memory retrieval failed")
+        except Exception as exc:
+            logger.error(
+                "assistant memory retrieval failed (exception_type=%s)",
+                type(exc).__name__,
+            )
 
         # Reflection scheduling is best-effort and independent of retrieval.
         with contextlib.suppress(Exception):

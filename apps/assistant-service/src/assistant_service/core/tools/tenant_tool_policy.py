@@ -158,9 +158,25 @@ class TenantToolPolicyService:
         self._cache[tenant_id] = (policy, time.monotonic() + _CACHE_TTL)
         return policy
 
+    async def get_policy_fresh(self, tenant_id: str) -> TenantToolPolicy:
+        """Re-read policy for a pre-execution revocation check."""
+
+        policy = await self._load_from_db(tenant_id)
+        self._cache[tenant_id] = (policy, time.monotonic() + _CACHE_TTL)
+        return policy
+
     async def _load_from_db(self, tenant_id: str) -> TenantToolPolicy:
         if not self._database:
             return TenantToolPolicy(tenant_id=tenant_id)
+
+        # ``DatabaseStorage.fetchrow`` intentionally returns ``None`` while its
+        # pool is unavailable.  That is indistinguishable from a missing tenant
+        # row unless readiness is checked first, and treating it as a missing
+        # row would silently turn a storage outage into allow-all policy.
+        if hasattr(self._database, "enabled") and not bool(self._database.enabled):
+            raise RuntimeError("Tenant tool policy is unavailable")
+        if hasattr(self._database, "_pool") and self._database._pool is None:
+            raise RuntimeError("Tenant tool policy is unavailable")
 
         try:
             row = await self._database.fetchrow(
@@ -169,7 +185,10 @@ class TenantToolPolicyService:
             )
         except Exception as e:
             logger.warning(f"Failed to load tool policy for {tenant_id}: {e}")
-            return TenantToolPolicy(tenant_id=tenant_id)
+            # A storage outage is not evidence of an allow-all policy. Let the
+            # canonical catalog/invocation boundary convert this uncertainty
+            # into a scoped deny decision.
+            raise RuntimeError("Tenant tool policy is unavailable") from e
 
         if not row:
             return TenantToolPolicy(tenant_id=tenant_id)

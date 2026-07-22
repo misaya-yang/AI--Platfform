@@ -69,6 +69,7 @@ DOCUMENT_GENERATION_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={"operation_kind": "write"},
     when_to_use="Use ONLY AFTER you have written out the complete document content in your chat response. "
     "The user should see the full content before you generate the document file. "
     "Good for creating detailed reports, plans, analyses, or documentation.",

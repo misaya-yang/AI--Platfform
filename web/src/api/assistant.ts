@@ -932,6 +932,19 @@ export interface RunResumeResponse {
   };
 }
 
+export interface AssistantRunCheckpoint {
+  phase?: string;
+  approval_id?: string | null;
+  pending_tool?: Record<string, unknown> | null;
+}
+
+export interface AssistantRunStatus {
+  run_id?: string;
+  session_id?: string;
+  status?: string;
+  checkpoint?: AssistantRunCheckpoint | null;
+}
+
 export async function approveToolCall(
   approvalId: string,
   body: ToolApprovalRequest,
@@ -943,8 +956,8 @@ export async function approveToolCall(
   return data;
 }
 
-export async function getAssistantRunStatus(runId: string): Promise<{ run: Record<string, unknown> }> {
-  const { data } = await api.get<{ run: Record<string, unknown> }>(
+export async function getAssistantRunStatus(runId: string): Promise<{ run: AssistantRunStatus }> {
+  const { data } = await api.get<{ run: AssistantRunStatus }>(
     `/api/v1/assistant/runs/${runId}`,
   );
   return data;

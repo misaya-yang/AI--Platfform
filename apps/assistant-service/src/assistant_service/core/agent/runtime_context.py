@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
 from typing import Any
 
-from ai_gateway_core.agents import VerifiedAgentRuntime
+from ai_gateway_core.agents import VerifiedAgentRuntime, agent_memory_principal
 from ai_gateway_core.exceptions import PermissionDeniedError
 
 
@@ -81,10 +80,11 @@ class AgentRuntimeExecutionContext:
 
     @property
     def memory_principal(self) -> str:
-        digest = sha256(
-            f"{self.caller_principal}:{self.agent_id}:{self.version_scope}".encode()
-        ).hexdigest()
-        return f"agent-memory:{digest}"
+        return agent_memory_principal(
+            self.caller_principal,
+            self.agent_id,
+            self.version_scope,
+        )
 
     @property
     def user_memory_enabled(self) -> bool:
@@ -155,19 +155,19 @@ def compose_agent_system_prompt(
     sections = [platform_prompt.strip()]
     if agent_instructions and agent_instructions.strip():
         sections.append(
-            "<agent_instructions trust=\"owner-version\">\n"
+            '<agent_instructions trust="owner-version">\n'
             f"{agent_instructions.strip()}\n"
             "</agent_instructions>"
         )
     if channel_instructions and channel_instructions.strip():
         sections.append(
-            "<channel_policy trust=\"server-publication\">\n"
+            '<channel_policy trust="server-publication">\n'
             f"{channel_instructions.strip()}\n"
             "</channel_policy>"
         )
     if capability_instructions and capability_instructions.strip():
         sections.append(
-            "<capability_policy trust=\"server-effective-set\">\n"
+            '<capability_policy trust="server-effective-set">\n'
             f"{capability_instructions.strip()}\n"
             "</capability_policy>"
         )

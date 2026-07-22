@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -21,6 +23,12 @@ from src.services.eval.golden import (
     validate_cases,
     validate_observations,
     write_gate_report,
+)
+
+CANONICAL_ASSISTANT_GOLDEN = "assistant_regression_v1.jsonl"
+REQUIRED_ASSISTANT_HARD_BLOCKERS = (
+    "assistant.runtime.policy_bypass",
+    "assistant.runtime.repeated_unknown_side_effect",
 )
 
 
@@ -170,6 +178,127 @@ def _load_valid_cases(path: str) -> list[dict[str, Any]] | None:
     return cases
 
 
+def _sha256(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _offline_provenance(
+    args: argparse.Namespace,
+    cases: list[dict[str, Any]],
+    observations: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    observation_rows = list((observations or {}).values())
+    grader_path = Path(__file__).resolve().parents[1] / "src/services/eval/golden.py"
+    numeric_thresholds = [
+        {
+            "case_id": case.get("case_id"),
+            "type": assertion.get("type"),
+            "value": assertion.get("value"),
+        }
+        for case in cases
+        for assertion in case.get("assertions") or []
+        if isinstance(assertion, dict)
+        and assertion.get("type") in {"latency_ms_lt", "total_tokens_lt", "cost_cents_lt"}
+    ]
+
+    def measurements(keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        return [
+            {
+                "case_id": str(case_id),
+                **{key: replay[key] for key in keys if replay.get(key) is not None},
+            }
+            for case_id, replay in sorted((observations or {}).items())
+            if any(replay.get(key) is not None for key in keys)
+        ]
+
+    recovery_receipts = [
+        {
+            "case_id": str(case_id),
+            **{
+                key: replay[key]
+                for key in (
+                    "exit_reason",
+                    "recovery_action",
+                    "blind_replay",
+                    "dispatch_count",
+                    "second_dispatch_count",
+                )
+                if replay.get(key) is not None
+            },
+        }
+        for case_id, replay in sorted((observations or {}).items())
+        if replay.get("recovery_action") is not None
+        or str(replay.get("exit_reason") or "")
+        in {"approval_denied", "policy_denied", "side_effect_unknown", "interrupted", "stopped"}
+    ]
+    trace_ids = sorted({str(row["trace_id"]) for row in observation_rows if row.get("trace_id")})
+    observation_hash = _sha256(args.observations) if args.observations else None
+    return {
+        "dataset": {
+            "version": Path(args.path).stem,
+            "sha256": _sha256(args.path),
+            "source": str(Path(args.path)),
+        },
+        "observations": {
+            "version": Path(args.observations).stem if args.observations else "inline",
+            "sha256": observation_hash,
+            "source": str(Path(args.observations)) if args.observations else None,
+        },
+        "grader": {
+            "id": "assistant_deterministic_contract",
+            "version": "v1",
+            "sha256": _sha256(grader_path),
+        },
+        "trial": {
+            "id": f"offline-{(observation_hash or _sha256(args.path))[:16]}",
+            "repetitions_per_case": 1,
+            "seed": "not_recorded",
+            "observation_timestamp": "not_recorded",
+            "report_generated_at": datetime.now(timezone.utc).isoformat(),
+            "command": "scripts/eval_golden.py gate",
+        },
+        "trace": {
+            "receipt": "recorded" if trace_ids else "not_recorded",
+            "trace_ids": trace_ids,
+            "span_evidence_cases": sum(bool(row.get("span_kinds")) for row in observation_rows),
+            "observation_sha256": observation_hash,
+        },
+        "coverage": {
+            "latency": measurements(("total_latency_ms",)),
+            "tokens": measurements(("total_tokens", "input_tokens", "output_tokens")),
+            "cache": measurements(("cache_hit", "cached_tokens", "cache_read_input_tokens")),
+            "recovery": recovery_receipts,
+            "numeric_thresholds": numeric_thresholds,
+        },
+        "evidence_tiers": {
+            "offline": "verified",
+            "mock": "not_run",
+            "local_live": "not_run",
+            "real_provider": "not_run",
+        },
+    }
+
+
+def _apply_canonical_hard_blockers(
+    path: str,
+    gate: dict[str, Any],
+    metrics: dict[str, Any],
+) -> None:
+    if Path(path).name != CANONICAL_ASSISTANT_GOLDEN:
+        return
+    results = {str(row.get("case_id")): row for row in metrics.get("cases") or []}
+    failures = [
+        case_id
+        for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
+        if results.get(case_id, {}).get("passed") is not True
+    ]
+    gate["required_hard_blockers"] = list(REQUIRED_ASSISTANT_HARD_BLOCKERS)
+    gate["hard_blockers_passed"] = not failures
+    if failures:
+        gate["status"] = "fail"
+        gate["failures"].append(f"required hard blockers missing or failing: {', '.join(failures)}")
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     cases = load_jsonl(args.path)
     result = validate_cases(cases)
@@ -225,6 +354,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
     metrics = evaluate_cases(cases, observations)
     gate = apply_gate(metrics, baseline_metrics=baseline_metrics)
+    _apply_canonical_hard_blockers(args.path, gate, metrics)
     result = {
         "schema_version": "eval-regression-gate-v1",
         "source": str(Path(args.path)),
@@ -233,6 +363,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         "summary": summarize_cases(cases),
         "metrics": metrics,
         "gate": gate,
+        "provenance": _offline_provenance(args, cases, observations),
     }
     if baseline is not None:
         result["baseline"] = baseline

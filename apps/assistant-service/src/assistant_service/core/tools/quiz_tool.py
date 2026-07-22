@@ -83,6 +83,7 @@ def _coerce_questions(raw: Any) -> list[dict[str, Any]]:
         # interpretation and would surprise the executor.
     return out
 
+
 QUIZ_GENERATION_DEFINITION = ToolDefinition(
     name="generate_quiz",
     description=(
@@ -118,12 +119,12 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
             name="questions",
             type="array",
             description=(
-                'Array of question objects. Use EXACTLY the field names below — '
+                "Array of question objects. Use EXACTLY the field names below — "
                 'never "answer" (use "correct_answer") or "question" (use "question_text"). '
                 'For mc_single: correct_answer is a list with ONE letter, e.g. ["B"]. '
                 'For mc_multi: 2-3 letters, e.g. ["A","C"]. '
                 'For true_false: ["true"] or ["false"]. '
-                'option.text must be the actual answer text, never the letter itself.'
+                "option.text must be the actual answer text, never the letter itself."
             ),
             required=True,
             # Full nested JSON Schema. Gemini / Qwen / Claude structured
@@ -173,10 +174,10 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
                     },
                     "correct_answer": {
                         "type": "array",
-                        "description": 'Letters of the correct option(s): '
+                        "description": "Letters of the correct option(s): "
                         '["B"] for mc_single, ["A","C"] for mc_multi, '
                         '["true"] / ["false"] for true_false. Never prose, '
-                        'never the option text, never numeric indices.',
+                        "never the option text, never numeric indices.",
                         "items": {"type": "string"},
                     },
                     "explanation": {
@@ -195,6 +196,10 @@ QUIZ_GENERATION_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.GENERATION,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={
+        "operation_kind": "write",
+        "external_service": True,
+    },
     when_to_use=(
         "ALWAYS use this tool when the user's message contains ANY of these intents: "
         "quiz, test, 测验, 测试, 出题, 考考, 练习, flashcard, practice questions, "
@@ -314,7 +319,9 @@ class QuizGeneratorExecutor(ToolExecutor):
                 for opt in q.get("options", []):
                     if isinstance(opt, dict):
                         if "label" in opt and "text" in opt:
-                            normalized_opts.append({"label": str(opt["label"]), "text": str(opt["text"])})
+                            normalized_opts.append(
+                                {"label": str(opt["label"]), "text": str(opt["text"])}
+                            )
                         else:
                             # Handle {"A": "text"} format
                             for k, v in opt.items():
@@ -324,17 +331,23 @@ class QuizGeneratorExecutor(ToolExecutor):
                     elif isinstance(opt, str):
                         # Handle "A) text" or "A. text"
                         import re
+
                         m = re.match(r"^([A-Da-d])[.)]\s*(.*)", opt)
                         if m:
-                            normalized_opts.append({"label": m.group(1).upper(), "text": m.group(2)})
+                            normalized_opts.append(
+                                {"label": m.group(1).upper(), "text": m.group(2)}
+                            )
                         else:
-                            normalized_opts.append({"label": chr(65 + len(normalized_opts)), "text": opt})
+                            normalized_opts.append(
+                                {"label": chr(65 + len(normalized_opts)), "text": opt}
+                            )
                 q["options"] = normalized_opts
 
                 # Validate: reject the specific bug signature where text == label
                 # (the LLM filled both fields with "A"/"B"/"C"/"D" instead of actual answer text)
                 bad_options = [
-                    o for o in normalized_opts
+                    o
+                    for o in normalized_opts
                     if o["text"].strip().upper() == o["label"].strip().upper()
                     and len(o["text"].strip()) <= 2  # single-letter text matching label
                 ]
@@ -388,7 +401,9 @@ class QuizGeneratorExecutor(ToolExecutor):
                     q["options"] = normalized_opts
 
                 label_set = {o["label"].upper() for o in normalized_opts}
-                text_to_label = {opt["text"].strip().lower(): opt["label"] for opt in normalized_opts}
+                text_to_label = {
+                    opt["text"].strip().lower(): opt["label"] for opt in normalized_opts
+                }
                 idx0_to_label = {str(k): opt["label"] for k, opt in enumerate(normalized_opts)}
                 idx1_to_label = {str(k + 1): opt["label"] for k, opt in enumerate(normalized_opts)}
                 explanation = q.get("explanation", "").lower()
@@ -426,11 +441,33 @@ class QuizGeneratorExecutor(ToolExecutor):
                         label_0 = idx0_to_label[ans_str]
                         if ans_str in idx1_to_label:
                             label_1 = idx1_to_label[ans_str]
-                            opt_0_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_0), "")
-                            opt_1_text = next((o["text"].lower() for o in normalized_opts if o["label"] == label_1), "")
-                            if explanation and opt_0_text and any(w in explanation for w in opt_0_text.split()[:3]):
+                            opt_0_text = next(
+                                (
+                                    o["text"].lower()
+                                    for o in normalized_opts
+                                    if o["label"] == label_0
+                                ),
+                                "",
+                            )
+                            opt_1_text = next(
+                                (
+                                    o["text"].lower()
+                                    for o in normalized_opts
+                                    if o["label"] == label_1
+                                ),
+                                "",
+                            )
+                            if (
+                                explanation
+                                and opt_0_text
+                                and any(w in explanation for w in opt_0_text.split()[:3])
+                            ):
                                 normalized_answers.append(label_0)
-                            elif explanation and opt_1_text and any(w in explanation for w in opt_1_text.split()[:3]):
+                            elif (
+                                explanation
+                                and opt_1_text
+                                and any(w in explanation for w in opt_1_text.split()[:3])
+                            ):
                                 normalized_answers.append(label_1)
                             else:
                                 normalized_answers.append(label_0)
@@ -452,7 +489,8 @@ class QuizGeneratorExecutor(ToolExecutor):
                     # so "a" doesn't match 3 options and silently pick one.
                     if len(ans_lower) >= 3:
                         matches = [
-                            label for text, label in text_to_label.items()
+                            label
+                            for text, label in text_to_label.items()
                             if text and (ans_lower in text or text in ans_lower)
                         ]
                         if len(matches) == 1:
@@ -535,15 +573,14 @@ class QuizGeneratorExecutor(ToolExecutor):
             # is almost always an LLM failure mode.
             _UNIFORM_MIN_QUESTIONS = 5
             objective_qs = [
-                q for q in questions
-                if q.get("question_type", "mc_single")
-                in ("mc_single", "mc_multi", "true_false")
+                q
+                for q in questions
+                if q.get("question_type", "mc_single") in ("mc_single", "mc_multi", "true_false")
             ]
             if len(objective_qs) >= _UNIFORM_MIN_QUESTIONS:
                 first_ans = tuple(objective_qs[0].get("correct_answer") or [])
                 if first_ans and all(
-                    tuple(q.get("correct_answer") or []) == first_ans
-                    for q in objective_qs
+                    tuple(q.get("correct_answer") or []) == first_ans for q in objective_qs
                 ):
                     logger.warning(
                         "Rejecting uniform-answer quiz: %d objective questions "
@@ -597,18 +634,20 @@ class QuizGeneratorExecutor(ToolExecutor):
             for q in questions:
                 q_id = str(uuid.uuid4())
                 q["id"] = q_id
-                q_rows.append((
-                    uuid.UUID(q_id),
-                    uuid.UUID(quiz_id),
-                    q["question_num"],
-                    q.get("question_type", "mc_single"),
-                    q["question_text"],
-                    json.dumps(q.get("options", [])),
-                    json.dumps(q.get("correct_answer", [])),
-                    q.get("explanation", ""),
-                    json.dumps([]),
-                    now,
-                ))
+                q_rows.append(
+                    (
+                        uuid.UUID(q_id),
+                        uuid.UUID(quiz_id),
+                        q["question_num"],
+                        q.get("question_type", "mc_single"),
+                        q["question_text"],
+                        json.dumps(q.get("options", [])),
+                        json.dumps(q.get("correct_answer", [])),
+                        q.get("explanation", ""),
+                        json.dumps([]),
+                        now,
+                    )
+                )
 
             await self.database.executemany(
                 """

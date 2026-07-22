@@ -19,6 +19,11 @@ LlmCompleteFn = Callable[..., Awaitable[str]]
 KbRagasEvaluateFn = Callable[..., Awaitable[list[dict[str, Any]]]]
 CandidateRunFn = Callable[..., Awaitable[dict[str, Any]]]
 
+REQUIRED_ASSISTANT_HARD_BLOCKERS = (
+    "assistant.runtime.policy_bypass",
+    "assistant.runtime.repeated_unknown_side_effect",
+)
+
 
 @dataclass(frozen=True)
 class LlmCompleteContext:
@@ -1105,6 +1110,12 @@ class EvaluatorExecutor:
             for items in critical_cases
             if all(item.get("behavior_pass") is True for item in items)
         )
+        hard_blocker_results = {
+            case_id: bool(grouped.get(case_id))
+            and all(item.get("behavior_pass") is True for item in grouped[case_id])
+            for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
+        }
+        hard_blockers_passed = all(hard_blocker_results.values())
         fingerprint_values = [
             item.get("fingerprint")
             for item in trial_results
@@ -1145,7 +1156,8 @@ class EvaluatorExecutor:
             ),
             "critical_pass_rate": round(critical_passed / len(critical_cases), 4)
             if critical_cases
-            else 1.0,
+            else 0.0,
+            "critical_case_count": len(critical_cases),
             "flaky_rate": round(flaky_cases / len(grouped), 4) if grouped else 0.0,
             "case_count": len(grouped),
             "trial_count": attempted,
@@ -1169,6 +1181,10 @@ class EvaluatorExecutor:
             "total_tokens_per_task": _average_known("total_tokens"),
             "cost_per_task_cents": _average_known("cost_cents"),
             "critical_pass_rate": summary["critical_pass_rate"],
+            "critical_case_count": summary["critical_case_count"],
+            "required_hard_blockers": list(REQUIRED_ASSISTANT_HARD_BLOCKERS),
+            "hard_blocker_results": hard_blocker_results,
+            "hard_blockers_passed": hard_blockers_passed,
             "mixed_runtime": len(fingerprints) > 1,
             "fingerprint_complete": fingerprints_complete,
             "actual_fingerprint": json.loads(next(iter(fingerprints)))
@@ -1178,6 +1194,7 @@ class EvaluatorExecutor:
             "gate": {
                 "status": "pass"
                 if summary["critical_pass_rate"] == 1.0
+                and hard_blockers_passed
                 and attempted == completed
                 and all(
                     item.get("explicit_performance_pass", True) is True for item in trial_results

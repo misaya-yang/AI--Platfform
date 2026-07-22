@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Any
 
+from ai_gateway_core.eval.evaluator_executor import REQUIRED_ASSISTANT_HARD_BLOCKERS
 from ai_gateway_core.persistence.repositories.agent_trace_repository import (
     AgentTraceRepository,
 )
@@ -1023,6 +1024,33 @@ async def promote_eval_experiment_baseline(
     critical_pass_rate = summary.get("critical_pass_rate", metrics.get("critical_pass_rate"))
     if critical_pass_rate is None or float(critical_pass_rate) < 1.0:
         raise HTTPException(status_code=409, detail="All critical behavior cases must pass")
+    hard_blocker_results = (
+        metrics.get("hard_blocker_results")
+        if isinstance(metrics.get("hard_blocker_results"), dict)
+        else {}
+    )
+    if (
+        int(metrics.get("critical_case_count") or 0) < 1
+        or metrics.get("hard_blockers_passed") is not True
+        or any(
+            hard_blocker_results.get(case_id) is not True
+            for case_id in REQUIRED_ASSISTANT_HARD_BLOCKERS
+        )
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Baseline requires all mandatory Assistant safety blockers",
+        )
+    sha256_chars = frozenset("0123456789abcdef")
+    if any(
+        len(value := str(run.get(field) or "")) != 64
+        or any(char not in sha256_chars for char in value)
+        for field in ("dataset_manifest_hash", "evaluator_suite_hash")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Baseline requires verified dataset and evaluator provenance",
+        )
     if metrics.get("mixed_runtime") is True:
         raise HTTPException(
             status_code=409, detail="Mixed runtime fingerprints cannot become baseline"

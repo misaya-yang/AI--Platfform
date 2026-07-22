@@ -43,7 +43,11 @@ class AssistantRequestRouter:
         if profile not in self.ALLOWED_EXECUTION_PROFILES:
             profile = self.policy_engine.default_execution_profile
 
-        memory_mode = getattr(config, "memory_mode", None) or self.policy_engine.default_memory_mode
+        memory_mode = (
+            str(getattr(config, "memory_mode", None) or self.policy_engine.default_memory_mode)
+            .strip()
+            .lower()
+        )
         if memory_mode not in self.ALLOWED_MEMORY_MODES:
             memory_mode = self.policy_engine.default_memory_mode
 
@@ -61,6 +65,8 @@ class AssistantRequestRouter:
         )
         if memory_profile not in self.ALLOWED_MEMORY_PROFILES:
             memory_profile = None
+        if memory_mode == "off":
+            memory_profile = "off"
 
         raw_skills_enabled = getattr(config, "skills_enabled", None)
         if raw_skills_enabled is None:

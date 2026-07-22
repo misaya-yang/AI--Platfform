@@ -64,6 +64,8 @@ export function ActivityPanel({
   }, [message, t]);
 
   const running = !!message?.isStreaming;
+  const failed =
+    message?.status === "failed" || message?.processSummary?.status === "failed";
   const stepCount = steps.length;
   const durationLabel = formatTotal(totalDurationMs);
   const pendingApprovals =
@@ -73,6 +75,8 @@ export function ActivityPanel({
 
   const statusWord = running
     ? t("playground.activity.running", { defaultValue: "running" })
+    : failed
+      ? t("assistant.processSummary.failed", { defaultValue: "Execution failed" })
     : t("playground.activity.statusCompleted", { defaultValue: "completed" });
 
   const stepsText = t("playground.activity.steps", {

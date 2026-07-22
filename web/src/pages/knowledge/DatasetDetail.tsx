@@ -45,6 +45,7 @@ import {
   ExternalLink,
   Check,
   Cloud,
+  FlaskConical,
 } from "lucide-react";
 
 import { useDataset, useDocuments, useSegments } from "@/hooks/useKnowledge";
@@ -70,8 +71,11 @@ import {
   previewChunking,
   batchReindexDocuments,
   batchDeleteDocuments,
+  listRetrievalPresets,
+  retrievalPresetToFlatRequest,
   type ChunkPreviewItem,
   type ProcessingMode,
+  type RetrievalPreset,
 } from "@/api/knowledge";
 import { scoreKbRagasRetrieval, type KbRagasScoreRetrievalResult } from "@/api/eval";
 import type { Document, RetrieveHit, QAResponse, QAStreamEvent, DatasetConfig, DatasetDebugInfo } from "@/types/knowledge";
@@ -111,10 +115,12 @@ import { DocumentRow } from "@/pages/knowledge/detail/DocumentRow";
 import { SegmentList } from "@/pages/knowledge/detail/SegmentList";
 import { RetrievalResultCard } from "@/pages/knowledge/detail/RetrievalResultCard";
 import { SourcesTab } from "@/pages/knowledge/sources";
+import { RetrievalEvalWorkbench } from "@/pages/knowledge/detail/RetrievalEvalWorkbench";
 
 type DatasetMainTab =
   | "documents"
   | "retrieval"
+  | "eval"
   | "qa"
   | "sources"
   | "settings"
@@ -123,6 +129,7 @@ type DatasetMainTab =
 const DATASET_MAIN_TABS: DatasetMainTab[] = [
   "documents",
   "retrieval",
+  "eval",
   "qa",
   "sources",
   "settings",
@@ -184,6 +191,10 @@ export function KnowledgeDatasetDetailPage() {
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement | null>(null);
   const qaChatEndRef = useRef<HTMLDivElement | null>(null);
+  const hitTestControllerRef = useRef<AbortController | null>(null);
+  const ragasGenerationRef = useRef(0);
+  const activeDatasetIdRef = useRef(datasetId);
+  activeDatasetIdRef.current = datasetId;
 
   const dsQuery = useDataset(datasetId);
   const docsQuery = useDocuments(datasetId);
@@ -324,15 +335,117 @@ export function KnowledgeDatasetDetailPage() {
   const [denseWeight, setDenseWeight] = useState(0.5);  // 0-1 weight for dense scores
   const [bm25Weight, setBm25Weight] = useState(0.5);    // 0-1 weight for BM25 scores
   const [fusionMethod, setFusionMethod] = useState<"weighted" | "rrf">("weighted");
-  const [scoreThreshold, setScoreThreshold] = useState(0);  // 0-1, 0 means no filtering
+  const [scoreThreshold, setScoreThreshold] = useState(0);  // 0 means no filtering
   const [rerank, setRerank] = useState(false);
+  const [hitRerankModel, setHitRerankModel] = useState("gte-rerank");
+  const [hitRerankTopN, setHitRerankTopN] = useState<number | undefined>(undefined);
   const [mmr, setMmr] = useState(false);
+  const [hitMmrLambda, setHitMmrLambda] = useState(0.5);
   const [hitLoading, setHitLoading] = useState(false);
+
+  // Presets are opt-in so the existing manual retrieval defaults remain stable.
+  const [retrievalPresets, setRetrievalPresets] = useState<RetrievalPreset[]>([]);
+  const [retrievalPresetStatus, setRetrievalPresetStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [retrievalPresetError, setRetrievalPresetError] = useState<string | null>(null);
+  const [retrievalPresetReloadKey, setRetrievalPresetReloadKey] = useState(0);
+  const [selectedPreset, setSelectedPreset] = useState("");
+  const [presetRequestConfig, setPresetRequestConfig] = useState<
+    ReturnType<typeof retrievalPresetToFlatRequest>
+  >({});
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setRetrievalPresetStatus("loading");
+    setRetrievalPresetError(null);
+    setRetrievalPresets([]);
+    setSelectedPreset("");
+    setPresetRequestConfig({});
+    listRetrievalPresets({ signal: controller.signal, timeoutMs: 15_000 })
+      .then((resp) => {
+        if (resp.presets.length === 0) throw new Error("No retrieval presets available");
+        for (const preset of resp.presets) {
+          retrievalPresetToFlatRequest(preset.config);
+        }
+        setRetrievalPresets(resp.presets);
+        setRetrievalPresetStatus("ready");
+      })
+      .catch((error: unknown) => {
+        const candidate = error as { code?: string; name?: string };
+        if (
+          candidate?.code === "ERR_CANCELED" ||
+          candidate?.name === "CanceledError" ||
+          candidate?.name === "AbortError"
+        ) {
+          return;
+        }
+        setRetrievalPresetStatus("error");
+        setRetrievalPresetError(error instanceof Error ? error.message : String(error));
+      });
+    return () => controller.abort();
+  }, [retrievalPresetReloadKey]);
+
+  const applyPreset = (presetName: string) => {
+    const preset = retrievalPresets.find((p) => p.name === presetName);
+    if (!preset) return;
+    invalidateHitTestResults();
+    const config = retrievalPresetToFlatRequest(preset.config);
+    setSelectedPreset(presetName);
+    setPresetRequestConfig(config);
+    const modeMap: Record<string, "dense" | "bm25" | "hybrid"> = {
+      vector: "dense",
+      keyword: "bm25",
+      hybrid: "hybrid",
+    };
+    if (config.mode) setMode(modeMap[config.mode] ?? "hybrid");
+    if (typeof config.top_k === "number") setTopK(config.top_k);
+    setScoreThreshold(config.score_threshold ?? 0);
+    if (config.fusion_method) setFusionMethod(config.fusion_method);
+    if (typeof config.dense_weight === "number") {
+      setDenseWeight(config.dense_weight);
+      setBm25Weight(config.bm25_weight ?? 1 - config.dense_weight);
+    }
+    setRerank(config.rerank ?? false);
+    setHitRerankModel(config.rerank_model ?? "gte-rerank");
+    setHitRerankTopN(config.rerank_top_n);
+    setMmr(config.mmr ?? false);
+    setHitMmrLambda(config.mmr_lambda ?? 0.5);
+  };
+
+  const markRetrievalConfigCustom = () => {
+    invalidateHitTestResults();
+    setSelectedPreset("");
+    setPresetRequestConfig({});
+  };
   const [hitResults, setHitResults] = useState<RetrieveHit[]>([]);
   const [ragasLoading, setRagasLoading] = useState(false);
   const [ragasResults, setRagasResults] = useState<KbRagasScoreRetrievalResult[]>([]);
   const [ragasJudgeModel, setRagasJudgeModel] = useState<string | null>(null);
   const [hitMeta, setHitMeta] = useState<Record<string, unknown>>({});
+
+  function invalidateHitTestResults() {
+    hitTestControllerRef.current?.abort();
+    hitTestControllerRef.current = null;
+    ragasGenerationRef.current += 1;
+    setHitLoading(false);
+    setRagasLoading(false);
+    setHitResults([]);
+    setHitMeta({});
+    setRagasResults([]);
+    setRagasJudgeModel(null);
+  }
+
+  useEffect(() => {
+    hitTestControllerRef.current?.abort();
+    hitTestControllerRef.current = null;
+    ragasGenerationRef.current += 1;
+    setHitLoading(false);
+    setRagasLoading(false);
+    setHitResults([]);
+    setHitMeta({});
+    setRagasResults([]);
+    setRagasJudgeModel(null);
+    return () => hitTestControllerRef.current?.abort();
+  }, [datasetId]);
 
   // QA Testing
   const [qaQueryInput, setQaQueryInput] = useState("");
@@ -1092,6 +1205,10 @@ export function KnowledgeDatasetDetailPage() {
 
   async function runRagasScore() {
     if (!datasetId || !query.trim() || hitResults.length === 0) return;
+    const requestDatasetId = datasetId;
+    const requestQuery = query.trim();
+    const generation = ragasGenerationRef.current + 1;
+    ragasGenerationRef.current = generation;
     setRagasLoading(true);
     setRagasResults([]);
     setRagasJudgeModel(null);
@@ -1100,30 +1217,51 @@ export function KnowledgeDatasetDetailPage() {
         .map((hit) => hit.text?.trim())
         .filter((text): text is string => Boolean(text));
       const response = await scoreKbRagasRetrieval({
-        query: query.trim(),
+        query: requestQuery,
         contexts,
-        dataset_id: datasetId,
+        dataset_id: requestDatasetId,
         metrics: ["context_relevancy"],
       });
+      if (
+        ragasGenerationRef.current !== generation ||
+        activeDatasetIdRef.current !== requestDatasetId
+      ) {
+        return;
+      }
       setRagasResults(response.results || []);
       setRagasJudgeModel(response.judge_model || null);
     } catch (err: unknown) {
+      if (
+        ragasGenerationRef.current !== generation ||
+        activeDatasetIdRef.current !== requestDatasetId
+      ) {
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       setHitMeta((prev) => ({ ...prev, ragas_error: message }));
     } finally {
-      setRagasLoading(false);
+      if (ragasGenerationRef.current === generation) {
+        setRagasLoading(false);
+      }
     }
   }
 
   async function runHitTest() {
     if (!datasetId || !query.trim()) return;
+    const requestDatasetId = datasetId;
+    hitTestControllerRef.current?.abort();
+    const controller = new AbortController();
+    hitTestControllerRef.current = controller;
+    ragasGenerationRef.current += 1;
     setHitLoading(true);
+    setRagasLoading(false);
     setHitResults([]);
     setHitMeta({});
     setRagasResults([]);
     setRagasJudgeModel(null);
     try {
-      const res = await hitTest(datasetId, {
+      const res = await hitTest(requestDatasetId, {
+        ...presetRequestConfig,
         query,
         top_k: topK,
         mode,
@@ -1132,16 +1270,33 @@ export function KnowledgeDatasetDetailPage() {
         fusion_method: mode === "hybrid" ? fusionMethod : undefined,
         score_threshold: scoreThreshold > 0 ? scoreThreshold : undefined,
         rerank,
+        rerank_model: rerank ? hitRerankModel : undefined,
+        rerank_top_n: rerank ? hitRerankTopN : undefined,
         mmr,
-        mmr_lambda: 0.5,
+        mmr_lambda: hitMmrLambda,
+      }, {
+        signal: controller.signal,
+        timeoutMs: 60_000,
       });
+      if (activeDatasetIdRef.current !== requestDatasetId || controller.signal.aborted) return;
       setHitResults(res.results || []);
       setHitMeta(res.metadata || {});
     } catch (err: unknown) {
+      const candidate = err as { code?: string; name?: string };
+      if (
+        candidate?.code === "ERR_CANCELED" ||
+        candidate?.name === "CanceledError" ||
+        candidate?.name === "AbortError"
+      ) {
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       setHitMeta({ error: message });
     } finally {
-      setHitLoading(false);
+      if (hitTestControllerRef.current === controller) {
+        hitTestControllerRef.current = null;
+        setHitLoading(false);
+      }
     }
   }
 
@@ -1283,6 +1438,7 @@ export function KnowledgeDatasetDetailPage() {
     qa: "border-primary text-primary bg-primary/10",
     sources: "border-primary text-primary bg-primary/10",
     settings: "border-primary text-primary bg-primary/10",
+    eval: "border-primary text-primary bg-primary/10",
     permissions: "border-primary text-primary bg-primary/10",
   } as const;
 
@@ -1290,6 +1446,7 @@ export function KnowledgeDatasetDetailPage() {
     documents: "text-primary",
     retrieval: "text-primary",
     qa: "text-primary",
+    eval: "text-primary",
     sources: "text-primary",
     settings: "text-primary",
     permissions: "text-primary",
@@ -1368,6 +1525,7 @@ export function KnowledgeDatasetDetailPage() {
             {[
               { key: "documents", label: t("knowledge.detail.tabDocuments"), icon: FileText },
               { key: "retrieval", label: t("knowledge.detail.tabRetrieval"), icon: Search },
+              { key: "eval", label: t("knowledge.detail.tabEval", "评测"), icon: FlaskConical },
               { key: "qa", label: t("knowledge.detail.tabQA"), icon: MessageSquare },
               { key: "sources", label: t("knowledge.detail.tabSources"), icon: Cloud },
               { key: "settings", label: t("knowledge.detail.tabSettings"), icon: Sliders },
@@ -1742,26 +1900,95 @@ export function KnowledgeDatasetDetailPage() {
 
         {/* 召回测试 Tab - 阿里云风格 */}
         {mainTab === "retrieval" && (
-          <div className="grid grid-cols-12 gap-6">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
             {/* 左侧：知识库配置调试 */}
-            <div className="col-span-4">
+            <div className="lg:col-span-4">
               <Card className="p-5 bg-card">
                 <h3 className="font-semibold text-foreground mb-6">{t("knowledge.detail.retrievalConfig")}</h3>
 
                 <div className="space-y-6">
+                  {/* Retrieval presets are explicit opt-in starting points. */}
+                  <div>
+                    <Label className="text-sm text-muted-foreground flex items-center gap-1">
+                      {t("knowledge.detail.retrievalPreset", "检索预设")} · API 投影
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" aria-hidden="true" />
+                    </Label>
+                    <Select
+                      value={selectedPreset}
+                      onValueChange={applyPreset}
+                      disabled={retrievalPresetStatus !== "ready"}
+                    >
+                      <SelectTrigger
+                        className="mt-2 bg-card"
+                        aria-label={t("knowledge.detail.retrievalPreset", "检索预设")}
+                        data-testid="retrieval-preset"
+                      >
+                        <SelectValue
+                          placeholder={
+                            retrievalPresetStatus === "loading"
+                              ? t("knowledge.eval.loadingPresets", "正在加载检索预设…")
+                              : t("knowledge.eval.selectPreset", "选择预设")
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {retrievalPresets.map((preset) => (
+                          <SelectItem key={preset.name} value={preset.name}>
+                            {preset.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {retrievalPresetStatus === "error" ? (
+                      <div className="mt-2 flex flex-col gap-2" role="alert">
+                        <p className="text-xs text-destructive">
+                          {t("knowledge.eval.presetsFailed", "检索预设加载失败")}
+                          {retrievalPresetError ? `：${retrievalPresetError}` : ""}
+                        </p>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="w-fit"
+                          onClick={() => setRetrievalPresetReloadKey((value) => value + 1)}
+                        >
+                          {t("knowledge.eval.retry", "重试")}
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground mt-1.5">
+                        {selectedPreset
+                          ? `${retrievalPresets.find((preset) => preset.name === selectedPreset)?.summary ?? ""} ${t(
+                              "knowledge.eval.projectionHint",
+                              "仅应用当前检索 API 可执行字段。"
+                            )}`
+                          : t(
+                              "knowledge.eval.presetOptional",
+                              "可选：应用预设会填充请求参数；手动调整将切回自定义配置。"
+                            )}
+                      </p>
+                    )}
+                  </div>
+
                   {/* 选择排序模型 */}
                   <div>
                     <Label className="text-sm text-muted-foreground flex items-center gap-1">
                       {t("knowledge.detail.selectRerankModel")}
                       <HelpCircle className="h-3.5 w-3.5 text-muted-foreground/70" />
                     </Label>
-                    <Select defaultValue="official">
+                    <Select
+                      value={hitRerankModel}
+                      onValueChange={(value) => {
+                        markRetrievalConfigCustom();
+                        setHitRerankModel(value);
+                      }}
+                    >
                       <SelectTrigger className="mt-2 bg-card">
                         <SelectValue placeholder={t("knowledge.detail.officialRerank")} />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="official">{t("knowledge.detail.officialRerank")}</SelectItem>
                         <SelectItem value="gte-rerank">GTE Rerank</SelectItem>
+                        <SelectItem value="gte-rerank-v2">GTE Rerank v2</SelectItem>
                         <SelectItem value="bge-reranker">BGE Reranker</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1776,25 +2003,33 @@ export function KnowledgeDatasetDetailPage() {
                     <div className="mt-2 flex items-center gap-3">
                       <input
                         type="range"
-                        min={0.01}
+                        min={0}
                         max={1}
                         step={0.01}
-                        value={scoreThreshold || 0.2}
-                        onChange={(e) => setScoreThreshold(parseFloat(e.target.value))}
+                        value={scoreThreshold}
+                        onChange={(e) => {
+                          markRetrievalConfigCustom();
+                          setScoreThreshold(Number(e.target.value));
+                        }}
+                        aria-label={t("knowledge.detail.similarityThreshold")}
                         className="flex-1 h-1.5 bg-primary/10 rounded-lg appearance-none cursor-pointer accent-primary"
                       />
                       <Input
                         type="number"
-                        value={scoreThreshold || 0.2}
-                        onChange={(e) => setScoreThreshold(parseFloat(e.target.value) || 0.2)}
+                        value={scoreThreshold}
+                        onChange={(e) => {
+                          markRetrievalConfigCustom();
+                          const value = Number(e.target.value);
+                          setScoreThreshold(Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0);
+                        }}
                         className="w-20 h-9 text-center"
                         step={0.01}
-                        min={0.01}
+                        min={0}
                         max={1}
                       />
                     </div>
                     <div className="flex justify-between text-xs text-muted-foreground/70 mt-1">
-                      <span>0.01</span>
+                      <span>0</span>
                       <span>1</span>
                     </div>
                   </div>
@@ -1812,13 +2047,21 @@ export function KnowledgeDatasetDetailPage() {
                         max={20}
                         step={1}
                         value={topK}
-                        onChange={(e) => setTopK(parseInt(e.target.value))}
+                        onChange={(e) => {
+                          markRetrievalConfigCustom();
+                          setTopK(Number(e.target.value));
+                        }}
+                        aria-label={t("knowledge.detail.maxRecall")}
                         className="flex-1 h-1.5 bg-primary/10 rounded-lg appearance-none cursor-pointer accent-primary"
                       />
                       <Input
                         type="number"
                         value={topK}
-                        onChange={(e) => setTopK(parseInt(e.target.value) || 5)}
+                        onChange={(e) => {
+                          markRetrievalConfigCustom();
+                          const value = Number(e.target.value);
+                          setTopK(Number.isFinite(value) ? Math.min(20, Math.max(1, value)) : 5);
+                        }}
                         className="w-20 h-9 text-center"
                         min={1}
                         max={20}
@@ -1836,13 +2079,20 @@ export function KnowledgeDatasetDetailPage() {
                     <Textarea
                       placeholder={t("knowledge.detail.inputPlaceholder")}
                       value={query}
-                      onChange={(e) => setQuery(e.target.value)}
+                      onChange={(e) => {
+                        invalidateHitTestResults();
+                        setQuery(e.target.value);
+                      }}
                       rows={4}
                       className="mt-2 resize-none"
                     />
                     <div className="flex justify-end mt-1">
-                      <button className="text-muted-foreground/70 hover:text-muted-foreground">
-                        <ImageIcon className="h-4 w-4" />
+                      <button
+                        type="button"
+                        className="text-muted-foreground/70 hover:text-muted-foreground"
+                        aria-label={t("knowledge.detail.image", "图片")}
+                      >
+                        <ImageIcon className="h-4 w-4" aria-hidden="true" />
                       </button>
                     </div>
                   </div>
@@ -1851,11 +2101,23 @@ export function KnowledgeDatasetDetailPage() {
                   <div className="pt-4 border-t border-border/60">
                     <div className="flex items-center gap-6">
                       <label className="flex items-center gap-2 cursor-pointer">
-                        <Switch checked={rerank} onCheckedChange={setRerank} />
+                        <Switch
+                          checked={rerank}
+                          onCheckedChange={(checked) => {
+                            markRetrievalConfigCustom();
+                            setRerank(checked);
+                          }}
+                        />
                         <span className="text-sm text-foreground/80">Rerank</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
-                        <Switch checked={mmr} onCheckedChange={setMmr} />
+                        <Switch
+                          checked={mmr}
+                          onCheckedChange={(checked) => {
+                            markRetrievalConfigCustom();
+                            setMmr(checked);
+                          }}
+                        />
                         <span className="text-sm text-foreground/80">MMR</span>
                       </label>
                     </div>
@@ -1953,8 +2215,18 @@ export function KnowledgeDatasetDetailPage() {
                         </div>
                         <div className="flex items-center justify-between p-2 bg-card rounded border">
                           <span className="text-muted-foreground">Rerank</span>
-                          <Badge className={hitMeta.rerank ? "bg-emerald-100 text-emerald-700" : "bg-secondary/60 text-muted-foreground"}>
-                            {hitMeta.rerank ? t("knowledge.detail.enabled") : t("knowledge.detail.disabled")}
+                          <Badge
+                            className={
+                              typeof hitMeta.rerank_applied_provider === "string"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-secondary/60 text-muted-foreground"
+                            }
+                          >
+                            {typeof hitMeta.rerank_applied_provider === "string"
+                              ? t("knowledge.eval.executed", "已执行")
+                              : hitMeta.rerank
+                                ? t("knowledge.eval.requestedUnverified", "已请求（执行未确认）")
+                                : t("knowledge.detail.disabled")}
                           </Badge>
                         </div>
                         <div className="flex items-center justify-between p-2 bg-card rounded border">
@@ -2015,7 +2287,7 @@ export function KnowledgeDatasetDetailPage() {
             </div>
 
             {/* 右侧：结果 */}
-            <div className="col-span-8">
+            <div className="lg:col-span-8">
               <Card className="p-0 h-[calc(100vh-200px)] overflow-hidden shadow-xs">
                 <div className="px-5 py-4 border-b border-border/60 bg-card flex items-center justify-between sticky top-0">
                   <div className="flex items-center gap-3">
@@ -2067,6 +2339,11 @@ export function KnowledgeDatasetDetailPage() {
               </Card>
             </div>
           </div>
+        )}
+
+        {/* 检索评测 Tab */}
+        {mainTab === "eval" && (
+          <RetrievalEvalWorkbench datasetId={datasetId} />
         )}
 
         {/* QA 测试 Tab */}
@@ -2148,7 +2425,10 @@ export function KnowledgeDatasetDetailPage() {
                         <Input
                           type="number"
                           value={topK}
-                          onChange={(e) => setTopK(Number(e.target.value || 5))}
+                          onChange={(e) => {
+                            markRetrievalConfigCustom();
+                            setTopK(Number(e.target.value || 5));
+                          }}
                           className="mt-1.5 border-border"
                           min={1}
                           max={20}
@@ -2156,7 +2436,13 @@ export function KnowledgeDatasetDetailPage() {
                       </div>
                       <div>
                         <Label className="text-xs font-medium text-muted-foreground">{t("knowledge.detail.qaRetrievalMode")}</Label>
-                        <Select value={mode} onValueChange={(v) => setMode(v as typeof mode)}>
+                        <Select
+                          value={mode}
+                          onValueChange={(value) => {
+                            markRetrievalConfigCustom();
+                            setMode(value as typeof mode);
+                          }}
+                        >
                           <SelectTrigger className="mt-1.5 border-border">
                             <SelectValue />
                           </SelectTrigger>
@@ -2173,7 +2459,13 @@ export function KnowledgeDatasetDetailPage() {
                       <div className="space-y-4 p-3 bg-primary/5 rounded-lg border border-primary/20">
                         <div className="flex items-center justify-between text-xs text-muted-foreground">
                           <span className="font-medium">{t("knowledge.detail.qaWeightConfig")}</span>
-                          <Select value={fusionMethod} onValueChange={(v) => setFusionMethod(v as typeof fusionMethod)}>
+                          <Select
+                            value={fusionMethod}
+                            onValueChange={(value) => {
+                              markRetrievalConfigCustom();
+                              setFusionMethod(value as typeof fusionMethod);
+                            }}
+                          >
                             <SelectTrigger className="h-7 w-28 text-xs">
                               <SelectValue />
                             </SelectTrigger>
@@ -2195,6 +2487,7 @@ export function KnowledgeDatasetDetailPage() {
                             max="100"
                             value={denseWeight * 100}
                             onChange={(e) => {
+                              markRetrievalConfigCustom();
                               const newDense = Number(e.target.value) / 100;
                               setDenseWeight(newDense);
                               setBm25Weight(1 - newDense);
@@ -2214,6 +2507,7 @@ export function KnowledgeDatasetDetailPage() {
                             max="100"
                             value={bm25Weight * 100}
                             onChange={(e) => {
+                              markRetrievalConfigCustom();
                               const newBm25 = Number(e.target.value) / 100;
                               setBm25Weight(newBm25);
                               setDenseWeight(1 - newBm25);
@@ -2229,11 +2523,23 @@ export function KnowledgeDatasetDetailPage() {
                     <Label className="text-sm font-medium text-foreground/80">{t("knowledge.detail.qaStrategy")}</Label>
                     <div className="grid grid-cols-2 gap-3">
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
-                        <Switch checked={rerank} onCheckedChange={setRerank} />
+                        <Switch
+                          checked={rerank}
+                          onCheckedChange={(checked) => {
+                            markRetrievalConfigCustom();
+                            setRerank(checked);
+                          }}
+                        />
                         <span className="text-sm font-medium text-foreground/80">Rerank</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">
-                        <Switch checked={mmr} onCheckedChange={setMmr} />
+                        <Switch
+                          checked={mmr}
+                          onCheckedChange={(checked) => {
+                            markRetrievalConfigCustom();
+                            setMmr(checked);
+                          }}
+                        />
                         <span className="text-sm font-medium text-foreground/80">MMR</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer rounded-lg border border-border px-3 py-2 bg-card">

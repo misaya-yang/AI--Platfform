@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ...rag.context_engine import estimate_tokens, serialize_tools_deterministic
+from ...rag.context_engine import (
+    estimate_message_tokens,
+    estimate_tokens,
+    serialize_tools_deterministic,
+)
 
 
 @dataclass
@@ -35,30 +40,27 @@ class ContextCostBreakdown:
         tool_result_summaries: list[dict[str, Any] | str] | None = None,
         artifact_summaries: list[dict[str, Any] | str] | None = None,
         compaction_summary: str | None = None,
+        source_records: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         contributors: list[ContextContributor] = []
 
-        contributors.append(self._make_item("system_prompt", "system", system_prompt, {}))
+        contributors.append(
+            ContextContributor(
+                name="system_prompt",
+                category="system",
+                chars=len(system_prompt or ""),
+                tokens=estimate_message_tokens({"role": "system", "content": system_prompt}),
+                metadata={},
+            )
+        )
 
         for idx, message in enumerate(messages or []):
             role = str(message.get("role") or "unknown")
-            content = message.get("content")
-            if isinstance(content, list):
-                text = " ".join(
-                    str(item.get("text") or "")
-                    for item in content
-                    if isinstance(item, dict) and item.get("type") == "text"
-                )
-            else:
-                text = str(content or "")
-            contributors.append(
-                self._make_item(
-                    name=f"message_{idx}_{role}",
-                    category="messages",
-                    text=text,
-                    metadata={"role": role},
-                )
-            )
+            # ``system_prompt`` is already an explicit transport contributor.
+            # Counting the system message again inflated the model-bound total.
+            if role == "system":
+                continue
+            contributors.append(self._make_message_item(idx, role, message))
 
         tools_text = serialize_tools_deterministic(tool_definitions or [])
         contributors.append(
@@ -70,7 +72,36 @@ class ContextCostBreakdown:
             )
         )
 
-        for file_item in injected_files or []:
+        if source_records is not None:
+            for record in source_records:
+                kind = str(record.get("kind") or "source")
+                source_id = str(record.get("source_id") or "unknown")
+                category = {
+                    "file": "injected_files",
+                    "skill": "skills",
+                    "memory_snippet": "memory",
+                    "source_summary": "source_summaries",
+                    "tool_result": "tool_results",
+                    "artifact": "artifacts",
+                    "compaction_summary": "compaction",
+                }.get(kind, kind)
+                contributors.append(
+                    self._make_item(
+                        f"source:{kind}:{source_id}",
+                        category,
+                        str(record.get("content") or ""),
+                        {
+                            "attribution_only": True,
+                            "transport_overlap": "embedded_in_messages",
+                            "reduction_decision": str(
+                                record.get("reduction_decision") or "included"
+                            ),
+                            "original_tokens": max(0, int(record.get("original_tokens") or 0)),
+                        },
+                    )
+                )
+
+        for file_item in [] if source_records is not None else (injected_files or []):
             path = str(file_item.get("path") or "unknown")
             content = str(file_item.get("content") or "")
             contributors.append(
@@ -81,11 +112,12 @@ class ContextCostBreakdown:
                     {
                         "path": path,
                         "source_type": file_item.get("source_type") or "workspace",
+                        "attribution_only": True,
                     },
                 )
             )
 
-        for skill in skills_metadata or []:
+        for skill in [] if source_records is not None else (skills_metadata or []):
             label = str(skill.get("name") or "skill")
             text = str(skill.get("summary") or skill)
             contributors.append(
@@ -93,65 +125,80 @@ class ContextCostBreakdown:
                     f"skill:{label}",
                     "skills",
                     text,
-                    {"name": label},
+                    {"name": label, "attribution_only": True},
                 )
             )
 
-        for idx, snippet in enumerate(memory_snippets or []):
+        for idx, snippet in enumerate(
+            [] if source_records is not None else (memory_snippets or [])
+        ):
             contributors.append(
                 self._make_item(
                     f"memory_{idx}",
                     "memory",
                     snippet,
-                    {"index": idx},
+                    {"index": idx, "attribution_only": True},
                 )
             )
 
-        for idx, summary in enumerate(source_summaries or []):
+        for idx, summary in enumerate(
+            [] if source_records is not None else (source_summaries or [])
+        ):
             contributors.append(
                 self._make_item(
                     f"source_summary_{idx}",
                     "source_summaries",
                     self._summary_text(summary),
-                    {"index": idx},
+                    {"index": idx, "attribution_only": True},
                 )
             )
 
-        for idx, summary in enumerate(tool_result_summaries or []):
+        for idx, summary in enumerate(
+            [] if source_records is not None else (tool_result_summaries or [])
+        ):
             contributors.append(
                 self._make_item(
                     f"tool_result_{idx}",
                     "tool_results",
                     self._summary_text(summary),
-                    {"index": idx},
+                    {"index": idx, "attribution_only": True},
                 )
             )
 
-        for idx, summary in enumerate(artifact_summaries or []):
+        for idx, summary in enumerate(
+            [] if source_records is not None else (artifact_summaries or [])
+        ):
             contributors.append(
                 self._make_item(
                     f"artifact_{idx}",
                     "artifacts",
                     self._summary_text(summary),
-                    {"index": idx},
+                    {"index": idx, "attribution_only": True},
                 )
             )
 
-        if compaction_summary:
+        if compaction_summary and source_records is None:
             contributors.append(
                 self._make_item(
                     "compaction_summary",
                     "compaction",
                     compaction_summary,
-                    {},
+                    {"attribution_only": True},
                 )
             )
 
-        contributors = [c for c in contributors if c.chars > 0]
+        contributors = [
+            contributor
+            for contributor in contributors
+            if contributor.tokens > 0 or contributor.metadata.get("reduction_decision")
+        ]
         contributors.sort(key=lambda item: item.tokens, reverse=True)
 
-        total_tokens = sum(item.tokens for item in contributors)
-        total_chars = sum(item.chars for item in contributors)
+        transport_contributors = [
+            item for item in contributors if not item.metadata.get("attribution_only")
+        ]
+        total_tokens = sum(item.tokens for item in transport_contributors)
+        total_chars = sum(item.chars for item in transport_contributors)
 
         by_category: dict[str, int] = {}
         for item in contributors:
@@ -160,6 +207,8 @@ class ContextCostBreakdown:
         return {
             "total_tokens": total_tokens,
             "total_chars": total_chars,
+            "attributed_tokens": sum(item.tokens for item in contributors),
+            "attribution_policy": "transport_total_excludes_embedded_source_overlays",
             "contributors": [asdict(item) for item in contributors],
             "tokens_by_category": by_category,
         }
@@ -179,6 +228,26 @@ class ContextCostBreakdown:
             chars=chars,
             tokens=tokens,
             metadata=metadata,
+        )
+
+    @staticmethod
+    def _make_message_item(
+        index: int,
+        role: str,
+        message: dict[str, Any],
+    ) -> ContextContributor:
+        content = message.get("content")
+        chars = len(
+            json.dumps(content, ensure_ascii=False, default=str)
+            if isinstance(content, (dict, list))
+            else str(content or "")
+        )
+        return ContextContributor(
+            name=f"message_{index}_{role}",
+            category="messages",
+            chars=chars,
+            tokens=estimate_message_tokens(message),
+            metadata={"role": role},
         )
 
     @staticmethod

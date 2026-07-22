@@ -5,6 +5,13 @@ function sessionButtonName(title: string): RegExp {
   return new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s·|$)`);
 }
 
+function historyToggle(page: import("@playwright/test").Page, state: "show" | "hide") {
+  const labels = state === "show"
+    ? ["Show history", "显示历史"]
+    : ["Hide history", "隐藏历史"];
+  return page.locator(labels.map((label) => `button[aria-label="${label}"]`).join(", "));
+}
+
 async function seedAssistantSession(request: APIRequestContext) {
   const headers = await buildAuthHeaders(request);
   const title = `assistant-history-${Date.now()}`;
@@ -36,18 +43,35 @@ test("assistant restores seeded history and keeps sidebar toggle functional", as
   await ensureAuthenticatedPage(page, "/assistant");
   const sessionButton = page.getByRole("button", { name: sessionButtonName(title) });
   if (!(await sessionButton.isVisible())) {
-    await page.getByRole("button", { name: /show history|显示历史/i }).click();
+    await historyToggle(page, "show").click();
   }
   await sessionButton.click();
 
   await expect(page.getByText("History seed question")).toBeVisible();
   await expect(page.getByText("History seed answer")).toBeVisible();
 
-  const toggle = page.getByRole("button", { name: /hide history|隐藏历史/i });
+  const toggle = historyToggle(page, "hide");
   await toggle.click();
-  await expect(page.getByRole("button", { name: /show history|显示历史/i })).toBeVisible();
+  await expect(historyToggle(page, "show")).toBeVisible();
 
   await page.reload();
   await expect(page.getByText("History seed question")).toBeVisible();
-  await expect(page.getByRole("button", { name: /show history|显示历史/i })).toBeVisible();
+  await expect(historyToggle(page, "show")).toBeVisible();
+});
+
+test("assistant restores seeded history in the mobile history sheet", async ({ page, request }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { title } = await seedAssistantSession(request);
+
+  await ensureAuthenticatedPage(page, "/assistant");
+  await historyToggle(page, "show").click();
+  const historySheet = page.getByRole("dialog", { name: /history|历史/i });
+  await expect(historySheet).toBeVisible();
+  const bounds = await historySheet.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.width).toBeLessThanOrEqual(390);
+
+  await page.getByRole("button", { name: sessionButtonName(title) }).click();
+  await expect(page.getByText("History seed question")).toBeVisible();
+  await expect(page.getByText("History seed answer")).toBeVisible();
 });

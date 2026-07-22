@@ -11,6 +11,7 @@ Tests for the three-layer memory system:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1034,13 +1035,43 @@ class TestMemoryManagerPrivacyBoundaries:
 class TestMemorySourceStoreBoundaries:
     """Test runtime memory source-store inspect/delete boundaries."""
 
+    def test_unsafe_scope_components_do_not_collide(self, tmp_path):
+        store = MemorySourceStore(base_dir=tmp_path)
+        unsafe_path = store.append_long_term_facts("tenant/a", "user/a", ["tenant slash fact"])
+        safe_path = store.append_long_term_facts("tenant_a", "user_a", ["tenant underscore fact"])
+
+        assert unsafe_path != safe_path
+        assert "tenant slash fact" in Path(unsafe_path).read_text(encoding="utf-8")
+        assert "tenant underscore fact" not in Path(unsafe_path).read_text(encoding="utf-8")
+        assert store.list_markdown_sources("tenant/a", "user/a") == [unsafe_path]
+        assert store.list_markdown_sources("tenant_a", "user_a") == [safe_path]
+
+    def test_source_inventory_uses_scoped_handles_without_host_paths(self, tmp_path):
+        store = MemorySourceStore(base_dir=tmp_path)
+        source_path = store.append_long_term_facts("tenant_a", "user_a", ["private fact"])
+
+        inventory = store.inspect_user_tree("tenant_a", "user_a")
+        source = inventory["sources"][0]
+
+        assert inventory["scope"] == "tenant_user"
+        assert inventory["files"] == ["MEMORY.md"]
+        assert source["label"] == "MEMORY.md"
+        assert source["source_id"].startswith("memsrc_")
+        assert str(tmp_path) not in str(inventory)
+        assert store.resolve_source_handle("tenant_a", "user_a", source["source_id"]) == Path(
+            source_path
+        )
+        assert store.resolve_source_handle("tenant_b", "user_a", source["source_id"]) is None
+
     def test_delete_source_is_confined_to_active_tenant_and_user(self, tmp_path):
         store = MemorySourceStore(base_dir=tmp_path)
         path_a = store.append_long_term_facts("tenant_a", "user_a", ["prefers markdown"])
         path_b = store.append_long_term_facts("tenant_b", "user_a", ["prefers csv"])
 
         assert store.delete_source("tenant_b", "user_a", path_a) is False
-        assert store.delete_source("tenant_a", "user_a", str(tmp_path / ".." / "outside.md")) is False
+        assert (
+            store.delete_source("tenant_a", "user_a", str(tmp_path / ".." / "outside.md")) is False
+        )
         assert store.delete_source("tenant_a", "user_a", path_a) is True
 
         assert path_a not in store.list_markdown_sources("tenant_a", "user_a")
@@ -1053,8 +1084,7 @@ class TestMemorySourceStoreBoundaries:
         first = store.append_daily_entry_result("tenant_a", "user_a", unsafe_text)
         second = store.append_daily_entry_result("tenant_a", "user_a", unsafe_text)
 
-        content = (tmp_path / "tenant_a" / "user_a" / "memory").glob("*.md")
-        daily_path = next(content)
+        daily_path = Path(first.path)
         written = daily_path.read_text(encoding="utf-8")
 
         assert first.source_type == "daily"
@@ -1125,9 +1155,8 @@ class TestMemorySourceStoreBoundaries:
             ),
         )
 
-        content = (tmp_path / "tenant_a" / "user_a" / "MEMORY.md").read_text(
-            encoding="utf-8"
-        )
+        source_path = store.list_markdown_sources("tenant_a", "user_a")[0]
+        content = Path(source_path).read_text(encoding="utf-8")
         assert "first concurrent fact" in content
         assert "second concurrent fact" in content
 
@@ -1152,11 +1181,7 @@ class TestHybridMemoryRetriever:
             async def fetch(self, sql: str, *args):
                 del args
                 if "WITH ranked" in sql:
-                    return [
-                        AsyncpgLikeRecord(
-                            {"chunk_id": chunk_id, "text_score": 1.0}
-                        )
-                    ]
+                    return [AsyncpgLikeRecord({"chunk_id": chunk_id, "text_score": 1.0})]
                 return [
                     AsyncpgLikeRecord(
                         {
@@ -1406,6 +1431,37 @@ class TestRuntimeMemoryLifecycle:
         assert ctx.runtime_memory_provenance[0]["untrusted"] is True
         assert events[0].data["provenance"][0]["score"] == 0.87
 
+    @pytest.mark.asyncio
+    async def test_runtime_memory_middleware_off_skips_retrieval_and_reflection(self):
+        from assistant_service.core.agent.agent_loop import AgentLoopPhase
+        from assistant_service.core.agent.middlewares.runtime_memory import (
+            RuntimeMemoryMiddleware,
+        )
+
+        runtime = SimpleNamespace(
+            load_memory_context=AsyncMock(),
+            schedule_daily_reflection=AsyncMock(),
+        )
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                memory_mode="off",
+                memory_profile="hybrid",
+                agent_runtime=None,
+            )
+        )
+
+        events = [
+            event
+            async for event in RuntimeMemoryMiddleware(
+                runtime,
+                AgentLoopPhase.MEMORY_LOADING,
+            ).before_call(ctx, [])
+        ]
+
+        assert events == []
+        runtime.load_memory_context.assert_not_awaited()
+        runtime.schedule_daily_reflection.assert_not_awaited()
+
 
 class TestMemoryToolBoundaries:
     """Test memory tool profile gates and output boundaries."""
@@ -1457,7 +1513,7 @@ class TestMemoryToolBoundaries:
         )
 
         assert result.success is True
-        assert result.result == "Memory updated: contact"
+        assert result.result == "Memory updated"
         assert "alice@example.com" not in result.result
         memory_service.set_user_memory.assert_called_once_with(
             tenant_id="tenant_a",
@@ -1476,7 +1532,11 @@ class TestMemoryToolBoundaries:
 
         assert result.success is True
         assert result.result["profile"] == MemoryProfile.OFF.value
-        assert result.result["allowed_actions"] == ["delete", "inspect"]
+        assert result.result["allowed_actions"] == [
+            "delete",
+            "delete_source",
+            "inspect",
+        ]
         assert "value" not in result.result
 
     @pytest.mark.asyncio

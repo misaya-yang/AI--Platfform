@@ -46,6 +46,17 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _register_subagent_tool_if_enabled() -> bool:
+    """Register delegation only when the rollout flag explicitly enables it."""
+
+    if not _env_truthy("ASSISTANT_SUBAGENTS_ENABLED"):
+        return False
+    from .core.tools.subagent_tool import register_subagent_tool
+
+    register_subagent_tool()
+    return True
+
+
 def _configure_agent_runtime_resource_policies(app: FastAPI, database):
     """Wire the real DB-backed policy services used by Agent runtime mapping."""
 
@@ -350,6 +361,9 @@ async def lifespan(app: FastAPI):
 
     register_context_tools()
 
+    if _register_subagent_tool_if_enabled():
+        logger.info("Sub-agent delegation enabled")
+
     # ── Primitive tools (Phase 4) — env-gated opt-in ──
     # Exposes fs_read/fs_write/fs_glob/fs_grep to the model. Requires a writable
     # workspace root (default /tmp/ai-gateway-workspace, override with
@@ -405,9 +419,7 @@ async def lifespan(app: FastAPI):
             from ai_gateway_core.storage.image_storage import StorageConfig
 
             file_storage = init_file_storage(StorageConfig.from_env())
-            logger.info(
-                f"File storage initialized (backend={file_storage.config.backend.value})"
-            )
+            logger.info(f"File storage initialized (backend={file_storage.config.backend.value})")
         except Exception:
             logger.warning(f"File storage not configurable — falling back to NoOp: {e}")
             from ai_gateway_core.storage import NoOpFileStorage
@@ -433,6 +445,20 @@ async def lifespan(app: FastAPI):
     app.state.session_manager = session_manager
     app.state.kb_proxy = kb_proxy
     app.state.memory_service = memory_service
+    try:
+        from .core.runtime.memory.governance_cleanup import (
+            AgentRuntimeMemoryCleanupService,
+        )
+
+        app.state.runtime_memory_cleanup_service = AgentRuntimeMemoryCleanupService.from_env(
+            database=database
+        )
+    except Exception as exc:
+        app.state.runtime_memory_cleanup_service = None
+        logger.warning(
+            "Agent runtime-memory cleanup service initialization failed (%s)",
+            type(exc).__name__,
+        )
 
     # ── Register DB-backed Confluence tools ──
     # Register ONCE with a database reference. The executors resolve

@@ -1,7 +1,12 @@
 """Memory components for the Assistant runtime."""
 
 from .chunker import ChunkConfig, MemoryChunk, chunk_markdown
-from .indexer import MemoryIndexer
+from .indexer import (
+    MemoryIndexDeleteResult,
+    MemoryIndexer,
+    MemoryIndexFinalizeResult,
+    MemorySourceDeletionPendingError,
+)
 from .lifecycle import (
     MEMORY_LIFECYCLE_SCHEMA_VERSION,
     MemoryProviderLifecycle,
@@ -15,6 +20,7 @@ from .lifecycle import (
 )
 from .reflector import DailyMemoryReflector
 from .retriever import HybridMemoryRetriever, MemorySearchHit
+from .scope import public_source_label, scoped_collection_name
 from .source_store import MemorySourceDocument, MemorySourceStore
 
 __all__ = [
@@ -22,6 +28,9 @@ __all__ = [
     "MemoryChunk",
     "chunk_markdown",
     "MemoryIndexer",
+    "MemoryIndexDeleteResult",
+    "MemoryIndexFinalizeResult",
+    "MemorySourceDeletionPendingError",
     "MEMORY_LIFECYCLE_SCHEMA_VERSION",
     "MemoryProviderLifecycle",
     "MemoryThreatScan",
@@ -34,6 +43,8 @@ __all__ = [
     "DailyMemoryReflector",
     "HybridMemoryRetriever",
     "MemorySearchHit",
+    "public_source_label",
+    "scoped_collection_name",
     "MemorySourceDocument",
     "MemorySourceStore",
 ]

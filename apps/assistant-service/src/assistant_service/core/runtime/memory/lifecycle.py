@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from .scope import public_source_label
+
 MEMORY_LIFECYCLE_SCHEMA_VERSION = "assistant-memory-lifecycle/v1"
 
 _ALLOWED_SYNC_REASONS = {"succeeded"}
@@ -53,7 +55,7 @@ class MemoryWriteResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "path": self.path,
+            "path": public_source_label(self.path),
             "source_type": self.source_type,
             "written": self.written,
             "duplicate": self.duplicate,
@@ -118,11 +120,28 @@ def should_sync_turn_to_memory(
     return False, f"terminal_exit_reason_{exit_reason}"
 
 
+def memory_policy_enabled(
+    *,
+    memory_mode: str | None = None,
+    memory_profile: str | None = None,
+) -> bool:
+    """Return whether user long-term memory is enabled by both policy gates.
+
+    ``memory_mode`` is the user-visible request control while ``memory_profile``
+    bounds the enabled memory capabilities. Either control may disable memory;
+    callers must never let a model-selected tool argument re-enable it.
+    """
+
+    mode = str(memory_mode or "").strip().lower()
+    profile = str(memory_profile or "").strip().lower()
+    return mode != "off" and profile != "off"
+
+
 def memory_hit_provenance(hit: Any) -> dict[str, Any]:
     """Build trace/UI-safe provenance for a memory retrieval hit."""
 
     metadata = getattr(hit, "metadata", None) or {}
-    source_path = str(getattr(hit, "source_path", "") or "")
+    source_path = public_source_label(getattr(hit, "source_path", ""))
     recency = metadata.get("recency") or metadata.get("updated_at")
     return {
         "schema_version": MEMORY_LIFECYCLE_SCHEMA_VERSION,

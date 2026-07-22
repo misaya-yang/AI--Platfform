@@ -27,6 +27,10 @@ class ChatMessage:
     tool_call_id: str | None = None
     images: list[str] | None = None
     thought_signature: str | None = None
+    # Provider-native assistant content blocks that must be replayed verbatim
+    # for protocols such as Anthropic server-tool pause/resume. Other
+    # providers ignore this optional extension.
+    provider_content_blocks: list[dict[str, Any]] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ChatMessage:
@@ -38,6 +42,7 @@ class ChatMessage:
             tool_call_id=data.get("tool_call_id"),
             images=data.get("images"),
             thought_signature=data.get("thought_signature"),
+            provider_content_blocks=data.get("provider_content_blocks"),
         )
 
 

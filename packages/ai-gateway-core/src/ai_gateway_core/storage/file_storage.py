@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ai_gateway_core.logging import get_logger
+
 from .image_storage import (
     BaseStorageBackend,
     LocalStorageBackend,
@@ -28,6 +29,7 @@ from .image_storage import (
     S3StorageBackend,
     StorageBackend,
     StorageConfig,
+    storage_key_log_hash,
 )
 
 logger = get_logger(__name__)
@@ -400,7 +402,10 @@ class FileStorageService:
         """
         result = await self._backend.delete(storage_key)
         if result:
-            logger.info(f"[FileStorage] Deleted {storage_key}")
+            logger.info(
+                "File storage operation completed (operation=delete, key_hash=%s)",
+                storage_key_log_hash(storage_key),
+            )
         return result
 
     async def delete_user_files(self, user_id: str) -> int:

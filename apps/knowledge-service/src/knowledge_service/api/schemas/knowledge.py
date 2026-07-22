@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import math
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing_extensions import Self
 
 # ============================================================
 # Enums
@@ -235,6 +238,277 @@ class RetrieveRequestSchema(BaseModel):
     l1_top_k: int = 5  # Documents to consider at L1 (summary level)
     l2_top_k: int = 10  # Sections to consider at L2 (section level)
     include_context: bool = True  # Include parent context in L3 results
+
+
+RetrievalEvalGrade = Annotated[
+    float,
+    Field(ge=0.0, le=5.0, allow_inf_nan=False),
+]
+RetrievalEvalK = Annotated[int, Field(ge=1, le=100)]
+
+
+class RetrievalEvalCaseSchema(BaseModel):
+    """One retrieval-evaluation case: a query plus its ground-truth relevance.
+
+    ``relevant_segment_ids`` (binary) and ``relevance`` (graded id->score in
+    [0, 5]) may both be supplied; they are merged, with graded values taking
+    precedence. At least one relevant segment should be provided for the case to
+    contribute meaningfully to the metrics.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4096)
+    case_id: str | None = Field(default=None, min_length=1, max_length=128)
+    relevant_segment_ids: list[str] = Field(default_factory=list, max_length=500)
+    relevance: dict[str, RetrievalEvalGrade] = Field(default_factory=dict, max_length=500)
+
+    @field_validator("query", "case_id", mode="before")
+    @classmethod
+    def _strip_eval_text(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("relevant_segment_ids")
+    @classmethod
+    def _validate_relevant_segment_ids(cls, values: list[str]) -> list[str]:
+        normalized = [str(value).strip() for value in values]
+        if any(not value or len(value) > 256 for value in normalized):
+            raise ValueError("relevant segment IDs must contain 1-256 characters")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("relevant segment IDs must be unique within a case")
+        return normalized
+
+    @field_validator("relevance")
+    @classmethod
+    def _validate_relevance_ids(
+        cls,
+        values: dict[str, RetrievalEvalGrade],
+    ) -> dict[str, RetrievalEvalGrade]:
+        normalized: dict[str, RetrievalEvalGrade] = {}
+        for raw_segment_id, grade in values.items():
+            segment_id = str(raw_segment_id).strip()
+            if not segment_id or len(segment_id) > 256:
+                raise ValueError("relevance segment IDs must contain 1-256 characters")
+            normalized[segment_id] = grade
+        return normalized
+
+
+class RetrievalEvalRequestSchema(RetrieveRequestSchema):
+    """Run the retrieval pipeline against a labelled test set and score it.
+
+    Inherits every retrieval knob from ``RetrieveRequestSchema`` (mode, fusion,
+    weights, rerank, mmr, thresholds, ...) so that two different configurations
+    can be evaluated and A/B-compared on the exact same queries. The ``query``
+    field is ignored here; ``cases`` supplies the queries instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(default="", max_length=4096)  # ignored; cases supply queries
+    top_k: int = Field(default=5, ge=1, le=100)
+    cases: list[RetrievalEvalCaseSchema] = Field(..., min_length=1, max_length=20)
+    k_values: list[RetrievalEvalK] = Field(
+        default_factory=lambda: [1, 3, 5, 10],
+        min_length=1,
+        max_length=8,
+    )
+    return_retrieved: bool = True  # include per-case ranked lists in the response
+
+    @model_validator(mode="before")
+    @classmethod
+    def _flatten_retrieval_preset(cls, value: Any) -> Any:
+        """Accept ``RetrievalConfig.to_dict()`` without weakening flat callers.
+
+        The preset endpoint intentionally returns the canonical nested retrieval
+        config used by dataset settings. Evaluation requests historically inherit
+        the flat ``RetrieveRequestSchema``. Normalize known nested preset fields at
+        this boundary so the preset response can be posted back verbatim while the
+        execution service continues receiving its stable flat contract.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+
+        def consume_nested(name: str, allowed: set[str]) -> dict[str, Any] | None:
+            nested = data.get(name)
+            if not isinstance(nested, dict):
+                return None
+            unknown = set(nested).difference(allowed)
+            if unknown:
+                unknown_fields = ", ".join(sorted(str(field) for field in unknown))
+                raise ValueError(f"unsupported {name} preset fields: {unknown_fields}")
+            data.pop(name)
+            return nested
+
+        vector = consume_nested("vector", {"enabled", "top_k", "score_threshold"})
+        if vector is not None:
+            if vector.get("top_k") is not None:
+                data.setdefault("vector_top_k", vector["top_k"])
+            if data.get("score_threshold") is None and vector.get("score_threshold") is not None:
+                data["score_threshold"] = vector["score_threshold"]
+
+        keyword = consume_nested(
+            "keyword",
+            {"enabled", "top_k", "candidate_pool_size", "bm25_k1", "bm25_b"},
+        )
+        if keyword is not None:
+            if keyword.get("top_k") is not None:
+                data.setdefault("keyword_top_k", keyword["top_k"])
+            if keyword.get("candidate_pool_size") is not None:
+                data.setdefault("keyword_candidate_k", keyword["candidate_pool_size"])
+
+        fusion = consume_nested("fusion", {"strategy", "rrf_k", "rrf_weights", "alpha"})
+        if fusion is not None:
+            if fusion.get("strategy") is not None:
+                data.setdefault("fusion_method", fusion["strategy"])
+            for source, target in (
+                ("rrf_k", "rrf_k"),
+                ("rrf_weights", "rrf_weights"),
+                ("alpha", "alpha"),
+            ):
+                if fusion.get(source) is not None:
+                    data.setdefault(target, fusion[source])
+
+        rerank = consume_nested(
+            "rerank",
+            {"enabled", "provider", "model", "top_n", "score_threshold"},
+        )
+        if rerank is not None:
+            if rerank.get("enabled") is not None:
+                data.setdefault("rerank", rerank["enabled"])
+            if rerank.get("model") is not None:
+                data.setdefault("rerank_model", rerank["model"])
+            if rerank.get("top_n") is not None:
+                data.setdefault("rerank_top_n", rerank["top_n"])
+
+        mmr = consume_nested("mmr", {"enabled", "lambda", "similarity_threshold"})
+        if mmr is not None:
+            if mmr.get("enabled") is not None:
+                data.setdefault("mmr", mmr["enabled"])
+            if mmr.get("lambda") is not None:
+                data.setdefault("mmr_lambda", mmr["lambda"])
+            if mmr.get("similarity_threshold") is not None:
+                data.setdefault("mmr_threshold", mmr["similarity_threshold"])
+
+        multimodal = consume_nested(
+            "multimodal",
+            {
+                "enabled",
+                "image_search_enabled",
+                "image_score_threshold",
+                "text_score_threshold",
+                "use_separate_thresholds",
+                "image_boost",
+                "vlm_rerank_enabled",
+                "vlm_rerank_weight",
+                "content_type_filter",
+            },
+        )
+        if multimodal is not None:
+            mappings = {
+                "image_search_enabled": "image_search_enabled",
+                "image_score_threshold": "image_score_threshold",
+                "use_separate_thresholds": "use_separate_thresholds",
+                "image_boost": "image_boost",
+                "vlm_rerank_enabled": "multimodal_rerank",
+                "vlm_rerank_weight": "vlm_rerank_weight",
+                "content_type_filter": "content_type_filter",
+            }
+            for source, target in mappings.items():
+                if multimodal.get(source) is not None:
+                    data.setdefault(target, multimodal[source])
+
+        return data
+
+    @model_validator(mode="after")
+    def _validate_eval_bounds_and_identity(self) -> Self:
+        self.k_values = sorted(set(self.k_values))
+
+        seen_case_ids: set[str] = set()
+        for index, case in enumerate(self.cases):
+            resolved_case_id = case.case_id or f"case_{index}"
+            if resolved_case_id in seen_case_ids:
+                raise ValueError(f"duplicate case_id: {resolved_case_id}")
+            seen_case_ids.add(resolved_case_id)
+            case.case_id = resolved_case_id
+
+        integer_limits = {
+            "vector_top_k": 1000,
+            "keyword_top_k": 1000,
+            "candidate_top_k": 2000,
+            "keyword_candidate_k": 500,
+            "rerank_top_n": 1000,
+            "rrf_k": 10000,
+            "l1_top_k": 100,
+            "l2_top_k": 200,
+        }
+        for field_name, upper_bound in integer_limits.items():
+            field_value = getattr(self, field_name, None)
+            if field_value is not None and not 1 <= int(field_value) <= upper_bound:
+                raise ValueError(f"{field_name} must be between 1 and {upper_bound}")
+
+        unit_interval_fields = (
+            "dense_weight",
+            "bm25_weight",
+            "alpha",
+            "score_threshold",
+            "mmr_lambda",
+            "mmr_threshold",
+            "vlm_rerank_weight",
+            "image_score_threshold",
+        )
+        for field_name in unit_interval_fields:
+            field_value = getattr(self, field_name, None)
+            if field_value is None:
+                continue
+            numeric = float(field_value)
+            if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
+                raise ValueError(f"{field_name} must be finite and between 0 and 1")
+
+        if self.image_boost is not None:
+            image_boost = float(self.image_boost)
+            if not math.isfinite(image_boost) or not 0.0 <= image_boost <= 10.0:
+                raise ValueError("image_boost must be finite and between 0 and 10")
+
+        if self.rrf_weights:
+            if len(self.rrf_weights) > 16:
+                raise ValueError("rrf_weights supports at most 16 entries")
+            for name, weight in self.rrf_weights.items():
+                if not name or len(name) > 64:
+                    raise ValueError("rrf_weights keys must contain 1-64 characters")
+                numeric = float(weight)
+                if not math.isfinite(numeric) or not 0.0 <= numeric <= 100.0:
+                    raise ValueError("rrf_weights values must be finite and between 0 and 100")
+
+        text_limits = {
+            "document_id": 256,
+            "mode": 32,
+            "fusion_method": 32,
+            "fusion": 32,
+            "rerank_model": 256,
+            "content_type_filter": 64,
+            "source_type_filter": 128,
+            "language_filter": 64,
+        }
+        for field_name, maximum_length in text_limits.items():
+            field_value = getattr(self, field_name, None)
+            if field_value is not None and len(str(field_value)) > maximum_length:
+                raise ValueError(f"{field_name} must not exceed {maximum_length} characters")
+
+        if self.metadata_filter is not None:
+            serialized_filter = json.dumps(
+                self.metadata_filter,
+                ensure_ascii=False,
+                allow_nan=False,
+                default=str,
+            )
+            if len(serialized_filter.encode("utf-8")) > 16_384:
+                raise ValueError("metadata_filter must not exceed 16 KiB")
+
+        return self
 
 
 class AssociatedImageSchema(BaseModel):
@@ -533,7 +807,9 @@ class BatchRetrieveRequestSchema(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    queries: list[str | BatchRetrieveQuerySchema] | None = None  # List of queries for batch retrieval
+    queries: list[str | BatchRetrieveQuerySchema] | None = (
+        None  # List of queries for batch retrieval
+    )
     query: str | None = None  # Single query or comma-separated queries
     top_k: int | None = None  # Explicit override; otherwise derived from unique query count
     mode: str = "hybrid"

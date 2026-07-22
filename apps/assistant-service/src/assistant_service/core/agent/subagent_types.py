@@ -14,8 +14,8 @@ from typing import Any
 
 class SubAgentType(str, Enum):
     EXPLORE = "explore"  # Fast search, read-only tools
-    TASK = "task"        # Full execution with all tools
-    PLAN = "plan"        # Analyze and output a plan
+    TASK = "task"  # Full execution with all tools
+    PLAN = "plan"  # Analyze and output a plan
 
 
 @dataclass
@@ -29,6 +29,7 @@ class SubAgentConfig:
     # Execution limits
     max_turns: int = 10
     max_tool_calls: int = 20
+    max_tokens: int = 2048
     timeout_seconds: int = 120
 
     # Model override (None = use default for agent type)
@@ -82,6 +83,7 @@ SUBAGENT_DEFAULTS: dict[SubAgentType, dict[str, Any]] = {
     SubAgentType.EXPLORE: {
         "max_turns": 8,
         "max_tool_calls": 15,
+        "max_tokens": 2048,
         "timeout_seconds": 60,
         "allowed_tool_categories": {"retrieval", "utility"},
         "system_prompt_suffix": (
@@ -93,6 +95,7 @@ SUBAGENT_DEFAULTS: dict[SubAgentType, dict[str, Any]] = {
     SubAgentType.TASK: {
         "max_turns": 15,
         "max_tool_calls": 30,
+        "max_tokens": 2048,
         "timeout_seconds": 180,
         "allowed_tool_categories": None,  # All tools
         "system_prompt_suffix": (
@@ -103,6 +106,7 @@ SUBAGENT_DEFAULTS: dict[SubAgentType, dict[str, Any]] = {
     SubAgentType.PLAN: {
         "max_turns": 5,
         "max_tool_calls": 10,
+        "max_tokens": 2048,
         "timeout_seconds": 60,
         "allowed_tool_categories": {"retrieval", "utility"},
         "system_prompt_suffix": (

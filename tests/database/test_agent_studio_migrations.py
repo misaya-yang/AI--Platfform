@@ -12,10 +12,16 @@ from typing import Any
 import asyncpg
 import pytest
 import pytest_asyncio
+from ai_gateway_core.agents import (
+    RUNTIME_CLEANUP_INVENTORY_SCHEMA,
+    RUNTIME_CLEANUP_RECEIPT_SCHEMA,
+    canonical_cleanup_digest,
+)
 from ai_gateway_core.persistence.repositories.agent_repository import (
     AgentDraftConflictError,
     AgentLastOwnerError,
     AgentNotFoundError,
+    AgentRepositoryError,
     AgentRuntimeUnavailableError,
     AgentValidationError,
     DatabaseAgentRepository,
@@ -39,6 +45,104 @@ AGENT_TABLES = (
     "agent_publish_events",
     "agent_api_tokens",
 )
+
+
+async def _freeze_completed_runtime_cleanup(
+    repository: DatabaseAgentRepository,
+    *,
+    prepared: dict[str, Any],
+    tenant_id: str,
+    agent_id: str,
+    user_id: str,
+) -> dict[str, Any]:
+    plan = prepared["deleted_counts"]["runtime_cleanup_plan"]
+    principals = [
+        {
+            "principal_id": principal_id,
+            "source_count": 0,
+            "sources": [],
+            "vector_count": 0,
+            "vector_sets": [],
+        }
+        for principal_id in plan["principal_handles"]
+    ]
+    inventory: dict[str, Any] = {
+        "schema_version": RUNTIME_CLEANUP_INVENTORY_SCHEMA,
+        "deletion_id": prepared["deletion_id"],
+        "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "plan_digest": plan["plan_digest"],
+        "cutoff_at": plan["cutoff_at"],
+        "principal_count": len(principals),
+        "source_count": 0,
+        "vector_count": 0,
+        "principals": principals,
+    }
+    inventory["inventory_digest"] = canonical_cleanup_digest(inventory)
+    await repository.freeze_agent_runtime_cleanup_inventory(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        deletion_id=prepared["deletion_id"],
+        user_id=user_id,
+        is_tenant_admin=False,
+        inventory=inventory,
+    )
+    principal_receipts = [
+        {
+            "principal_id": principal["principal_id"],
+            "status": "completed",
+            "completed": True,
+            "retryable": False,
+            "source_count": 0,
+            "deleted_source_count": 0,
+            "vector_count": 0,
+            "deleted_vector_count": 0,
+            "idempotent_absent_count": 0,
+            "idempotent_absent_vector_count": 0,
+            "errors": [],
+        }
+        for principal in principals
+    ]
+    receipt: dict[str, Any] = {
+        "schema_version": RUNTIME_CLEANUP_RECEIPT_SCHEMA,
+        "deletion_id": prepared["deletion_id"],
+        "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "plan_digest": plan["plan_digest"],
+        "inventory_digest": inventory["inventory_digest"],
+        "status": "completed",
+        "completed": True,
+        "retryable": False,
+        "principals": principal_receipts,
+        "errors": [],
+    }
+    receipt["receipt_digest"] = canonical_cleanup_digest(receipt)
+    return receipt
+
+
+async def _finish_claimed_data_deletion(
+    repository: DatabaseAgentRepository,
+    *,
+    prepared: dict[str, Any],
+    tenant_id: str,
+    agent_id: str,
+    user_id: str,
+    storage_cleanup_succeeded: bool,
+    runtime_cleanup_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    async with repository.claim_agent_data_deletion_execution(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        deletion_id=str(prepared["deletion_id"]),
+        user_id=user_id,
+        is_tenant_admin=False,
+    ) as claimed:
+        if not claimed.get("execution_claimed"):
+            return claimed
+        return await claimed["_execution_finish"](
+            storage_cleanup_succeeded=storage_cleanup_succeeded,
+            runtime_cleanup_receipt=runtime_cleanup_receipt,
+        )
 
 
 def _postgres_config() -> dict[str, Any]:
@@ -288,9 +392,7 @@ async def _insert_graph(conn: asyncpg.Connection, tenant_id: str, suffix: str) -
     }
 
 
-async def _assert_fk_rejected(
-    conn: asyncpg.Connection, query: str, *args: Any
-) -> None:
+async def _assert_fk_rejected(conn: asyncpg.Connection, query: str, *args: Any) -> None:
     transaction = conn.transaction()
     await transaction.start()
     try:
@@ -508,7 +610,9 @@ async def test_version_bindings_are_immutable_and_publish_events_append_only(
             transaction = conn.transaction()
             await transaction.start()
             try:
-                with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="AGENT_VERSION_IMMUTABLE"):
+                with pytest.raises(
+                    asyncpg.ObjectNotInPrerequisiteStateError, match="AGENT_VERSION_IMMUTABLE"
+                ):
                     await conn.execute(query, *args)
             finally:
                 await transaction.rollback()
@@ -548,7 +652,9 @@ async def test_database_guard_prevents_last_owner_removal_or_demotion(
             await transaction.start()
             try:
                 with pytest.raises(asyncpg.CheckViolationError, match="AGENT_LAST_OWNER"):
-                    await conn.execute(query, graph["tenant_id"], graph["agent_id"], graph["owner_id"])
+                    await conn.execute(
+                        query, graph["tenant_id"], graph["agent_id"], graph["owner_id"]
+                    )
             finally:
                 await transaction.rollback()
 
@@ -983,20 +1089,26 @@ async def test_production_repository_enforces_role_matrix_and_tenant_admin_bound
             is_tenant_admin=False,
         )
     )["revision"] == 1
-    assert await repository.list_versions(
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        user_id=viewer_id,
-        is_tenant_admin=False,
-    ) == []
-    assert len(
-        await repository.list_members(
+    assert (
+        await repository.list_versions(
             tenant_id=tenant_id,
             agent_id=agent_id,
             user_id=viewer_id,
             is_tenant_admin=False,
         )
-    ) == 3
+        == []
+    )
+    assert (
+        len(
+            await repository.list_members(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                user_id=viewer_id,
+                is_tenant_admin=False,
+            )
+        )
+        == 3
+    )
     viewer_page = await repository.list_agents(
         tenant_id=tenant_id,
         user_id=viewer_id,
@@ -1466,6 +1578,7 @@ async def operations_pool() -> AsyncIterator[asyncpg.Pool]:
                     spec JSONB NOT NULL DEFAULT '{}'::jsonb,
                     spec_hash CHAR(64) NOT NULL DEFAULT repeat('0', 64),
                     updated_by VARCHAR(255) NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, draft_id)
                 );
@@ -1473,6 +1586,7 @@ async def operations_pool() -> AsyncIterator[asyncpg.Pool]:
                     tenant_id VARCHAR(255) NOT NULL,
                     agent_version_id UUID NOT NULL,
                     agent_id UUID NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY (tenant_id, agent_version_id)
                 );
                 CREATE TABLE agent_version_capabilities (
@@ -1519,7 +1633,8 @@ async def operations_pool() -> AsyncIterator[asyncpg.Pool]:
                     agent_draft_revision INTEGER,
                     publication_id UUID,
                     channel VARCHAR(16),
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE TABLE assistant_runs (
                     run_id UUID PRIMARY KEY,
@@ -1592,7 +1707,8 @@ async def operations_pool() -> AsyncIterator[asyncpg.Pool]:
                 CREATE TABLE user_memory (
                     tenant_id VARCHAR(255) NOT NULL,
                     user_id VARCHAR(255) NOT NULL,
-                    key VARCHAR(255) NOT NULL
+                    key VARCHAR(255) NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE TABLE assistant_memory_sources (
                     source_id UUID PRIMARY KEY,
@@ -1602,11 +1718,13 @@ async def operations_pool() -> AsyncIterator[asyncpg.Pool]:
                 CREATE TABLE assistant_memory_reflections (
                     reflection_id UUID PRIMARY KEY,
                     tenant_id VARCHAR(255) NOT NULL,
-                    user_id VARCHAR(255) NOT NULL
+                    user_id VARCHAR(255) NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE TABLE semantic_cache (
                     id BIGSERIAL PRIMARY KEY,
-                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 CREATE TABLE agent_api_tokens (
                     tenant_id VARCHAR(255) NOT NULL,
@@ -1695,9 +1813,7 @@ async def _seed_operations_agent(
 async def test_operations_migration_is_reentrant_and_projects_audit_dimensions(
     operations_pool: asyncpg.Pool,
 ) -> None:
-    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(
-        operations_pool
-    )
+    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(operations_pool)
     version_id = str(uuid.uuid4())
     async with operations_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -1785,7 +1901,7 @@ async def test_legal_hold_blocks_cleanup_and_receipt_is_terminal(
 
 
 @pytest.mark.asyncio
-async def test_finish_rechecks_legal_hold_after_prepare(
+async def test_legal_hold_activation_atomically_blocks_unclaimed_cleanup(
     operations_pool: asyncpg.Pool,
 ) -> None:
     tenant_id, agent_id, _, owner_id = await _seed_operations_agent(operations_pool)
@@ -1808,24 +1924,195 @@ async def test_finish_rechecks_legal_hold_after_prepare(
         changes={"legal_hold": True},
     )
 
-    blocked = await repository.finish_agent_data_deletion(
+    blocked = await _finish_claimed_data_deletion(
+        repository,
+        prepared=prepared,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        deletion_id=prepared["deletion_id"],
         user_id=owner_id,
-        is_tenant_admin=False,
         storage_cleanup_succeeded=True,
     )
 
     assert blocked["status"] == "blocked"
     assert blocked["error_code"] == "AGENT_LEGAL_HOLD_ACTIVE"
-    assert blocked["attempt_count"] == 1
+    assert blocked["attempt_count"] == 0
     async with operations_pool.acquire() as conn:
-        assert await conn.fetchval(
-            "SELECT status FROM agents WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == "active"
+        assert (
+            await conn.fetchval(
+                "SELECT status FROM agents WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == "active"
+        )
+
+
+@pytest.mark.asyncio
+async def test_active_cleanup_claim_fences_concurrent_legal_hold_activation(
+    operations_pool: asyncpg.Pool,
+) -> None:
+    tenant_id, agent_id, _, owner_id = await _seed_operations_agent(operations_pool)
+    repository = DatabaseAgentRepository(_Holder(operations_pool))
+    prepared = await repository.prepare_agent_data_deletion(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+        scope="retention",
+        subject_user_id=None,
+        idempotency_key="retention-hold-execution-fence",
+    )
+    external_delete_started = asyncio.Event()
+
+    async def activate_legal_hold() -> dict[str, Any]:
+        await external_delete_started.wait()
+        return await repository.update_governance_policy(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            user_id=owner_id,
+            is_tenant_admin=False,
+            changes={"legal_hold": True},
+        )
+
+    async with repository.claim_agent_data_deletion_execution(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        deletion_id=prepared["deletion_id"],
+        user_id=owner_id,
+        is_tenant_admin=False,
+    ) as claimed:
+        assert claimed["execution_claimed"] is True
+        await claimed["_execution_guard"]()
+        hold_task = asyncio.create_task(activate_legal_hold())
+        external_delete_started.set()
+        with pytest.raises(AgentRepositoryError, match="AGENT_LEGAL_HOLD_CLEANUP_ACTIVE"):
+            await hold_task
+        policy = await repository.get_governance_policy(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            user_id=owner_id,
+            is_tenant_admin=False,
+        )
+        assert policy["legal_hold"] is False
+        failed = await claimed["_execution_finish"](
+            storage_cleanup_succeeded=False,
+        )
+        assert failed["status"] == "failed"
+
+    applied = await repository.update_governance_policy(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+        changes={"legal_hold": True},
+    )
+    assert applied["legal_hold"] is True
+    async with operations_pool.acquire() as conn:
+        blocked = await conn.fetchrow(
+            """
+            SELECT status, error_code, deleted_counts
+            FROM agent_data_deletion_requests
+            WHERE deletion_id = $1::uuid
+            """,
+            prepared["deletion_id"],
+        )
+    assert blocked["status"] == "blocked"
+    assert blocked["error_code"] == "AGENT_LEGAL_HOLD_ACTIVE_AFTER_INTERRUPTED_CLEANUP"
+    blocked_counts = json.loads(blocked["deleted_counts"])
+    assert blocked_counts["cleanup_execution"]["state"] == "blocked"
+
+    blocked_retry = await repository.prepare_agent_data_deletion(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+        scope="retention",
+        subject_user_id=None,
+        idempotency_key="retention-under-active-hold",
+    )
+    assert blocked_retry["status"] == "blocked"
+    assert blocked_retry["error_code"] == "AGENT_LEGAL_HOLD_ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_released_cleanup_claim_denies_hold_until_idempotent_recovery_finishes(
+    operations_pool: asyncpg.Pool,
+) -> None:
+    tenant_id, agent_id, _, owner_id = await _seed_operations_agent(operations_pool)
+    repository = DatabaseAgentRepository(_Holder(operations_pool))
+    prepared = await repository.prepare_agent_data_deletion(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+        scope="retention",
+        subject_user_id=None,
+        idempotency_key="retention-abandoned-execution-fence",
+    )
+    async with repository.claim_agent_data_deletion_execution(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        deletion_id=prepared["deletion_id"],
+        user_id=owner_id,
+        is_tenant_admin=False,
+    ) as claimed:
+        assert claimed["execution_claimed"] is True
+        await claimed["_execution_guard"]()
+
+    with pytest.raises(AgentRepositoryError, match="AGENT_LEGAL_HOLD_CLEANUP_ACTIVE"):
+        await repository.update_governance_policy(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            user_id=owner_id,
+            is_tenant_admin=False,
+            changes={"legal_hold": True},
+        )
+    policy = await repository.get_governance_policy(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+    )
+    assert policy["legal_hold"] is False
+
+    async with repository.claim_agent_data_deletion_execution(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        deletion_id=prepared["deletion_id"],
+        user_id=owner_id,
+        is_tenant_admin=False,
+    ) as recovered:
+        assert recovered["execution_claimed"] is True
+        assert recovered["_execution_generation"] == 2
+        failed = await recovered["_execution_finish"](
+            storage_cleanup_succeeded=False,
+        )
+        assert failed["status"] == "failed"
+        assert failed["error_code"] == "AGENT_STORAGE_CLEANUP_FAILED"
+        assert failed["completed_at"] is None
+
+    applied = await repository.update_governance_policy(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
+        is_tenant_admin=False,
+        changes={"legal_hold": True},
+    )
+    assert applied["legal_hold"] is True
+    async with operations_pool.acquire() as conn:
+        blocked = await conn.fetchrow(
+            """
+            SELECT status, error_code, deleted_counts
+            FROM agent_data_deletion_requests
+            WHERE deletion_id = $1::uuid
+            """,
+            prepared["deletion_id"],
+        )
+    assert blocked["status"] == "blocked"
+    assert blocked["error_code"] == "AGENT_LEGAL_HOLD_ACTIVE_AFTER_INTERRUPTED_CLEANUP"
+    blocked_counts = json.loads(blocked["deleted_counts"])
+    assert blocked_counts["cleanup_execution"]["state"] == "blocked"
+    assert "claim_digest" not in blocked_counts["cleanup_execution"]
 
 
 @pytest.mark.asyncio
@@ -1843,24 +2130,32 @@ async def test_storage_failure_can_retry_same_deletion_receipt(
         subject_user_id=None,
         idempotency_key="retention-retry-0001",
     )
-    failed = await repository.finish_agent_data_deletion(
+    failed = await _finish_claimed_data_deletion(
+        repository,
+        prepared=prepared,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        deletion_id=prepared["deletion_id"],
         user_id=owner_id,
-        is_tenant_admin=False,
         storage_cleanup_succeeded=False,
     )
     assert failed["status"] == "failed"
     assert failed["completed_at"] is None
 
-    completed = await repository.finish_agent_data_deletion(
+    runtime_receipt = await _freeze_completed_runtime_cleanup(
+        repository,
+        prepared=prepared,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        deletion_id=prepared["deletion_id"],
         user_id=owner_id,
-        is_tenant_admin=False,
+    )
+    completed = await _finish_claimed_data_deletion(
+        repository,
+        prepared=prepared,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
         storage_cleanup_succeeded=True,
+        runtime_cleanup_receipt=runtime_receipt,
     )
 
     assert completed["status"] == "completed"
@@ -1872,9 +2167,7 @@ async def test_storage_failure_can_retry_same_deletion_receipt(
 async def test_runtime_governance_usage_enforces_caps_and_emits_threshold_alerts(
     operations_pool: asyncpg.Pool,
 ) -> None:
-    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(
-        operations_pool
-    )
+    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(operations_pool)
     repository = DatabaseAgentRepository(_Holder(operations_pool))
     await repository.update_governance_policy(
         tenant_id=tenant_id,
@@ -1947,15 +2240,18 @@ async def test_runtime_governance_usage_enforces_caps_and_emits_threshold_alerts
         "AGENT_RUNTIME_MCP_QUOTA_EXCEEDED",
     }
     async with operations_pool.acquire() as conn:
-        assert await conn.fetchval(
-            """
+        assert (
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM audit_logs
             WHERE tenant_id = $1 AND agent_id = $2::uuid
               AND action IN ('quota_threshold_reached', 'quota_exceeded')
             """,
-            tenant_id,
-            agent_id,
-        ) == 4
+                tenant_id,
+                agent_id,
+            )
+            == 4
+        )
 
     with pytest.raises(AgentRuntimeUnavailableError) as storage_error:
         await repository.create_runtime_attachment(
@@ -1975,18 +2271,14 @@ async def test_runtime_governance_usage_enforces_caps_and_emits_threshold_alerts
 async def test_tenant_deletion_disables_delivery_and_scrubs_mutable_state(
     operations_pool: asyncpg.Pool,
 ) -> None:
-    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(
-        operations_pool
-    )
+    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(operations_pool)
     repository = DatabaseAgentRepository(_Holder(operations_pool))
     subject_id = f"subject-{uuid.uuid4().hex[:8]}"
     draft_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
     mcp_tool_id = str(uuid.uuid4())
     connector_grant_id = str(uuid.uuid4())
-    digest = hashlib.sha256(
-        f"{subject_id}:{agent_id}:version:{version_id}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{subject_id}:{agent_id}:version:{version_id}".encode()).hexdigest()
     orphan_memory_id = f"agent-memory:{digest}"
     async with operations_pool.acquire() as conn:
         await conn.execute(
@@ -2070,13 +2362,21 @@ async def test_tenant_deletion_disables_delivery_and_scrubs_mutable_state(
         subject_user_id=None,
         idempotency_key="tenant-complete-0001",
     )
-    completed = await repository.finish_agent_data_deletion(
+    runtime_receipt = await _freeze_completed_runtime_cleanup(
+        repository,
+        prepared=prepared,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        deletion_id=prepared["deletion_id"],
         user_id=owner_id,
-        is_tenant_admin=False,
+    )
+    completed = await _finish_claimed_data_deletion(
+        repository,
+        prepared=prepared,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
         storage_cleanup_succeeded=True,
+        runtime_cleanup_receipt=runtime_receipt,
     )
     assert completed["status"] == "completed"
     replayed = await repository.prepare_agent_data_deletion(
@@ -2110,58 +2410,75 @@ async def test_tenant_deletion_disables_delivery_and_scrubs_mutable_state(
         )
         assert agent["status"] == "deleted"
         assert agent["current_draft_id"] is None
-        assert await conn.fetchval(
-            "SELECT status FROM agent_publications WHERE tenant_id = $1 AND publication_id = $2::uuid",
-            tenant_id,
-            publication_id,
-        ) == "disabled"
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM agent_members WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == 0
-        assert await conn.fetchval(
-            "SELECT spec->>'deleted' FROM agent_drafts WHERE tenant_id = $1 AND draft_id = $2::uuid",
-            tenant_id,
-            draft_id,
-        ) == "true"
-        assert await conn.fetchval(
-            "SELECT enabled FROM mcp_channel_grants WHERE tenant_id = $1 AND tool_id = $2::uuid",
-            tenant_id,
-            mcp_tool_id,
-        ) is False
-        assert await conn.fetchval(
-            "SELECT enabled FROM connector_credential_principals WHERE tenant_id = $1 AND grant_id = $2::uuid",
-            tenant_id,
-            connector_grant_id,
-        ) is False
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM user_memory WHERE tenant_id = $1 AND user_id = $2",
-            tenant_id,
-            orphan_memory_id,
-        ) == 0
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM agent_versions WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == 1
+        assert (
+            await conn.fetchval(
+                "SELECT status FROM agent_publications WHERE tenant_id = $1 AND publication_id = $2::uuid",
+                tenant_id,
+                publication_id,
+            )
+            == "disabled"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_members WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT spec->>'deleted' FROM agent_drafts WHERE tenant_id = $1 AND draft_id = $2::uuid",
+                tenant_id,
+                draft_id,
+            )
+            == "true"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT enabled FROM mcp_channel_grants WHERE tenant_id = $1 AND tool_id = $2::uuid",
+                tenant_id,
+                mcp_tool_id,
+            )
+            is False
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT enabled FROM connector_credential_principals WHERE tenant_id = $1 AND grant_id = $2::uuid",
+                tenant_id,
+                connector_grant_id,
+            )
+            is False
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM user_memory WHERE tenant_id = $1 AND user_id = $2",
+                tenant_id,
+                orphan_memory_id,
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_versions WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
 async def test_user_deletion_removes_ephemeral_data_and_preserves_history(
     operations_pool: asyncpg.Pool,
 ) -> None:
-    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(
-        operations_pool
-    )
+    tenant_id, agent_id, publication_id, owner_id = await _seed_operations_agent(operations_pool)
     repository = DatabaseAgentRepository(_Holder(operations_pool))
     subject_id = "subject-user"
     session_id = str(uuid.uuid4())
     version_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
-    digest = hashlib.sha256(
-        f"{subject_id}:{agent_id}:version:{version_id}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{subject_id}:{agent_id}:version:{version_id}".encode()).hexdigest()
     memory_id = f"agent-memory:{digest}"
     async with operations_pool.acquire() as conn:
         await conn.execute(
@@ -2289,10 +2606,23 @@ async def test_user_deletion_removes_ephemeral_data_and_preserves_history(
         await conn.execute(
             """
             INSERT INTO semantic_cache (metadata)
-            VALUES (jsonb_build_object('tenant_id', $1::text, 'agent_id', $2::text))
+            VALUES (
+                jsonb_build_object(
+                    'tenant_id', $1::text,
+                    'agent_id', $2::text,
+                    'user_id', $3::text
+                )
+            ), (
+                jsonb_build_object(
+                    'tenant_id', $1::text,
+                    'agent_id', $2::text,
+                    'user_id', 'other-user'
+                )
+            )
             """,
             tenant_id,
             agent_id,
+            subject_id,
         )
     prepared = await repository.prepare_agent_data_deletion(
         tenant_id=tenant_id,
@@ -2305,45 +2635,96 @@ async def test_user_deletion_removes_ephemeral_data_and_preserves_history(
     )
     assert prepared["status"] == "pending"
     assert prepared["object_keys"] == ["tenant/object-key"]
-    completed = await repository.finish_agent_data_deletion(
+    async with operations_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO semantic_cache (metadata)
+            VALUES (
+                jsonb_build_object(
+                    'tenant_id', $1::text,
+                    'agent_id', $2::text,
+                    'user_id', $3::text
+                )
+            )
+            """,
+            tenant_id,
+            agent_id,
+            subject_id,
+        )
+    runtime_receipt = await _freeze_completed_runtime_cleanup(
+        repository,
+        prepared=prepared,
         tenant_id=tenant_id,
         agent_id=agent_id,
-        deletion_id=prepared["deletion_id"],
         user_id=owner_id,
-        is_tenant_admin=False,
+    )
+    completed = await _finish_claimed_data_deletion(
+        repository,
+        prepared=prepared,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=owner_id,
         storage_cleanup_succeeded=True,
+        runtime_cleanup_receipt=runtime_receipt,
     )
     assert completed["status"] == "completed"
     assert completed["deleted_counts"]["sessions"] == 1
     assert completed["deleted_counts"]["traces"] == 1
     assert completed["deleted_counts"]["attachments"] == 1
     assert completed["deleted_counts"]["user_memory"] == 1
+    assert completed["deleted_counts"]["semantic_cache"] == 1
     async with operations_pool.acquire() as conn:
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM agents WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == 1
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM agent_publications WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == 1
-        assert await conn.fetchval(
-            "SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND agent_id = $2::uuid",
-            tenant_id,
-            agent_id,
-        ) == 0
-        assert await conn.fetchval(
-            "SELECT revoked_at IS NOT NULL FROM agent_api_tokens WHERE tenant_id = $1",
-            tenant_id,
-        ) is True
-        assert await conn.fetchval(
-            """
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agents WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == 1
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM agent_publications WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == 1
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM sessions WHERE tenant_id = $1 AND agent_id = $2::uuid",
+                tenant_id,
+                agent_id,
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT revoked_at IS NOT NULL FROM agent_api_tokens WHERE tenant_id = $1",
+                tenant_id,
+            )
+            is True
+        )
+        assert (
+            await conn.fetchval(
+                """
+            SELECT COUNT(*) FROM semantic_cache
+            WHERE metadata->>'tenant_id' = $1 AND metadata->>'agent_id' = $2
+            """,
+                tenant_id,
+                agent_id,
+            )
+            == 2
+        )
+        assert (
+            await conn.fetchval(
+                """
             SELECT COUNT(*) FROM audit_logs
             WHERE tenant_id = $1 AND agent_id = $2::uuid
               AND action = 'data_deletion_completed'
             """,
-            tenant_id,
-            agent_id,
-        ) == 1
+                tenant_id,
+                agent_id,
+            )
+            == 1
+        )

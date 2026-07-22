@@ -23,6 +23,18 @@ from typing import Any, Final
 
 import httpx
 
+from .resilience import (
+    MCPCircuitBreaker,
+    MCPCircuitLease,
+    MCPCircuitOpen,
+    MCPFailureDecision,
+    MCPFailureKind,
+    MCPInvocationPolicy,
+    MCPOperationKind,
+    counts_toward_circuit,
+    decide_mcp_failure,
+)
+
 logger = logging.getLogger(__name__)
 
 MCP_PROTOCOL_VERSION: Final = "2025-11-25"
@@ -36,10 +48,30 @@ _SESSION_ID_RE: Final = re.compile(r"^[\x21-\x7e]{1,256}$")
 class MCPError(Exception):
     """Stable error with no URL, credential, upstream body or stack detail."""
 
-    def __init__(self, code: int, message: str, *, stable_code: str = "MCP_ERROR"):
+    def __init__(
+        self,
+        code: int,
+        message: str,
+        *,
+        stable_code: str = "MCP_ERROR",
+        failure: MCPFailureDecision | None = None,
+        circuit: dict[str, Any] | None = None,
+        recovery_evidence: dict[str, Any] | None = None,
+    ):
         self.code = code
         self.stable_code = stable_code
+        self.failure = failure
+        self.circuit = dict(circuit or {})
+        self.recovery_evidence = dict(recovery_evidence or {})
         super().__init__(message)
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "mcp_error_code": self.stable_code,
+            "mcp_failure": self.failure.to_dict() if self.failure is not None else None,
+            "mcp_circuit": self.circuit,
+            "mcp_recovery_evidence": self.recovery_evidence,
+        }
 
 
 DNSResolver = Callable[[str, int], Iterable[str]]
@@ -58,11 +90,14 @@ class MCPServerConfig:
     api_key: str | None = field(default=None, repr=False)
     transport: str = "streamable_http"
     timeout: float = 30.0
+    host_deadline: float | None = None
     enabled: bool = True
     description: str = ""
     allowed_tools: list[str] | None = None
     blocked_tools: list[str] | None = None
     max_concurrent: int = 10
+    circuit_failure_threshold: int = 3
+    circuit_cooldown_seconds: float = 30.0
     response_limit_bytes: int = DEFAULT_RESPONSE_LIMIT_BYTES
     endpoint_path: str = "/mcp"
     auth_method: str = "none"
@@ -86,6 +121,16 @@ class MCPServerConfig:
             raise ValueError("Invalid MCP endpoint path")
         if self.max_concurrent < 1 or self.max_concurrent > 32:
             raise ValueError("Invalid MCP concurrency limit")
+        if self.timeout <= 0:
+            raise ValueError("Invalid MCP transport timeout")
+        if self.host_deadline is None:
+            self.host_deadline = self.timeout + min(5.0, max(0.1, self.timeout * 0.1))
+        if self.host_deadline <= 0:
+            raise ValueError("Invalid MCP host deadline")
+        if self.circuit_failure_threshold < 1 or self.circuit_failure_threshold > 20:
+            raise ValueError("Invalid MCP circuit threshold")
+        if self.circuit_cooldown_seconds < 0 or self.circuit_cooldown_seconds > 3600:
+            raise ValueError("Invalid MCP circuit cooldown")
         if self.response_limit_bytes < 1024 or self.response_limit_bytes > 8 * 1024 * 1024:
             raise ValueError("Invalid MCP response limit")
 
@@ -111,6 +156,8 @@ class MCPTool:
 class MCPToolResult:
     content: list[dict[str, Any]] = field(default_factory=list)
     is_error: bool = False
+    failure: MCPFailureDecision | None = None
+    circuit: dict[str, Any] = field(default_factory=dict)
 
 
 class MCPClient:
@@ -121,6 +168,7 @@ class MCPClient:
         config: MCPServerConfig,
         *,
         http_client: httpx.AsyncClient | None = None,
+        circuit_breaker: MCPCircuitBreaker | None = None,
     ) -> None:
         self.config = config
         self._http = http_client
@@ -131,6 +179,30 @@ class MCPClient:
         self._semaphore = asyncio.Semaphore(config.max_concurrent)
         self._pinned_addresses: frozenset[str] = frozenset()
         self._session_id: str | None = None
+        self._circuit = circuit_breaker or MCPCircuitBreaker(
+            failure_threshold=config.circuit_failure_threshold,
+            cooldown_seconds=config.circuit_cooldown_seconds,
+        )
+        self._circuits: dict[str, MCPCircuitBreaker] = {"default": self._circuit}
+
+    def _circuit_for(self, scope: str) -> MCPCircuitBreaker:
+        key = str(scope or "default")[:256]
+        breaker = self._circuits.get(key)
+        if breaker is None:
+            breaker = MCPCircuitBreaker(
+                failure_threshold=self.config.circuit_failure_threshold,
+                cooldown_seconds=self.config.circuit_cooldown_seconds,
+            )
+            self._circuits[key] = breaker
+        if len(self._circuits) > 500:
+            oldest = min(
+                (item for item in self._circuits if item != key),
+                key=lambda item: self._circuits[item].touched_at,
+                default=None,
+            )
+            if oldest is not None:
+                self._circuits.pop(oldest, None)
+        return breaker
 
     @staticmethod
     def _default_resolver(hostname: str, port: int) -> Iterable[str]:
@@ -424,39 +496,196 @@ class MCPClient:
         self._tools = tools
         return list(tools)
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> MCPToolResult:
-        async with self._semaphore:
-            started = time.monotonic()
-            try:
-                response = await self._jsonrpc(
-                    "tools/call",
-                    {"name": tool_name, "arguments": arguments},
-                )
-            except MCPError:
-                logger.warning(
-                    "MCP tool failed: server=%s tool=%s duration_ms=%.0f",
-                    self.config.name,
-                    self._sanitize_name(tool_name),
-                    (time.monotonic() - started) * 1000,
-                )
-                raise
-            content = response.get("content") or []
-            if not isinstance(content, list):
-                raise MCPError(
-                    -18,
-                    "MCP tool response is invalid",
-                    stable_code="MCP_RESPONSE_INVALID",
-                )
-            logger.info(
-                "MCP tool completed: server=%s tool=%s duration_ms=%.0f",
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        invocation_policy: MCPInvocationPolicy | None = None,
+    ) -> MCPToolResult:
+        policy = invocation_policy or MCPInvocationPolicy(
+            operation_kind=MCPOperationKind.UNKNOWN,
+            operation_id=f"mcp_op_{uuid.uuid4().hex[:24]}",
+        )
+        started = time.monotonic()
+        circuit_breaker = self._circuit_for(policy.circuit_scope)
+        lease: MCPCircuitLease | None = None
+        operation_started = False
+        circuit_recorded = False
+        response: dict[str, Any] | None = None
+        content: list[Any] = []
+        circuit: dict[str, Any] = {}
+        failure: MCPFailureDecision | None = None
+        try:
+            host_timeout = asyncio.timeout(float(self.config.host_deadline or self.config.timeout))
+            async with host_timeout, self._semaphore:
+                try:
+                    lease = await circuit_breaker.acquire()
+                except MCPCircuitOpen as exc:
+                    failure = decide_mcp_failure("MCP_CIRCUIT_OPEN", policy)
+                    circuit = await circuit_breaker.snapshot()
+                    circuit["retry_after_seconds"] = exc.retry_after
+                    raise MCPError(
+                        -25,
+                        "MCP circuit is open",
+                        stable_code="MCP_CIRCUIT_OPEN",
+                        failure=failure,
+                        circuit=circuit,
+                    ) from exc
+                try:
+                    params: dict[str, Any] = {
+                        "name": tool_name,
+                        "arguments": arguments,
+                    }
+                    request_meta = policy.request_meta()
+                    if request_meta is not None:
+                        params["_meta"] = request_meta
+
+                    last_error: MCPError | None = None
+                    operation_started = True
+                    for attempt in range(policy.max_attempts):
+                        try:
+                            response = await self._jsonrpc("tools/call", params)
+                            last_error = None
+                            break
+                        except MCPError as exc:
+                            failure = exc.failure or decide_mcp_failure(
+                                exc.stable_code,
+                                policy,
+                            )
+                            exc.failure = failure
+                            last_error = exc
+                            if not (
+                                failure.auto_retry_allowed and attempt + 1 < policy.max_attempts
+                            ):
+                                raise
+                    if last_error is not None or response is None:
+                        raise last_error or MCPError(
+                            -1,
+                            "MCP operation failed",
+                            stable_code="MCP_ERROR",
+                        )
+
+                    raw_content = response.get("content") or []
+                    if not isinstance(raw_content, list):
+                        raise MCPError(
+                            -18,
+                            "MCP tool response is invalid",
+                            stable_code="MCP_RESPONSE_INVALID",
+                        )
+                    content = raw_content
+                except MCPError as exc:
+                    failure = exc.failure or decide_mcp_failure(
+                        exc.stable_code,
+                        policy,
+                        operation_started=operation_started,
+                    )
+                    exc.failure = failure
+                    if lease is not None:
+                        if failure.cause is MCPFailureKind.CANCELLED:
+                            await circuit_breaker.record_neutral(lease)
+                        elif counts_toward_circuit(failure):
+                            await circuit_breaker.record_failure(lease)
+                        else:
+                            await circuit_breaker.record_success(lease)
+                        circuit_recorded = True
+                    exc.circuit = await circuit_breaker.snapshot()
+                    raise
+                except asyncio.CancelledError:
+                    if host_timeout.expired():
+                        # Preserve the host-timeout stable code; the timeout
+                        # context converts its own cancellation outside.
+                        raise
+                    error_code = (
+                        "MCP_CANCELLED_AFTER_DISPATCH" if operation_started else "MCP_CANCELLED"
+                    )
+                    cancellation_failure = decide_mcp_failure(
+                        error_code,
+                        policy,
+                        operation_started=operation_started,
+                    )
+                    if lease is not None:
+                        await circuit_breaker.record_neutral(lease)
+                        circuit_recorded = True
+                    raise MCPError(
+                        499,
+                        "MCP invocation cancelled",
+                        stable_code=error_code,
+                        failure=cancellation_failure,
+                        circuit=await circuit_breaker.snapshot(),
+                    ) from None
+
+                is_error = bool(response.get("isError", False))
+                failure = decide_mcp_failure("MCP_REMOTE_TOOL_ERROR", policy) if is_error else None
+                await circuit_breaker.record_success(lease)
+                circuit_recorded = True
+                circuit = await circuit_breaker.snapshot()
+        except asyncio.CancelledError:
+            error_code = "MCP_CANCELLED_AFTER_DISPATCH" if operation_started else "MCP_CANCELLED"
+            failure = decide_mcp_failure(
+                error_code,
+                policy,
+                operation_started=operation_started,
+            )
+            if lease is not None and not circuit_recorded:
+                await circuit_breaker.record_neutral(lease)
+                circuit_recorded = True
+            raise MCPError(
+                499,
+                "MCP invocation cancelled",
+                stable_code=error_code,
+                failure=failure,
+                circuit=await circuit_breaker.snapshot(),
+            ) from None
+        except TimeoutError as exc:
+            failure = decide_mcp_failure(
+                "MCP_HOST_DEADLINE",
+                policy,
+                operation_started=operation_started,
+            )
+            if lease is not None and not circuit_recorded:
+                if counts_toward_circuit(failure):
+                    await circuit_breaker.record_failure(lease)
+                else:
+                    await circuit_breaker.record_success(lease)
+            circuit = await circuit_breaker.snapshot()
+            raise MCPError(
+                -2,
+                "MCP host deadline exceeded",
+                stable_code="MCP_HOST_DEADLINE",
+                failure=failure,
+                circuit=circuit,
+            ) from exc
+        except MCPError as exc:
+            failure = exc.failure or decide_mcp_failure(exc.stable_code, policy)
+            exc.failure = failure
+            if lease is not None and not circuit_recorded:
+                if counts_toward_circuit(failure):
+                    await circuit_breaker.record_failure(lease)
+                else:
+                    await circuit_breaker.record_success(lease)
+                exc.circuit = await circuit_breaker.snapshot()
+            logger.warning(
+                "MCP tool failed: server=%s tool=%s code=%s duration_ms=%.0f",
                 self.config.name,
                 self._sanitize_name(tool_name),
+                exc.stable_code,
                 (time.monotonic() - started) * 1000,
             )
-            return MCPToolResult(
-                content=[item for item in content if isinstance(item, dict)],
-                is_error=bool(response.get("isError", False)),
-            )
+            raise
+
+        logger.info(
+            "MCP tool completed: server=%s tool=%s duration_ms=%.0f",
+            self.config.name,
+            self._sanitize_name(tool_name),
+            (time.monotonic() - started) * 1000,
+        )
+        return MCPToolResult(
+            content=[item for item in content if isinstance(item, dict)],
+            is_error=is_error,
+            failure=failure,
+            circuit=circuit,
+        )
 
     async def close(self) -> None:
         if self._http is not None and self._owns_http:
@@ -591,6 +820,12 @@ class MCPClient:
                     "MCP redirects are not permitted",
                     stable_code="MCP_REDIRECT_BLOCKED",
                 )
+            if response.status_code >= 500:
+                raise MCPError(
+                    response.status_code,
+                    "MCP upstream response was unavailable",
+                    stable_code="MCP_UPSTREAM_UNAVAILABLE",
+                )
             if response.status_code < 200 or response.status_code >= 300:
                 raise MCPError(
                     response.status_code,
@@ -662,6 +897,12 @@ class MCPClient:
                     -22,
                     "MCP redirects are not permitted",
                     stable_code="MCP_REDIRECT_BLOCKED",
+                )
+            if response.status_code >= 500:
+                raise MCPError(
+                    response.status_code,
+                    "MCP upstream response was unavailable",
+                    stable_code="MCP_UPSTREAM_UNAVAILABLE",
                 )
             if response.status_code not in {200, 202, 204}:
                 raise MCPError(

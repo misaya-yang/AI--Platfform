@@ -391,9 +391,8 @@ async def web_fetch(
         "attention required | cloudflare",
     )
     blocked_by_antibot = (
-        (response.status_code == 403 and any(m in _preview for m in cloudflare_markers))
-        or (response.status_code == 503 and "cloudflare" in _preview)
-    )
+        response.status_code == 403 and any(m in _preview for m in cloudflare_markers)
+    ) or (response.status_code == 503 and "cloudflare" in _preview)
     if blocked_by_antibot:
         return {
             "url": final_url,
@@ -465,6 +464,11 @@ WEB_FETCH_DEFINITION = ToolDefinition(
     ],
     category=ToolCategory.RETRIEVAL,
     risk_level=ToolRiskLevel.LOW,
+    capability_metadata={
+        "operation_kind": "read",
+        "read_only": True,
+        "external_service": True,
+    },
     when_to_use=(
         "Use when you have a specific URL to read — a link the user shared, "
         "a citation URL from your model's native search, or a doc link you "

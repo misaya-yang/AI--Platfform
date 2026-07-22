@@ -37,7 +37,9 @@ class TenantMCPConfigService:
     def __init__(self, database: Any, all_server_names: list[str] | None = None) -> None:
         self._database = database
         self._all_server_names = set(all_server_names or [])
-        self._cache: dict[str, tuple[TenantMCPConfig, float]] = {}  # tenant_id → (config, expires_at)
+        self._cache: dict[
+            str, tuple[TenantMCPConfig, float]
+        ] = {}  # tenant_id → (config, expires_at)
 
     def set_all_server_names(self, names: list[str]) -> None:
         """Update the list of all known MCP server names (set after MCPManager init)."""
@@ -56,6 +58,13 @@ class TenantMCPConfigService:
         if len(self._cache) >= _CACHE_MAX_SIZE:
             oldest = min(self._cache, key=lambda k: self._cache[k][1])
             del self._cache[oldest]
+        self._cache[tenant_id] = (config, time.monotonic() + _CACHE_TTL)
+        return config
+
+    async def get_config_fresh(self, tenant_id: str) -> TenantMCPConfig:
+        """Re-read policy for a pre-execution revocation check."""
+
+        config = await self._load_from_db(tenant_id)
         self._cache[tenant_id] = (config, time.monotonic() + _CACHE_TTL)
         return config
 

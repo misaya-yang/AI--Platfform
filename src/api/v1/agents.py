@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -41,6 +42,10 @@ from ai_gateway_core.storage import get_file_storage
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from ...core.auth.user_resolver import UserContext
+from ...services.agent_runtime_cleanup import (
+    AgentRuntimeCleanupClient,
+    AgentRuntimeCleanupClientError,
+)
 from ...services.metrics.redaction import redact_sensitive_text
 from ..deps import get_user_context
 from ..schemas.agent_runtime import (
@@ -147,7 +152,10 @@ def _raise_agent_error(
 
 
 def _require_actor(request: Request, user: UserContext) -> None:
-    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and not _management_mutations_enabled():
+    if (
+        request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and not _management_mutations_enabled()
+    ):
         _raise_agent_error(
             request,
             503,
@@ -205,6 +213,14 @@ def _get_repository(request: Request) -> Any:
     repository = DatabaseAgentRepository(database)
     request.app.state.agent_repository = repository
     return repository
+
+
+def _get_runtime_cleanup_client(request: Request) -> AgentRuntimeCleanupClient:
+    client = getattr(request.app.state, "agent_runtime_cleanup_client", None)
+    if client is None:
+        client = AgentRuntimeCleanupClient()
+        request.app.state.agent_runtime_cleanup_client = client
+    return client
 
 
 def _get_trace_repository(request: Request) -> AgentTraceRepository:
@@ -499,9 +515,7 @@ def _failed_release_gate(
         "non_blocking_findings": [],
         "metrics": {
             "critical_pass_rate": 0.0,
-            "configured_critical_pass_rate": float(
-                profile.get("critical_pass_rate") or 1.0
-            ),
+            "configured_critical_pass_rate": float(profile.get("critical_pass_rate") or 1.0),
             "validation_duration_ms": max(0.0, round(validation_duration_ms, 3)),
             "provider_cost_cents": 0.0,
             "evaluator_results": [],
@@ -603,6 +617,18 @@ def _map_repository_error(request: Request, exc: Exception) -> None:
         if code == "AGENT_DATA_DELETION_NOT_FOUND":
             _raise_agent_error(request, 404, code, "Agent data deletion request not found")
         if code in {
+            "AGENT_LEGAL_HOLD_CLEANUP_ACTIVE",
+            "AGENT_DATA_DELETION_EXECUTION_STATE_INVALID",
+            "AGENT_DATA_DELETION_EXECUTION_CLAIM_INVALID",
+            "AGENT_DATA_DELETION_EXECUTION_FENCE_LOST",
+        }:
+            _raise_agent_error(
+                request,
+                409,
+                code,
+                "Agent data cleanup execution conflicts with the requested governance change",
+            )
+        if code in {
             "AGENT_TENANT_AGENT_QUOTA_EXCEEDED",
             "AGENT_ACTIVE_PUBLICATION_QUOTA_EXCEEDED",
         }:
@@ -626,7 +652,10 @@ def _map_repository_error(request: Request, exc: Exception) -> None:
             "AGENT_RELEASE_IDEMPOTENCY_CONFLICT",
             "The Idempotency-Key was already used for a different release request",
         )
-    if getattr(exc, "sqlstate", None) == "23505" or exc.__class__.__name__ == "UniqueViolationError":
+    if (
+        getattr(exc, "sqlstate", None) == "23505"
+        or exc.__class__.__name__ == "UniqueViolationError"
+    ):
         _raise_agent_error(request, 409, "AGENT_SLUG_CONFLICT", "Agent slug already exists")
     raise exc
 
@@ -925,9 +954,7 @@ async def revoke_agent_credentials(
         )
     except Exception as exc:
         _map_repository_error(request, exc)
-    return AgentCredentialRevocationResponse(
-        request_id=_request_id(request), revoked=counts
-    )
+    return AgentCredentialRevocationResponse(request_id=_request_id(request), revoked=counts)
 
 
 @router.post(
@@ -955,29 +982,78 @@ async def delete_agent_runtime_data(
         )
         if prepared["status"] not in {"pending", "failed"}:
             return AgentDataDeletionResponse.model_validate(prepared)
-        object_keys = prepared.get("object_keys") or []
-        storage_ok = not object_keys
-        if object_keys:
-            try:
-                storage = get_file_storage()
-            except RuntimeError:
-                storage = None
-            storage_ok = storage is not None
-            if storage is not None:
-                for storage_key in object_keys:
-                    deleted = await storage.delete_file(str(storage_key))
-                    if not deleted:
-                        exists = getattr(storage, "file_exists", None)
-                        if not callable(exists) or await exists(str(storage_key)):
-                            storage_ok = False
-        result = await repository.finish_agent_data_deletion(
+        async with repository.claim_agent_data_deletion_execution(
             tenant_id=user.tenant_id,
             agent_id=str(agent_id),
             deletion_id=str(prepared["deletion_id"]),
             user_id=user.user_id,
             is_tenant_admin=_is_tenant_admin(user),
-            storage_cleanup_succeeded=storage_ok,
-        )
+        ) as claimed:
+            if not claimed.get("execution_claimed"):
+                return AgentDataDeletionResponse.model_validate(claimed)
+            claimed.pop("_execution_claim_token")
+            claimed.pop("_execution_generation")
+            execution_guard = claimed.pop("_execution_guard")
+            freeze_execution_inventory = claimed.pop("_execution_freeze_inventory")
+            finish_execution = claimed.pop("_execution_finish")
+            prepared = claimed
+            object_keys = prepared.get("object_keys") or []
+            storage_ok = not object_keys
+            if object_keys:
+                try:
+                    storage = get_file_storage()
+                except RuntimeError:
+                    storage = None
+                storage_ok = storage is not None
+                if storage is not None:
+                    for storage_key in object_keys:
+                        await execution_guard()
+                        try:
+                            await storage.delete_file(str(storage_key))
+                        except Exception:
+                            storage_ok = False
+                        exists = getattr(storage, "file_exists", None)
+                        if not callable(exists):
+                            storage_ok = False
+                            continue
+                        await execution_guard()
+                        try:
+                            object_exists = await exists(str(storage_key))
+                        except Exception:
+                            storage_ok = False
+                            continue
+                        if object_exists is not False:
+                            storage_ok = False
+            runtime_cleanup_receipt: dict[str, Any] | None = None
+            if storage_ok:
+                counts = prepared.get("deleted_counts") or {}
+                if isinstance(counts, str):
+                    counts = json.loads(counts)
+                plan = counts.get("runtime_cleanup_plan")
+                inventory = counts.get("runtime_cleanup_inventory")
+                try:
+                    cleanup_client = _get_runtime_cleanup_client(request)
+                    if inventory is None:
+                        inventory = await cleanup_client.inspect(plan)
+                        prepared = await freeze_execution_inventory(
+                            inventory=inventory,
+                        )
+                        frozen_counts = prepared.get("deleted_counts") or {}
+                        if isinstance(frozen_counts, str):
+                            frozen_counts = json.loads(frozen_counts)
+                        plan = frozen_counts.get("runtime_cleanup_plan")
+                        inventory = frozen_counts.get("runtime_cleanup_inventory")
+                    await execution_guard()
+                    runtime_cleanup_receipt = await cleanup_client.execute(
+                        plan_value=plan,
+                        inventory_value=inventory,
+                    )
+                except (AgentRuntimeCleanupClientError, TypeError, ValueError):
+                    runtime_cleanup_receipt = None
+            result = await finish_execution(
+                storage_cleanup_succeeded=storage_ok,
+                runtime_cleanup_receipt=runtime_cleanup_receipt,
+            )
     except Exception as exc:
         _map_repository_error(request, exc)
     return AgentDataDeletionResponse.model_validate(result)
@@ -1050,9 +1126,7 @@ async def copy_agent(
     return AgentMutationResponse(request_id=_request_id(request), agent=agent)
 
 
-@router.post(
-    "/{agent_id}/archive", response_model=AgentMutationResponse, responses=ERROR_RESPONSES
-)
+@router.post("/{agent_id}/archive", response_model=AgentMutationResponse, responses=ERROR_RESPONSES)
 async def archive_agent(
     agent_id: uuid.UUID,
     payload: AgentArchiveRequest,
@@ -1080,9 +1154,7 @@ async def archive_agent(
     return AgentMutationResponse(request_id=_request_id(request), agent=agent)
 
 
-@router.get(
-    "/{agent_id}/draft", response_model=AgentDraftResponse, responses=ERROR_RESPONSES
-)
+@router.get("/{agent_id}/draft", response_model=AgentDraftResponse, responses=ERROR_RESPONSES)
 async def get_agent_draft(
     agent_id: uuid.UUID,
     request: Request,
@@ -1198,9 +1270,7 @@ async def run_agent_release_evaluation(
             candidate=candidate,
             profile=profile,
             actor_model_access_levels=_model_access_levels(user),
-            model_authorization_revalidator=candidate.get(
-                "_model_authorization_revalidator"
-            ),
+            model_authorization_revalidator=candidate.get("_model_authorization_revalidator"),
         )
     except AgentReleaseProfileUnavailableError:
         _raise_agent_error(
@@ -1242,10 +1312,9 @@ async def execute_agent_release_evaluation(
         if not running.get("execution_claimed"):
             return AgentReleaseEvaluationResponse.model_validate(running)
         profile = require_available_release_profile()
-        if (
-            str(profile["profile_id"]) != str(running["profile_id"])
-            or str(profile["profile_version"]) != str(running["profile_version"])
-        ):
+        if str(profile["profile_id"]) != str(running["profile_id"]) or str(
+            profile["profile_version"]
+        ) != str(running["profile_version"]):
             gate = _failed_release_gate(
                 profile=profile,
                 code="AGENT_RELEASE_PROFILE_STALE",
@@ -1263,16 +1332,13 @@ async def execute_agent_release_evaluation(
                     channel=str(running["channel"]),
                     auth_mode=str(running["auth_mode"]),
                     channel_policy=dict(running.get("channel_policy") or {}),
-                    dataset_id=(
-                        str(running["dataset_id"]) if running.get("dataset_id") else None
-                    ),
+                    dataset_id=(str(running["dataset_id"]) if running.get("dataset_id") else None),
                 )
                 expected = {
                     "runtime_fingerprint_hash": str(running["runtime_fingerprint_hash"]),
                     "release_identity_hash": str(running["release_identity_hash"]),
                     "evaluation_identity_hash": str(
-                        running.get("evaluation_identity_hash")
-                        or running["release_identity_hash"]
+                        running.get("evaluation_identity_hash") or running["release_identity_hash"]
                     ),
                     "dataset_manifest_hash": (
                         str(running["dataset_manifest_hash"])
@@ -1311,13 +1377,13 @@ async def execute_agent_release_evaluation(
             candidate=candidate,
             gate=gate,
             actor_model_access_levels=_model_access_levels(user),
-            model_authorization_revalidator=candidate.get(
-                "_model_authorization_revalidator"
-            ),
+            model_authorization_revalidator=candidate.get("_model_authorization_revalidator"),
         )
     except AgentReleaseProfileUnavailableError:
         profile = {
-            "profile_id": str(running.get("profile_id") if "running" in locals() else "unavailable"),
+            "profile_id": str(
+                running.get("profile_id") if "running" in locals() else "unavailable"
+            ),
             "profile_version": str(
                 running.get("profile_version") if "running" in locals() else "unavailable"
             ),
@@ -1522,9 +1588,7 @@ async def publish_agent(
             reason=payload.reason,
             current_candidate=candidate,
             actor_model_access_levels=_model_access_levels(user),
-            model_authorization_revalidator=candidate.get(
-                "_model_authorization_revalidator"
-            ),
+            model_authorization_revalidator=candidate.get("_model_authorization_revalidator"),
         )
     except AgentReleaseCandidateError as exc:
         _raise_agent_error(request, 409, str(exc), "Release candidate validation failed")
@@ -1880,9 +1944,7 @@ async def rollback_agent_publication(
             user,
             channel=str(publication["channel"]),
         )
-        snapshot_model = (
-            snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
-        )
+        snapshot_model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
         model_authorization = await _resolve_release_model_authorization(
             request=request,
             user=user,

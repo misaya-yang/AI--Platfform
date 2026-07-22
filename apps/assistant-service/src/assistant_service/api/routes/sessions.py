@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
 
+from ai_gateway_core.logging import get_logger
+from ai_gateway_core.security import redact_trace_text
+from ai_gateway_core.tasks.task_manager import SessionDeletionBusyError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ...auth import UserContext, get_user_context
+from ...core.tasks.task_manager import get_task_manager
 from ..deps import get_session_manager
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+def _log_session_delete_failure(operation: str, exc: BaseException) -> None:
+    logger.error(
+        "Session deletion failed (operation=%s, exception_type=%s)",
+        operation,
+        redact_trace_text(type(exc).__name__, limit=80),
+    )
 
 
 @router.post("/sessions")
@@ -102,11 +114,81 @@ async def delete_session(
     if not sm:
         raise HTTPException(503, "Session manager not available")
 
-    session = await sm.get(session_id)
+    try:
+        session = await sm.get(session_id)
+    except Exception as exc:
+        _log_session_delete_failure("verify_session_owner", exc)
+        raise HTTPException(503, "Session deletion storage is unavailable") from None
     if not session or session.user_id != user.user_id or session.tenant_id != user.tenant_id:
         raise HTTPException(404, "Session not found")
 
-    await sm.delete(session_id)
+    memory_service = getattr(request.app.state, "memory_service", None)
+    if memory_service is None or not hasattr(
+        memory_service,
+        "delete_all_session_memories",
+    ):
+        raise HTTPException(503, "Session deletion storage is unavailable")
+
+    task_manager = get_task_manager()
+    try:
+        session_context = task_manager.session_deletion_context(
+            session_id=session_id,
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
+        async with session_context:
+            try:
+                memories_deleted = await memory_service.delete_all_session_memories(
+                    tenant_id=user.tenant_id,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                _log_session_delete_failure("delete_session_memory", exc)
+                memories_deleted = False
+            if memories_deleted is not True:
+                raise HTTPException(503, "Session deletion was not completed")
+
+            assistant_service = getattr(request.app.state, "assistant_service", None)
+            if assistant_service is not None:
+                clear_runtime_state = getattr(
+                    assistant_service,
+                    "clear_session_runtime_state",
+                    None,
+                )
+                if not callable(clear_runtime_state):
+                    raise HTTPException(503, "Session deletion was not completed")
+                try:
+                    runtime_clearance = clear_runtime_state(
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        session_id=session_id,
+                    )
+                except Exception as exc:
+                    _log_session_delete_failure("clear_session_runtime_state", exc)
+                    raise HTTPException(503, "Session deletion was not completed") from None
+                if (
+                    not isinstance(runtime_clearance, dict)
+                    or runtime_clearance.get("cleared") is not True
+                ):
+                    raise HTTPException(503, "Session deletion was not completed")
+
+            try:
+                durable_deleted = await sm.delete(session_id)
+            except Exception as exc:
+                _log_session_delete_failure("delete_session", exc)
+                durable_deleted = False
+            if durable_deleted is not True:
+                raise HTTPException(503, "Session deletion was not completed")
+    except HTTPException:
+        raise
+    except SessionDeletionBusyError:
+        raise HTTPException(409, "Session has an active run") from None
+    except PermissionError:
+        raise HTTPException(409, "Session has conflicting live ownership") from None
+    except Exception as exc:
+        _log_session_delete_failure("coordinate_session_delete", exc)
+        raise HTTPException(503, "Session deletion was not completed") from None
+
     return {"status": "deleted", "session_id": session_id}
 
 
