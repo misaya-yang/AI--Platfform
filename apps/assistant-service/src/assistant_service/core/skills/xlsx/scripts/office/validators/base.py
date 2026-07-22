@@ -8,6 +8,9 @@ from pathlib import Path
 import defusedxml.minidom
 import lxml.etree
 
+# Safe parser: disable external entity resolution (XXE prevention).
+_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
+
 
 class BaseSchemaValidator:
 
@@ -148,7 +151,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                lxml.etree.parse(str(xml_file))
+                lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER))
             except lxml.etree.XMLSyntaxError as e:
                 errors.append(
                     f"  {xml_file.relative_to(self.unpacked_dir)}: "
@@ -175,7 +178,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file)).getroot()
+                root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
                 declared = set(root.nsmap.keys()) - {None}
 
                 for attr_val in [
@@ -205,7 +208,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file)).getroot()
+                root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
                 file_ids = {}
 
                 mc_elements = root.xpath(
@@ -317,7 +320,7 @@ class BaseSchemaValidator:
 
         for rels_file in rels_files:
             try:
-                rels_root = lxml.etree.parse(str(rels_file)).getroot()
+                rels_root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
 
                 rels_dir = rels_file.parent
 
@@ -388,6 +391,9 @@ class BaseSchemaValidator:
     def validate_all_relationship_ids(self):
         import lxml.etree
 
+# Safe parser: disable external entity resolution (XXE prevention).
+_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
+
         errors = []
 
         for xml_file in self.xml_files:
@@ -401,7 +407,7 @@ class BaseSchemaValidator:
                 continue
 
             try:
-                rels_root = lxml.etree.parse(str(rels_file)).getroot()
+                rels_root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
                 rid_to_type = {}
 
                 for rel in rels_root.findall(
@@ -421,7 +427,7 @@ class BaseSchemaValidator:
                         )
                         rid_to_type[rid] = type_name
 
-                xml_root = lxml.etree.parse(str(xml_file)).getroot()
+                xml_root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
 
                 r_ns = self.OFFICE_RELATIONSHIPS_NAMESPACE
                 rid_attrs_to_check = ["id", "embed", "link"]
@@ -499,7 +505,7 @@ class BaseSchemaValidator:
             return False
 
         try:
-            root = lxml.etree.parse(str(content_types_file)).getroot()
+            root = lxml.etree.parse(str(content_types_file, _SAFE_XML_PARSER)).getroot()
             declared_parts = set()
             declared_extensions = set()
 
@@ -554,7 +560,7 @@ class BaseSchemaValidator:
                     continue
 
                 try:
-                    root_tag = lxml.etree.parse(str(xml_file)).getroot().tag
+                    root_tag = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot().tag
                     root_name = root_tag.split("}")[-1] if "}" in root_tag else root_tag
 
                     if root_name in declarable_roots and path_str not in declared_parts:
@@ -765,7 +771,7 @@ class BaseSchemaValidator:
                 schema = lxml.etree.XMLSchema(xsd_doc)
 
             with open(xml_file) as f:
-                xml_doc = lxml.etree.parse(f)
+                xml_doc = lxml.etree.parse(f, _SAFE_XML_PARSER)
 
             xml_doc, _ = self._remove_template_tags_from_text_nodes(xml_doc)
             xml_doc = self._preprocess_for_mc_ignorable(xml_doc)

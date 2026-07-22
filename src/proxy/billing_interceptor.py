@@ -583,6 +583,8 @@ class StreamProcessor:
 
         # SSE 解析状态
         self._buffer = ""
+        self._MAX_BUFFER_BYTES = 1_048_576  # 1 MiB – prevent OOM from malformed streams
+        self._buffer_overflowed = False
         self._usage_collected = False
         self._realtime_started = False  # 跟踪是否已开始实时指标记录
         self._request_complete_recorded = False
@@ -626,6 +628,21 @@ class StreamProcessor:
             text = chunk.decode("utf-8", errors="ignore")
             # 统一行分隔符，避免上游使用 CRLF 时无法按 SSE 事件分块。
             self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
+
+            # Guard against unbounded buffer growth from malformed/malicious
+            # streams that never emit "\n\n" (SSE event boundary).
+            if len(self._buffer) > self._MAX_BUFFER_BYTES:
+                if not self._buffer_overflowed:
+                    self._buffer_overflowed = True
+                    logger.warning(
+                        "[Billing] StreamProcessor buffer exceeded %d bytes "
+                        "for request=%s – truncating to prevent OOM",
+                        self._MAX_BUFFER_BYTES,
+                        self.request_id,
+                    )
+                # Keep only the tail so already-buffered complete events
+                # (if any) are still parseable.
+                self._buffer = self._buffer[-self._MAX_BUFFER_BYTES // 2:]
 
             # 解析完整的 SSE 事件
             await self._parse_events()

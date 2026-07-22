@@ -12,6 +12,7 @@ LangGraph Server 代理层
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -242,6 +243,7 @@ class LangGraphProxy:
         self.redis = redis_client  # RedisStorage instance
         self.auth_token = auth_token
         self._clients: dict[str, httpx.AsyncClient] = {}
+        self._background_tasks: set[asyncio.Task] = set()
         # L1 缓存: Thread 元数据 {cache_key: (thread_data, timestamp)}
         self._thread_cache: dict[str, tuple] = {}
         # L1 缓存: Assistant 信息 {assistant_id: (assistant_data, timestamp)}
@@ -1648,9 +1650,11 @@ class LangGraphProxy:
 
         # 失效 Redis 缓存
         if self.redis and self.redis.enabled:
-            import asyncio
-
-            asyncio.create_task(self._async_invalidate_redis_assistant(assistant_id))
+            task = asyncio.create_task(
+                self._async_invalidate_redis_assistant(assistant_id)
+            )
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     async def _async_invalidate_redis_assistant(self, assistant_id: str) -> None:
         """异步失效 Redis 中的 Assistant 缓存"""

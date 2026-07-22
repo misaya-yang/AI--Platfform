@@ -99,6 +99,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.config = config
         self.log_writer = log_writer or self._default_log_writer
+        # Track background log-write tasks so they are not GC'd before
+        # completion (Python 3.11+ may collect unreferenced asyncio.Tasks).
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def dispatch(
         self,
@@ -159,7 +162,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response.headers["X-Request-Id"] = request_id
 
             # 异步写入日志
-            asyncio.create_task(self._write_log(log_data))
+            task = asyncio.create_task(self._write_log(log_data))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
             return response
 
@@ -171,7 +176,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             log_data.duration_ms = (time.time() - start_time) * 1000
 
             # 异步写入日志
-            asyncio.create_task(self._write_log(log_data))
+            task = asyncio.create_task(self._write_log(log_data))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
             raise
 

@@ -331,12 +331,12 @@ class CapacityAdmissionController:
         tenant_limit = tenant_limit if tenant_limit is not None else self._tenant_limit_for(budget, tenant_id)
         key = self._tenant_local_key(tenant_id, budget.key)
         condition = self._conditions.setdefault(key, asyncio.Condition())
-        state = self._tenant_states.get(key)
-        if state is None:
-            state = _LocalBudgetState(limit=tenant_limit, queue_max=0, queue_timeout_ms=1)
-            self._tenant_states[key] = state
-
         async with condition:
+            # Re-check under lock (same TOCTOU fix as _acquire_local).
+            state = self._tenant_states.get(key)
+            if state is None:
+                state = _LocalBudgetState(limit=tenant_limit, queue_max=0, queue_timeout_ms=1)
+                self._tenant_states[key] = state
             state.limit = tenant_limit
             if state.inflight >= state.limit:
                 raise CapacityRejected(
@@ -426,17 +426,19 @@ class CapacityAdmissionController:
 
     async def _acquire_local(self, budget: CapacityBudget) -> float:
         condition = self._conditions.setdefault(budget.key, asyncio.Condition())
-        state = self._states.get(budget.key)
-        if state is None:
-            state = _LocalBudgetState(
-                limit=budget.limit,
-                queue_max=budget.queue_max,
-                queue_timeout_ms=budget.queue_timeout_ms,
-            )
-            self._states[budget.key] = state
-
         started = time.perf_counter()
         async with condition:
+            # Re-check state under the lock to prevent a TOCTOU race where two
+            # coroutines both see ``state is None`` and overwrite each other's
+            # _LocalBudgetState, breaking the capacity limit.
+            state = self._states.get(budget.key)
+            if state is None:
+                state = _LocalBudgetState(
+                    limit=budget.limit,
+                    queue_max=budget.queue_max,
+                    queue_timeout_ms=budget.queue_timeout_ms,
+                )
+                self._states[budget.key] = state
             state.update(budget)
             if state.inflight < state.limit:
                 state.inflight += 1
@@ -550,15 +552,32 @@ class CapacityAdmissionController:
         shared_leases: list[tuple[str, str]],
         tenant_leases: list[tuple[str, str, str]] | None = None,
     ) -> None:
+        # Each loop is independently guarded so a single failed release
+        # does not prevent the remaining budgets from being freed.
         for kind, key, member in reversed(tenant_leases or []):
-            if kind == "shared":
-                await self._release_shared(key, member)
-            else:
-                await self._release_tenant_local(key)
+            try:
+                if kind == "shared":
+                    await self._release_shared(key, member)
+                else:
+                    await self._release_tenant_local(key)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to release tenant lease kind=%s key=%s: %s", kind, key, exc
+                )
         for key, member in reversed(shared_leases):
-            await self._release_shared(key, member)
+            try:
+                await self._release_shared(key, member)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to release shared lease key=%s: %s", key, exc
+                )
         for budget in reversed(local_budgets):
-            await self._release_local(budget)
+            try:
+                await self._release_local(budget)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to release local budget key=%s: %s", budget.key, exc
+                )
 
     def _redis_key(self, *, tenant_id: str, budget_key: str, request_class: str) -> str:
         del tenant_id

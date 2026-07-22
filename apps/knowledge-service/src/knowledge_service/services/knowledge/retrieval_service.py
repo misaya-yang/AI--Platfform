@@ -913,7 +913,18 @@ class RetrievalService:
             (
                 (dense_hits, dense_hits_raw_count, dense_ranked_lists),
                 (bm25_hits, bm25_hits_raw_count, bm25_ranked_lists),
-            ) = await asyncio.gather(_run_dense_multi(), _run_bm25_multi())
+            ) = await asyncio.gather(
+                _run_dense_multi(), _run_bm25_multi(), return_exceptions=True
+            )
+
+            # If one retrieval path fails, log and use empty results for that
+            # path so the other path's results are preserved.
+            if isinstance(dense_hits, BaseException):
+                logger.warning("Dense multi-retrieval failed: %s", dense_hits)
+                dense_hits, dense_hits_raw_count, dense_ranked_lists = [], 0, {}
+            if isinstance(bm25_hits, BaseException):
+                logger.warning("BM25 multi-retrieval failed: %s", bm25_hits)
+                bm25_hits, bm25_hits_raw_count, bm25_ranked_lists = [], 0, {}
 
         # --- Merge candidates with clear score tracking ---
         candidates: dict[str, dict[str, Any]] = {}
@@ -1706,11 +1717,14 @@ class RetrievalService:
 
         # Generate presigned URLs in parallel
         presigned_tasks = [get_presigned_url_for_result(c) for c in result_candidates]
-        presigned_urls = await asyncio.gather(*presigned_tasks)
+        presigned_urls = await asyncio.gather(*presigned_tasks, return_exceptions=True)
 
         # Build final results with presigned URLs
         results: list[RetrieveResult] = []
         for cand, presigned_url in zip(result_candidates, presigned_urls, strict=False):
+            if isinstance(presigned_url, BaseException):
+                logger.debug("Presigned URL generation failed: %s", presigned_url)
+                presigned_url = None
             payload = cand["payload"]
             image_url = presigned_url or cand.get("raw_image_url")
 

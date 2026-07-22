@@ -27,10 +27,15 @@ def get_dsn() -> str:
         settings = Settings()
         if getattr(settings, "database", None) and settings.database.dsn:
             return settings.database.dsn
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"Failed to load Settings for migration DSN: {exc}", file=sys.stderr)
 
-    return "postgresql://postgres:postgres@localhost:5432/gateway"
+    print(
+        "GATEWAY_DATABASE__DSN is not set and Settings could not be loaded. "
+        "Cannot determine database connection string.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 async def run_migration(file_path: str, dsn: str):
