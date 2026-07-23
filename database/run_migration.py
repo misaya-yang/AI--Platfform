@@ -15,7 +15,7 @@ import asyncpg
 
 def get_dsn() -> str:
     """Get database DSN from environment or settings."""
-    dsn = os.environ.get("GATEWAY_DATABASE__DSN")
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("GATEWAY_DATABASE__DSN")
     if dsn:
         return dsn
 
@@ -27,11 +27,12 @@ def get_dsn() -> str:
         settings = Settings()
         if getattr(settings, "database", None) and settings.database.dsn:
             return settings.database.dsn
-    except Exception as exc:
-        print(f"Failed to load Settings for migration DSN: {exc}", file=sys.stderr)
+    except Exception:
+        print("Failed to load Settings for migration DSN.", file=sys.stderr)
 
     print(
-        "GATEWAY_DATABASE__DSN is not set and Settings could not be loaded. "
+        "DATABASE_URL and GATEWAY_DATABASE__DSN are not set, and Settings "
+        "could not provide a DSN. "
         "Cannot determine database connection string.",
         file=sys.stderr,
     )
@@ -45,7 +46,7 @@ async def run_migration(file_path: str, dsn: str):
     conn = await asyncpg.connect(dsn)
 
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             sql = f.read()
 
         async with conn.transaction():

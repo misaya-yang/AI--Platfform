@@ -199,3 +199,40 @@ async def test_capacity_context_releases_on_cancellation_path():
             raise asyncio.CancelledError()
 
     assert controller.snapshot()["gateway.total_inflight"]["inflight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_release_many_continues_after_one_release_fails(monkeypatch):
+    controller = CapacityAdmissionController()
+    calls = []
+
+    async def release_tenant(key):
+        calls.append(("tenant", key))
+        if key == "tenant-fail":
+            raise RuntimeError("simulated tenant release failure")
+
+    async def release_shared(key, member):
+        calls.append(("shared", key, member))
+
+    async def release_local(budget):
+        calls.append(("local", budget.key))
+
+    monkeypatch.setattr(controller, "_release_tenant_local", release_tenant)
+    monkeypatch.setattr(controller, "_release_shared", release_shared)
+    monkeypatch.setattr(controller, "_release_local", release_local)
+
+    await controller._release_many(
+        [_budget(key="local-good")],
+        [("shared-good", "member")],
+        [
+            ("local", "tenant-good", ""),
+            ("local", "tenant-fail", ""),
+        ],
+    )
+
+    assert calls == [
+        ("tenant", "tenant-fail"),
+        ("tenant", "tenant-good"),
+        ("shared", "shared-good", "member"),
+        ("local", "local-good"),
+    ]

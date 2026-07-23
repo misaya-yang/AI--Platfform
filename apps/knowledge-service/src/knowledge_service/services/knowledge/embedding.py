@@ -820,21 +820,12 @@ class DashScopeMultimodalEmbedding(BaseEmbedding):
 
         # Launch all embedding tasks concurrently (limited by semaphore)
         tasks = [embed_single_image(i, img) for i, img in enumerate(images)]
-        all_vectors = await asyncio.gather(*tasks, return_exceptions=True)
+        all_vectors = await asyncio.gather(*tasks)
 
-        # Preserve successful embeddings; log and skip failures so one bad
-        # image does not discard every other completed embedding in the batch.
-        results: list[list[float]] = []
-        for i, vec in enumerate(all_vectors):
-            if isinstance(vec, BaseException):
-                logger.warning("Image embedding failed for image %d: %s", i, vec)
-                continue
-            results.append(vec)
+        if self._dimension is None and all_vectors:
+            self._dimension = len(all_vectors[0])
 
-        if self._dimension is None and results:
-            self._dimension = len(results[0])
-
-        return results
+        return list(all_vectors)
 
     async def embed_image_and_text(
         self, image_bytes: bytes, text: str | None = None
@@ -1629,20 +1620,12 @@ class UnifiedMultimodalEmbedding(BaseEmbedding):
             return await self._call_api([{"image": data_uri}])
 
         tasks = [embed_single(i, img) for i, img in enumerate(images)]
-        vectors = await asyncio.gather(*tasks, return_exceptions=True)
+        vectors = await asyncio.gather(*tasks)
 
-        # Preserve successful embeddings; log and skip failures.
-        results: list[list[float]] = []
-        for i, vec in enumerate(vectors):
-            if isinstance(vec, BaseException):
-                logger.warning("Multimodal embedding failed for image %d: %s", i, vec)
-                continue
-            results.append(vec)
+        if self._dimension is None and vectors:
+            self._dimension = len(vectors[0])
 
-        if self._dimension is None and results:
-            self._dimension = len(results[0])
-
-        return results
+        return list(vectors)
 
     async def embed_image_with_context(
         self,

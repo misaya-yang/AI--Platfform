@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from knowledge_service.core.exceptions import PermissionDeniedError
+from knowledge_service.core.exceptions import PermissionDeniedError, ValidationFailedError
 from knowledge_service.services.knowledge.knowledge_service import KnowledgeService
 from knowledge_service.services.knowledge.retrieval import MMRPick
 from knowledge_service.services.knowledge.retrieval import (
@@ -171,6 +171,19 @@ class FakeHybridVectorStore:
         }
 
 
+class FailingDenseVectorStore(FakeHybridVectorStore):
+    def __init__(self, probe: RecallProbe, *, wait_for_bm25: bool):
+        super().__init__(probe)
+        self.wait_for_bm25 = wait_for_bm25
+
+    async def search(self, **kwargs):
+        self.calls.append(kwargs)
+        self.probe.dense_started.set()
+        if self.wait_for_bm25:
+            await asyncio.wait_for(self.probe.bm25_started.wait(), timeout=1)
+        raise RuntimeError("simulated dense recall failure")
+
+
 class FakeEmbedder:
     dimension = 2
 
@@ -279,6 +292,63 @@ def _make_hybrid_service(probe: RecallProbe):
         _normalize_local_image_url=lambda raw_url, _segment_id: raw_url,
     )
     return svc, database, vector_store
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retrieval_keeps_bm25_results_when_dense_recall_fails(
+    monkeypatch,
+):
+    probe = RecallProbe()
+    svc, _, _ = _make_hybrid_service(probe)
+    svc.vector_store = FailingDenseVectorStore(probe, wait_for_bm25=True)
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    results, meta = await svc.retrieve(
+        user=SimpleNamespace(),
+        dataset_id="kb-demo",
+        query="original full question",
+        top_k=5,
+        mode="hybrid",
+        rerank=False,
+        mmr=False,
+    )
+
+    assert {result.segment_id for result in results} == {"shared", "bm25-original"}
+    assert meta["dense_hits_raw_count"] == 0
+    assert meta["bm25_hits_raw_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dense_retrieval_propagates_dense_recall_failure(monkeypatch):
+    probe = RecallProbe()
+    svc, _, _ = _make_hybrid_service(probe)
+    svc.vector_store = FailingDenseVectorStore(probe, wait_for_bm25=False)
+
+    async def _get_cached_embedder(_config, dimension=None):
+        return FakeEmbedder()
+
+    monkeypatch.setattr(
+        "knowledge_service.services.knowledge.retrieval_service.get_cached_embedder",
+        _get_cached_embedder,
+    )
+
+    with pytest.raises(ValidationFailedError, match="simulated dense recall failure"):
+        await svc.retrieve(
+            user=SimpleNamespace(),
+            dataset_id="kb-demo",
+            query="original full question",
+            top_k=5,
+            mode="dense",
+            rerank=False,
+            mmr=False,
+        )
 
 
 @pytest.mark.asyncio

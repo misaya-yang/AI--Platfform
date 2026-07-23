@@ -557,6 +557,8 @@ class StreamProcessor:
     解析 SSE 流并提取 metadata。
     """
 
+    MAX_BUFFER_CHARS = 1_048_576
+
     def __init__(
         self,
         interceptor: BillingInterceptor,
@@ -583,8 +585,8 @@ class StreamProcessor:
 
         # SSE 解析状态
         self._buffer = ""
-        self._MAX_BUFFER_BYTES = 1_048_576  # 1 MiB – prevent OOM from malformed streams
         self._buffer_overflowed = False
+        self._discarding_oversized_event = False
         self._usage_collected = False
         self._realtime_started = False  # 跟踪是否已开始实时指标记录
         self._request_complete_recorded = False
@@ -627,25 +629,39 @@ class StreamProcessor:
             # 尝试解码
             text = chunk.decode("utf-8", errors="ignore")
             # 统一行分隔符，避免上游使用 CRLF 时无法按 SSE 事件分块。
-            self._buffer += text.replace("\r\n", "\n").replace("\r", "\n")
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+            if self._discarding_oversized_event:
+                self._buffer += text
+                if "\n\n" not in self._buffer:
+                    # Retain only a possible cross-chunk event-boundary prefix.
+                    self._buffer = "\n" if self._buffer.endswith("\n") else ""
+                    return chunk
+                _, self._buffer = self._buffer.split("\n\n", 1)
+                self._discarding_oversized_event = False
+            else:
+                self._buffer += text
+
+            # Parse complete events before bounding the remaining incomplete
+            # event. This avoids dropping valid usage events when one upstream
+            # chunk contains many complete SSE records.
+            await self._parse_events()
 
             # Guard against unbounded buffer growth from malformed/malicious
             # streams that never emit "\n\n" (SSE event boundary).
-            if len(self._buffer) > self._MAX_BUFFER_BYTES:
+            if len(self._buffer) > self.MAX_BUFFER_CHARS:
                 if not self._buffer_overflowed:
                     self._buffer_overflowed = True
                     logger.warning(
-                        "[Billing] StreamProcessor buffer exceeded %d bytes "
-                        "for request=%s – truncating to prevent OOM",
-                        self._MAX_BUFFER_BYTES,
+                        "[Billing] StreamProcessor buffer exceeded %d characters "
+                        "for request=%s – discarding oversized event",
+                        self.MAX_BUFFER_CHARS,
                         self.request_id,
                     )
-                # Keep only the tail so already-buffered complete events
-                # (if any) are still parseable.
-                self._buffer = self._buffer[-self._MAX_BUFFER_BYTES // 2:]
-
-            # 解析完整的 SSE 事件
-            await self._parse_events()
+                if not self._usage_collected:
+                    self._mark_error("billing_stream_buffer_overflow")
+                self._discarding_oversized_event = True
+                self._buffer = "\n" if self._buffer.endswith("\n") else ""
 
         except Exception as e:
             logger.debug(f"Error processing chunk: {e}")

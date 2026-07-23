@@ -112,7 +112,7 @@ class TestStreamingProxy:
 
     @pytest.mark.asyncio
     async def test_streaming_response_is_async_iterator(
-        self, transparent_proxy, proxy_config, sample_sse_events, request_context
+        self, sample_sse_events, request_context
     ):
         """测试流式响应是异步迭代器"""
         mock_response = MockStreamResponse(
@@ -258,6 +258,88 @@ class TestBillingInterceptor:
 
         # 应该透传原始数据
         assert result == chunk
+
+    @pytest.mark.asyncio
+    async def test_stream_processor_bounds_only_incomplete_event(self, billing_interceptor):
+        billing_interceptor._realtime_metrics = False
+        processor = billing_interceptor.create_stream_processor(
+            request_id="req_bounded",
+            service_id="langgraph",
+            user_id="user_123",
+            tenant_id="tenant_001",
+        )
+        processor.MAX_BUFFER_CHARS = 64
+
+        await processor.process_chunk(b"x" * 100)
+
+        assert processor._buffer_overflowed is True
+        assert processor._discarding_oversized_event is True
+        assert processor._buffer == ""
+        assert processor._status == "error"
+        assert (
+            processor._error_metadata["upstream_error_type"]
+            == "billing_stream_buffer_overflow"
+        )
+
+        await processor.finalize()
+
+        fallback = billing_interceptor._buffer[-1]
+        assert fallback.total_tokens == 0
+        assert fallback.status == "error"
+        assert fallback.raw_metadata["token_source"] == "zero_on_failure"
+        assert (
+            fallback.raw_metadata["upstream_error_type"]
+            == "billing_stream_buffer_overflow"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_processor_recovers_after_discarding_oversized_event(
+        self, billing_interceptor
+    ):
+        billing_interceptor._realtime_metrics = False
+        processor = billing_interceptor.create_stream_processor(
+            request_id="req_recover_after_overflow",
+            service_id="langgraph",
+            user_id="user_123",
+            tenant_id="tenant_001",
+        )
+        processor.MAX_BUFFER_CHARS = 64
+
+        await processor.process_chunk(b"event: updates\ndata: " + b"x" * 100)
+        await processor.process_chunk(
+            b'\n\nevent: metadata\ndata: {"usage": {"input_tokens": 4, '
+            b'"output_tokens": 3}}\n\n'
+        )
+
+        assert processor._discarding_oversized_event is False
+        assert processor._usage_collected is True
+        assert billing_interceptor._buffer[-1].total_tokens == 7
+        assert billing_interceptor._buffer[-1].status == "error"
+        assert (
+            billing_interceptor._buffer[-1].raw_metadata["upstream_error_type"]
+            == "billing_stream_buffer_overflow"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_processor_parses_complete_events_before_buffer_bound(
+        self, billing_interceptor
+    ):
+        billing_interceptor._realtime_metrics = False
+        processor = billing_interceptor.create_stream_processor(
+            request_id="req_complete_events",
+            service_id="langgraph",
+            user_id="user_123",
+            tenant_id="tenant_001",
+        )
+        processor.MAX_BUFFER_CHARS = 64
+        processor._process_event_block = AsyncMock()
+        event = b"event: ping\ndata: {}\n\n"
+
+        await processor.process_chunk(event * 10)
+
+        assert processor._process_event_block.await_count == 10
+        assert processor._buffer == ""
+        assert processor._buffer_overflowed is False
 
     @pytest.mark.asyncio
     async def test_stream_processor_extract_usage_from_updates_event(self):
@@ -439,7 +521,7 @@ class TestStreamingErrorHandling:
         )
 
     @pytest.mark.asyncio
-    async def test_upstream_error_passthrough(self, transparent_proxy):
+    async def test_upstream_error_passthrough(self):
         """测试上游错误透传"""
         # 模拟上游 500 错误
         error_response = MockStreamResponse(

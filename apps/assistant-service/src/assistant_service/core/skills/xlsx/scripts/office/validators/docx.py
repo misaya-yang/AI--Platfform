@@ -13,7 +13,12 @@ import lxml.etree
 from .base import BaseSchemaValidator
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
+_SAFE_XML_PARSER = lxml.etree.XMLParser(
+    load_dtd=False,
+    no_network=True,
+    resolve_entities=False,
+    huge_tree=False,
+)
 
 
 class DOCXSchemaValidator(BaseSchemaValidator):

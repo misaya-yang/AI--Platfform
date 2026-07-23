@@ -4,7 +4,17 @@ Validator for PowerPoint presentation XML files against XSD schemas.
 
 import re
 
+import lxml.etree
+
 from .base import BaseSchemaValidator
+
+# Safe parser: disable DTD loading, network access, and entity resolution.
+_SAFE_XML_PARSER = lxml.etree.XMLParser(
+    load_dtd=False,
+    no_network=True,
+    resolve_entities=False,
+    huge_tree=False,
+)
 
 
 class PPTXSchemaValidator(BaseSchemaValidator):
@@ -60,13 +70,6 @@ class PPTXSchemaValidator(BaseSchemaValidator):
         return all_valid
 
     def validate_uuid_ids(self):
-        import lxml.etree
-
-# Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
         errors = []
         uuid_pattern = re.compile(
             r"^[\{\(]?[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}[\}\)]?$"
@@ -109,12 +112,6 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
         return len(clean_value) == 32 and all(c.isalnum() for c in clean_value)
 
     def validate_slide_layout_ids(self):
-        import lxml.etree
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
         errors = []
 
         slide_masters = list(self.unpacked_dir.glob("ppt/slideMasters/*.xml"))
@@ -181,12 +178,6 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
             return True
 
     def validate_no_duplicate_slide_layouts(self):
-        import lxml.etree
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
         errors = []
         slide_rels_files = list(self.unpacked_dir.glob("ppt/slides/_rels/*.xml.rels"))
 
@@ -223,12 +214,6 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
             return True
 
     def validate_notes_slide_references(self):
-        import lxml.etree
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
         errors = []
         notes_slide_references = {}
 

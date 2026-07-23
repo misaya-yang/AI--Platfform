@@ -9,7 +9,12 @@ import defusedxml.minidom
 import lxml.etree
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
+_SAFE_XML_PARSER = lxml.etree.XMLParser(
+    load_dtd=False,
+    no_network=True,
+    resolve_entities=False,
+    huge_tree=False,
+)
 
 
 class BaseSchemaValidator:
@@ -389,10 +394,6 @@ class BaseSchemaValidator:
             return True
 
     def validate_all_relationship_ids(self):
-        import lxml.etree
-
-# Safe parser: disable external entity resolution (XXE prevention).
-
         errors = []
 
         for xml_file in self.xml_files:
@@ -763,7 +764,12 @@ class BaseSchemaValidator:
 
         try:
             with open(schema_path, "rb") as xsd_file:
-                parser = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
+                parser = lxml.etree.XMLParser(
+                    load_dtd=False,
+                    no_network=True,
+                    resolve_entities=False,
+                    huge_tree=False,
+                )
                 xsd_doc = lxml.etree.parse(
                     xsd_file, parser=parser, base_url=str(schema_path)
                 )

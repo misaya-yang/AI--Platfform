@@ -414,7 +414,7 @@ async def lifespan(app: FastAPI):
     artifact_storage = get_artifact_storage()
     try:
         file_storage = get_file_storage()
-    except RuntimeError as e:
+    except RuntimeError:
         try:
             from ai_gateway_core.storage.image_storage import StorageConfig
 
@@ -422,7 +422,8 @@ async def lifespan(app: FastAPI):
             logger.info(f"File storage initialized (backend={file_storage.config.backend.value})")
         except Exception as init_err:
             logger.warning(
-                "File storage not configurable — falling back to NoOp: %s", init_err
+                "File storage not configurable — falling back to NoOp (%s)",
+                type(init_err).__name__,
             )
             from ai_gateway_core.storage import NoOpFileStorage
 
