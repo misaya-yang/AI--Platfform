@@ -151,7 +151,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER))
+                lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER)
             except lxml.etree.XMLSyntaxError as e:
                 errors.append(
                     f"  {xml_file.relative_to(self.unpacked_dir)}: "
@@ -178,7 +178,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER).getroot()
                 declared = set(root.nsmap.keys()) - {None}
 
                 for attr_val in [
@@ -208,7 +208,7 @@ class BaseSchemaValidator:
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER).getroot()
                 file_ids = {}
 
                 mc_elements = root.xpath(
@@ -320,7 +320,7 @@ class BaseSchemaValidator:
 
         for rels_file in rels_files:
             try:
-                rels_root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
+                rels_root = lxml.etree.parse(str(rels_file), _SAFE_XML_PARSER).getroot()
 
                 rels_dir = rels_file.parent
 
@@ -392,7 +392,6 @@ class BaseSchemaValidator:
         import lxml.etree
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
 
         errors = []
 
@@ -407,7 +406,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
                 continue
 
             try:
-                rels_root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
+                rels_root = lxml.etree.parse(str(rels_file), _SAFE_XML_PARSER).getroot()
                 rid_to_type = {}
 
                 for rel in rels_root.findall(
@@ -427,7 +426,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
                         )
                         rid_to_type[rid] = type_name
 
-                xml_root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
+                xml_root = lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER).getroot()
 
                 r_ns = self.OFFICE_RELATIONSHIPS_NAMESPACE
                 rid_attrs_to_check = ["id", "embed", "link"]
@@ -505,7 +504,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
             return False
 
         try:
-            root = lxml.etree.parse(str(content_types_file, _SAFE_XML_PARSER)).getroot()
+            root = lxml.etree.parse(str(content_types_file), _SAFE_XML_PARSER).getroot()
             declared_parts = set()
             declared_extensions = set()
 
@@ -560,7 +559,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
                     continue
 
                 try:
-                    root_tag = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot().tag
+                    root_tag = lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER).getroot().tag
                     root_name = root_tag.split("}")[-1] if "}" in root_tag else root_tag
 
                     if root_name in declarable_roots and path_str not in declared_parts:
@@ -712,7 +711,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
 
     def _clean_ignorable_namespaces(self, xml_doc):
         xml_string = lxml.etree.tostring(xml_doc, encoding="unicode")
-        xml_copy = lxml.etree.fromstring(xml_string)
+        xml_copy = lxml.etree.fromstring(xml_string, _SAFE_XML_PARSER)
 
         for elem in xml_copy.iter():
             attrs_to_remove = []
@@ -764,7 +763,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
 
         try:
             with open(schema_path, "rb") as xsd_file:
-                parser = lxml.etree.XMLParser()
+                parser = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
                 xsd_doc = lxml.etree.parse(
                     xsd_file, parser=parser, base_url=str(schema_path)
                 )
@@ -826,7 +825,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
         template_pattern = re.compile(r"\{\{[^}]*\}\}")
 
         xml_string = lxml.etree.tostring(xml_doc, encoding="unicode")
-        xml_copy = lxml.etree.fromstring(xml_string)
+        xml_copy = lxml.etree.fromstring(xml_string, _SAFE_XML_PARSER)
 
         def process_text_content(text, content_type):
             if not text:

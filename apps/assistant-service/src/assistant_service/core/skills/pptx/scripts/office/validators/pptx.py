@@ -72,7 +72,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
 
         for xml_file in self.xml_files:
             try:
-                root = lxml.etree.parse(str(xml_file, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(xml_file), _SAFE_XML_PARSER).getroot()
 
                 for elem in root.iter():
                     for attr, value in elem.attrib.items():
@@ -110,7 +110,6 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
         import lxml.etree
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
 
         errors = []
 
@@ -123,7 +122,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
 
         for slide_master in slide_masters:
             try:
-                root = lxml.etree.parse(str(slide_master, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(slide_master), _SAFE_XML_PARSER).getroot()
 
                 rels_file = slide_master.parent / "_rels" / f"{slide_master.name}.rels"
 
@@ -134,7 +133,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
                     )
                     continue
 
-                rels_root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
+                rels_root = lxml.etree.parse(str(rels_file), _SAFE_XML_PARSER).getroot()
 
                 valid_layout_rids = set()
                 for rel in rels_root.findall(
@@ -181,14 +180,13 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
         import lxml.etree
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
 
         errors = []
         slide_rels_files = list(self.unpacked_dir.glob("ppt/slides/_rels/*.xml.rels"))
 
         for rels_file in slide_rels_files:
             try:
-                root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(rels_file), _SAFE_XML_PARSER).getroot()
 
                 layout_rels = [
                     rel
@@ -222,7 +220,6 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
         import lxml.etree
 
 # Safe parser: disable external entity resolution (XXE prevention).
-_SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tree=False)
 
         errors = []
         notes_slide_references = {}
@@ -236,7 +233,7 @@ _SAFE_XML_PARSER = lxml.etree.XMLParser(load_dtd=False, no_network=True, huge_tr
 
         for rels_file in slide_rels_files:
             try:
-                root = lxml.etree.parse(str(rels_file, _SAFE_XML_PARSER)).getroot()
+                root = lxml.etree.parse(str(rels_file), _SAFE_XML_PARSER).getroot()
 
                 for rel in root.findall(
                     f".//{{{self.PACKAGE_RELATIONSHIPS_NAMESPACE}}}Relationship"
